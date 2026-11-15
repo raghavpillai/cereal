@@ -15872,11 +15872,7 @@
             "$ref": "#/components/schemas/OnboardingStep"
           },
           "state": {
-            "type": "string",
-            "enum": [
-              "done",
-              "skipped"
-            ]
+            "$ref": "#/components/schemas/OnboardingStepState"
           }
         },
         "required": [
@@ -15884,6 +15880,13 @@
           "state"
         ],
         "additionalProperties": false
+      },
+      "OnboardingStepState": {
+        "type": "string",
+        "enum": [
+          "done",
+          "skipped"
+        ]
       },
       "OnboardingStep": {
         "type": "string",

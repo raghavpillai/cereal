@@ -397,7 +397,9 @@ export type OnboardingStepsDTO = typeof OnboardingStepsDTO.Type
 export const OnboardingDTO = Schema.Struct({ completedAt: Schema.NullOr(Timestamp), steps: OnboardingStepsDTO }).annotate({ identifier: "OnboardingDTO" })
 export type OnboardingDTO = typeof OnboardingDTO.Type
 /** Records that a step was confirmed ("done") or passed over ("skipped"). A required step cannot be skipped. */
-export const OnboardingStepInput = Schema.Struct({ step: OnboardingStep, state: Schema.Literals(["done", "skipped"]) }).annotate({ identifier: "OnboardingStepInput" })
+// Named, so generated code does not get a type called `State` (which collides with SwiftUI's).
+export const OnboardingStepState = Schema.Literals(["done", "skipped"]).annotate({ identifier: "OnboardingStepState" })
+export const OnboardingStepInput = Schema.Struct({ step: OnboardingStep, state: OnboardingStepState }).annotate({ identifier: "OnboardingStepInput" })
 export type OnboardingStepInput = typeof OnboardingStepInput.Type
 export const AdminSettingsDTO = Schema.Struct({
   instanceName: Schema.String, languageModel: Schema.String,

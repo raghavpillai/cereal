@@ -1754,14 +1754,14 @@ pub enum Step {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OnboardingStepInput {
-    pub state: State,
+    pub state: OnboardingStepState,
 
     pub step: OnboardingStep,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum State {
+pub enum OnboardingStepState {
     Done,
 
     Skipped,

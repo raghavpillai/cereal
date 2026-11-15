@@ -2737,7 +2737,7 @@ public enum Step: String, Codable, Sendable {
 
 // MARK: - OnboardingStepInput
 public struct OnboardingStepInput: Codable, Sendable {
-    public let state: State
+    public let state: OnboardingStepState
     public let step: OnboardingStep
 
     public enum CodingKeys: String, CodingKey {
@@ -2745,13 +2745,13 @@ public struct OnboardingStepInput: Codable, Sendable {
         case step = "step"
     }
 
-    public init(state: State, step: OnboardingStep) {
+    public init(state: OnboardingStepState, step: OnboardingStep) {
         self.state = state
         self.step = step
     }
 }
 
-public enum State: String, Codable, Sendable {
+public enum OnboardingStepState: String, Codable, Sendable {
     case done = "done"
     case skipped = "skipped"
 }

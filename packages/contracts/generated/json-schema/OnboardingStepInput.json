@@ -14,6 +14,13 @@
         "storage"
       ]
     },
+    "OnboardingStepState": {
+      "type": "string",
+      "enum": [
+        "done",
+        "skipped"
+      ]
+    },
     "OnboardingStepInput": {
       "type": "object",
       "properties": {
@@ -21,11 +28,7 @@
           "$ref": "#/$defs/OnboardingStep"
         },
         "state": {
-          "type": "string",
-          "enum": [
-            "done",
-            "skipped"
-          ]
+          "$ref": "#/$defs/OnboardingStepState"
         }
       },
       "required": [
