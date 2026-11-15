@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/HealthDTO",
+  "$defs": {
+    "HealthDTO": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok"
+          ]
+        },
+        "version": {
+          "type": "string",
+          "enum": [
+            "v1"
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "version"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,0 +1,99 @@
+import Foundation
+
+/// An HTTPS instance URL, or HTTP on an explicit loopback host for local development.
+/// Query parameters, fragments, embedded credentials, and traversal are rejected.
+public struct InstanceURL: Equatable, Sendable, CustomStringConvertible {
+    public let url: URL
+
+    public init(_ text: String) throws {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.contains("\\"), var components = URLComponents(string: text),
+              let scheme = components.scheme?.lowercased(),
+              let host = components.host?.lowercased(), !host.isEmpty,
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil,
+              components.port.map({ (1...65_535).contains($0) }) ?? true,
+              !(components.path.split(separator: "/").contains { $0 == "." || $0 == ".." }),
+              !host.unicodeScalars.contains(where: CharacterSet.whitespacesAndNewlines.contains)
+        else { throw APIClientError.invalidInstanceURL }
+        let loopback = ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host)
+        guard scheme == "https" || scheme == "http" && loopback else {
+            throw APIClientError.insecureInstanceURL
+        }
+        components.scheme = scheme
+        components.host = host
+        while components.path.hasSuffix("/") { components.path.removeLast() }
+        guard let url = components.url else { throw APIClientError.invalidInstanceURL }
+        self.url = url
+    }
+
+    public var description: String { url.absoluteString }
+
+    /// Uses route segments, not interpolated paths, so identifiers cannot change the route.
+    func endpoint(_ segments: [String]) -> URL {
+        segments.reduce(url) { result, segment in result.appendingPathComponent(segment) }
+    }
+}
+
+/// Credentials are deliberately not Codable. They must not be persisted in preferences.
+public struct InstanceCredentials: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    public let instance: InstanceURL
+    let bearerToken: String
+
+    public init(instance: InstanceURL, bearerToken: String) throws {
+        let token = bearerToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty, token.utf8.count <= 8192,
+              token.unicodeScalars.allSatisfy({ (0x21...0x7e).contains($0.value) }) else {
+            throw APIClientError.invalidToken
+        }
+        self.instance = instance
+        self.bearerToken = token
+    }
+
+    public var description: String { "InstanceCredentials(instance: \(instance), bearerToken: <redacted>)" }
+    public var debugDescription: String { description }
+}
+
+public enum APIClientError: Error, LocalizedError, Equatable, Sendable {
+    case invalidInstanceURL
+    case insecureInstanceURL
+    case invalidToken
+    case invalidIdentifier
+    case secureStorage
+    case invalidResponse
+    case invalidJSON
+    case unauthorized
+    case notFound
+    case unavailable
+    case conflict
+    case invalidAudio
+    case audioTooLarge
+    case localStorage
+    case httpStatus(Int)
+    case transport(URLError.Code)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidInstanceURL: "Enter an instance URL without a query, fragment, or embedded credentials."
+        case .insecureInstanceURL: "Use HTTPS for your server. HTTP is supported only on localhost for development."
+        case .invalidToken: "Enter a valid instance access token."
+        case .secureStorage: "The access token could not be read or saved securely on this device."
+        case .invalidIdentifier: "This note identifier is invalid."
+        case .invalidResponse: "The server returned an unexpected response."
+        case .invalidJSON: "The server response does not match this app's API version."
+        case .unauthorized: "The server did not accept your access token. Check your connection settings."
+        case .notFound: "This note is no longer available."
+        case .unavailable: "The server is temporarily unavailable. Try again shortly."
+        case .conflict: "This note changed or is still processing audio. Refresh it before trying again."
+        case .invalidAudio: "This audio file could not be read as a supported WAV recording. The original file has been kept."
+        case .audioTooLarge: "This audio chunk exceeds the server's upload limit. The recording has been kept."
+        case .localStorage: "The recording upload queue could not be saved. Your original audio has been kept on this device."
+        case .httpStatus(let status): "The server could not complete the request (HTTP \(status))."
+        case .transport(let code) where code == .notConnectedToInternet || code == .networkConnectionLost:
+            "You're offline. Your notes will be available when the connection returns."
+        case .transport(let code) where code == .timedOut:
+            "The server took too long to respond. Try again."
+        case .transport: "The server could not be reached. Check the instance URL and your connection."
+        }
+    }
+}

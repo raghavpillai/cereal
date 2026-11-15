@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/ChatStreamEventDTO",
+  "$defs": {
+    "UUID": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|[fF]{8}-[fF]{4}-[fF]{4}-[fF]{4}-[fF]{12})$",
+      "format": "uuid",
+      "description": "UUID encoded as a string"
+    },
+    "ChatToolMeetingDTO": {
+      "type": "object",
+      "properties": {
+        "noteId": {
+          "$ref": "#/$defs/UUID"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "date": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "noteId",
+        "title",
+        "date"
+      ],
+      "additionalProperties": true
+    },
+    "ChatToolProgressDTO": {
+      "type": "object",
+      "properties": {
+        "callId": {
+          "$ref": "#/$defs/UUID"
+        },
+        "name": {
+          "type": "string",
+          "enum": [
+            "search_meetings",
+            "search_transcripts",
+            "list_meetings",
+            "get_meetings",
+            "get_meeting_transcript"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "running",
+            "completed",
+            "failed"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "resultCount": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChatToolMeetingDTO"
+          },
+          "maxItems": 20
+        }
+      },
+      "required": [
+        "callId",
+        "name",
+        "status",
+        "label"
+      ],
+      "additionalProperties": true
+    },
+    "ChatCitationDTO": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "noteId": {
+          "$ref": "#/$defs/UUID"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "transcript",
+            "notes",
+            "summary"
+          ]
+        },
+        "segmentId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UUID"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "startMs": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "allOf": [
+                {
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                }
+              ],
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "quote": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "transcriptRevision": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "noteId",
+        "title",
+        "source",
+        "segmentId",
+        "startMs",
+        "quote",
+        "transcriptRevision"
+      ],
+      "additionalProperties": true
+    },
+    "ChatStreamEventDTO": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "delta",
+            "done",
+            "error",
+            "tool",
+            "citations"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 1000000
+        },
+        "tool": {
+          "$ref": "#/$defs/ChatToolProgressDTO"
+        },
+        "citations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChatCitationDTO"
+          },
+          "maxItems": 40
+        }
+      },
+      "required": [
+        "type",
+        "text"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

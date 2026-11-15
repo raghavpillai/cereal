@@ -1,0 +1,95 @@
+name: Cereal
+options:
+  bundleIdPrefix: dev.cereal
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: LZWN2FF7YB
+    "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"
+packages:
+  Contracts:
+    path: Packages/Contracts
+  MeetingNotesAPIClient:
+    path: Packages/APIClient
+targets:
+  Cereal:
+    type: application
+    platform: iOS
+    dependencies:
+      - package: Contracts
+      - package: MeetingNotesAPIClient
+        product: APIClient
+      - target: CerealRecordingActivity
+        embed: true
+    sources:
+      - path: Cereal
+        excludes: ["Resources/Info.plist"]
+      - path: ActivityShared
+    info:
+      path: Cereal/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: Cereal
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        NSMicrophoneUsageDescription: Cereal records meeting audio on this device when you start recording.
+        NSSupportsLiveActivities: true
+        CFBundleURLTypes:
+          - CFBundleURLSchemes: [cereal]
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        UIBackgroundModes: [audio]
+        UILaunchScreen: {}
+        # Lets Core Animation use refresh rates above 60 Hz on ProMotion iPhones.
+        CADisableMinimumFrameDurationOnPhone: true
+        UIUserInterfaceStyle: Dark
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.cereal.mobile
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  CerealRecordingActivity:
+    type: app-extension
+    platform: iOS
+    sources: [RecordingActivity, ActivityShared]
+    info:
+      path: RecordingActivity/Info.plist
+      properties:
+        CFBundleDisplayName: Cereal Recording
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.cereal.mobile.recording
+        GENERATE_INFOPLIST_FILE: YES
+        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "0.1.0"
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+  CerealTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [CerealTests]
+    dependencies:
+      - target: Cereal
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: dev.cereal.mobile.tests
+schemes:
+  Cereal:
+    build:
+      targets:
+        Cereal: all
+        CerealTests: [test]
+    test:
+      targets: [CerealTests]

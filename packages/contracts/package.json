@@ -1,0 +1,21 @@
+{
+  "name": "@meeting-notes/contracts",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./api": "./src/api.ts",
+    "./client": "./src/client.ts",
+    "./live": "./src/live.ts"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "generate": "bun scripts/generate.ts"
+  },
+  "dependencies": {
+    "effect": "4.1.4"
+  },
+  "devDependencies": {
+    "quicktype-core": "26.0.0"
+  }
+}

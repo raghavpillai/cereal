@@ -1,0 +1,25 @@
+/target
+/dist
+/reference/bundle
+/reference/*installed*.png
+/reference/interactions
+.DS_Store
+
+# Workspace builds, local credentials, and private visual references
+node_modules/
+**/dist/
+**/.output/
+**/.tanstack/
+**/.build/
+**/DerivedData/
+**/*.xcodeproj/
+**/generated/prisma/
+packages/database/generated/
+apps/ios/build/
+**/.swiftpm/
+.env
+.env.*
+!.env.example
+.local/
+reference/
+.DS_Store

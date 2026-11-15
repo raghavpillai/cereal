@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/InviteOrganizationMemberInput",
+  "$defs": {
+    "InviteOrganizationMemberInput": {
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "maxLength": 254
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "admin",
+            "member"
+          ]
+        }
+      },
+      "required": [
+        "email",
+        "role"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

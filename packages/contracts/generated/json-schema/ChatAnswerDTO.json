@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/ChatAnswerDTO",
+  "$defs": {
+    "ChatAnswerDTO": {
+      "type": "object",
+      "properties": {
+        "answer": {
+          "type": "string",
+          "maxLength": 1000000
+        }
+      },
+      "required": [
+        "answer"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

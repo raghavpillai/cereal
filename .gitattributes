@@ -1,0 +1,2 @@
+# Keep upstream vendor formatting intact when checking our changes.
+vendor/** -whitespace

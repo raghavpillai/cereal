@@ -1,0 +1,28 @@
+[package]
+name = "cereal"
+version = "0.1.0"
+edition = "2024"
+description = "Cereal's native desktop meeting notepad"
+
+[dependencies]
+gpui = "=0.2.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+iana-time-zone = "0.1"
+unicode-segmentation = "1"
+rust-embed = { version = "8", features = ["debug-embed"] }
+meeting-notes-api-types = { path = "../../crates/api-types" }
+base64 = "0.22"
+uuid = { version = "1", features = ["v5"] }
+# Live transcription: one blocking WebSocket per recording (src/live.rs). TLS is
+# rustls with the ring provider and the system's root certificates.
+tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-native-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-native-certs = "0.8"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+raw-window-handle = "0.6"
+security-framework = "3.7"
+objc = "0.2"
+cocoa = "=0.26.0"

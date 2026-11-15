@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/ChatModelsDTO",
+  "$defs": {
+    "LanguageModelSelection": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "openrouter",
+            "openai",
+            "anthropic"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        }
+      },
+      "required": [
+        "provider",
+        "model"
+      ],
+      "additionalProperties": true
+    },
+    "ChatModelsDTO": {
+      "type": "object",
+      "properties": {
+        "models": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LanguageModelSelection"
+          }
+        }
+      },
+      "required": [
+        "models"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

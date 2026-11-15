@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/NoteMeetingTimeDTO",
+  "$defs": {
+    "Timestamp": {
+      "type": "string"
+    },
+    "NoteMeetingTimeDTO": {
+      "type": "object",
+      "properties": {
+        "startAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "endAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "allDay": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "startAt",
+        "endAt",
+        "allDay"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/RecordingCommandDTO",
+  "$defs": {
+    "RecordingCommandDTO": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "enum": [
+            "start",
+            "stop",
+            "resume"
+          ]
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

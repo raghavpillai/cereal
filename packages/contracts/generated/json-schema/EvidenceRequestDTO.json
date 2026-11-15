@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/EvidenceRequestDTO",
+  "$defs": {
+    "EvidenceRequestDTO": {
+      "type": "object",
+      "properties": {
+        "paragraph": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "expectedTranscriptRevision": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        }
+      },
+      "required": [
+        "paragraph",
+        "expectedTranscriptRevision"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

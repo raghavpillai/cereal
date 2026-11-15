@@ -1,0 +1,28 @@
+{
+  "name": "cereal",
+  "private": true,
+  "packageManager": "bun@1.3.8",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "bun run --cwd apps/api dev",
+    "dev:web": "bun run --cwd apps/web dev",
+    "build": "bun run --cwd apps/web build",
+    "check": "bun run --filter \"*\" check",
+    "test": "bun test",
+    "generate": "bun run --cwd packages/contracts generate && bun run --cwd packages/database generate",
+    "db:migrate": "bun run --cwd packages/database migrate",
+    "compose:up": "docker compose up --build -d",
+    "verify:deployment": "bun scripts/check-deployment.ts",
+    "verify:pipeline": "bun scripts/check-pipeline.ts",
+    "check:generated": "bun scripts/check-generated.ts"
+  },
+  "devDependencies": {
+    "@meeting-notes/contracts": "workspace:*",
+    "effect": "4.1.4",
+    "typescript": "7.0.2",
+    "@types/bun": "1.4.4"
+  }
+}

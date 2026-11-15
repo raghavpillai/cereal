@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/ApiErrorDTO",
+  "$defs": {
+    "ApiErrorCode": {
+      "type": "string",
+      "enum": [
+        "unauthorized",
+        "forbidden",
+        "conflict",
+        "not_found",
+        "invalid_request",
+        "unavailable"
+      ]
+    },
+    "ApiErrorDTO": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/ApiErrorCode"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "error",
+        "message"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

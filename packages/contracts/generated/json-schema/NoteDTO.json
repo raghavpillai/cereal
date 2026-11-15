@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/NoteDTO",
+  "$defs": {
+    "UUID": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|[fF]{8}-[fF]{4}-[fF]{4}-[fF]{4}-[fF]{12})$",
+      "format": "uuid",
+      "description": "UUID encoded as a string"
+    },
+    "Timestamp": {
+      "type": "string"
+    },
+    "AudioChannel": {
+      "type": "string",
+      "enum": [
+        "mic",
+        "system"
+      ]
+    },
+    "TranscriptSegmentDTO": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/UUID"
+        },
+        "channel": {
+          "$ref": "#/$defs/AudioChannel"
+        },
+        "speakerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "speakerLabel": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 200
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "isFinal": {
+          "type": "boolean"
+        },
+        "startMs": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        },
+        "endMs": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "allOf": [
+                {
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                }
+              ],
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "channel",
+        "speakerId",
+        "speakerLabel",
+        "text",
+        "isFinal",
+        "startMs",
+        "endMs"
+      ],
+      "additionalProperties": true
+    },
+    "RecordingState": {
+      "type": "string",
+      "enum": [
+        "idle",
+        "recording",
+        "stopped"
+      ]
+    },
+    "GenerationState": {
+      "type": "string",
+      "enum": [
+        "idle",
+        "analyzing_transcript",
+        "writing_notes",
+        "ready",
+        "failed",
+        "unsupported"
+      ]
+    },
+    "NoteDTO": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/UUID"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "body": {
+          "type": "string",
+          "maxLength": 1000000
+        },
+        "enhanced": {
+          "type": "string",
+          "maxLength": 1000000
+        },
+        "date": {
+          "type": "string"
+        },
+        "duration": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "updatedAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "transcriptSegments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TranscriptSegmentDTO"
+          }
+        },
+        "recordingState": {
+          "$ref": "#/$defs/RecordingState"
+        },
+        "generationState": {
+          "$ref": "#/$defs/GenerationState"
+        },
+        "transcriptRevision": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        },
+        "generatedRevision": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "allOf": [
+                {
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                }
+              ],
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "body",
+        "enhanced",
+        "date",
+        "duration",
+        "createdAt",
+        "updatedAt",
+        "transcriptSegments",
+        "recordingState",
+        "generationState",
+        "transcriptRevision",
+        "generatedRevision"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

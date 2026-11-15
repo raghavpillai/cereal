@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/UpdateAdminSettingsInput",
+  "$defs": {
+    "LanguageModelSelection": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "openrouter",
+            "openai",
+            "anthropic"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        }
+      },
+      "required": [
+        "provider",
+        "model"
+      ],
+      "additionalProperties": true
+    },
+    "TranscriptionModelSelection": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "elevenlabs",
+            "openai"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        }
+      },
+      "required": [
+        "provider",
+        "model"
+      ],
+      "additionalProperties": true
+    },
+    "LiveTranscriptionModelSelection": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "elevenlabs"
+              ]
+            }
+          ]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        }
+      },
+      "required": [
+        "provider",
+        "model"
+      ],
+      "additionalProperties": true
+    },
+    "UpdateAdminSettingsInput": {
+      "type": "object",
+      "properties": {
+        "instanceName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "instanceLogo": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 350000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "chatModels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LanguageModelSelection"
+          },
+          "minItems": 1,
+          "maxItems": 20
+        },
+        "generationModel": {
+          "$ref": "#/$defs/LanguageModelSelection"
+        },
+        "transcriptionModel": {
+          "$ref": "#/$defs/TranscriptionModelSelection"
+        },
+        "liveTranscriptionModel": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LiveTranscriptionModelSelection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "openAiApiKey": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 5,
+              "maxLength": 1000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "anthropicApiKey": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 5,
+              "maxLength": 1000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "languageModel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "openRouterApiKey": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 5,
+              "maxLength": 1000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "elevenLabsApiKey": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 5,
+              "maxLength": 1000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "calendarRefreshMinutes": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 5,
+          "maximum": 1440
+        },
+        "calendarLookAheadDays": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 1,
+          "maximum": 90
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

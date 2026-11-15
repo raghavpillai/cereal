@@ -1,0 +1,232 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/NoteContextDTO",
+  "$defs": {
+    "UUID": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|[fF]{8}-[fF]{4}-[fF]{4}-[fF]{4}-[fF]{12})$",
+      "format": "uuid",
+      "description": "UUID encoded as a string"
+    },
+    "Timestamp": {
+      "type": "string"
+    },
+    "MeetingParticipantDTO": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/UUID"
+        },
+        "email": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "displayName": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "givenName": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "familyName": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nameSource": {
+          "type": "string",
+          "enum": [
+            "calendar",
+            "contacts",
+            "manual",
+            "unknown"
+          ]
+        },
+        "isSelf": {
+          "type": "boolean"
+        },
+        "isOrganizer": {
+          "type": "boolean"
+        },
+        "isResource": {
+          "type": "boolean"
+        },
+        "responseStatus": {
+          "type": "string",
+          "enum": [
+            "needsAction",
+            "declined",
+            "tentative",
+            "accepted",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "email",
+        "displayName",
+        "givenName",
+        "familyName",
+        "nameSource",
+        "isSelf",
+        "isOrganizer",
+        "isResource",
+        "responseStatus"
+      ],
+      "additionalProperties": true
+    },
+    "MeetingContextDTO": {
+      "type": "object",
+      "properties": {
+        "eventId": {
+          "$ref": "#/$defs/UUID"
+        },
+        "provider": {
+          "type": "string",
+          "enum": [
+            "google",
+            "ics"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "calendarName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "startAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "endAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "allDay": {
+          "type": "boolean"
+        },
+        "timeZone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "location": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "meetingUrl": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "eventUrl": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "organizer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MeetingParticipantDTO"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "participants": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MeetingParticipantDTO"
+          }
+        }
+      },
+      "required": [
+        "eventId",
+        "provider",
+        "title",
+        "calendarName",
+        "startAt",
+        "endAt",
+        "allDay",
+        "timeZone",
+        "location",
+        "meetingUrl",
+        "eventUrl",
+        "organizer",
+        "participants"
+      ],
+      "additionalProperties": true
+    },
+    "NoteContextDTO": {
+      "type": "object",
+      "properties": {
+        "noteId": {
+          "$ref": "#/$defs/UUID"
+        },
+        "meeting": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MeetingContextDTO"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "noteId",
+        "meeting"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

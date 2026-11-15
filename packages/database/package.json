@@ -1,0 +1,9 @@
+{
+  "name": "@meeting-notes/database",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "check": "tsc --noEmit", "generate": "prisma generate", "migrate": "prisma migrate deploy" },
+  "dependencies": { "@prisma/client": "7.10.1", "@prisma/adapter-pg": "7.10.1", "pg": "8.16.3" },
+  "devDependencies": { "prisma": "7.10.1", "@types/pg": "8.15.5" }
+}

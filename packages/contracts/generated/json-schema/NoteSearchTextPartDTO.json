@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/NoteSearchTextPartDTO",
+  "$defs": {
+    "NoteSearchTextPartDTO": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "maxLength": 600
+        },
+        "hit": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "hit"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

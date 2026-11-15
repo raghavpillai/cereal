@@ -1,0 +1,7 @@
+# Reproduces the validated project toolchain; these are compatibility pins, not
+# claims that every dependency is the newest available release. Xcode and
+# XcodeGen are macOS tools installed separately; the iPhone app needs both.
+[tools]
+bun = "1.3.8"
+node = "24.22.3"
+rust = "1.89.0"

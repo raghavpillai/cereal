@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/McpAuthorizationDTO",
+  "$defs": {
+    "McpWorkspaceDTO": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "additionalProperties": true
+    },
+    "McpAuthorizationDTO": {
+      "type": "object",
+      "properties": {
+        "clientId": {
+          "type": "string"
+        },
+        "clientName": {
+          "type": "string"
+        },
+        "redirectUri": {
+          "type": "string"
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "resource": {
+          "type": "string"
+        },
+        "workspace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/McpWorkspaceDTO"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "globalWorkspaceSwitch": {
+          "type": "boolean",
+          "enum": [
+            true
+          ]
+        }
+      },
+      "required": [
+        "clientId",
+        "clientName",
+        "redirectUri",
+        "scopes",
+        "resource",
+        "workspace",
+        "globalWorkspaceSwitch"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

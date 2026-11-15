@@ -1,0 +1,353 @@
+/* Landing, sign-in, account, workspaces, connections and the shared pieces of
+   instance administration. Class names prefixed admin- predate the design
+   system and are kept because account and administration components use them. */
+
+/* ── Landing ───────────────────────────────────────────────────────────── */
+.landing { width: 100%; max-width: var(--page); margin: 0 auto; padding: 0 var(--gutter) var(--space-16); }
+.landing-hero {
+  position: relative; isolation: isolate;
+  display: grid; justify-items: center; gap: var(--space-5);
+  padding: clamp(2.5rem, 9vh, 6rem) 0 clamp(3rem, 9vh, 5.5rem);
+  text-align: center;
+}
+.landing-hero::before {
+  content: ''; position: absolute; z-index: -1; left: 50%; top: 0;
+  width: min(46rem, 100%); height: 26rem; transform: translateX(-50%);
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--brand) 26%, transparent), transparent);
+  pointer-events: none;
+}
+.landing-icon {
+  display: block; width: clamp(6rem, 14vw, 8rem); height: auto; aspect-ratio: 1;
+  filter: drop-shadow(0 18px 28px color-mix(in srgb, var(--bronze-black) 26%, transparent));
+  animation: fade-in var(--dur-snappy) var(--ease-fade) backwards, icon-settle var(--dur-settle) var(--spring-gooey) backwards;
+}
+@keyframes icon-settle { from { transform: translateY(var(--page-rise)) scale(var(--pop-from)) rotate(-10deg); } }
+@media (prefers-reduced-motion: reduce) { .landing-icon { animation: fade-in var(--dur-reduced) var(--ease-fade) backwards; } }
+.landing-hero h1 { max-width: 14ch; font-size: clamp(2.75rem, 1.6rem + 5.4vw, 4.75rem); line-height: 1.04; letter-spacing: -0.028em; }
+.landing-lede { max-width: 34rem; color: var(--ink-soft); font-size: var(--text-lg); line-height: 1.6; text-wrap: pretty; }
+.landing-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-3); margin-top: var(--space-2); }
+.landing-points { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); margin: 0; padding: 0; list-style: none; }
+.landing-point { display: grid; align-content: start; gap: var(--space-2); padding: var(--space-6); }
+.landing-point h2 { font: 400 var(--text-xl) / 1.3 var(--font-display); }
+.landing-point p { color: var(--ink-soft); font-size: var(--text-base); }
+.landing-point-icon {
+  display: grid; place-items: center; width: 2.5rem; height: 2.5rem; margin-bottom: var(--space-2);
+  border-radius: var(--radius-md); background: var(--brand-soft); color: var(--on-brand-soft);
+}
+.landing-point:nth-child(2) .landing-point-icon { background: var(--info-soft); color: var(--info); }
+.landing-point:nth-child(3) .landing-point-icon { background: var(--wash-strong); color: var(--ink); }
+.landing-point-icon svg { width: 1.25rem; height: 1.25rem; }
+.landing-fine { margin-top: var(--space-8); color: var(--ink-faint); font-size: var(--text-sm); text-align: center; }
+
+/* ── Sign-in and session states ────────────────────────────────────────── */
+.auth { display: grid; justify-items: center; width: 100%; padding: clamp(1.5rem, 7vh, 4.5rem) var(--gutter) var(--space-16); }
+.auth-card { width: 100%; max-width: 26.5rem; padding: clamp(1.5rem, 5vw, 2.5rem); border-radius: var(--radius-xl); box-shadow: var(--shadow-md); }
+.auth-icon { display: block; width: 4.25rem; height: 4.25rem; margin: -0.375rem 0 var(--space-4) -0.375rem; }
+.auth-card h1 { font-size: var(--text-3xl); margin-top: var(--space-2); }
+.auth-card > p:not(.eyebrow) { margin-top: var(--space-3); color: var(--ink-soft); font-size: var(--text-base); }
+.auth-card form { margin-top: var(--space-6); }
+.auth-card fieldset { display: grid; gap: var(--space-4); margin: 0; padding: 0; border: 0; min-width: 0; }
+.auth-card fieldset:disabled { opacity: 0.7; }
+.auth-card .admin-notice { margin: 0; }
+.auth-card > .admin-notice { margin-top: var(--space-4); }
+.auth-card .button { width: 100%; margin-top: var(--space-1); }
+.auth-footnote { max-width: 26.5rem; margin-top: var(--space-5); color: var(--ink-faint); font-size: var(--text-sm); text-align: center; }
+
+.account-loading { min-height: 20rem; display: grid; place-items: center; }
+.admin-login { display: grid; justify-items: start; gap: var(--space-3); max-width: 31rem; margin: clamp(1.5rem, 7vh, 4rem) auto 5rem; }
+.admin-login h1 { font-size: var(--text-3xl); }
+.admin-login > p:not(.eyebrow) { color: var(--ink-soft); font-size: var(--text-base); }
+.admin-login .button { margin-top: var(--space-2); }
+.admin-login .admin-notice { margin: 0; }
+
+/* ── Account and connections layout ────────────────────────────────────── */
+.admin-page { width: 100%; max-width: calc(58rem + 2 * var(--gutter)); margin: 0 auto; padding: var(--space-6) var(--gutter) var(--space-16); }
+/* The account page is forms and short lists: one narrow column, on the same edges as the notes. */
+.admin-page.is-account { max-width: calc(var(--measure) + 2 * var(--gutter)); }
+.admin-page h1 { font-size: var(--text-3xl); }
+.admin-page h3 { font-size: var(--text-base); font-weight: 400; line-height: 1.5; color: var(--ink); }
+.admin-heading { display: flex; justify-content: space-between; align-items: flex-end; gap: var(--space-5); flex-wrap: wrap; margin-bottom: var(--space-6); }
+.admin-heading .eyebrow { margin-bottom: var(--space-2); }
+.admin-heading > div > p:last-child { margin-top: var(--space-2); color: var(--ink-soft); font-size: var(--text-base); }
+.admin-account, .account-actions { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.account-sections { margin-bottom: var(--space-6); }
+.admin-tabs { display: flex; gap: 0.25rem; margin-bottom: var(--space-6); border-bottom: 1px solid var(--line); overflow-x: auto; }
+.admin-tabs > button { flex-shrink: 0; padding: 0.75rem 1rem; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--ink-soft); font-size: var(--text-base); white-space: nowrap; }
+.admin-tabs > button[aria-current] { color: var(--ink); border-color: var(--brand); }
+
+.admin-card {
+  margin-bottom: var(--space-4); padding: clamp(1.25rem, 3.4vw, 1.75rem);
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  background: var(--surface); box-shadow: var(--shadow-sm);
+  /* Cards are swapped by tabs as well as loaded: they fade and do not travel. */
+  animation: fade-in var(--dur-snappy) var(--ease-fade) backwards;
+}
+.admin-card > h2, .admin-section-title h2 { font: 400 var(--text-xl) / 1.3 var(--font-display); }
+.admin-card > h2 + p { margin-top: var(--space-2); color: var(--ink-soft); font-size: var(--text-base); }
+.admin-section-title { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--space-5); margin-bottom: var(--space-5); }
+.admin-section-title:last-child { margin-bottom: 0; }
+.admin-section-title p { max-width: 36rem; margin-top: 0.375rem; color: var(--ink-soft); font-size: var(--text-sm); line-height: 1.6; }
+.admin-section-title > .button, .admin-section-title > .admin-secondary-button, .admin-section-title > .account-actions { flex-shrink: 0; }
+.admin-fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
+.admin-fieldset:disabled { opacity: 0.7; }
+.admin-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-5); }
+.admin-page label, .admin-dialog label { display: flex; flex-direction: column; gap: var(--space-2); color: var(--ink); font-size: var(--text-sm); line-height: 1.5; }
+:is(.admin-page, .admin-dialog) input:not([type='checkbox']):not([type='color']):not([type='file']), :is(.admin-page, .admin-dialog) select {
+  display: block; width: 100%; min-width: 0; min-height: 2.75rem; padding: 0 0.875rem;
+  border: 1px solid var(--field-line); border-radius: var(--radius-md);
+  background: var(--surface); color: var(--ink); font: var(--text-md) / 1.4 var(--font-ui);
+  transition: border-color var(--dur-hover-out) var(--ease-fade), box-shadow var(--dur-snappy) var(--spring-snappy);
+}
+:is(.admin-page, .admin-dialog) input::placeholder { color: var(--ink-faint); opacity: 1; }
+:is(.admin-page, .admin-dialog) :is(input:not([type='checkbox']):not([type='color']):not([type='file']), select):focus-visible {
+  outline: none; border-color: var(--focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 28%, transparent);
+}
+.admin-page input:disabled { cursor: not-allowed; opacity: 0.7; }
+.admin-hint { color: var(--ink-soft); font-size: var(--text-sm); font-weight: 400; line-height: 1.6; }
+.admin-inline-hint { display: contents; color: var(--ink-soft); font-weight: 400; }
+.admin-inline-error { color: var(--danger) !important; font-size: var(--text-sm); }
+.admin-page .admin-checkbox { flex-direction: row; align-items: flex-start; gap: 0.5625rem; margin-top: var(--space-3); color: var(--ink-soft); font-size: var(--text-sm); }
+.admin-checkbox input { flex-shrink: 0; margin: 0.1875rem 0 0; accent-color: var(--brand); }
+.admin-save-row { display: flex; justify-content: space-between; align-items: center; gap: var(--space-5); padding: 0.25rem 0 0.75rem; }
+.admin-empty { display: grid; justify-items: center; gap: var(--space-2); padding: var(--space-10) var(--space-4); text-align: center; color: var(--ink-soft); }
+.admin-empty h3 { font: 400 var(--text-xl) / 1.35 var(--font-display); color: var(--ink); }
+.admin-empty p { max-width: 29rem; font-size: var(--text-sm); }
+.admin-card-footnote { margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--line); }
+.admin-page-footnote { margin: var(--space-6) 0 0; color: var(--ink-faint); font-size: var(--text-xs); text-align: center; }
+
+/* ── Dialogs ───────────────────────────────────────────────────────────────
+   A dialog pops in on the gooey spring; its backdrop only fades. */
+.admin-dialog {
+  width: min(33.75rem, calc(100% - 2rem)); max-height: calc(100dvh - 3.75rem);
+  margin: auto; padding: 0;
+  border: 1px solid var(--line); border-radius: var(--radius-xl);
+  background: var(--surface-raised); color: var(--ink);
+  box-shadow: var(--shadow-lg);
+  animation: fade-in calc(var(--dur-gooey) * 0.4) var(--ease-fade) backwards, dialog-in var(--dur-gooey) var(--spring-snappy) backwards;
+}
+.admin-dialog::backdrop { background: var(--scrim); animation: fade-in var(--dur-snappy) var(--ease-fade) backwards; }
+@keyframes dialog-in { from { transform: translateY(var(--rise)) scale(var(--pop-panel)); } }
+.admin-dialog-title { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-4) var(--space-5) var(--space-4) var(--space-6); border-bottom: 1px solid var(--line); }
+.admin-dialog-title h2 { font: 400 var(--text-xl) / 1.3 var(--font-display); }
+.admin-dialog-title > .icon-button { font-size: 1.375rem; line-height: 1; }
+.admin-dialog-body { display: flex; flex-direction: column; gap: var(--space-4); padding: var(--space-5) var(--space-6); }
+.admin-dialog-body > p { font-size: var(--text-base); line-height: 1.6; }
+.admin-dialog-body .admin-notice { margin: 0; }
+.admin-dialog-actions { display: flex; justify-content: flex-end; align-items: center; gap: var(--space-2); flex-wrap: wrap; padding: var(--space-4) var(--space-6); border-top: 1px solid var(--line); }
+.admin-dialog > p { padding: var(--space-5) var(--space-6) 0; font-size: var(--text-base); }
+.admin-dialog > .admin-notice { margin: var(--space-4) var(--space-6) 0; }
+.admin-dialog > .account-actions { justify-content: flex-end; padding: var(--space-5) var(--space-6); }
+.dialog-ghost { position: fixed; z-index: 2147483000; margin: 0; max-height: none; pointer-events: none; animation: none; }
+.dialog-scrim-ghost { position: fixed; inset: 0; z-index: 2147482999; background: var(--scrim); pointer-events: none; }
+
+/* ── Password settings ─────────────────────────────────────────────────── */
+.account-password { max-width: none; }
+.account-password form { margin-top: var(--space-5); }
+.account-password fieldset { display: grid; gap: var(--space-4); }
+.account-password .button { justify-self: start; margin-top: var(--space-1); }
+
+/* ── People, workspaces, calendars ─────────────────────────────────────── */
+.admin-users { display: grid; }
+.admin-user { display: flex; align-items: center; gap: var(--space-4); flex-wrap: wrap; padding: var(--space-4) 0; border-bottom: 1px solid var(--line); }
+.admin-user:last-child { border-bottom: 0; }
+.admin-user-avatar {
+  display: grid; place-items: center; flex-shrink: 0; width: 2.5rem; height: 2.5rem; border-radius: 50%;
+  background: var(--brand-soft); color: var(--on-brand-soft); font: 400 1.125rem / 1 var(--font-display);
+}
+.admin-user-info { flex: 1; min-width: 11rem; }
+.admin-user-info h3 { display: flex; align-items: center; gap: 0.625rem; font-size: var(--text-md); }
+.admin-user-info p { margin-top: 0.125rem; color: var(--ink-soft); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.workspace-list { display: grid; gap: var(--space-2); }
+.workspace-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); min-width: 0; padding: var(--space-4) var(--space-3); border-bottom: 1px solid var(--line); }
+.workspace-list > .workspace-row {
+  padding: var(--space-3) var(--space-4); border: 1px solid var(--line); border-radius: var(--radius-md);
+  transition: background-color var(--dur-hover-out) var(--ease-fade), border-color var(--dur-hover-out) var(--ease-fade);
+}
+.workspace-row.is-selected { background: var(--wash); border-color: var(--focus); }
+.workspace-info { flex: 1; min-width: 10rem; overflow-wrap: anywhere; }
+.workspace-info h3 { font-size: var(--text-md); }
+.workspace-info p { margin-top: 0.125rem; color: var(--ink-soft); font-size: var(--text-xs); }
+.workspace-actions { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.workspace-incoming { margin-top: var(--space-6); padding-top: var(--space-5); border-top: 1px solid var(--line); }
+.workspace-incoming > .admin-hint { margin: 0.25rem 0 var(--space-2); }
+.workspace-subheading { margin-top: var(--space-6) !important; }
+.workspace-self { display: inline-flex; flex-shrink: 0; padding: 0.0625rem 0.4375rem; border: 1px solid var(--line-strong); border-radius: var(--radius-pill); color: var(--ink-soft); font-size: var(--text-xs); line-height: 1.5; }
+
+.google-contact-option { margin-top: var(--space-5); }
+.google-connection-actions { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-4) 0; }
+.google-calendar-options { display: grid; margin-top: var(--space-3); }
+.admin-page .google-calendar-option { flex-direction: row; align-items: center; gap: 0.875rem; padding: var(--space-4) 0; border-top: 1px solid var(--line); cursor: pointer; }
+.google-calendar-option > span:nth-child(2) { display: grid; gap: 0.125rem; flex: 1; }
+.google-calendar-option strong { font-size: var(--text-base); font-weight: 400; overflow-wrap: anywhere; }
+.google-calendar-option input { width: 1.125rem; height: 1.125rem; accent-color: var(--brand); }
+
+/* Instance calendar and event panels (native-client features kept for parity). */
+.admin-provider + .admin-provider { margin-top: var(--space-5); padding-top: var(--space-5); border-top: 1px solid var(--line); }
+.admin-provider-heading { display: flex; justify-content: space-between; align-items: center; gap: var(--space-4); margin-bottom: var(--space-3); }
+.admin-provider-heading p { margin-top: 0.1875rem; color: var(--ink-soft); font-size: var(--text-xs); }
+.admin-integration-note { display: flex; align-items: flex-start; gap: var(--space-4); background: none; }
+.admin-integration-note p { margin-top: 0.4375rem; color: var(--ink-soft); font-size: var(--text-xs); line-height: 1.7; }
+.admin-integration-icon { display: grid; place-items: center; flex-shrink: 0; width: 2rem; height: 2rem; border: 1px solid var(--line); border-radius: var(--radius-sm); color: var(--ink-soft); font-size: 1.25rem; }
+.admin-calendar { display: flex; align-items: center; gap: 0.875rem; padding: var(--space-5) 0; border-top: 1px solid var(--line); }
+.admin-calendar:first-child { border-top: 0; padding-top: 0.25rem; }
+.admin-calendar-marker { align-self: stretch; flex-shrink: 0; width: 4px; min-height: 2.75rem; border-radius: 9px; }
+.admin-calendar-details { flex: 1; min-width: 0; }
+.admin-calendar-name { display: flex; align-items: center; gap: 0.625rem; flex-wrap: wrap; }
+.admin-calendar-details > p { margin: 0.3125rem 0; color: var(--ink-soft); font-size: var(--text-xs); overflow-wrap: anywhere; }
+.admin-calendar-meta { display: flex; gap: 0.375rem 1rem; flex-wrap: wrap; color: var(--ink-soft); font-size: var(--text-2xs); }
+.admin-calendar-actions { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-3); flex-wrap: wrap; }
+.admin-calendar.is-paused .admin-calendar-marker { opacity: 0.35; }
+.admin-page .admin-switch { position: relative; display: inline-flex; flex-shrink: 0; width: 2.125rem; height: 1.3125rem; }
+.admin-switch input { position: absolute; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.admin-switch span { width: 2.125rem; height: 1.3125rem; border: 1px solid var(--line-strong); border-radius: var(--radius-pill); background: var(--wash); pointer-events: none; transition: background-color var(--dur-hover-out) var(--ease-fade); }
+.admin-switch span::before { content: ''; display: block; width: 0.9375rem; height: 0.9375rem; margin: 2px; border-radius: 50%; background: var(--ink-soft); transition: transform var(--dur-gooey) var(--spring-gooey), background-color var(--dur-hover-out) var(--ease-fade); }
+.admin-switch input:checked + span { background: var(--brand); }
+.admin-switch input:checked + span::before { transform: translateX(0.8125rem); background: var(--on-brand); }
+.admin-switch input:focus-visible + span { outline: 2px solid var(--focus); outline-offset: 3px; }
+.admin-switch input:disabled + span { opacity: 0.45; }
+.admin-event-filters { display: flex; gap: var(--space-4); flex-wrap: wrap; margin-bottom: var(--space-3); }
+.admin-event-filters > label { min-width: 11.875rem; }
+.admin-events { margin-top: var(--space-6); }
+.admin-event-day > h3 { margin: var(--space-6) 0 var(--space-2); color: var(--ink-soft); font-size: var(--text-xs); }
+.admin-event { display: flex; align-items: center; gap: 0.875rem; padding: 0.875rem 0; border-top: 1px solid var(--line); }
+.admin-event-marker { flex-shrink: 0; width: 3px; height: 2.5rem; border-radius: 5px; }
+.admin-event-info { flex: 1; min-width: 0; }
+.admin-event h4 { font-size: var(--text-base); font-weight: 400; line-height: 1.4; overflow-wrap: anywhere; }
+.admin-event-info > p { display: flex; gap: 0.5rem 1rem; flex-wrap: wrap; margin-top: 0.3125rem; color: var(--ink-soft); font-size: var(--text-xs); }
+.admin-event-calendar { font-size: var(--text-2xs); }
+.admin-event-actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.625rem; flex-wrap: wrap; }
+.admin-page .admin-color-label { flex-direction: row; align-items: center; justify-content: space-between; }
+.admin-color-label input { width: 3rem; height: 2.125rem; padding: 3px; border: 1px solid var(--line-strong); border-radius: var(--radius-xs); background: var(--surface); cursor: pointer; }
+
+/* ── Connections (MCP) ─────────────────────────────────────────────────── */
+.mcp-page > .admin-card, .mcp-page > div > .admin-card { margin-bottom: var(--space-5); }
+.mcp-url-label { display: block; margin-top: var(--space-5); }
+.mcp-url { display: flex; align-items: center; gap: var(--space-3); margin: var(--space-2) 0; }
+.mcp-url input { flex: 1; font-family: var(--font-mono) !important; font-size: var(--text-sm) !important; }
+.mcp-client-tabs { margin: var(--space-6) 0 var(--space-4); }
+.mcp-client-panel { font-size: var(--text-base); }
+.mcp-client-panel > p { margin: 0 0 var(--space-3); }
+.mcp-page pre {
+  margin: var(--space-2) 0; padding: 0.875rem 1rem; overflow-x: auto;
+  border: 1px solid var(--line); border-radius: var(--radius-md);
+  background: var(--surface-sunken); font: var(--text-sm) / 1.6 var(--font-mono); white-space: pre;
+}
+.mcp-page code { font-family: var(--font-mono); font-size: 0.9em; }
+.mcp-steps { margin: 0 0 var(--space-3); padding-left: 1.375rem; line-height: 1.7; }
+.mcp-steps li { margin-bottom: var(--space-3); padding-left: 0.375rem; }
+.mcp-steps li::marker { color: var(--ink-faint); }
+.mcp-connections { display: grid; }
+.mcp-connection { display: flex; align-items: center; justify-content: space-between; gap: var(--space-5); padding: var(--space-4) 0; border-top: 1px solid var(--line); }
+.mcp-connection h3 { margin-bottom: 0.25rem; font-size: var(--text-md); overflow-wrap: anywhere; }
+.mcp-consent { display: grid; gap: var(--space-3); max-width: 36rem; margin: var(--space-4) auto; padding: clamp(1.5rem, 5vw, 2.5rem); border-radius: var(--radius-xl); box-shadow: var(--shadow-md); }
+.mcp-consent h1 { font-size: var(--text-3xl); overflow-wrap: anywhere; }
+.mcp-consent h2 { margin-top: var(--space-4); font: 400 var(--text-md) / 1.4 var(--font-ui); color: var(--ink-soft); }
+.mcp-consent > p { color: var(--ink-soft); font-size: var(--text-base); }
+.mcp-consent > p strong { color: var(--ink); font-weight: 400; }
+.mcp-consent > .admin-secondary-button { justify-self: start; margin-top: var(--space-2); }
+.mcp-consent-mark { display: grid; place-items: center; width: 3.5rem; height: 3.5rem; margin-bottom: var(--space-2); border-radius: var(--radius-lg); background: var(--brand); color: var(--on-brand); }
+.mcp-consent-mark .mark { width: 2.125rem; height: 2.125rem; }
+.mcp-scopes { display: grid; gap: var(--space-4); margin: var(--space-2) 0; padding: 0; list-style: none; }
+.mcp-scopes li { display: flex; gap: 0.875rem; align-items: flex-start; }
+.mcp-scopes strong { font-weight: 400; }
+.mcp-scopes p { margin-top: 0.125rem; color: var(--ink-soft); font-size: var(--text-sm); line-height: 1.5; }
+.mcp-scope-icon { display: grid; place-items: center; flex: 0 0 1.75rem; width: 1.75rem; height: 1.75rem; border-radius: var(--radius-sm); background: var(--brand-soft); color: var(--on-brand-soft); font-size: var(--text-sm); }
+.mcp-scope-icon.is-write { background: var(--info-soft); color: var(--info); }
+.mcp-consent-actions { display: flex; justify-content: flex-end; gap: var(--space-3); margin-top: var(--space-4); }
+.mcp-consent-actions button { min-width: 6.875rem; min-height: 2.5rem; }
+
+/* ── Instance settings bridge ──────────────────────────────────────────────
+   The settings screen brings its own utility classes (src/admin.css). Its
+   palette maps onto the shared tokens there; these rules give its controls the
+   same press, focus and popover behaviour as the rest of the product. */
+.instance-settings :is(button, [role='combobox']) {
+  transition:
+    background-color var(--dur-hover-out) var(--ease-fade), border-color var(--dur-hover-out) var(--ease-fade),
+    color var(--dur-hover-out) var(--ease-fade), box-shadow var(--dur-hover-out) var(--ease-fade),
+    transform var(--dur-snappy) var(--spring-snappy);
+}
+.instance-settings :is(button, [role='combobox']):hover { transition-duration: var(--dur-hover-in), var(--dur-hover-in), var(--dur-hover-in), var(--dur-hover-in), var(--dur-snappy); }
+.instance-settings button:active:not(:disabled) { transform: scale(var(--squash)); transition-duration: var(--dur-hover-in), var(--dur-hover-in), var(--dur-hover-in), var(--dur-hover-in), var(--dur-press); }
+.instance-settings [role='combobox']:active:not(:disabled) { transform: scale(var(--squash-row)); }
+.instance-settings :is(button, [role='combobox'], a):focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.instance-settings .provider-editor { animation: fade-in var(--dur-snappy) var(--ease-fade) backwards, rise var(--dur-snappy) var(--spring-snappy) backwards; }
+.instance-settings .provider-row svg { transition: transform var(--dur-gooey) var(--spring-gooey); }
+.instance-select[data-state='open'] {
+  transform-origin: var(--radix-select-content-transform-origin);
+  animation: pop-in var(--dur-gooey) var(--spring-gooey) backwards, fade-in calc(var(--dur-gooey) * 0.4) var(--ease-fade) backwards;
+}
+.instance-select[data-state='closed'] {
+  transform-origin: var(--radix-select-content-transform-origin);
+  animation: pop-out var(--dur-gooey-exit) var(--ease-exit) both, fade-out var(--dur-gooey-exit) var(--ease-fade) both;
+}
+.instance-select [role='option'] { transition: background-color var(--dur-hover-in) var(--ease-fade); }
+/* Accents the settings screen wrote as fixed light-theme colours, restated in
+   tokens so they hold in both themes. :root lifts these above admin.css, which
+   loads after this file. */
+:root .instance-settings { max-width: calc(58rem + 2 * var(--gutter)); padding-inline: var(--gutter); }
+:root .instance-settings h1 { font-size: var(--text-3xl); }
+:root .instance-settings :is(.rounded-xl, [class*='rounded-xl']) { border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); }
+:root .instance-settings .instance-owner,
+:root .instance-settings .provider-connected,
+:root .instance-settings .default-model { border-color: transparent; background: var(--brand-soft); color: var(--on-brand-soft); }
+:root .instance-settings .provider-disconnected,
+:root .instance-settings .model-section-heading > [class*='rounded'] { border-color: var(--line); background: var(--wash); color: var(--ink-soft); }
+:root .instance-settings .provider-row > button,
+:root .instance-settings .instance-form button.add-provider,
+:root .instance-settings .remove-key,
+:root .instance-settings .add-model-picker .model-select-trigger,
+:root .instance-settings .instance-footer :is(a, button),
+:root .instance-select .catalog-refresh button { color: var(--ink-soft); }
+:root .instance-settings :is(.provider-row > button svg, .model-select-trigger > svg, .chat-model-row > button, .model-purpose-icon) { color: var(--ink-faint); }
+:root .instance-settings :is(.provider-security > svg, .instance-save > span > svg) { color: var(--accent-ink); }
+:root .instance-settings .chat-model-row > button:hover { background: var(--danger-soft); color: var(--danger); }
+:root .instance-settings .provider-editor { border-color: var(--line); }
+:root .instance-settings .settings-error { color: var(--danger); }
+:root .instance-settings .admin-inline-notice { color: var(--accent-ink); }
+:root .instance-settings .admin-notice { border-color: var(--line); background: var(--brand-soft); color: var(--on-brand-soft); }
+:root .instance-settings .admin-notice.is-error { border-color: var(--danger-line); background: var(--danger-soft); color: var(--danger); }
+:root .instance-settings input::placeholder, :root .instance-select input::placeholder { color: var(--ink-faint); }
+:root .instance-settings input:focus-visible { outline: none; border-color: var(--focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 28%, transparent); }
+:root .instance-select { border-radius: var(--radius-md); box-shadow: var(--shadow-md); }
+:root .instance-select [data-highlighted] { background: var(--wash-solid); color: var(--ink); }
+:root .instance-select .model-search input { border-color: var(--line); background: var(--wash-solid); color: var(--ink); }
+:root .instance-settings .team-logo-preview > img[src='/mark.svg'] { opacity: 1; }
+:root[data-theme='dark'] .instance-settings :is(.team-logo-preview > img[src='/mark.svg'], .provider-logo),
+:root[data-theme='dark'] .instance-select .provider-logo { filter: invert(1); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .instance-settings :is(.team-logo-preview > img[src='/mark.svg'], .provider-logo),
+  :root:not([data-theme='light']) .instance-select .provider-logo { filter: invert(1); }
+}
+
+@media (max-width: 850px) {
+  .admin-calendar { flex-wrap: wrap; gap: 0.625rem 0.75rem; }
+  .admin-calendar-details { flex-basis: calc(100% - 1.5625rem); }
+  .admin-calendar-actions { width: 100%; justify-content: flex-start; padding-left: 1.0625rem; }
+  .admin-event-actions { max-width: 10rem; }
+  .admin-event-info > p { flex-direction: column; gap: 0.1875rem; }
+  .landing-points { grid-template-columns: 1fr; }
+}
+@media (max-width: 600px) {
+  .admin-page { padding-top: var(--space-4); }
+  .admin-heading { align-items: flex-start; flex-direction: column; margin-bottom: var(--space-5); }
+  .admin-section-title { flex-direction: column; gap: var(--space-4); }
+  .admin-form-grid { grid-template-columns: 1fr; }
+  .admin-provider-heading { align-items: flex-start; }
+  .admin-save-row { align-items: flex-start; flex-direction: column; }
+  .admin-save-row > .button { width: 100%; }
+  .admin-event { flex-wrap: wrap; }
+  .admin-event-info { flex-basis: calc(100% - 1.25rem); }
+  .admin-event-actions { max-width: none; width: 100%; justify-content: flex-start; padding-left: 1.0625rem; }
+  .admin-dialog-title, .admin-dialog-body, .admin-dialog-actions { padding-inline: var(--space-5); }
+  .admin-user { gap: var(--space-3); }
+  .admin-user-info { min-width: 8.75rem; }
+  .admin-user > .admin-text-button, .admin-user .workspace-actions { margin-left: 3.25rem; }
+  .workspace-row > .admin-user-avatar { display: none; }
+  .workspace-actions { width: 100%; }
+  .workspace-info { min-width: 8rem; }
+  .mcp-url { align-items: stretch; flex-direction: column; }
+  .mcp-connection { align-items: flex-start; flex-direction: column; gap: var(--space-3); }
+  .mcp-consent-actions button { flex: 1; }
+  .landing-actions { width: 100%; }
+  .landing-actions .button { flex: 1 1 100%; }
+}

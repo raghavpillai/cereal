@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/AIModelDTO",
+  "$defs": {
+    "AIModelDTO": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "name": {
+          "type": "string"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "language",
+              "transcription",
+              "live_transcription"
+            ]
+          }
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "capabilities"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

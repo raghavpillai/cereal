@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/CalendarPreferencesDTO",
+  "$defs": {
+    "CalendarPreferencesDTO": {
+      "type": "object",
+      "properties": {
+        "lookAheadDays": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ]
+        }
+      },
+      "required": [
+        "lookAheadDays"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

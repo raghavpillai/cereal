@@ -1,0 +1,70 @@
+name: meeting-notes
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: meeting_notes
+      POSTGRES_USER: meeting_notes
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run ./scripts/setup.sh first}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meeting_notes -d meeting_notes"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  migrate:
+    image: meeting-notes:local
+    build: .
+    command: ["bun", "run", "--cwd", "packages/database", "migrate"]
+    environment:
+      DATABASE_URL: postgresql://meeting_notes:${POSTGRES_PASSWORD}@db:5432/meeting_notes?schema=public
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+  app:
+    image: meeting-notes:local
+    build: .
+    environment:
+      DATABASE_URL: postgresql://meeting_notes:${POSTGRES_PASSWORD}@db:5432/meeting_notes?schema=public
+      ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:?Run ./scripts/setup.sh first}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+      ELEVENLABS_STT_MODEL: ${ELEVENLABS_STT_MODEL:-scribe_v3}
+      LIVE_MAX_SESSIONS: ${LIVE_MAX_SESSIONS:-20}
+      LIVE_HOLD_SECONDS: ${LIVE_HOLD_SECONDS:-300}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openai/gpt-6-sol}
+      OPENROUTER_TOOL_MODEL: ${OPENROUTER_TOOL_MODEL:-openai/gpt-6-sol}
+      AUDIO_STORAGE_DIR: /data/audio
+      SETTINGS_KEY_FILE: /data/state/settings.key
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
+      AUTH_TRUSTED_ORIGINS: ${AUTH_TRUSTED_ORIGINS:-}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
+      HOST: 0.0.0.0
+      PORT: "3000"
+    volumes:
+      - audio-data:/data/audio
+      - state-data:/data/state
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-3000}:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r=await fetch('http://127.0.0.1:3000/api/v1/ready');process.exit(r.ok?0:1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+volumes:
+  postgres-data:
+  audio-data:
+  state-data:

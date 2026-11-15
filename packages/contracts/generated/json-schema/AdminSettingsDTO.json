@@ -1,0 +1,235 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/AdminSettingsDTO",
+  "$defs": {
+    "ProviderStatusDTO": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": [
+            "openrouter",
+            "openai",
+            "anthropic",
+            "elevenlabs"
+          ]
+        },
+        "configured": {
+          "type": "boolean"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "environment",
+            "stored",
+            "none"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "configured",
+        "source"
+      ],
+      "additionalProperties": true
+    },
+    "LanguageModelSelection": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "openrouter",
+            "openai",
+            "anthropic"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        }
+      },
+      "required": [
+        "provider",
+        "model"
+      ],
+      "additionalProperties": true
+    },
+    "TranscriptionModelSelection": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "elevenlabs",
+            "openai"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        }
+      },
+      "required": [
+        "provider",
+        "model"
+      ],
+      "additionalProperties": true
+    },
+    "LiveTranscriptionModelSelection": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "elevenlabs"
+              ]
+            }
+          ]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        }
+      },
+      "required": [
+        "provider",
+        "model"
+      ],
+      "additionalProperties": true
+    },
+    "Timestamp": {
+      "type": "string"
+    },
+    "AdminSettingsDTO": {
+      "type": "object",
+      "properties": {
+        "instanceName": {
+          "type": "string"
+        },
+        "languageModel": {
+          "type": "string"
+        },
+        "instanceLogo": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 350000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProviderStatusDTO"
+          }
+        },
+        "chatModels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LanguageModelSelection"
+          }
+        },
+        "generationModel": {
+          "$ref": "#/$defs/LanguageModelSelection"
+        },
+        "transcriptionModel": {
+          "$ref": "#/$defs/TranscriptionModelSelection"
+        },
+        "liveTranscriptionModel": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LiveTranscriptionModelSelection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "openRouterConfigured": {
+          "type": "boolean"
+        },
+        "elevenLabsConfigured": {
+          "type": "boolean"
+        },
+        "openRouterSource": {
+          "type": "string",
+          "enum": [
+            "environment",
+            "stored",
+            "none"
+          ]
+        },
+        "elevenLabsSource": {
+          "type": "string",
+          "enum": [
+            "environment",
+            "stored",
+            "none"
+          ]
+        },
+        "calendarRefreshMinutes": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ]
+        },
+        "calendarLookAheadDays": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ]
+        },
+        "updatedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "instanceName",
+        "languageModel",
+        "instanceLogo",
+        "providers",
+        "chatModels",
+        "generationModel",
+        "transcriptionModel",
+        "openRouterConfigured",
+        "elevenLabsConfigured",
+        "openRouterSource",
+        "elevenLabsSource",
+        "calendarRefreshMinutes",
+        "calendarLookAheadDays",
+        "updatedAt"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

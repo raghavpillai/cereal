@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/ModelCatalogInput",
+  "$defs": {
+    "ModelCatalogInput": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "openrouter",
+            "openai",
+            "anthropic",
+            "elevenlabs"
+          ]
+        },
+        "apiKey": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 1000
+        },
+        "refresh": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

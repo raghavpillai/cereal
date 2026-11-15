@@ -1,0 +1,328 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/NoteSummariesPageDTO",
+  "$defs": {
+    "UUID": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|[fF]{8}-[fF]{4}-[fF]{4}-[fF]{4}-[fF]{12})$",
+      "format": "uuid",
+      "description": "UUID encoded as a string"
+    },
+    "Timestamp": {
+      "type": "string"
+    },
+    "RecordingState": {
+      "type": "string",
+      "enum": [
+        "idle",
+        "recording",
+        "stopped"
+      ]
+    },
+    "GenerationState": {
+      "type": "string",
+      "enum": [
+        "idle",
+        "analyzing_transcript",
+        "writing_notes",
+        "ready",
+        "failed",
+        "unsupported"
+      ]
+    },
+    "NoteMeetingTimeDTO": {
+      "type": "object",
+      "properties": {
+        "startAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "endAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "allDay": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "startAt",
+        "endAt",
+        "allDay"
+      ],
+      "additionalProperties": true
+    },
+    "NoteAttendeeDTO": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 254
+        },
+        "shortName": {
+          "type": "string",
+          "maxLength": 254
+        },
+        "initials": {
+          "type": "string",
+          "maxLength": 8
+        }
+      },
+      "required": [
+        "name",
+        "shortName",
+        "initials"
+      ],
+      "additionalProperties": true
+    },
+    "NoteAttendeesDTO": {
+      "type": "object",
+      "properties": {
+        "people": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NoteAttendeeDTO"
+          },
+          "maxItems": 4
+        },
+        "others": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        }
+      },
+      "required": [
+        "people",
+        "others",
+        "total"
+      ],
+      "additionalProperties": true
+    },
+    "NoteFolderRefDTO": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/UUID"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "additionalProperties": true
+    },
+    "NoteSummaryDTO": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/UUID"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "date": {
+          "type": "string"
+        },
+        "duration": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "updatedAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "recordingState": {
+          "$ref": "#/$defs/RecordingState"
+        },
+        "generationState": {
+          "$ref": "#/$defs/GenerationState"
+        },
+        "transcriptRevision": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        },
+        "generatedRevision": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "allOf": [
+                {
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                }
+              ],
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hasBody": {
+          "type": "boolean"
+        },
+        "hasSummary": {
+          "type": "boolean"
+        },
+        "hasTranscript": {
+          "type": "boolean"
+        },
+        "speakerCount": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        },
+        "excerpt": {
+          "type": "string",
+          "maxLength": 400
+        },
+        "meeting": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NoteMeetingTimeDTO"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attendees": {
+          "$ref": "#/$defs/NoteAttendeesDTO"
+        },
+        "organizationId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UUID"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "folders": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NoteFolderRefDTO"
+          },
+          "maxItems": 8
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "date",
+        "duration",
+        "createdAt",
+        "updatedAt",
+        "recordingState",
+        "generationState",
+        "transcriptRevision",
+        "generatedRevision",
+        "hasBody",
+        "hasSummary",
+        "hasTranscript",
+        "speakerCount",
+        "excerpt",
+        "meeting",
+        "attendees",
+        "organizationId",
+        "folders"
+      ],
+      "additionalProperties": true
+    },
+    "NoteSummariesPageDTO": {
+      "type": "object",
+      "properties": {
+        "notes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NoteSummaryDTO"
+          },
+          "maxItems": 100
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 512
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "total": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        }
+      },
+      "required": [
+        "notes",
+        "nextCursor",
+        "total"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

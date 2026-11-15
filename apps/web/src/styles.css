@@ -1,0 +1,7 @@
+/* Cereal web. Tokens first; every later layer reads from them.
+   Instance settings add src/admin.css on their own route. */
+@import './styles/tokens.css';
+@import './styles/base.css';
+@import './styles/reader.css';
+@import './styles/notes.css';
+@import './styles/pages.css';

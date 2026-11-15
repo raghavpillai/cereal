@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/OrganizationDetailsDTO",
+  "$defs": {
+    "UUID": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|[fF]{8}-[fF]{4}-[fF]{4}-[fF]{4}-[fF]{12})$",
+      "format": "uuid",
+      "description": "UUID encoded as a string"
+    },
+    "Timestamp": {
+      "type": "string"
+    },
+    "OrganizationDTO": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/UUID"
+        },
+        "name": {
+          "type": "string"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "owner",
+            "admin",
+            "member"
+          ]
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "slug",
+        "role",
+        "createdAt"
+      ],
+      "additionalProperties": true
+    },
+    "OrganizationMemberDTO": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/UUID"
+        },
+        "organizationId": {
+          "$ref": "#/$defs/UUID"
+        },
+        "userId": {
+          "$ref": "#/$defs/UUID"
+        },
+        "name": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "owner",
+            "admin",
+            "member"
+          ]
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "id",
+        "organizationId",
+        "userId",
+        "name",
+        "email",
+        "role",
+        "createdAt"
+      ],
+      "additionalProperties": true
+    },
+    "OrganizationInvitationDTO": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/UUID"
+        },
+        "organizationId": {
+          "$ref": "#/$defs/UUID"
+        },
+        "organizationName": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "owner",
+            "admin",
+            "member"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "accepted",
+            "rejected",
+            "canceled",
+            "expired"
+          ]
+        },
+        "inviterId": {
+          "$ref": "#/$defs/UUID"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "expiresAt": {
+          "$ref": "#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "id",
+        "organizationId",
+        "organizationName",
+        "email",
+        "role",
+        "status",
+        "inviterId",
+        "createdAt",
+        "expiresAt"
+      ],
+      "additionalProperties": true
+    },
+    "OrganizationDetailsDTO": {
+      "type": "object",
+      "properties": {
+        "organization": {
+          "$ref": "#/$defs/OrganizationDTO"
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OrganizationMemberDTO"
+          }
+        },
+        "invitations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OrganizationInvitationDTO"
+          }
+        }
+      },
+      "required": [
+        "organization",
+        "members",
+        "invitations"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

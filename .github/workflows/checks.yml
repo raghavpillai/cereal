@@ -1,0 +1,71 @@
+name: Checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: meeting_notes
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: meeting_notes
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U meeting_notes -d meeting_notes"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://meeting_notes:ci-only@127.0.0.1:5432/meeting_notes?schema=public
+      RUN_PG_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.8
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: bun install --frozen-lockfile
+      - run: bun run check:generated
+      - run: bun run --cwd packages/database generate
+      - run: bun run db:migrate
+      - run: bun run check
+      - run: bun test
+      - run: bun run build
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p meeting-notes-api-types --locked
+  swift-packages:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test --package-path apps/ios/Packages/APIClient
+  ios-app:
+    runs-on: macos-26
+    timeout-minutes: 35
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install project generator
+        run: brew install xcodegen
+      - name: Generate app and widget project
+        run: xcodegen generate --spec apps/ios/project.yml
+      - name: Select an available iOS 26 iPhone
+        id: simulator
+        run: |
+          SIMULATOR_ID=$(python3 scripts/select-ios-simulator.py)
+          echo "id=$SIMULATOR_ID" >> "$GITHUB_OUTPUT"
+      - name: Test signed simulator app and build recording widget
+        run: >-
+          xcodebuild -project apps/ios/Minutes.xcodeproj -scheme Minutes
+          -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.id }}"
+          -derivedDataPath "$RUNNER_TEMP/MinutesDerivedData"
+          -resultBundlePath "$RUNNER_TEMP/MinutesTests.xcresult"
+          test
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ios-test-results
+          path: ${{ runner.temp }}/MinutesTests.xcresult

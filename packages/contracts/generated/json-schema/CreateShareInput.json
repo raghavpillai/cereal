@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/CreateShareInput",
+  "$defs": {
+    "Timestamp": {
+      "type": "string"
+    },
+    "CreateShareInput": {
+      "type": "object",
+      "properties": {
+        "includeBody": {
+          "type": "boolean"
+        },
+        "includeEnhanced": {
+          "type": "boolean"
+        },
+        "expiresAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "includeBody",
+        "includeEnhanced"
+      ],
+      "additionalProperties": true,
+      "description": "Explicit fields to publish as an immutable snapshot. Transcript is never publishable."
+    }
+  }
+}

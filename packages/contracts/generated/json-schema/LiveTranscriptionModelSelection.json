@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/LiveTranscriptionModelSelection",
+  "$defs": {
+    "LiveTranscriptionModelSelection": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "elevenlabs"
+              ]
+            }
+          ]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        }
+      },
+      "required": [
+        "provider",
+        "model"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

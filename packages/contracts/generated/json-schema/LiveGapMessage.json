@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/LiveGapMessage",
+  "$defs": {
+    "AudioChannel": {
+      "type": "string",
+      "enum": [
+        "mic",
+        "system"
+      ]
+    },
+    "LiveGapReason": {
+      "type": "string",
+      "enum": [
+        "resume_window_exceeded",
+        "provider_unavailable"
+      ]
+    },
+    "LiveGapMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "gap"
+          ]
+        },
+        "channel": {
+          "$ref": "#/$defs/AudioChannel"
+        },
+        "fromMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "toMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "reason": {
+          "$ref": "#/$defs/LiveGapReason"
+        }
+      },
+      "required": [
+        "type",
+        "channel",
+        "fromMs",
+        "toMs",
+        "reason"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

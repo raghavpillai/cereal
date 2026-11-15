@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/NoteSearchExcerptDTO",
+  "$defs": {
+    "NoteSearchField": {
+      "type": "string",
+      "enum": [
+        "title",
+        "summary",
+        "notes",
+        "transcript",
+        "people"
+      ]
+    },
+    "NoteSearchTextPartDTO": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "maxLength": 600
+        },
+        "hit": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "hit"
+      ],
+      "additionalProperties": true
+    },
+    "UUID": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|[fF]{8}-[fF]{4}-[fF]{4}-[fF]{4}-[fF]{12})$",
+      "format": "uuid",
+      "description": "UUID encoded as a string"
+    },
+    "NoteSearchExcerptDTO": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/NoteSearchField"
+        },
+        "parts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NoteSearchTextPartDTO"
+          },
+          "maxItems": 64
+        },
+        "segmentId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UUID"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "startMs": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "allOf": [
+                {
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                }
+              ],
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "source",
+        "parts",
+        "segmentId",
+        "startMs"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

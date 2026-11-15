@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/ModelCatalogDTO",
+  "$defs": {
+    "AIModelDTO": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "name": {
+          "type": "string"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "language",
+              "transcription",
+              "live_transcription"
+            ]
+          }
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "capabilities"
+      ],
+      "additionalProperties": true
+    },
+    "Timestamp": {
+      "type": "string"
+    },
+    "ModelCatalogDTO": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "openrouter",
+            "openai",
+            "anthropic",
+            "elevenlabs"
+          ]
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AIModelDTO"
+          }
+        },
+        "fetchedAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "notice": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "provider",
+        "models",
+        "fetchedAt",
+        "notice"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

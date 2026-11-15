@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/UploadNoteAttachmentInput",
+  "$defs": {
+    "UploadNoteAttachmentInput": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "mimeType": {
+          "type": "string",
+          "enum": [
+            "image/png",
+            "image/jpeg",
+            "image/webp"
+          ]
+        },
+        "dataBase64": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 6990508
+        }
+      },
+      "required": [
+        "name",
+        "mimeType",
+        "dataBase64"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

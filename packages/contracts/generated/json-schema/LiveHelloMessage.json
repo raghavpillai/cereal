@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/LiveHelloMessage",
+  "$defs": {
+    "AudioChannel": {
+      "type": "string",
+      "enum": [
+        "mic",
+        "system"
+      ]
+    },
+    "LiveStreamHello": {
+      "type": "object",
+      "properties": {
+        "channel": {
+          "$ref": "#/$defs/AudioChannel"
+        },
+        "sampleRate": {
+          "type": "integer",
+          "minimum": 8000,
+          "maximum": 48000
+        },
+        "encoding": {
+          "type": "string",
+          "enum": [
+            "pcm_s16le"
+          ]
+        },
+        "baseMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "resumeFromSample": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "channel",
+        "sampleRate",
+        "encoding",
+        "baseMs",
+        "resumeFromSample"
+      ],
+      "additionalProperties": true
+    },
+    "LiveHelloMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "hello"
+          ]
+        },
+        "protocol": {
+          "type": "number",
+          "enum": [
+            1
+          ]
+        },
+        "captureId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "language": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16
+        },
+        "streams": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LiveStreamHello"
+          },
+          "minItems": 1,
+          "maxItems": 2
+        }
+      },
+      "required": [
+        "type",
+        "protocol",
+        "captureId",
+        "streams"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

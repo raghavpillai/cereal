@@ -1,0 +1,16 @@
+[workspace]
+members = ["apps/desktop", "crates/api-types"]
+default-members = ["apps/desktop"]
+resolver = "2"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.release]
+opt-level = 2
+strip = true
+lto = "thin"
+
+[patch.crates-io]
+gpui = { path = "vendor/gpui" }

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/NoteAttendeeDTO",
+  "$defs": {
+    "NoteAttendeeDTO": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 254
+        },
+        "shortName": {
+          "type": "string",
+          "maxLength": 254
+        },
+        "initials": {
+          "type": "string",
+          "maxLength": 8
+        }
+      },
+      "required": [
+        "name",
+        "shortName",
+        "initials"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

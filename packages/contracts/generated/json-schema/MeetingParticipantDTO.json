@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/MeetingParticipantDTO",
+  "$defs": {
+    "UUID": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|[fF]{8}-[fF]{4}-[fF]{4}-[fF]{4}-[fF]{12})$",
+      "format": "uuid",
+      "description": "UUID encoded as a string"
+    },
+    "MeetingParticipantDTO": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/UUID"
+        },
+        "email": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "displayName": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "givenName": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "familyName": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nameSource": {
+          "type": "string",
+          "enum": [
+            "calendar",
+            "contacts",
+            "manual",
+            "unknown"
+          ]
+        },
+        "isSelf": {
+          "type": "boolean"
+        },
+        "isOrganizer": {
+          "type": "boolean"
+        },
+        "isResource": {
+          "type": "boolean"
+        },
+        "responseStatus": {
+          "type": "string",
+          "enum": [
+            "needsAction",
+            "declined",
+            "tentative",
+            "accepted",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "email",
+        "displayName",
+        "givenName",
+        "familyName",
+        "nameSource",
+        "isSelf",
+        "isOrganizer",
+        "isResource",
+        "responseStatus"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

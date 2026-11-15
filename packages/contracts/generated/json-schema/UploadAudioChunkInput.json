@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/UploadAudioChunkInput",
+  "$defs": {
+    "AudioChannel": {
+      "type": "string",
+      "enum": [
+        "mic",
+        "system"
+      ]
+    },
+    "UploadAudioChunkInput": {
+      "type": "object",
+      "properties": {
+        "channel": {
+          "$ref": "#/$defs/AudioChannel"
+        },
+        "sequence": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        },
+        "startMs": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        },
+        "audioBase64": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 27962028
+        }
+      },
+      "required": [
+        "channel",
+        "sequence",
+        "startMs",
+        "audioBase64"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

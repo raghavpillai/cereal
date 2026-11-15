@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/NoteAttendeesDTO",
+  "$defs": {
+    "NoteAttendeeDTO": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 254
+        },
+        "shortName": {
+          "type": "string",
+          "maxLength": 254
+        },
+        "initials": {
+          "type": "string",
+          "maxLength": 8
+        }
+      },
+      "required": [
+        "name",
+        "shortName",
+        "initials"
+      ],
+      "additionalProperties": true
+    },
+    "NoteAttendeesDTO": {
+      "type": "object",
+      "properties": {
+        "people": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NoteAttendeeDTO"
+          },
+          "maxItems": 4
+        },
+        "others": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        }
+      },
+      "required": [
+        "people",
+        "others",
+        "total"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

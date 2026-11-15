@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/LiveInterimMessage",
+  "$defs": {
+    "AudioChannel": {
+      "type": "string",
+      "enum": [
+        "mic",
+        "system"
+      ]
+    },
+    "UUID": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|[fF]{8}-[fF]{4}-[fF]{4}-[fF]{4}-[fF]{12})$",
+      "format": "uuid",
+      "description": "UUID encoded as a string"
+    },
+    "LiveInterimMessage": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "interim"
+          ]
+        },
+        "channel": {
+          "$ref": "#/$defs/AudioChannel"
+        },
+        "utteranceId": {
+          "$ref": "#/$defs/UUID"
+        },
+        "rev": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        },
+        "text": {
+          "type": "string"
+        },
+        "startMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "endMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "speakerId": {
+          "type": "string"
+        },
+        "speakerLabel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "channel",
+        "utteranceId",
+        "rev",
+        "text",
+        "startMs",
+        "endMs"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

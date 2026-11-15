@@ -1,0 +1,601 @@
+generator client {
+  provider     = "prisma-client"
+  output       = "../generated"
+  moduleFormat = "esm"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum AudioChannel {
+  mic
+  system
+}
+
+model Note {
+  organizationId String? @db.Uuid
+  organization Organization? @relation(fields:[organizationId],references:[id],onDelete:SetNull)
+  @@index([ownerId, organizationId, date])
+  ownerId String @default("00000000-0000-4000-8000-000000000001") @db.Uuid
+  owner User @relation(fields:[ownerId],references:[id],onDelete:Cascade)
+  @@index([ownerId, updatedAt])
+  id                 String              @id @default(uuid()) @db.Uuid
+  title              String              @default("")
+  body               String              @default("")
+  enhanced           String              @default("")
+  date               DateTime            @db.Date
+  duration           String              @default("") @db.VarChar(32)
+  createdAt          DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime            @updatedAt @db.Timestamptz(3)
+  recordingState     String              @default("idle") @db.VarChar(32)
+  generationState    String              @default("idle") @db.VarChar(32)
+  transcriptRevision Int                 @default(0)
+  generatedRevision  Int?
+  generationRun      String?             @db.Uuid
+  transcriptSegments TranscriptSegment[]
+  shares             SharedNote[]
+  audioChunks        AudioChunk[]
+  calendarMeeting    CalendarMeeting?
+  meetingContext     NoteMeetingContext?
+  googleMeeting      GoogleMeeting?
+  folderLinks MeetingFolderNote[]
+  attachments NoteAttachment[]
+  liveCoverage       LiveCoverage[]
+  speakers           NoteSpeaker[]
+
+  @@index([updatedAt(sort: Desc)])
+}
+
+model TranscriptSegment {
+  id           String       @id @default(uuid()) @db.Uuid
+  noteId       String       @db.Uuid
+  channel      AudioChannel
+  speakerId    String       @db.VarChar(100)
+  speakerLabel String?      @db.VarChar(200)
+  text         String
+  isFinal      Boolean      @default(false)
+  startMs      Int
+  endMs        Int?
+  /// "batch" (an uploaded part) or "live" (the streaming session). Client-supplied segments are "batch".
+  origin       String       @default("batch") @db.VarChar(16)
+  note         Note         @relation(fields: [noteId], references: [id], onDelete: Cascade)
+
+  @@index([noteId, startMs])
+}
+
+/// Ledger of note-timeline audio that has been accounted for, so each piece is transcribed once.
+/// source "live": the streaming session stored final text for it (or heard silence).
+/// source "batch": an uploaded part claimed it for batch transcription (chunkId says which).
+model LiveCoverage {
+  id        String       @id @default(uuid()) @db.Uuid
+  noteId    String       @db.Uuid
+  channel   AudioChannel
+  fromMs    Int
+  toMs      Int
+  source    String       @default("live") @db.VarChar(16)
+  sessionId String?      @db.Uuid
+  chunkId   String?      @db.Uuid
+  updatedAt DateTime     @updatedAt @db.Timestamptz(3)
+  note      Note         @relation(fields: [noteId], references: [id], onDelete: Cascade)
+
+  @@index([noteId, channel, fromMs])
+}
+
+/// A voice within one channel of one note, numbered in order of first appearance.
+/// Live segments carry speakerId "<channel>:n:<number>".
+model NoteSpeaker {
+  id           String       @id @default(uuid()) @db.Uuid
+  noteId       String       @db.Uuid
+  channel      AudioChannel
+  number       Int
+  displayName  String?      @db.VarChar(200)
+  mergedIntoId String?      @db.Uuid
+  createdAt    DateTime     @default(now()) @db.Timestamptz(3)
+  note         Note         @relation(fields: [noteId], references: [id], onDelete: Cascade)
+
+  @@unique([noteId, channel, number])
+}
+
+model SharedNote {
+  id        String    @id @default(uuid()) @db.Uuid
+  noteId    String    @db.Uuid
+  tokenHash String    @unique @db.Char(64)
+  snapshot  Json
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  expiresAt DateTime? @db.Timestamptz(3)
+  revokedAt DateTime? @db.Timestamptz(3)
+  note      Note      @relation(fields: [noteId], references: [id], onDelete: Cascade)
+
+  @@index([noteId, createdAt(sort: Desc)])
+}
+
+model AudioChunk {
+  id        String @id @db.Uuid
+  noteId    String @db.Uuid
+  channel   AudioChannel
+  sequence  Int
+  startMs   Int
+  durationMs Int
+  hash      String @db.Char(64)
+  state     String @default("queued") @db.VarChar(32)
+  error     String?
+  lease     String? @db.Uuid
+  leaseUntil DateTime? @db.Timestamptz(3)
+  /// How a ready part was accounted for: "batch", "live" (no provider call) or "mixed". Null until ready.
+  resolution String? @db.VarChar(16)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+  note      Note @relation(fields: [noteId], references: [id], onDelete: Cascade)
+
+  @@unique([noteId, channel, sequence])
+  @@index([state, leaseUntil])
+}
+
+model InstanceSettings {
+  id                     String   @id @default("instance")
+  instanceName           String   @default("Cereal") @db.VarChar(100)
+  languageModel          String?  @db.VarChar(150)
+  instanceLogo           String?
+  chatModels             Json?
+  generationModel        Json?
+  transcriptionModel     Json?
+  /// {provider, model} of the streaming speech-to-text model; null means live transcription is off.
+  liveTranscriptionModel Json?
+  openAiSecret           String?
+  anthropicSecret        String?
+  openRouterSecret       String?
+  elevenLabsSecret       String?
+  calendarRefreshMinutes Int      @default(15)
+  calendarLookAheadDays   Int      @default(30)
+  updatedAt              DateTime @updatedAt @db.Timestamptz(3)
+}
+
+model CalendarSubscription {
+  id              String   @id @default(uuid()) @db.Uuid
+  name            String   @db.VarChar(200)
+  provider        String   @default("ics") @db.VarChar(32)
+  color           String   @default("#87e5e8") @db.Char(7)
+  enabled         Boolean  @default(true)
+  encryptedURL    String
+  sourceHost      String   @db.VarChar(253)
+  lastSyncedAt    DateTime? @db.Timestamptz(3)
+  lastSyncError   String?
+  createdAt       DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime @updatedAt @db.Timestamptz(3)
+  events          CalendarEvent[]
+}
+
+model CalendarEvent {
+  id           String @id @db.Uuid
+  calendarId   String @db.Uuid
+  sourceKey    String @db.Char(64)
+  meetingKey   String @db.Char(64)
+  title        String @db.VarChar(500)
+  startAt      DateTime @db.Timestamptz(3)
+  endAt        DateTime @db.Timestamptz(3)
+  allDay       Boolean @default(false)
+  startDate    String @db.Char(10)
+  endDate      String @db.Char(10)
+  timeZone     String? @db.VarChar(200)
+  location     String? @db.VarChar(1000)
+  meetingUrl   String? @db.VarChar(4096)
+  calendar     CalendarSubscription @relation(fields: [calendarId], references: [id], onDelete: Cascade)
+
+  @@unique([calendarId, sourceKey])
+  @@index([startAt, endAt])
+  @@index([meetingKey])
+}
+
+model CalendarMeeting {
+  userId String @db.Uuid
+  user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+  meetingKey String @db.Char(64)
+  @@id([userId,meetingKey])
+  noteId     String @unique @db.Uuid
+  note       Note @relation(fields: [noteId], references: [id], onDelete: Cascade)
+}
+
+model User {
+ oauthClientUserIdChildren OauthClient[] @relation("mcpOauthClientUserId")
+ oauthRefreshTokenUserIdChildren OauthRefreshToken[] @relation("mcpOauthRefreshTokenUserId")
+ oauthAccessTokenUserIdChildren OauthAccessToken[] @relation("mcpOauthAccessTokenUserId")
+ oauthConsentUserIdChildren OauthConsent[] @relation("mcpOauthConsentUserId")
+ workspaceState UserWorkspaceState?
+ meetingFolders MeetingFolder[]
+ agentBriefs AgentBrief[]
+ id String @id @db.Uuid
+ name String
+ email String @unique
+ emailVerified Boolean @default(false)
+ image String?
+ role String @default("user") @db.VarChar(16)
+ banned Boolean @default(false)
+ banReason String?
+ banExpires DateTime? @db.Timestamptz(3)
+ memberships Member[]
+ invitations Invitation[]
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ updatedAt DateTime @updatedAt @db.Timestamptz(3)
+ sessions Session[]
+ accounts Account[]
+ notes Note[]
+ calendarMeetings CalendarMeeting[]
+ googleConnections GoogleConnection[]
+ googleStates GoogleOAuthState[]
+ meetingContexts NoteMeetingContext[]
+ googleMeetings GoogleMeeting[]
+}
+model Session {
+ oauthRefreshTokenSessionIdChildren OauthRefreshToken[] @relation("mcpOauthRefreshTokenSessionId")
+ oauthAccessTokenSessionIdChildren OauthAccessToken[] @relation("mcpOauthAccessTokenSessionId")
+ id String @id @db.Uuid
+ token String @unique
+ expiresAt DateTime @db.Timestamptz(3)
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ updatedAt DateTime @updatedAt @db.Timestamptz(3)
+ ipAddress String?
+ userAgent String?
+ impersonatedBy String? @db.Uuid
+ activeOrganizationId String? @db.Uuid
+ activeOrganization Organization? @relation(fields:[activeOrganizationId],references:[id],onDelete:SetNull)
+ userId String @db.Uuid
+ user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+ @@index([userId])
+}
+model Account {
+ id String @id @db.Uuid
+ accountId String
+ providerId String
+ userId String @db.Uuid
+ user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+ accessToken String?
+ refreshToken String?
+ idToken String?
+ accessTokenExpiresAt DateTime? @db.Timestamptz(3)
+ refreshTokenExpiresAt DateTime? @db.Timestamptz(3)
+ scope String?
+ password String?
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ updatedAt DateTime @updatedAt @db.Timestamptz(3)
+ @@index([userId])
+ @@unique([providerId,accountId])
+}
+model Verification {
+ id String @id @db.Uuid
+ identifier String
+ value String
+ expiresAt DateTime @db.Timestamptz(3)
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ updatedAt DateTime @updatedAt @db.Timestamptz(3)
+ @@index([identifier])
+}
+
+model GoogleOAuthState {
+ stateHash String @id @db.Char(64)
+ userId String @db.Uuid
+ user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+ sessionHash String @db.Char(64)
+ encryptedVerifier String
+ contacts Boolean @default(false)
+ expiresAt DateTime @db.Timestamptz(3)
+ @@index([expiresAt])
+}
+model GoogleConnection {
+ id String @id @default(uuid()) @db.Uuid
+ userId String @db.Uuid
+ user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+ subject String @db.VarChar(255)
+ email String @db.VarChar(254)
+ displayName String? @db.VarChar(500)
+ encryptedGrant String
+ contactsEnabled Boolean @default(false)
+ status String @default("connected") @db.VarChar(32)
+ lastSyncedAt DateTime? @db.Timestamptz(3)
+ lastSyncError String?
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ updatedAt DateTime @updatedAt @db.Timestamptz(3)
+ calendars GoogleCalendar[]
+ @@unique([userId,subject])
+ @@index([userId])
+}
+model GoogleCalendar {
+ id String @id @default(uuid()) @db.Uuid
+ connectionId String @db.Uuid
+ connection GoogleConnection @relation(fields:[connectionId],references:[id],onDelete:Cascade)
+ remoteId String @db.VarChar(1024)
+ name String @db.VarChar(200)
+ color String @db.Char(7)
+ timeZone String @db.VarChar(200)
+ primary Boolean @default(false)
+ selected Boolean @default(false)
+ accessRole String @db.VarChar(64)
+ events GooglePersonalEvent[]
+ @@unique([connectionId,remoteId])
+}
+model GooglePersonalEvent {
+ id String @id @db.Uuid
+ calendarId String @db.Uuid
+ calendar GoogleCalendar @relation(fields:[calendarId],references:[id],onDelete:Cascade)
+ remoteId String @db.VarChar(1024)
+ meetingKey String @db.Char(64)
+ title String @db.VarChar(500)
+ startAt DateTime @db.Timestamptz(3)
+ endAt DateTime @db.Timestamptz(3)
+ allDay Boolean
+ startDate String @db.Char(10)
+ endDate String @db.Char(10)
+ timeZone String? @db.VarChar(200)
+ location String? @db.VarChar(1000)
+ meetingUrl String? @db.VarChar(4096)
+ context Json
+ @@index([startAt,endAt])
+ @@unique([calendarId,remoteId])
+}
+model GoogleMeeting {
+ userId String @db.Uuid
+ user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+ meetingKey String @db.Char(64)
+ @@id([userId,meetingKey])
+ noteId String @unique @db.Uuid
+ note Note @relation(fields:[noteId],references:[id],onDelete:Cascade)
+}
+model NoteMeetingContext {
+ noteId String @id @db.Uuid
+ note Note @relation(fields:[noteId],references:[id],onDelete:Cascade)
+ userId String @db.Uuid
+ user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+ meeting Json
+ updatedAt DateTime @updatedAt @db.Timestamptz(3)
+ @@index([userId])
+}
+
+// Better Auth Organization plugin. Membership never changes Note.ownerId.
+model Organization {
+ notes Note[]
+ meetingFolders MeetingFolder[]
+ workspaceSelections UserWorkspaceState[]
+ agentBriefs AgentBrief[]
+ id String @id @db.Uuid
+ name String @db.VarChar(100)
+ slug String @unique @db.VarChar(100)
+ logo String?
+ metadata String?
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ members Member[]
+ invitations Invitation[]
+ sessions Session[]
+}
+model Member {
+ id String @id @db.Uuid
+ organizationId String @db.Uuid
+ organization Organization @relation(fields:[organizationId],references:[id],onDelete:Cascade)
+ userId String @db.Uuid
+ user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+ role String @default("member") @db.VarChar(16)
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ @@unique([organizationId,userId])
+ @@index([userId])
+}
+model Invitation {
+ id String @id @db.Uuid
+ organizationId String @db.Uuid
+ organization Organization @relation(fields:[organizationId],references:[id],onDelete:Cascade)
+ email String @db.VarChar(254)
+ role String @default("member") @db.VarChar(16)
+ status String @default("pending") @db.VarChar(16)
+ inviterId String @db.Uuid
+ inviter User @relation(fields:[inviterId],references:[id],onDelete:Cascade)
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ expiresAt DateTime @db.Timestamptz(3)
+ @@index([organizationId,status])
+ @@index([email,status])
+}
+
+// Workspace navigation never expands private-note ownership or folder access.
+model UserWorkspaceState {
+ userId String @id @db.Uuid
+ user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+ activeOrganizationId String? @db.Uuid
+ activeOrganization Organization? @relation(fields:[activeOrganizationId],references:[id],onDelete:SetNull)
+ updatedAt DateTime @updatedAt @db.Timestamptz(3)
+}
+model MeetingFolder {
+ id String @id @default(uuid()) @db.Uuid
+ ownerId String @db.Uuid
+ owner User @relation(fields:[ownerId],references:[id],onDelete:Cascade)
+ organizationId String @db.Uuid
+ organization Organization @relation(fields:[organizationId],references:[id],onDelete:Cascade)
+ name String @db.VarChar(200)
+ description String @default("") @db.VarChar(2000)
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ updatedAt DateTime @updatedAt @db.Timestamptz(3)
+ notes MeetingFolderNote[]
+ @@index([ownerId,organizationId,createdAt])
+}
+model MeetingFolderNote {
+ folderId String @db.Uuid
+ folder MeetingFolder @relation(fields:[folderId],references:[id],onDelete:Cascade)
+ noteId String @db.Uuid
+ note Note @relation(fields:[noteId],references:[id],onDelete:Cascade)
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ @@id([folderId,noteId])
+ @@index([noteId])
+}
+model NoteAttachment {
+ id String @id @default(uuid()) @db.Uuid
+ noteId String @db.Uuid
+ note Note @relation(fields:[noteId],references:[id],onDelete:Cascade)
+ name String @db.VarChar(255)
+ mimeType String @db.VarChar(40)
+ data Bytes
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ @@index([noteId,createdAt])
+}
+model AgentBrief {
+ userId String @db.Uuid
+ user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+ organizationId String @db.Uuid
+ organization Organization @relation(fields:[organizationId],references:[id],onDelete:Cascade)
+ body String @default("")
+ updatedAt DateTime @updatedAt @db.Timestamptz(3)
+ @@id([userId,organizationId])
+}
+
+// Exact installed Better Auth MCP/OAuth-provider and JWT plugin tables.
+model OauthClient {
+ id String @id @default(uuid())
+ clientId String @unique
+ clientSecret String?
+ clientDiscoveryId String?
+ disabled Boolean? @default(false)
+ skipConsent Boolean?
+ enableEndSession Boolean?
+ subjectType String?
+ scopes String[] @default([])
+ clientCredentialsScopes String[] @default([])
+ userId String? @db.Uuid
+ @@index([userId])
+ user User? @relation("mcpOauthClientUserId",fields:[userId],references:[id],onDelete:Cascade)
+ createdAt DateTime? @db.Timestamptz(3)
+ updatedAt DateTime? @db.Timestamptz(3)
+ name String?
+ uri String?
+ icon String?
+ contacts String[] @default([])
+ tos String?
+ policy String?
+ softwareId String?
+ softwareVersion String?
+ softwareStatement String?
+ redirectUris String[] @default([])
+ postLogoutRedirectUris String[] @default([])
+ backchannelLogoutUri String?
+ backchannelLogoutSessionRequired Boolean?
+ tokenEndpointAuthMethod String?
+ applicationType String?
+ jwks String?
+ jwksUri String?
+ grantTypes String[] @default([])
+ responseTypes String[] @default([])
+ requirePKCE Boolean?
+ dpopBoundAccessTokens Boolean? @default(false)
+ referenceId String?
+ metadata Json?
+ oauthClientResourceClientIdChildren OauthClientResource[] @relation("mcpOauthClientResourceClientId")
+ oauthRefreshTokenClientIdChildren OauthRefreshToken[] @relation("mcpOauthRefreshTokenClientId")
+ oauthAccessTokenClientIdChildren OauthAccessToken[] @relation("mcpOauthAccessTokenClientId")
+ oauthConsentClientIdChildren OauthConsent[] @relation("mcpOauthConsentClientId")
+}
+model OauthResource {
+ id String @id @default(uuid())
+ identifier String @unique
+ name String
+ accessTokenTtl Int?
+ refreshTokenTtl Int?
+ signingAlgorithm String?
+ signingKeyId String?
+ allowedScopes String[] @default([])
+ customClaims Json?
+ dpopBoundAccessTokensRequired Boolean? @default(false)
+ disabled Boolean? @default(false)
+ createdAt DateTime? @db.Timestamptz(3)
+ updatedAt DateTime? @db.Timestamptz(3)
+ policyVersion Int? @default(1)
+ metadata Json?
+ oauthClientResourceResourceIdChildren OauthClientResource[] @relation("mcpOauthClientResourceResourceId")
+}
+model OauthClientResource {
+ id String @id @default(uuid())
+ clientId String
+ @@index([clientId])
+ client OauthClient @relation("mcpOauthClientResourceClientId",fields:[clientId],references:[clientId],onDelete:Cascade)
+ resourceId String
+ @@index([resourceId])
+ resource OauthResource @relation("mcpOauthClientResourceResourceId",fields:[resourceId],references:[identifier],onDelete:Cascade)
+ metadata Json?
+ createdAt DateTime? @db.Timestamptz(3)
+ @@unique([clientId,resourceId])
+}
+model OauthRefreshToken {
+ id String @id @default(uuid())
+ token String @unique
+ clientId String
+ @@index([clientId])
+ client OauthClient @relation("mcpOauthRefreshTokenClientId",fields:[clientId],references:[clientId],onDelete:Cascade)
+ sessionId String? @db.Uuid
+ @@index([sessionId])
+ session Session? @relation("mcpOauthRefreshTokenSessionId",fields:[sessionId],references:[id],onDelete:SetNull)
+ userId String @db.Uuid
+ @@index([userId])
+ user User @relation("mcpOauthRefreshTokenUserId",fields:[userId],references:[id],onDelete:Cascade)
+ referenceId String?
+ authorizationCodeId String?
+ @@index([authorizationCodeId])
+ resources String[] @default([])
+ requestedUserInfoClaims String[] @default([])
+ expiresAt DateTime @db.Timestamptz(3)
+ createdAt DateTime @db.Timestamptz(3)
+ revoked DateTime? @db.Timestamptz(3)
+ rotatedAt DateTime? @db.Timestamptz(3)
+ rotationReplayResponse String?
+ rotationReplayExpiresAt DateTime? @db.Timestamptz(3)
+ authTime DateTime? @db.Timestamptz(3)
+ confirmation Json?
+ scopes String[] @default([])
+ oauthAccessTokenRefreshIdChildren OauthAccessToken[] @relation("mcpOauthAccessTokenRefreshId")
+}
+model OauthAccessToken {
+ id String @id @default(uuid())
+ token String @unique
+ clientId String
+ @@index([clientId])
+ client OauthClient @relation("mcpOauthAccessTokenClientId",fields:[clientId],references:[clientId],onDelete:Cascade)
+ sessionId String? @db.Uuid
+ @@index([sessionId])
+ session Session? @relation("mcpOauthAccessTokenSessionId",fields:[sessionId],references:[id],onDelete:SetNull)
+ userId String? @db.Uuid
+ @@index([userId])
+ user User? @relation("mcpOauthAccessTokenUserId",fields:[userId],references:[id],onDelete:Cascade)
+ referenceId String?
+ authorizationCodeId String?
+ @@index([authorizationCodeId])
+ resources String[] @default([])
+ requestedUserInfoClaims String[] @default([])
+ refreshId String?
+ @@index([refreshId])
+ refresh OauthRefreshToken? @relation("mcpOauthAccessTokenRefreshId",fields:[refreshId],references:[id],onDelete:Cascade)
+ expiresAt DateTime @db.Timestamptz(3)
+ createdAt DateTime @db.Timestamptz(3)
+ revoked DateTime? @db.Timestamptz(3)
+ confirmation Json?
+ scopes String[] @default([])
+}
+model OauthConsent {
+ id String @id @default(uuid())
+ clientId String
+ @@index([clientId])
+ client OauthClient @relation("mcpOauthConsentClientId",fields:[clientId],references:[clientId],onDelete:Cascade)
+ userId String? @db.Uuid
+ @@index([userId])
+ user User? @relation("mcpOauthConsentUserId",fields:[userId],references:[id],onDelete:Cascade)
+ referenceId String?
+ resources String[] @default([])
+ requestedUserInfoClaims String[] @default([])
+ scopes String[] @default([])
+ createdAt DateTime @db.Timestamptz(3)
+ updatedAt DateTime @db.Timestamptz(3)
+}
+model OauthClientAssertion {
+ id String @id @default(uuid())
+ expiresAt DateTime @db.Timestamptz(3)
+}
+model Jwks {
+ id String @id @default(uuid())
+ publicKey String
+ privateKey String
+ createdAt DateTime @db.Timestamptz(3)
+ expiresAt DateTime? @db.Timestamptz(3)
+ alg String?
+ crv String?
+}

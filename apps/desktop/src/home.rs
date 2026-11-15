@@ -1,0 +1,1151 @@
+use crate::{
+    app::{Cereal, Menu, Screen},
+    model::Note,
+    ui::*,
+};
+use chrono::{Datelike, Duration, Local, NaiveDate};
+use gpui::{prelude::*, *};
+
+thread_local! {
+    /// Height of the private-space banner as last laid out, so dismissing it
+    /// can close exactly the space it occupied (its text wraps with the
+    /// window, so the height is not a constant).
+    static SPACE_BANNER_HEIGHT: std::cell::Cell<f32> = const { std::cell::Cell::new(75.) };
+}
+
+/// One row of a notes list: everything it draws, and nothing else.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HomeRow {
+    pub id: u64,
+    pub title: SharedString,
+    pub time: SharedString,
+    /// The day it is grouped under, `YYYY-MM-DD`.
+    pub date: String,
+}
+
+/// One row of the search-results page.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchHit {
+    pub row: HomeRow,
+    /// The first line that matches, shortened for display.
+    pub snippet: String,
+}
+
+/// The matching line shown under a search result: the first line of the
+/// body, summary or transcript containing `query`, else the title.
+pub fn search_snippet(note: &Note, query: &str) -> String {
+    let needle = query.to_lowercase();
+    note.body
+        .lines()
+        .chain(note.enhanced.lines())
+        .chain(note.transcript.lines())
+        .find(|line| line.to_lowercase().contains(&needle))
+        .unwrap_or(&note.title)
+        .trim()
+        .chars()
+        .take(140)
+        .collect()
+}
+
+type WorkspaceRevision = (u64, usize, usize, usize);
+type TranscriptKey = (u64, u64, usize, usize);
+type Cached<K, V> = std::cell::RefCell<Option<(K, std::rc::Rc<V>)>>;
+
+/// Data derived from the workspace that is expensive to rebuild and only
+/// changes when the workspace does. Rendering happens on every animation
+/// frame, hover and scroll tick; none of those may clone notes, sort them or
+/// re-parse a transcript.
+#[derive(Default)]
+pub struct Caches {
+    home: Cached<(WorkspaceRevision, Option<u64>, bool), Vec<HomeRow>>,
+    search: Cached<(WorkspaceRevision, String), Vec<u64>>,
+    results: Cached<(WorkspaceRevision, String), Vec<SearchHit>>,
+    utterances: Cached<TranscriptKey, Vec<crate::note::TranscriptUtterance>>,
+}
+
+/// The rows of a notes list, in the order given, from the notes themselves.
+pub fn home_rows(notes: &[&Note]) -> Vec<HomeRow> {
+    notes
+        .iter()
+        .map(|note| HomeRow {
+            id: note.id,
+            title: if note.title.trim().is_empty() {
+                "New note".into()
+            } else {
+                note.title.clone().into()
+            },
+            time: note.time.clone().into(),
+            date: note.timeline_date(),
+        })
+        .collect()
+}
+
+impl Cereal {
+    /// Rows for the current list, rebuilt only when the workspace changed.
+    pub fn list_rows(&self, folder: Option<u64>, favorites: bool) -> std::rc::Rc<Vec<HomeRow>> {
+        let key = (self.workspace.revision(), folder, favorites);
+        let mut cache = self.caches.home.borrow_mut();
+        if let Some((cached, rows)) = cache.as_ref()
+            && *cached == key
+        {
+            return rows.clone();
+        }
+        let rows = std::rc::Rc::new(home_rows(
+            &self.workspace.visible_notes(folder, favorites, ""),
+        ));
+        *cache = Some((key, rows.clone()));
+        rows
+    }
+
+    /// Ids of the notes matching `query`, best first, searched once per
+    /// query and workspace state rather than once per frame.
+    pub fn search_ids(&self, query: &str) -> std::rc::Rc<Vec<u64>> {
+        let revision = self.workspace.revision();
+        let mut cache = self.caches.search.borrow_mut();
+        if let Some(((cached, cached_query), ids)) = cache.as_ref()
+            && *cached == revision
+            && cached_query == query
+        {
+            return ids.clone();
+        }
+        let ids = std::rc::Rc::new(
+            self.workspace
+                .visible_notes(None, false, query)
+                .iter()
+                .map(|note| note.id)
+                .collect::<Vec<_>>(),
+        );
+        *cache = Some(((revision, query.to_string()), ids.clone()));
+        ids
+    }
+
+    /// The search-results page: found, sorted and excerpted once per query
+    /// and workspace state. Rendering it copies no note text.
+    pub fn search_hits(&self, query: &str) -> std::rc::Rc<Vec<SearchHit>> {
+        let key = (self.workspace.revision(), query.to_string());
+        let mut cache = self.caches.results.borrow_mut();
+        if let Some((cached, hits)) = cache.as_ref()
+            && *cached == key
+        {
+            return hits.clone();
+        }
+        let notes = self.workspace.visible_notes(None, false, query);
+        let hits = std::rc::Rc::new(
+            home_rows(&notes)
+                .into_iter()
+                .zip(&notes)
+                .map(|(row, note)| SearchHit {
+                    row,
+                    snippet: search_snippet(note, query),
+                })
+                .collect::<Vec<_>>(),
+        );
+        *cache = Some((key, hits.clone()));
+        hits
+    }
+
+    /// A note's transcript as utterances, parsed once per transcript state.
+    /// The length is part of the key because legacy adapters may assign the
+    /// text without advancing its revision.
+    pub fn utterances(&self, note: &Note) -> std::rc::Rc<Vec<crate::note::TranscriptUtterance>> {
+        let key = (
+            note.id,
+            note.transcript_revision,
+            note.transcript.len(),
+            note.server_transcript_segments.len(),
+        );
+        let mut cache = self.caches.utterances.borrow_mut();
+        if let Some((cached, utterances)) = cache.as_ref()
+            && *cached == key
+        {
+            return utterances.clone();
+        }
+        let utterances = std::rc::Rc::new(crate::note::transcript_utterances(note));
+        *cache = Some((key, utterances.clone()));
+        utterances
+    }
+
+    /// Parse the transcript again next time: its segments changed in a way
+    /// its revision and lengths do not show (speakers were relabelled).
+    pub fn forget_utterances(&self) {
+        self.caches.utterances.borrow_mut().take();
+    }
+
+    pub fn render_home(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.theme();
+        let home = self.screen == Screen::Home;
+        let folder = if let Screen::Folder(id) = self.screen {
+            Some(id)
+        } else {
+            None
+        };
+        let notes = self.list_rows(folder, self.screen == Screen::Favorites);
+        let title = match self.screen {
+            Screen::Favorites => "Favorites".to_string(),
+            Screen::Folder(id) => self
+                .workspace
+                .folders
+                .iter()
+                .find(|f| f.id == id)
+                .map(|f| f.name.clone())
+                .unwrap_or("Notes".into()),
+            _ => "My notes".into(),
+        };
+        // The list is a day caption followed by that day's rows, over and
+        // over. Only the part near the viewport is built (see `lazy`); a
+        // workspace with hundreds of notes costs the same per frame as one
+        // with a dozen.
+        enum Entry<'a> {
+            Day(&'a str),
+            Row(&'a HomeRow),
+        }
+        let mut entries = Vec::with_capacity(notes.len() + 16);
+        let mut last_date = "";
+        for note in notes.iter() {
+            if note.date != last_date {
+                last_date = &note.date;
+                entries.push(Entry::Day(&note.date));
+            }
+            entries.push(Entry::Row(note));
+        }
+        let keys: Vec<u64> = entries
+            .iter()
+            .map(|entry| match entry {
+                Entry::Day(date) => crate::lazy::key(("day", date)),
+                Entry::Row(note) => crate::lazy::key(("row", note.id)),
+            })
+            .collect();
+        // On Home the list sits a pixel inside the card column above it.
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .px(px(if home { 1. } else { 0. }))
+            .child(crate::lazy::column(
+                "notes",
+                &keys,
+                0.,
+                0.,
+                &self.home_scroll,
+                window,
+                |index| match entries[index] {
+                    Entry::Day(date) => caption(date_label(date), t)
+                        .px(px(8.))
+                        .pt(px(25.))
+                        .pb(px(2.))
+                        .into_any_element(),
+                    Entry::Row(note) => self
+                        .list_row(note.id, note.title.clone(), &note.time, cx)
+                        .into_any_element(),
+                },
+            ));
+        if notes.is_empty() {
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .py(px(70.))
+                    .gap(px(14.))
+                    .child(icon("document", 32., t.muted))
+                    .child(heading("A little space for your thoughts", t))
+                    .child(small("Create a note to get started.", t))
+                    .child(
+                        pill("empty-new", "New note", "plus", t)
+                            .on_click(cx.listener(|this, _, w, cx| this.new_note(w, cx))),
+                    ),
+            );
+        }
+        // Space pages (My notes, a folder, Favorites) are wider and open with
+        // a centred hero; Home keeps the narrower column under "Coming up".
+        let space = !home;
+        let mut column = div()
+            .w_full()
+            .max_w(px(if space { 768. } else { 674. }))
+            .px(px(24.))
+            .pb(px(130.))
+            .flex()
+            .flex_col()
+            .flex_shrink_0();
+        if home && self.workspace.settings.show_upcoming {
+            column = column.child(self.calendar(cx)).child(self.voice_card(cx));
+        } else if home {
+            column = column.child(
+                div()
+                    .px(px(8.))
+                    .pt(px(14.))
+                    .pb(px(4.))
+                    .flex()
+                    .justify_between()
+                    .items_center()
+                    .child(heading(title, t))
+                    .child(
+                        tool("collection-search", "search", t)
+                            .on_click(cx.listener(|this, _, w, cx| this.open_search(w, cx))),
+                    ),
+            );
+        } else {
+            column = column.child(self.space_hero(title, notes.len(), window, cx));
+        }
+        column = column.child(list);
+        let assistant =
+            self.stage
+                .presence(("assistant", 0), self.assistant_open, crate::motion::PANEL);
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .overflow_hidden()
+            .child(
+                div()
+                    .id("home-scroll")
+                    .track_scroll(&self.home_scroll)
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .pr(px(10.))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(column),
+            )
+            // The chat unfolds out of the ask bar and folds back into it.
+            // Space pages ask from their inline composer instead of the bar.
+            .when(!assistant.visible && !space, |home| {
+                home.child(self.ask_bar(cx))
+            })
+            .when(assistant.visible, |home| {
+                home.child(self.render_note_assistant(assistant, window, cx))
+            })
+            .into_any_element()
+    }
+
+    pub(crate) fn list_row(
+        &self,
+        id: u64,
+        title: SharedString,
+        time: &str,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let t = self.theme();
+        let hovered = crate::motion::reveal_key(("note-row", id));
+        div()
+            .id(("note-row", id))
+            .w_full()
+            // A 44 px row on a 48 px pitch: the fill never touches its
+            // neighbours.
+            .h(px(44.))
+            .mb(px(4.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(16.))
+            .px(px(8.))
+            .rounded(px(12.))
+            .cursor_pointer()
+            // Rows cascade in after navigation and squash under the pointer.
+            .map(|row| crate::motion::lift(row, self.stage.cascade_next("page")))
+            .child(row_feedback(t, 12.).reveals(hovered))
+            .reach().on_click(cx.listener(move |this, _, _, cx| this.open_note(id, cx)))
+            // Secondary click opens the row's menu under the pointer.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.open_row_menu(id, event.position, cx);
+                }),
+            )
+            .child(
+                div()
+                    .size(px(28.))
+                    .flex_shrink_0()
+                    .rounded(px(6.))
+                    .bg(if self.workspace.settings.dark_mode {
+                        rgb(0x515150)
+                    } else {
+                        rgb(0xd8d9d3)
+                    })
+                    .border_1()
+                    .border_color(if self.workspace.settings.dark_mode {
+                        rgba(0xffffff26)
+                    } else {
+                        rgb(0xcdc9c0)
+                    })
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon("document", 17., t.text)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .line_height(px(20.))
+                            .truncate()
+                            .child(title),
+                    )
+                    .child(small("Me", t)),
+            )
+            // Under the pointer the time gives way to the row's actions.
+            .child(
+                div()
+                    .relative()
+                    .flex_shrink_0()
+                    .min_w(px(48.))
+                    .h(px(24.))
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .child(crate::motion::conceal(time_label(time, t), hovered))
+                    .child(
+                        crate::motion::reveal(div(), hovered)
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .child(
+                                tool_tip(("note-row-more", id), "more", "More actions", t)
+                                    .size(px(24.))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        let at = window.mouse_position();
+                                        this.open_row_menu(id, at, cx);
+                                    })),
+                            ),
+                    ),
+            )
+    }
+
+    /// The centred opening of a space page: its tile, title and scope, an
+    /// optional note about privacy, and a composer for asking about the space.
+    fn space_hero(
+        &self,
+        title: String,
+        notes: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let t = self.theme();
+        let private = self.screen == Screen::MyNotes;
+        // The private-space note: simply there until dismissed, then present
+        // only for as long as it takes to leave.
+        let banner = if self.workspace.settings.space_banner_dismissed {
+            let pose = self
+                .stage
+                .presence(("space-banner", 0), false, crate::motion::SNAPPY);
+            pose.visible.then_some(pose)
+        } else {
+            Some(crate::motion::Pose::REST)
+        };
+        let (symbol, subtitle) = match self.screen {
+            Screen::MyNotes => ("lock-solid", "Notes from all of your private folders."),
+            Screen::Favorites => ("star", "Notes you have marked as favorites."),
+            _ => ("folder", "Notes filed in this folder."),
+        };
+        let plural = |count: usize, word: &str| {
+            format!("{count} {word}{}", if count == 1 { "" } else { "s" })
+        };
+        let meta = div()
+            .mt(px(9.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(6.))
+            .text_size(px(13.))
+            .line_height(px(18.))
+            .text_color(t.muted);
+        let meta = if private {
+            meta.child(icon("lock-solid", 12., t.muted))
+                .child("Your private notes and folders")
+                .child("·")
+                .child(icon("folder", 13., t.muted))
+                .child(plural(self.workspace.folders.len(), "folder"))
+        } else {
+            meta.child(icon("document", 13., t.muted))
+                .child(plural(notes, "note"))
+        };
+        let asking = self.assistant_open;
+        let focused = self.ask.read(cx).focus_handle.is_focused(window);
+        let can_send = !self.ask.read(cx).content().trim().is_empty();
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(76.))
+            .child(
+                div()
+                    .size(px(28.))
+                    .rounded(px(7.))
+                    .border_1()
+                    .border_color(t.hairline)
+                    .bg(t.fill)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon(symbol, 14., t.secondary)),
+            )
+            .child(
+                div()
+                    .mt(px(10.))
+                    .w_full()
+                    .text_center()
+                    .font_family(DISPLAY)
+                    .text_size(px(35.))
+                    .line_height(px(44.))
+                    .text_color(t.text)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .mt(px(1.))
+                    .text_size(px(13.))
+                    .line_height(px(18.))
+                    .text_color(t.muted)
+                    .child(subtitle),
+            )
+            .child(meta)
+            .when(private && banner.is_some(), |hero| {
+                let (fill, edge) = if self.workspace.settings.dark_mode {
+                    (rgb(0x2c3441), rgb(0x424955))
+                } else {
+                    (rgb(0xe8f2fe), rgb(0xc8d0d4))
+                };
+                // Dismissed, the banner fades while the space it took (its
+                // measured height and the 40 px above it) closes up, so the
+                // composer below slides into place instead of jumping.
+                let leaving = banner.filter(|_| self.workspace.settings.space_banner_dismissed);
+                let measure = canvas(
+                    |bounds, _, _| SPACE_BANNER_HEIGHT.with(|height| height.set(f32::from(bounds.size.height))),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0();
+                hero.child(
+                    div()
+                        .w_full()
+                        .when_some(leaving, |shell, pose| {
+                            shell
+                                .h(px((40. + SPACE_BANNER_HEIGHT.with(std::cell::Cell::get))
+                                    * pose.value.clamp(0., 1.)))
+                                .overflow_hidden()
+                                .opacity(pose.fade)
+                        })
+                        .child(
+                    div()
+                        .relative()
+                        .when(leaving.is_none(), |banner| banner.child(measure))
+                        .mt(px(40.))
+                        .w_full()
+                        .px(px(16.))
+                        .pt(px(14.))
+                        .pb(px(17.))
+                        .rounded(px(12.))
+                        .border_1()
+                        .border_color(edge)
+                        .bg(fill)
+                        .flex()
+                        .items_start()
+                        .gap(px(12.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.))
+                                .child(
+                                    div()
+                                        .text_size(px(14.))
+                                        .line_height(px(18.))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child("Your private space"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(13.))
+                                        .line_height(px(18.))
+                                        .text_color(t.secondary)
+                                        .child("Your notes live here by default. Nothing gets shared until you choose to share it."),
+                                ),
+                        )
+                        .child(
+                            tool_tip("dismiss-space-banner", "close", "Dismiss", t)
+                                .size(px(22.))
+                                .mt(px(-6.))
+                                .mr(px(-6.))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    // Leave from fully present.
+                                    this.stage.kick(
+                                        ("space-banner", 0),
+                                        1.,
+                                        crate::motion::SNAPPY,
+                                    );
+                                    this.workspace.settings.space_banner_dismissed = true;
+                                    this.persist(cx);
+                                    cx.notify();
+                                })),
+                        ),
+                ),
+                )
+            })
+            .child(
+                // The composer and its recipe links sit 16 px in from the column.
+                div().mt(px(56.)).w_full().px(px(16.)).child(
+                div()
+                    .w_full()
+                    .max_w(px(680.))
+                    .h(px(57.))
+                    .rounded_full()
+                    .bg(t.card)
+                    .border_1()
+                    .border_color(if focused && !asking { t.accent } else { t.border })
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .pl(px(20.))
+                    .pr(px(10.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(14.))
+                            .line_height(px(22.))
+                            // While the chat panel is open it owns the input.
+                            .child(if asking {
+                                div()
+                                    .text_color(t.muted)
+                                    .child("Continue in the chat below")
+                                    .into_any_element()
+                            } else {
+                                self.ask.clone().into_any_element()
+                            }),
+                    )
+                    .child(
+                        round_tool("space-ask-send", "arrow-up", "Send · Enter", t)
+                            .size(px(32.))
+                            .bg(t.fill)
+                            .when(!can_send || asking, |send| send.opacity(DISABLED))
+                            .on_click(cx.listener(|this, _, _, cx| this.submit_chat(cx))),
+                    ),
+                ),
+            )
+            .child(self.space_recipe_links(cx))
+            .child(div().mt(px(41.)).w_full().px(px(8.)).child(separator(t)))
+            .child(
+                div().mt(px(55.)).mb(px(9.)).w_full().flex().child(
+                    // The one list this space has. Companies and People have
+                    // no data behind them here, so they are not offered.
+                    div()
+                        .h(px(26.))
+                        .px(px(11.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(t.hairline)
+                        .bg(t.hover)
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_size(px(12.))
+                        .text_color(t.text)
+                        .child(icon("notes-lines", 13., t.secondary))
+                        .child("Notes"),
+                ),
+            )
+    }
+
+    /// Recipes under the space composer: quiet text links, not chips.
+    fn space_recipe_links(&self, cx: &mut Context<Self>) -> Div {
+        let t = self.theme();
+        let link = |id: ElementId, symbol: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .relative()
+                .h(px(22.))
+                .px(px(4.))
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .rounded(px(6.))
+                .text_size(px(13.))
+                .line_height(px(18.))
+                .text_color(t.muted)
+                .cursor_pointer()
+                .child(row_feedback(t, 6.))
+                .child(icon(symbol, 14., t.muted))
+                .child(label)
+        };
+        let mut row = div()
+            .mt(px(13.))
+            .w_full()
+            .max_w(px(712.))
+            .pl(px(18.))
+            .pr(px(25.))
+            .flex()
+            .items_center()
+            .gap(px(4.));
+        for (index, (title, _, prompt)) in crate::chat::BUILTIN_RECIPES.iter().enumerate().take(3) {
+            row = row.child(
+                link(("space-recipe", index).into(), "recipe", title).reach().on_click(cx.listener(
+                    move |this, _, _, cx| this.use_chat_recipe((*prompt).into(), true, cx),
+                )),
+            );
+        }
+        row.child(div().flex_1()).child(
+            link("space-all-recipes".into(), "grid", "All recipes").reach().on_click(
+                cx.listener(|this, _, window, cx| this.open_recipes_from_sidebar(window, cx)),
+            ),
+        )
+    }
+
+    fn calendar(&self, cx: &mut Context<Self>) -> Div {
+        if crate::server::enabled() {
+            return self.connected_calendar(cx);
+        }
+        let t = self.theme();
+        let heading_hover = crate::motion::reveal_key("coming-up-heading");
+        let today = Local::now().date_naive() + Duration::days((self.calendar_page * 7) as i64);
+        let title = if self.calendar_page == 0 {
+            "Coming up".to_string()
+        } else {
+            format!("{} {}", today.format("%B"), today.day())
+        };
+        let mut rows = div()
+            .w_full()
+            .rounded(px(17.))
+            .bg(t.card)
+            .border_1()
+            .border_color(t.border)
+            .overflow_hidden();
+        for (i, delta) in [0, 4, 5, 6, 11].iter().enumerate() {
+            let day = today + Duration::days(*delta);
+            let events = [
+                ("No events today", ""),
+                ("Product & design sync", "10:30 – 11:00 AM"),
+                ("Weekly team standup", "9:00 – 9:30 AM"),
+                ("Customer discovery", "2:00 – 2:45 PM"),
+                ("Engineering planning", "3:30 – 4:15 PM"),
+            ];
+            let (mut name, time) = events[i];
+            if i == 0 && self.calendar_page != 0 {
+                name = "No events scheduled";
+            }
+            let row_id = i as u64;
+            let event_hover = crate::motion::reveal_key(("calendar-event", row_id));
+            let mut row = div()
+                .id(("calendar-event", row_id))
+                .relative()
+                .flex()
+                .items_center()
+                .h(px(60.))
+                .flex_shrink_0()
+                .px(px(16.));
+            if i > 0 {
+                row = row
+                    .child(crate::motion::hover_probe(event_hover))
+                    .cursor_pointer()
+                    .reach().on_click(cx.listener(move |this, _, w, cx| {
+                        let existing = this
+                            .workspace
+                            .notes
+                            .iter()
+                            .find(|n| n.title == name && !n.trashed)
+                            .map(|n| n.id);
+                        if let Some(id) = existing {
+                            this.open_note(id, cx);
+                        } else {
+                            this.new_note(w, cx);
+                            if let Some(n) =
+                                this.current_note.and_then(|id| this.workspace.note_mut(id))
+                            {
+                                n.title = name.into();
+                            }
+                            this.title_input
+                                .update(cx, |input, cx| input.set_content(name, cx));
+                            this.persist(cx);
+                        }
+                    }));
+            }
+            row = row
+                .child(
+                    div()
+                        .w(px(152.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .child(
+                            div()
+                                .w(px(40.))
+                                .font_family(DISPLAY)
+                                .text_size(px(27.))
+                                .line_height(px(32.))
+                                .child(day.day().to_string()),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .text_size(px(11.))
+                                .line_height(px(12.))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(4.))
+                                        .child(day.format("%B").to_string())
+                                        .when(i == 0 && self.calendar_page == 0, |s| {
+                                            s.child(
+                                                div().size(px(5.)).rounded_full().bg(rgb(0xc84f34)),
+                                            )
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(t.muted)
+                                        .child(day.format("%a").to_string()),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .w(px(3.))
+                        .h(px(28.))
+                        .rounded_full()
+                        .flex_shrink_0()
+                        .bg(if i == 0 { rgb(0xb5b6ae) } else { rgb(0x87e5e8) }),
+                )
+                // Only the event cell lights up, not the date beside it.
+                .child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_w_0()
+                        .h(px(44.))
+                        .pl(px(12.))
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .gap(px(2.))
+                        .text_size(px(14.))
+                        .line_height(px(18.))
+                        .when(i > 0, |cell| {
+                            cell.child(
+                                // From just before the colour bar to the
+                                // card's inner edge, 8 px clear of the row.
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .bottom_0()
+                                    .left(px(-11.))
+                                    .right(px(-8.))
+                                    .rounded(px(8.))
+                                    .bg(t.hover.opacity(crate::motion::revealed(event_hover))),
+                            )
+                        })
+                        .child(
+                            div()
+                                .truncate()
+                                .text_color(if i == 0 { t.muted } else { t.text })
+                                .child(name),
+                        )
+                        .when(!time.is_empty(), |s| {
+                            s.child(time_label(time, t).flex_shrink())
+                        }),
+                );
+            rows = rows.child(row);
+        }
+        div()
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .w_full()
+            .pt(px(10.))
+            .child(
+                div()
+                    .id("coming-up-heading")
+                    .child(crate::motion::hover_probe(heading_hover))
+                    .h(px(37.))
+                    .px(px(8.))
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .child(heading(title, t))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(1.))
+                            .when(self.calendar_page != 0, |s| {
+                                s.child(pill("calendar-today", "Today", "", t).on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.calendar_page = 0;
+                                        cx.notify();
+                                    }),
+                                ))
+                            })
+                            .child(
+                                tool_tip(
+                                    "calendar-settings",
+                                    "sliders-horizontal",
+                                    "Calendar settings",
+                                    t,
+                                )
+                                .opacity(crate::motion::revealed(heading_hover))
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.open_settings(
+                                            crate::screens::SettingsTab::Calendar,
+                                            cx,
+                                        )
+                                    },
+                                )),
+                            )
+                            .child(
+                                tool("calendar-prev", "chevron-left", t)
+                                    .size(px(24.))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.calendar_page -= 1;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                tool("calendar-next", "chevron-right", t)
+                                    .size(px(24.))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.calendar_page += 1;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+            .child(rows)
+    }
+
+    fn voice_card(&self, cx: &mut Context<Self>) -> Div {
+        let t = self.theme();
+        let mut waveform = div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(2.))
+            .w(px(40.))
+            .h(px(17.))
+            .rounded_full()
+            .bg(rgb(0x292929));
+        for height in [2., 4., 6., 3., 8., 4., 2., 5., 2.] {
+            waveform = waveform.child(div().w(px(1.)).h(px(height)).bg(rgb(0xd5a200)));
+        }
+        div()
+            .mt(px(14.))
+            .h(px(79.))
+            .flex_shrink_0()
+            .px(px(16.))
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .rounded(px(17.))
+            .border_1()
+            .border_color(t.border)
+            .bg(t.card)
+            .child(
+                div()
+                    .w(px(91.))
+                    .h(px(45.))
+                    .flex_shrink_0()
+                    .rounded(px(7.))
+                    .border_1()
+                    .border_color(t.info_edge)
+                    .bg(t.info_fill)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(waveform),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(4.))
+                    .font_family(DISPLAY)
+                    .text_size(px(16.))
+                    .line_height(px(24.))
+                    .child("Try dictating with")
+                    .child(div().text_color(t.accent).child("voice typing"))
+                    .child("for free"),
+            )
+            .child(
+                div()
+                    .id("try-voice")
+                    .px(px(13.))
+                    .h(px(29.))
+                    .flex()
+                    .items_center()
+                    .rounded_full()
+                    .bg(t.text)
+                    .text_color(t.card)
+                    .text_size(px(13.))
+                    .cursor_pointer()
+                    .child(crate::motion::tactile(neutral_wash(0.16)).round())
+                    .child("Try it out")
+                    .reach().on_click(cx.listener(|this, _, w, cx| {
+                        this.menu = Some(Menu::Voice);
+                        this.focus.focus(w);
+                        cx.notify();
+                    })),
+            )
+    }
+
+    pub fn ask_bar(&self, cx: &mut Context<Self>) -> Div {
+        let t = self.theme();
+        div()
+            .absolute()
+            .bottom(px(26.))
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .px(px(24.))
+            .child(bar_scrim(t, 0.))
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(674.))
+                    .h(px(59.))
+                    .rounded_full()
+                    .bg(t.card)
+                    .border_1()
+                    .border_color(t.border)
+                    .shadow(vec![BoxShadow {
+                        color: rgba(0x2929290a).into(),
+                        offset: point(px(0.), px(2.)),
+                        blur_radius: px(5.),
+                        spread_radius: px(0.),
+                    }])
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .pl(px(22.))
+                    .pr(px(11.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(14.))
+                            .line_height(px(22.))
+                            .child(self.ask.clone())
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    if !this.chat_messages.is_empty() || this.chat_stream.is_some()
+                                    {
+                                        this.assistant_open = true;
+                                        cx.notify();
+                                    }
+                                }),
+                            ),
+                    )
+                    .child(
+                        pill("ask-todos", "List recent todos", "recipe", t)
+                            .h(px(36.))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.ask.update(cx, |input, cx| {
+                                    input.set_content("List recent todos", cx)
+                                });
+                                this.submit_chat(cx);
+                            })),
+                    ),
+            )
+    }
+}
+
+pub fn date_label(date: &str) -> String {
+    let today = Local::now().date_naive();
+    match NaiveDate::parse_from_str(date, "%Y-%m-%d") {
+        Ok(d) if d == today => "Today".into(),
+        Ok(d) if d == today - Duration::days(1) => "Yesterday".into(),
+        Ok(d) => d.format("%a, %b %-d").to_string(),
+        Err(_) => date.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Workspace;
+    // `gpui::*` re-exports its own `test` attribute; these are plain unit tests.
+    use std::prelude::v1::test;
+
+    #[test]
+    fn list_rows_carry_what_a_row_draws_in_list_order() {
+        let workspace = Workspace::demo();
+        let notes = workspace.visible_notes(None, false, "");
+        let rows = home_rows(&notes);
+        assert_eq!(rows.len(), notes.len());
+        for (row, note) in rows.iter().zip(&notes) {
+            assert_eq!(row.id, note.id);
+            assert_eq!(row.date, note.timeline_date());
+            assert_eq!(row.time.as_ref(), note.time.as_str());
+        }
+        // Newest day first, exactly as the list was sorted.
+        assert!(rows.windows(2).all(|pair| pair[0].date >= pair[1].date));
+        let untitled = Note::default();
+        assert_eq!(home_rows(&[&untitled])[0].title.as_ref(), "New note");
+    }
+
+    #[test]
+    fn search_snippets_show_the_first_matching_line_or_the_title() {
+        let note = Note {
+            title: "Planning".into(),
+            body: "Agenda\n  Review the Prototype with Maya  \nNext".into(),
+            enhanced: "## Summary\nPrototype approved".into(),
+            ..Default::default()
+        };
+        // Case-insensitive, trimmed, and the body wins over the summary.
+        assert_eq!(
+            search_snippet(&note, "prototype"),
+            "Review the Prototype with Maya"
+        );
+        assert_eq!(search_snippet(&note, "approved"), "Prototype approved");
+        assert_eq!(search_snippet(&note, "nothing-here"), "Planning");
+        let long = Note {
+            body: "x".repeat(400),
+            ..Default::default()
+        };
+        assert_eq!(search_snippet(&long, "x").chars().count(), 140);
+    }
+
+    #[test]
+    fn workspace_revision_changes_with_every_way_the_lists_can_change() {
+        let mut workspace = Workspace::demo();
+        let start = workspace.revision();
+        // Reading never invalidates derived lists.
+        let first = workspace.notes[0].id;
+        let _ = workspace.note(first);
+        let _ = workspace.visible_notes(None, false, "sync");
+        assert_eq!(workspace.revision(), start);
+        // Any mutable access might have changed a title, date or trash flag.
+        workspace.note_mut(first).unwrap().trashed = true;
+        let trashed = workspace.revision();
+        assert_ne!(trashed, start);
+        workspace.create_note();
+        let created = workspace.revision();
+        assert_ne!(created, trashed);
+        workspace.add_folder("Research".into());
+        assert_ne!(workspace.revision(), created);
+        // A replaced workspace (account switch, reload) is a different list.
+        assert_ne!(
+            Workspace::demo().revision(),
+            Workspace::default().revision()
+        );
+    }
+}

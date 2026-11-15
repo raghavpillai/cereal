@@ -1,0 +1,91 @@
+import {useCallback,useEffect,useId,useRef,useState,type ReactNode} from 'react'
+import type {AdminSettingsDTO,AIProvider,LanguageModelSelection,LiveTranscriptionModelSelection,ModelCatalogDTO,TranscriptionModelSelection,UpdateAdminSettingsInput} from '@meeting-notes/contracts'
+import type {AdminClient} from '../../lib/admin-client'
+import {AdminClientError} from '../../lib/admin-client'
+import {defaultLiveModel,instanceDraft,instancePatch,instanceProblem,modelKey,providerNames,type InstanceDraft} from '../../lib/instance-settings'
+import {Button} from '../ui/button'
+import {Input} from '../ui/input'
+import {Badge} from '../ui/badge'
+import {Card,CardContent,CardHeader,CardTitle} from '../ui/card'
+import {Select,SelectContent,SelectItem,SelectTrigger} from '../ui/select'
+import {Check,ChevronRight,ImagePlus,Loader2,Plus,RefreshCw,Trash2,X} from 'lucide-react'
+
+export function ProviderLogo({provider}:{provider:AIProvider}){return <img className="provider-logo" src={`/providers/${provider}.svg`} width="20" height="20" alt=""/>}
+const modelLogo=(provider:AIProvider,model:string):AIProvider=>provider==='openrouter'&&/^(openai|anthropic)\//.test(model)?model.split('/')[0] as AIProvider:provider
+type CatalogState={data?:ModelCatalogDTO;busy?:boolean;error?:string}
+const providers=Object.keys(providerNames) as AIProvider[]
+export function SettingsPanel({settings,client,expired,busy,save,children}:{children?:ReactNode;settings:AdminSettingsDTO;client:AdminClient;expired:()=>void;busy:boolean;save:(patch:UpdateAdminSettingsInput)=>Promise<void>}){
+ const formId=useId()
+ const[draft,setDraft]=useState(()=>instanceDraft(settings)),[editing,setEditing]=useState<AIProvider|null>(null),[catalogs,setCatalogs]=useState<Partial<Record<AIProvider,CatalogState>>>({}),[logoError,setLogoError]=useState<string|null>(null)
+ const requests=useRef(new Map<AIProvider,AbortController>()),logoVersion=useRef(0),logoInput=useRef<HTMLInputElement>(null)
+ const draftRef=useRef(draft);draftRef.current=draft
+ const problem=instanceProblem(draft),patch=instancePatch(draft,settings),dirty=Object.keys(patch).length>0
+ const update=<K extends keyof InstanceDraft>(key:K,value:InstanceDraft[K])=>setDraft(old=>({...old,[key]:value}))
+ const loadCatalog=useCallback(async(provider:AIProvider,refresh=false)=>{
+  requests.current.get(provider)?.abort();const controller=new AbortController();requests.current.set(provider,controller)
+  const current=draftRef.current,key=current.keys[provider].trim(),saved=settings.providers.find(p=>p.id===provider)
+  if(!key&&(!saved?.configured||current.removed[provider])&&provider!=='openrouter')return
+  setCatalogs(old=>({...old,[provider]:{...old[provider],busy:true,error:undefined}}))
+  try{const data=await client.getModelCatalog({provider,...(key?{apiKey:key}:{}),refresh},controller.signal);if(!controller.signal.aborted)setCatalogs(old=>({...old,[provider]:{data,busy:false}}))}
+  catch(error){if(controller.signal.aborted)return;if(error instanceof AdminClientError&&error.status===401){expired();return}setCatalogs(old=>({...old,[provider]:{busy:false,error:'Couldn’t load models. Check the API key and try again.'}}))}
+ },[client,expired,settings.providers])
+ useEffect(()=>{for(const p of settings.providers)if(p.configured||p.id==='openrouter')void loadCatalog(p.id);return()=>{requests.current.forEach(c=>c.abort());logoVersion.current++}},[loadCatalog,settings.providers])
+ async function readLogo(file:File|undefined){
+  if(!file)return;const version=++logoVersion.current;setLogoError(null)
+  if(!['image/png','image/jpeg','image/webp'].includes(file.type)||file.size>250_000){setLogoError('Choose a PNG, JPG, or WebP smaller than 250 KB.');return}
+  const reader=new FileReader();reader.onload=()=>{if(version!==logoVersion.current)return;const value=reader.result;if(typeof value==='string'&&/^data:image\/(png|jpeg|webp);base64,/.test(value))update('instanceLogo',value);else setLogoError('This image could not be read.')};reader.onerror=()=>setLogoError('This image could not be read.');reader.readAsDataURL(file)
+ }
+ function setKey(provider:AIProvider,value:string){requests.current.get(provider)?.abort();setCatalogs(old=>({...old,[provider]:{}}));setDraft(old=>({...old,keys:{...old.keys,[provider]:value},removed:{...old.removed,[provider]:false}}))}
+ const available=(id:AIProvider)=>!draft.removed[id]&&(Boolean(draft.keys[id].trim())||Boolean(settings.providers.find(p=>p.id===id)?.configured))
+ return <><form id={formId} className="instance-form" onSubmit={event=>{event.preventDefault();if(!problem&&dirty)void save(patch)}}>
+ <fieldset disabled={busy} className="admin-fieldset">
+  <Card id="identity"><CardHeader><CardTitle>Identity</CardTitle></CardHeader><CardContent>
+   <div className="identity-fields"><div><label className="settings-label" htmlFor="instance-name">Team name</label><Input id="instance-name" value={draft.instanceName} maxLength={100} required onChange={e=>update('instanceName',e.target.value)}/></div>
+    <div><label className="settings-label">Team logo</label><div className="logo-control"><div className="team-logo-preview">{draft.instanceLogo?<img src={draft.instanceLogo} alt="Team logo"/>:<img src="/mark.svg" width="26" height="26" alt="Cereal"/>}</div><div><Button type="button" variant="outline" size="sm" onClick={()=>logoInput.current?.click()}><ImagePlus/>Upload logo</Button><p className="settings-help">PNG, JPG, WebP · 250 KB max</p></div>{draft.instanceLogo&&<Button type="button" variant="ghost" size="icon" aria-label="Remove team logo" onClick={()=>{logoVersion.current++;update('instanceLogo',null)}}><X/></Button>}</div><input ref={logoInput} type="file" className="sr-only" accept="image/png,image/jpeg,image/webp" aria-label="Upload team logo" onChange={e=>void readLogo(e.target.files?.[0])}/></div>
+   </div>{logoError&&<p role="alert" className="settings-error">{logoError}</p>}
+  </CardContent></Card>
+  <Card id="providers"><CardHeader><CardTitle>AI providers</CardTitle>  </CardHeader><CardContent><div className="provider-list">{providers.map(id=>{const saved=settings.providers.find(p=>p.id===id),connected=available(id),state=catalogs[id];return <div className="provider-entry" key={id}>
+   <div className="provider-row"><div className="provider-icon"><ProviderLogo provider={id}/></div><div className="provider-details"><strong>{providerNames[id]}</strong></div><Badge variant="outline" className={connected?'provider-connected':'provider-disconnected'}><span/>{draft.keys[id]?'Key ready':connected?'Connected':'Not connected'}</Badge><Button type="button" variant="ghost" size="sm" aria-expanded={editing===id} onClick={()=>setEditing(editing===id?null:id)}>{connected?'Manage':'Connect'}<ChevronRight className={editing===id?'rotate-90':''}/></Button></div>
+   {editing===id&&<div className="provider-editor"><label className="settings-label" htmlFor={`${id}-key`}>{providerNames[id]} API key</label><div className="provider-key-row"><Input id={`${id}-key`} type="password" autoComplete="new-password" value={draft.keys[id]} disabled={draft.removed[id]} placeholder={saved?.configured?'Leave blank to keep the current key':'Enter your API key'} onChange={e=>setKey(id,e.target.value)}/><Button type="button" variant="outline" disabled={state?.busy||(!connected&&id!=='openrouter')} onClick={()=>void loadCatalog(id,true)}>{state?.busy?<Loader2 className="animate-spin"/>:<RefreshCw/>}Load models</Button></div>
+   <p className="settings-help">{saved?.source==='environment'?'Configured on the server. A saved key overrides it.':'Keys are encrypted on the server and never returned to the browser.'}</p>
+   {saved?.source==='stored'&&<label className="remove-key"><input type="checkbox" checked={draft.removed[id]} onChange={e=>update('removed',{...draft.removed,[id]:e.target.checked})}/>Remove saved key and use the server configuration</label>}
+   {state?.error&&<p role="alert" className="settings-error">{state.error}</p>}{state?.data&&<p className="settings-help"><Check size={12}/>{state.data.models.length} models available{draft.keys[id]?' · Save changes to connect':''}</p>}
+   </div>}
+  </div>})}</div><p className="provider-security">API keys are encrypted and kept on your server.</p></CardContent></Card>
+  <Card id="models"><CardHeader><CardTitle>Models</CardTitle></CardHeader><CardContent>
+   <div className="model-section"><div className="model-section-heading"><h3>Chat</h3><span>{draft.chatModels.length} enabled</span></div><div className="model-controls">
+    <div className="chat-model-list">{draft.chatModels.map((model,i)=><div className="chat-model-row" key={modelKey(model)}><ModelPicker value={model} kind="language" catalogs={catalogs} available={available} load={loadCatalog} label={`Chat model ${i+1}`} change={next=>{if(draft.chatModels.some((m,index)=>index!==i&&modelKey(m)===modelKey(next)))return;update('chatModels',draft.chatModels.map((m,index)=>index===i?next as LanguageModelSelection:m))}}/>{i===0?<Badge variant="secondary" className="default-model">Default</Badge>:<Button type="button" variant="ghost" size="icon" aria-label={`Make ${model.model} the default`} onClick={()=>update('chatModels',[model,...draft.chatModels.filter((_,index)=>index!==i)])}><Check size={14}/></Button>}<Button type="button" variant="ghost" size="icon" disabled={draft.chatModels.length===1} aria-label={`Remove ${model.model}`} onClick={()=>update('chatModels',draft.chatModels.filter((_,index)=>index!==i))}><Trash2/></Button></div>)}</div>
+    {draft.chatModels.length<20&&<ModelPicker kind="language" catalogs={catalogs} available={available} load={loadCatalog} label="Add chat model" excluded={draft.chatModels.map(modelKey)} change={model=>update('chatModels',[...draft.chatModels,model as LanguageModelSelection])}/>}
+   </div></div>
+   <div className="model-section"><div className="model-section-heading"><h3>Speech-to-text</h3></div><ModelPicker value={draft.transcriptionModel} kind="transcription" catalogs={catalogs} available={available} load={loadCatalog} label="Speech-to-text model" change={model=>update('transcriptionModel',model as TranscriptionModelSelection)}/></div>
+   <div className="model-section"><div className="model-section-heading"><h3>Live transcription</h3><span>{draft.liveTranscriptionModel?'On':'Off'}</span></div><div className="model-controls">
+    <label className="live-toggle"><input type="checkbox" checked={draft.liveTranscriptionModel!==null} onChange={e=>update('liveTranscriptionModel',e.target.checked?settings.liveTranscriptionModel??defaultLiveModel:null)}/>Show the transcript while a meeting is being recorded</label>
+    {draft.liveTranscriptionModel&&<ModelPicker value={draft.liveTranscriptionModel} kind="live_transcription" catalogs={catalogs} available={available} load={loadCatalog} label="Live transcription model" change={model=>update('liveTranscriptionModel',model as LiveTranscriptionModelSelection)}/>}
+    <p className="settings-help">{draft.liveTranscriptionModel?(available('elevenlabs')?'Words appear within about a second. Recordings are still uploaded in parts as a backup.':'Connect ElevenLabs above to start. Until then, recordings are transcribed in parts after upload.'):'Recordings are transcribed in parts after upload.'}</p>
+   </div></div>
+   <div className="model-section"><div className="model-section-heading"><h3>Meeting notes</h3></div><ModelPicker value={draft.generationModel} kind="language" catalogs={catalogs} available={available} load={loadCatalog} label="Meeting notes model" change={model=>update('generationModel',model as LanguageModelSelection)}/></div>
+  </CardContent></Card>
+ </fieldset>
+ </form>
+ {children}
+  <div className="instance-save"><span aria-live="polite">{busy?<><Loader2 size={14} className="animate-spin"/>Saving changes…</>:problem??(dirty?'You have unsaved changes.':<><Check size={14}/>All changes saved</>)}</span><Button form={formId} type="submit" disabled={busy||!!problem||!dirty}>Save changes</Button></div>
+ </>
+}
+function ModelPicker({value,kind,catalogs,available,load,label,change,excluded=[]}:{value?:LanguageModelSelection|TranscriptionModelSelection;kind:'language'|'transcription'|'live_transcription';catalogs:Partial<Record<AIProvider,CatalogState>>;available:(id:AIProvider)=>boolean;load:(id:AIProvider,refresh?:boolean)=>Promise<void>;label:string;change:(m:LanguageModelSelection|TranscriptionModelSelection)=>void;excluded?:string[]}){
+ const[query,setQuery]=useState(''),id=useId(),supported:readonly AIProvider[]=kind==='language'?['openrouter','openai','anthropic']:kind==='live_transcription'?['elevenlabs']:['elevenlabs','openai']
+ const all=supported.flatMap(provider=>(catalogs[provider]?.data?.models??[]).filter(m=>m.capabilities.includes(kind)&&!excluded.includes(modelKey({provider,model:m.id}))).map(m=>({...m,provider})))
+ const matches=all.filter(m=>(m.name+' '+m.id+' '+providerNames[m.provider]).toLowerCase().includes(query.toLowerCase())).slice(0,100)
+ const current=value?all.find(m=>modelKey({provider:m.provider,model:m.id})===modelKey(value)):undefined
+ const errors=supported.filter(p=>catalogs[p]?.error),pending=supported.some(p=>catalogs[p]?.busy),selected=value?modelKey(value):''
+ return <div className={`model-picker${!value?' add-model-picker':''}`}><Select value={selected} onValueChange={key=>{const match=all.find(m=>modelKey({provider:m.provider,model:m.id})===key);if(match)change({provider:match.provider,model:match.id} as LanguageModelSelection)}} onOpenChange={open=>{if(!open){setQuery('');return}for(const p of supported)if(!catalogs[p]?.data&&!catalogs[p]?.busy&&(available(p)||p==='openrouter'))void load(p)}}>
+  <SelectTrigger aria-label={label} className="model-select-trigger">{value?<span className="selected-model"><ProviderLogo provider={modelLogo(value.provider,value.model)}/><span>{current?.name??value.model}</span><span className="selected-provider">{providerNames[value.provider]}</span></span>:<span className="add-model-label"><Plus size={14}/>{label}</span>}</SelectTrigger>
+  <SelectContent className="instance-select model-select-content" position="popper"><div className="model-search" onKeyDown={e=>e.stopPropagation()}><Input id={id} aria-label={`Search ${label.toLowerCase()}`} placeholder="Search models…" value={query} onChange={e=>setQuery(e.target.value)}/></div>
+   {value&&!matches.some(m=>modelKey({provider:m.provider,model:m.id})===selected)&&<SelectItem value={selected}><span className="provider-choice"><ProviderLogo provider={modelLogo(value.provider,value.model)}/>{value.model}</span></SelectItem>}
+   {matches.map(m=><SelectItem key={modelKey({provider:m.provider,model:m.id})} value={modelKey({provider:m.provider,model:m.id})}><span className="provider-choice"><ProviderLogo provider={modelLogo(m.provider,m.id)}/><span className="catalog-model-name">{m.name}<small>{providerNames[m.provider]} · {m.id}</small></span></span></SelectItem>)}
+   {!matches.length&&<div className="catalog-message">{pending?'Loading available models…':errors.length?'Couldn’t load models. Retry below.':'Connect a provider to see its models.'}</div>}
+   {all.length>100&&!query&&<div className="catalog-message">Search to find more models.</div>}
+   {supported.map(p=>catalogs[p]?.data?.notice?<p className="catalog-message" key={p}>{catalogs[p]!.data!.notice}</p>:null)}
+   <div className="catalog-refresh"><Button type="button" variant="ghost" size="sm" disabled={pending} onClick={e=>{e.preventDefault();for(const p of supported)if(available(p)||p==='openrouter')void load(p,true)}}><RefreshCw className={pending?'animate-spin':''}/>Refresh models</Button><span>Live provider catalogs</span></div>
+  </SelectContent>
+ </Select></div>
+}
