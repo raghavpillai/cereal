@@ -21,9 +21,15 @@ Open `http://localhost:3000`. `setup.sh` creates a private `.env` with random da
 Sign in as the owner and open `/admin` to finish setup:
 
 1. **AI providers**: add an API key for ElevenLabs (speech-to-text) and for OpenRouter, OpenAI or Anthropic (chat and notes). Keys are encrypted and stored on your server.
-2. **Models**: choose the model for chat, for meeting notes, for speech-to-text and for live transcription. These choices are stored in the database.
+2. **Models**: choose the model for chat, for meeting notes, for speech-to-text and for live transcription, and how many recordings may be transcribed live at once. These choices are stored in the database.
+3. **Sign-in**: choose how people sign in (email and password, Google, or both) and which addresses or domains may create an account by signing in with Google. To use Google, create an OAuth web client in Google Cloud, enter its client ID and secret here, and add the two redirect URIs the panel shows. The same client is used for the Google Calendar connection. The secret is encrypted and stored on your server.
 
-Provider keys can also be supplied through `ELEVENLABS_API_KEY` and `OPENROUTER_API_KEY` in `.env`; a key saved on the admin page takes precedence.
+4. **Storage** (optional): recorded audio and the app builds this server offers are kept on the server's disk, or in an S3-compatible bucket (Amazon S3, Cloudflare R2, MinIO, Backblaze B2). Enter the bucket and its keys, press **Test connection**, then save. New files go to the storage you choose; files already stored stay where they are and keep working, and nothing is moved.
+5. **Apps** (optional): the iPhone app IDs that may open note links, and the App Store ID once the app is published.
+
+All of this is kept in the database, and a change applies without a restart. `.env` holds only what the server needs before it can read its settings: the database password, the owner token, the port and the public address (`PUBLIC_BASE_URL`). If sign-in is ever misconfigured, `ADMIN_API_TOKEN` from `.env` still works as a bearer token for `PATCH /api/v1/admin/settings`.
+
+Upgrading from a version that kept provider keys or model names in `.env`: start the new version once. It takes those values into the database, logs each one by name, and never reads them again; the admin page then lists the variables you can delete.
 
 ```sh
 docker compose logs --tail=100 app
@@ -32,9 +38,20 @@ docker compose down
 
 `down` keeps your notes and audio. Back up the PostgreSQL volume and the `audio-data` volume together.
 
-AI clients can connect through the OAuth-protected `/mcp` endpoint; `/mcp/connect` has the setup steps.
+AI clients can connect through the OAuth-protected MCP endpoint at `/api/mcp`; the page at `/mcp/connect` has the setup steps. Clients set up with the earlier address, `/mcp`, keep working.
 
 ## Apps
+
+People get the Mac app from your server: `/download` offers the installer for the version the server is running, and the desktop app's "Check for updates" reads the same place (`GET /api/v1/downloads`). To publish a release:
+
+```sh
+./scripts/release-macos.sh                           # signed, notarised build in dist/release
+bun --env-file=.env scripts/publish-release.ts       # puts it where the server reads builds, and confirms
+```
+
+With local storage the server reads `dist/release` directly (Compose mounts it read-only; set `DOWNLOADS_HOST_DIR` to use another directory), so the second command only confirms that the server offers the build. With S3-compatible storage it uploads the files to `<prefix>downloads/` in the bucket; set `S3_SECRET_ACCESS_KEY` for that command, because the server never returns the secret. The version is the one in the root `package.json`; `bun run check` fails if the desktop and iPhone apps carry a different one.
+
+To build and run the desktop app locally:
 
 ```sh
 ./scripts/package.sh --release

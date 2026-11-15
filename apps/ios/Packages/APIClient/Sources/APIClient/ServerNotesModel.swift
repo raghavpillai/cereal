@@ -66,6 +66,8 @@ public final class ServerNotesModel {
     @ObservationIgnored private var calendarRequestRevision: UInt64 = 0
     /// True on a server from before the list endpoint: every note is then loaded whole, as this app used to.
     @ObservationIgnored private var wholeNoteList = false
+    /// Times this device has sent a title for each note. Not secret, not saved.
+    @ObservationIgnored private var titleEdits: [String: Int] = [:]
     /// Changes whenever the rows are replaced, so a page asked for before that is dropped.
     @ObservationIgnored private var listRevision: UInt64 = 0
     /// Whole notes kept for reopening. A row never holds a note's text.
@@ -96,6 +98,15 @@ public final class ServerNotesModel {
             guard revision == connectionRevision else { return }
             state = .failed(error as? APIClientError ?? .unauthorized, previous: [])
         }
+    }
+
+    /// Finishes a sign-in that was made in the browser. The current connection is
+    /// kept until the server has handed over a session; that session is then
+    /// checked and saved exactly as one from a password sign-in is.
+    public func signIn(browser attempt: BrowserSignIn, callback: URL, configuration: URLSessionConfiguration = .ephemeral) async throws {
+        let code = try attempt.code(from: callback)
+        let credentials = try await attempt.exchange(code: code, configuration: configuration)
+        await establish(credentials)
     }
 
     public func connect(instance text: String, token: String) async {
@@ -145,6 +156,7 @@ public final class ServerNotesModel {
         workspaces.attach(nil)
         state = .disconnected; calendarState = .disconnected
         list = ServerNoteList(); wholeNoteList = false; listRevision &+= 1
+        titleEdits = [:]
     }
 
     private struct FirstPage {
@@ -360,6 +372,9 @@ public final class ServerNotesModel {
     public func update(id: String, _ input: UpdateNoteInput) async throws -> NoteDTO {
         guard let api else { throw APIClientError.unauthorized }
         let revision = connectionRevision
+        // Counted before the request leaves: a generation that ends while it is
+        // in flight must already know the person has named the note.
+        if input.title != nil { titleEdits[id, default: 0] += 1 }
         let note = try await api.updateNote(id: id, input)
         try accept(note, revision: revision)
         return note
@@ -374,6 +389,22 @@ public final class ServerNotesModel {
         requestRevision &+= 1
         state = .loaded(state.notes.filter { $0.id != id })
         list.remove(id: id)
+    }
+
+    /// True when the app holds a session on the server a link names.
+    public func isSignedIn(to origin: ServerOrigin) -> Bool {
+        guard session != nil, let instance else { return false }
+        return origin.isInstance(instance)
+    }
+
+    /// A note someone else on this server shared. Without a session on the
+    /// link's own server nothing is asked of anyone.
+    public func sharedNote(_ link: SharedNoteLink) async throws -> SharedNote {
+        guard let api, isSignedIn(to: link.origin) else { throw SharedNoteError.signInRequired }
+        let revision = connectionRevision
+        let note = try await api.sharedNote(link)
+        guard revision == connectionRevision else { throw CancellationError() }
+        return note
     }
 
     public func shares(noteID: String) async throws -> [ShareDTO] {
@@ -437,12 +468,33 @@ public final class ServerNotesModel {
         return receipt
     }
 
+    /// Generating notes for a note without a title also gives it one, and the
+    /// note that comes back carries it: the note page, the list and search show
+    /// it from here on. A title the person typed on this device while the notes
+    /// were being generated is theirs. The answer may have been written before
+    /// their title arrived, so the note is read again rather than shown as answered.
     public func generate(noteID: String, expectedTranscriptRevision: Int) async throws -> NoteDTO {
         guard let api else { throw APIClientError.unauthorized }
         let revision = connectionRevision
-        let note = try await api.generate(noteID: noteID, expectedTranscriptRevision: expectedTranscriptRevision)
+        let titled = titleEdits[noteID]
+        var note = try await api.generate(noteID: noteID, expectedTranscriptRevision: expectedTranscriptRevision)
+        guard revision == connectionRevision else { throw CancellationError() }
+        if titleEdits[noteID] != titled { note = try await api.note(id: noteID) }
         try accept(note, revision: revision)
         return note
+    }
+
+    /// The title to show for a row that came from somewhere other than the
+    /// list (a search result): the newest one this device has seen for that
+    /// note, so a note just renamed or given a title here is not shown under its old one.
+    public func latestTitle(of row: ServerNoteRow) -> String {
+        let known: [(title: String, updatedAt: String)] = [
+            list.rows.first { $0.id == row.id }.map { ($0.title, $0.updatedAt) },
+            state.notes.first { $0.id == row.id }.map { ($0.title, $0.updatedAt) }
+        ].compactMap { $0 }
+        let stamp = CalendarSchedule.timestamp(row.updatedAt) ?? .distantPast
+        let newer = known.filter { (CalendarSchedule.timestamp($0.updatedAt) ?? .distantPast) > stamp }
+        return newer.max { (CalendarSchedule.timestamp($0.updatedAt) ?? .distantPast) < (CalendarSchedule.timestamp($1.updatedAt) ?? .distantPast) }?.title ?? row.title
     }
 
     public func chat(noteID: String, message: String, history: [ChatMessageDTO]) async throws -> ChatAnswerDTO {

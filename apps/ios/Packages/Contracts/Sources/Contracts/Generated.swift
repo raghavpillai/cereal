@@ -56,6 +56,13 @@
 //   let createUserInput = try? JSONDecoder().decode(CreateUserInput.self, from: jsonData)
 //   let updateUserRoleInput = try? JSONDecoder().decode(UpdateUserRoleInput.self, from: jsonData)
 //   let calendarPreferencesDTO = try? JSONDecoder().decode(CalendarPreferencesDTO.self, from: jsonData)
+//   let signInSettingsDTO = try? JSONDecoder().decode(SignInSettingsDTO.self, from: jsonData)
+//   let updateSignInSettingsInput = try? JSONDecoder().decode(UpdateSignInSettingsInput.self, from: jsonData)
+//   let authMethodsDTO = try? JSONDecoder().decode(AuthMethodsDTO.self, from: jsonData)
+//   let appHandoffInput = try? JSONDecoder().decode(AppHandoffInput.self, from: jsonData)
+//   let appHandoffDTO = try? JSONDecoder().decode(AppHandoffDTO.self, from: jsonData)
+//   let appHandoffExchangeInput = try? JSONDecoder().decode(AppHandoffExchangeInput.self, from: jsonData)
+//   let appHandoffTokenDTO = try? JSONDecoder().decode(AppHandoffTokenDTO.self, from: jsonData)
 //   let adminSettingsDTO = try? JSONDecoder().decode(AdminSettingsDTO.self, from: jsonData)
 //   let updateAdminSettingsInput = try? JSONDecoder().decode(UpdateAdminSettingsInput.self, from: jsonData)
 //   let calendarDTO = try? JSONDecoder().decode(CalendarDTO.self, from: jsonData)
@@ -88,6 +95,15 @@
 //   let healthDTO = try? JSONDecoder().decode(HealthDTO.self, from: jsonData)
 //   let deletedDTO = try? JSONDecoder().decode(DeletedDTO.self, from: jsonData)
 //   let aPIErrorDTO = try? JSONDecoder().decode(APIErrorDTO.self, from: jsonData)
+//   let downloadFileDTO = try? JSONDecoder().decode(DownloadFileDTO.self, from: jsonData)
+//   let mACDownloadDTO = try? JSONDecoder().decode(MACDownloadDTO.self, from: jsonData)
+//   let downloadsDTO = try? JSONDecoder().decode(DownloadsDTO.self, from: jsonData)
+//   let storageSettingsDTO = try? JSONDecoder().decode(StorageSettingsDTO.self, from: jsonData)
+//   let updateStorageSettingsInput = try? JSONDecoder().decode(UpdateStorageSettingsInput.self, from: jsonData)
+//   let storageTestInput = try? JSONDecoder().decode(StorageTestInput.self, from: jsonData)
+//   let storageTestDTO = try? JSONDecoder().decode(StorageTestDTO.self, from: jsonData)
+//   let appsSettingsDTO = try? JSONDecoder().decode(AppsSettingsDTO.self, from: jsonData)
+//   let updateAppsSettingsInput = try? JSONDecoder().decode(UpdateAppsSettingsInput.self, from: jsonData)
 //   let liveHelloMessage = try? JSONDecoder().decode(LiveHelloMessage.self, from: jsonData)
 //   let liveMarkMessage = try? JSONDecoder().decode(LiveMarkMessage.self, from: jsonData)
 //   let liveReadyMessage = try? JSONDecoder().decode(LiveReadyMessage.self, from: jsonData)
@@ -1288,8 +1304,83 @@ public struct CalendarPreferencesDTO: Codable, Sendable {
     }
 }
 
+// MARK: - AuthMethodsDTO
+public struct AuthMethodsDTO: Codable, Sendable {
+    public let google: Bool
+    public let instanceName: String
+    public let password: Bool
+
+    public enum CodingKeys: String, CodingKey {
+        case google = "google"
+        case instanceName = "instanceName"
+        case password = "password"
+    }
+
+    public init(google: Bool, instanceName: String, password: Bool) {
+        self.google = google
+        self.instanceName = instanceName
+        self.password = password
+    }
+}
+
+// MARK: - AppHandoffInput
+public struct AppHandoffInput: Codable, Sendable {
+    public let challenge: String
+
+    public enum CodingKeys: String, CodingKey {
+        case challenge = "challenge"
+    }
+
+    public init(challenge: String) {
+        self.challenge = challenge
+    }
+}
+
+// MARK: - AppHandoffDTO
+public struct AppHandoffDTO: Codable, Sendable {
+    public let code: String
+
+    public enum CodingKeys: String, CodingKey {
+        case code = "code"
+    }
+
+    public init(code: String) {
+        self.code = code
+    }
+}
+
+// MARK: - AppHandoffExchangeInput
+public struct AppHandoffExchangeInput: Codable, Sendable {
+    public let code: String
+    public let verifier: String
+
+    public enum CodingKeys: String, CodingKey {
+        case code = "code"
+        case verifier = "verifier"
+    }
+
+    public init(code: String, verifier: String) {
+        self.code = code
+        self.verifier = verifier
+    }
+}
+
+// MARK: - AppHandoffTokenDTO
+public struct AppHandoffTokenDTO: Codable, Sendable {
+    public let token: String
+
+    public enum CodingKeys: String, CodingKey {
+        case token = "token"
+    }
+
+    public init(token: String) {
+        self.token = token
+    }
+}
+
 // MARK: - AdminSettingsDTO
 public struct AdminSettingsDTO: Codable, Sendable {
+    public let apps: AppsSettingsDTO?
     public let calendarLookAheadDays: Int
     public let calendarRefreshMinutes: Int
     public let chatModels: [LanguageModelSelection]
@@ -1299,14 +1390,20 @@ public struct AdminSettingsDTO: Codable, Sendable {
     public let instanceLogo: String?
     public let instanceName: String
     public let languageModel: String
+    public let liveHoldSeconds: Int?
+    public let liveMaxSessions: Int?
     public let liveTranscriptionModel: LiveTranscriptionModelSelection?
     public let openRouterConfigured: Bool
     public let openRouterSource: ElevenLabsSourceEnum
     public let providers: [ProviderStatusDTO]
+    public let signIn: SignInSettingsDTO?
+    public let storage: StorageSettingsDTO?
     public let transcriptionModel: TranscriptionModelSelection
+    public let unusedEnvironment: [String]?
     public let updatedAt: String?
 
     public enum CodingKeys: String, CodingKey {
+        case apps = "apps"
         case calendarLookAheadDays = "calendarLookAheadDays"
         case calendarRefreshMinutes = "calendarRefreshMinutes"
         case chatModels = "chatModels"
@@ -1316,15 +1413,21 @@ public struct AdminSettingsDTO: Codable, Sendable {
         case instanceLogo = "instanceLogo"
         case instanceName = "instanceName"
         case languageModel = "languageModel"
+        case liveHoldSeconds = "liveHoldSeconds"
+        case liveMaxSessions = "liveMaxSessions"
         case liveTranscriptionModel = "liveTranscriptionModel"
         case openRouterConfigured = "openRouterConfigured"
         case openRouterSource = "openRouterSource"
         case providers = "providers"
+        case signIn = "signIn"
+        case storage = "storage"
         case transcriptionModel = "transcriptionModel"
+        case unusedEnvironment = "unusedEnvironment"
         case updatedAt = "updatedAt"
     }
 
-    public init(calendarLookAheadDays: Int, calendarRefreshMinutes: Int, chatModels: [LanguageModelSelection], elevenLabsConfigured: Bool, elevenLabsSource: ElevenLabsSourceEnum, generationModel: LanguageModelSelection, instanceLogo: String?, instanceName: String, languageModel: String, liveTranscriptionModel: LiveTranscriptionModelSelection?, openRouterConfigured: Bool, openRouterSource: ElevenLabsSourceEnum, providers: [ProviderStatusDTO], transcriptionModel: TranscriptionModelSelection, updatedAt: String?) {
+    public init(apps: AppsSettingsDTO?, calendarLookAheadDays: Int, calendarRefreshMinutes: Int, chatModels: [LanguageModelSelection], elevenLabsConfigured: Bool, elevenLabsSource: ElevenLabsSourceEnum, generationModel: LanguageModelSelection, instanceLogo: String?, instanceName: String, languageModel: String, liveHoldSeconds: Int?, liveMaxSessions: Int?, liveTranscriptionModel: LiveTranscriptionModelSelection?, openRouterConfigured: Bool, openRouterSource: ElevenLabsSourceEnum, providers: [ProviderStatusDTO], signIn: SignInSettingsDTO?, storage: StorageSettingsDTO?, transcriptionModel: TranscriptionModelSelection, unusedEnvironment: [String]?, updatedAt: String?) {
+        self.apps = apps
         self.calendarLookAheadDays = calendarLookAheadDays
         self.calendarRefreshMinutes = calendarRefreshMinutes
         self.chatModels = chatModels
@@ -1334,12 +1437,33 @@ public struct AdminSettingsDTO: Codable, Sendable {
         self.instanceLogo = instanceLogo
         self.instanceName = instanceName
         self.languageModel = languageModel
+        self.liveHoldSeconds = liveHoldSeconds
+        self.liveMaxSessions = liveMaxSessions
         self.liveTranscriptionModel = liveTranscriptionModel
         self.openRouterConfigured = openRouterConfigured
         self.openRouterSource = openRouterSource
         self.providers = providers
+        self.signIn = signIn
+        self.storage = storage
         self.transcriptionModel = transcriptionModel
+        self.unusedEnvironment = unusedEnvironment
         self.updatedAt = updatedAt
+    }
+}
+
+// MARK: - AppsSettingsDTO
+public struct AppsSettingsDTO: Codable, Sendable {
+    public let iosAppIds: [String]
+    public let iosAppStoreId: String?
+
+    public enum CodingKeys: String, CodingKey {
+        case iosAppIds = "iosAppIds"
+        case iosAppStoreId = "iosAppStoreId"
+    }
+
+    public init(iosAppIds: [String], iosAppStoreId: String?) {
+        self.iosAppIds = iosAppIds
+        self.iosAppStoreId = iosAppStoreId
     }
 }
 
@@ -1388,6 +1512,82 @@ public struct ProviderStatusDTO: Codable, Sendable {
     }
 }
 
+// MARK: - SignInSettingsDTO
+public struct SignInSettingsDTO: Codable, Sendable {
+    public let allowedEmails: [String]
+    public let google: Bool
+    public let googleClientId: String?
+    public let googleClientSecretSet: Bool
+    public let googleRedirectUris: [String]
+    public let password: Bool
+
+    public enum CodingKeys: String, CodingKey {
+        case allowedEmails = "allowedEmails"
+        case google = "google"
+        case googleClientId = "googleClientId"
+        case googleClientSecretSet = "googleClientSecretSet"
+        case googleRedirectUris = "googleRedirectUris"
+        case password = "password"
+    }
+
+    public init(allowedEmails: [String], google: Bool, googleClientId: String?, googleClientSecretSet: Bool, googleRedirectUris: [String], password: Bool) {
+        self.allowedEmails = allowedEmails
+        self.google = google
+        self.googleClientId = googleClientId
+        self.googleClientSecretSet = googleClientSecretSet
+        self.googleRedirectUris = googleRedirectUris
+        self.password = password
+    }
+}
+
+// MARK: - StorageSettingsDTO
+public struct StorageSettingsDTO: Codable, Sendable {
+    public let accessKeyId: String?
+    public let backend: StorageBackend
+    public let bucket: String?
+    public let endpoint: String?
+    public let forcePathStyle: Bool
+    public let storageSettingsDTOPrefix: String
+    public let region: String?
+    public let secretAccessKeySet: Bool
+    public let source: StorageSettingsDTOSource
+
+    public enum CodingKeys: String, CodingKey {
+        case accessKeyId = "accessKeyId"
+        case backend = "backend"
+        case bucket = "bucket"
+        case endpoint = "endpoint"
+        case forcePathStyle = "forcePathStyle"
+        case storageSettingsDTOPrefix = "prefix"
+        case region = "region"
+        case secretAccessKeySet = "secretAccessKeySet"
+        case source = "source"
+    }
+
+    public init(accessKeyId: String?, backend: StorageBackend, bucket: String?, endpoint: String?, forcePathStyle: Bool, storageSettingsDTOPrefix: String, region: String?, secretAccessKeySet: Bool, source: StorageSettingsDTOSource) {
+        self.accessKeyId = accessKeyId
+        self.backend = backend
+        self.bucket = bucket
+        self.endpoint = endpoint
+        self.forcePathStyle = forcePathStyle
+        self.storageSettingsDTOPrefix = storageSettingsDTOPrefix
+        self.region = region
+        self.secretAccessKeySet = secretAccessKeySet
+        self.source = source
+    }
+}
+
+public enum StorageBackend: String, Codable, Sendable {
+    case local = "local"
+    case s3 = "s3"
+}
+
+public enum StorageSettingsDTOSource: String, Codable, Sendable {
+    case environment = "environment"
+    case sourceDefault = "default"
+    case stored = "stored"
+}
+
 // MARK: - TranscriptionModelSelection
 public struct TranscriptionModelSelection: Codable, Sendable {
     public let model: String
@@ -1412,6 +1612,7 @@ public enum TranscriptionModelSelectionProvider: String, Codable, Sendable {
 // MARK: - UpdateAdminSettingsInput
 public struct UpdateAdminSettingsInput: Codable, Sendable {
     public let anthropicApiKey: String?
+    public let apps: UpdateAppsSettingsInput?
     public let calendarLookAheadDays: Int?
     public let calendarRefreshMinutes: Int?
     public let chatModels: [LanguageModelSelection]?
@@ -1420,13 +1621,18 @@ public struct UpdateAdminSettingsInput: Codable, Sendable {
     public let instanceLogo: String?
     public let instanceName: String?
     public let languageModel: String?
+    public let liveHoldSeconds: Int?
+    public let liveMaxSessions: Int?
     public let liveTranscriptionModel: LiveTranscriptionModelSelection?
     public let openAiApiKey: String?
     public let openRouterApiKey: String?
+    public let signIn: UpdateSignInSettingsInput?
+    public let storage: UpdateStorageSettingsInput?
     public let transcriptionModel: TranscriptionModelSelection?
 
     public enum CodingKeys: String, CodingKey {
         case anthropicApiKey = "anthropicApiKey"
+        case apps = "apps"
         case calendarLookAheadDays = "calendarLookAheadDays"
         case calendarRefreshMinutes = "calendarRefreshMinutes"
         case chatModels = "chatModels"
@@ -1435,14 +1641,19 @@ public struct UpdateAdminSettingsInput: Codable, Sendable {
         case instanceLogo = "instanceLogo"
         case instanceName = "instanceName"
         case languageModel = "languageModel"
+        case liveHoldSeconds = "liveHoldSeconds"
+        case liveMaxSessions = "liveMaxSessions"
         case liveTranscriptionModel = "liveTranscriptionModel"
         case openAiApiKey = "openAiApiKey"
         case openRouterApiKey = "openRouterApiKey"
+        case signIn = "signIn"
+        case storage = "storage"
         case transcriptionModel = "transcriptionModel"
     }
 
-    public init(anthropicApiKey: String?, calendarLookAheadDays: Int?, calendarRefreshMinutes: Int?, chatModels: [LanguageModelSelection]?, elevenLabsApiKey: String?, generationModel: LanguageModelSelection?, instanceLogo: String?, instanceName: String?, languageModel: String?, liveTranscriptionModel: LiveTranscriptionModelSelection?, openAiApiKey: String?, openRouterApiKey: String?, transcriptionModel: TranscriptionModelSelection?) {
+    public init(anthropicApiKey: String?, apps: UpdateAppsSettingsInput?, calendarLookAheadDays: Int?, calendarRefreshMinutes: Int?, chatModels: [LanguageModelSelection]?, elevenLabsApiKey: String?, generationModel: LanguageModelSelection?, instanceLogo: String?, instanceName: String?, languageModel: String?, liveHoldSeconds: Int?, liveMaxSessions: Int?, liveTranscriptionModel: LiveTranscriptionModelSelection?, openAiApiKey: String?, openRouterApiKey: String?, signIn: UpdateSignInSettingsInput?, storage: UpdateStorageSettingsInput?, transcriptionModel: TranscriptionModelSelection?) {
         self.anthropicApiKey = anthropicApiKey
+        self.apps = apps
         self.calendarLookAheadDays = calendarLookAheadDays
         self.calendarRefreshMinutes = calendarRefreshMinutes
         self.chatModels = chatModels
@@ -1451,10 +1662,89 @@ public struct UpdateAdminSettingsInput: Codable, Sendable {
         self.instanceLogo = instanceLogo
         self.instanceName = instanceName
         self.languageModel = languageModel
+        self.liveHoldSeconds = liveHoldSeconds
+        self.liveMaxSessions = liveMaxSessions
         self.liveTranscriptionModel = liveTranscriptionModel
         self.openAiApiKey = openAiApiKey
         self.openRouterApiKey = openRouterApiKey
+        self.signIn = signIn
+        self.storage = storage
         self.transcriptionModel = transcriptionModel
+    }
+}
+
+// MARK: - UpdateAppsSettingsInput
+public struct UpdateAppsSettingsInput: Codable, Sendable {
+    public let iosAppIds: [String]?
+    public let iosAppStoreId: String?
+
+    public enum CodingKeys: String, CodingKey {
+        case iosAppIds = "iosAppIds"
+        case iosAppStoreId = "iosAppStoreId"
+    }
+
+    public init(iosAppIds: [String]?, iosAppStoreId: String?) {
+        self.iosAppIds = iosAppIds
+        self.iosAppStoreId = iosAppStoreId
+    }
+}
+
+// MARK: - UpdateSignInSettingsInput
+public struct UpdateSignInSettingsInput: Codable, Sendable {
+    public let allowedEmails: [String]?
+    public let google: Bool?
+    public let googleClientId: String?
+    public let googleClientSecret: String?
+    public let password: Bool?
+
+    public enum CodingKeys: String, CodingKey {
+        case allowedEmails = "allowedEmails"
+        case google = "google"
+        case googleClientId = "googleClientId"
+        case googleClientSecret = "googleClientSecret"
+        case password = "password"
+    }
+
+    public init(allowedEmails: [String]?, google: Bool?, googleClientId: String?, googleClientSecret: String?, password: Bool?) {
+        self.allowedEmails = allowedEmails
+        self.google = google
+        self.googleClientId = googleClientId
+        self.googleClientSecret = googleClientSecret
+        self.password = password
+    }
+}
+
+// MARK: - UpdateStorageSettingsInput
+public struct UpdateStorageSettingsInput: Codable, Sendable {
+    public let accessKeyId: String?
+    public let backend: StorageBackend?
+    public let bucket: String?
+    public let endpoint: String?
+    public let forcePathStyle: Bool?
+    public let updateStorageSettingsInputPrefix: String?
+    public let region: String?
+    public let secretAccessKey: String?
+
+    public enum CodingKeys: String, CodingKey {
+        case accessKeyId = "accessKeyId"
+        case backend = "backend"
+        case bucket = "bucket"
+        case endpoint = "endpoint"
+        case forcePathStyle = "forcePathStyle"
+        case updateStorageSettingsInputPrefix = "prefix"
+        case region = "region"
+        case secretAccessKey = "secretAccessKey"
+    }
+
+    public init(accessKeyId: String?, backend: StorageBackend?, bucket: String?, endpoint: String?, forcePathStyle: Bool?, updateStorageSettingsInputPrefix: String?, region: String?, secretAccessKey: String?) {
+        self.accessKeyId = accessKeyId
+        self.backend = backend
+        self.bucket = bucket
+        self.endpoint = endpoint
+        self.forcePathStyle = forcePathStyle
+        self.updateStorageSettingsInputPrefix = updateStorageSettingsInputPrefix
+        self.region = region
+        self.secretAccessKey = secretAccessKey
     }
 }
 
@@ -2264,6 +2554,131 @@ public enum APIErrorCode: String, Codable, Sendable {
     case unavailable = "unavailable"
 }
 
+// MARK: - DownloadsDTO
+public struct DownloadsDTO: Codable, Sendable {
+    public let iosAppStoreUrl: String?
+    public let mac: MACDownloadDTO?
+    public let version: String
+
+    public enum CodingKeys: String, CodingKey {
+        case iosAppStoreUrl = "iosAppStoreUrl"
+        case mac = "mac"
+        case version = "version"
+    }
+
+    public init(iosAppStoreUrl: String?, mac: MACDownloadDTO?, version: String) {
+        self.iosAppStoreUrl = iosAppStoreUrl
+        self.mac = mac
+        self.version = version
+    }
+}
+
+// MARK: - MACDownloadDTO
+public struct MACDownloadDTO: Codable, Sendable {
+    public let arch: String
+    public let installer: DownloadFileDTO
+    public let minimumSystem: String
+    public let update: DownloadFileDTO?
+
+    public enum CodingKeys: String, CodingKey {
+        case arch = "arch"
+        case installer = "installer"
+        case minimumSystem = "minimumSystem"
+        case update = "update"
+    }
+
+    public init(arch: String, installer: DownloadFileDTO, minimumSystem: String, update: DownloadFileDTO?) {
+        self.arch = arch
+        self.installer = installer
+        self.minimumSystem = minimumSystem
+        self.update = update
+    }
+}
+
+// MARK: - DownloadFileDTO
+public struct DownloadFileDTO: Codable, Sendable {
+    public let file: String
+    public let sha256: String
+    public let size: Int
+    public let url: String
+
+    public enum CodingKeys: String, CodingKey {
+        case file = "file"
+        case sha256 = "sha256"
+        case size = "size"
+        case url = "url"
+    }
+
+    public init(file: String, sha256: String, size: Int, url: String) {
+        self.file = file
+        self.sha256 = sha256
+        self.size = size
+        self.url = url
+    }
+}
+
+// MARK: - StorageTestInput
+public struct StorageTestInput: Codable, Sendable {
+    public let accessKeyId: String?
+    public let backend: StorageBackend?
+    public let bucket: String?
+    public let endpoint: String?
+    public let forcePathStyle: Bool?
+    public let storageTestInputPrefix: String?
+    public let region: String?
+    public let secretAccessKey: String?
+
+    public enum CodingKeys: String, CodingKey {
+        case accessKeyId = "accessKeyId"
+        case backend = "backend"
+        case bucket = "bucket"
+        case endpoint = "endpoint"
+        case forcePathStyle = "forcePathStyle"
+        case storageTestInputPrefix = "prefix"
+        case region = "region"
+        case secretAccessKey = "secretAccessKey"
+    }
+
+    public init(accessKeyId: String?, backend: StorageBackend?, bucket: String?, endpoint: String?, forcePathStyle: Bool?, storageTestInputPrefix: String?, region: String?, secretAccessKey: String?) {
+        self.accessKeyId = accessKeyId
+        self.backend = backend
+        self.bucket = bucket
+        self.endpoint = endpoint
+        self.forcePathStyle = forcePathStyle
+        self.storageTestInputPrefix = storageTestInputPrefix
+        self.region = region
+        self.secretAccessKey = secretAccessKey
+    }
+}
+
+// MARK: - StorageTestDTO
+public struct StorageTestDTO: Codable, Sendable {
+    public let backend: StorageBackend
+    public let message: String
+    public let ok: Bool
+    public let step: Step?
+
+    public enum CodingKeys: String, CodingKey {
+        case backend = "backend"
+        case message = "message"
+        case ok = "ok"
+        case step = "step"
+    }
+
+    public init(backend: StorageBackend, message: String, ok: Bool, step: Step?) {
+        self.backend = backend
+        self.message = message
+        self.ok = ok
+        self.step = step
+    }
+}
+
+public enum Step: String, Codable, Sendable {
+    case delete = "delete"
+    case read = "read"
+    case write = "write"
+}
+
 // MARK: - LiveHelloMessage
 public struct LiveHelloMessage: Codable, Sendable {
     public let captureId: String
@@ -2980,6 +3395,27 @@ extension AuthSessionDTO {
 }
 
 
+extension SignInSettingsDTO {
+    private enum ContractWireKeys: String, CodingKey {
+        case password
+        case google
+        case allowedEmails
+        case googleClientId
+        case googleClientSecretSet
+        case googleRedirectUris
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: ContractWireKeys.self)
+        try container.encode(password, forKey: .password)
+        try container.encode(google, forKey: .google)
+        try container.encode(allowedEmails, forKey: .allowedEmails)
+        try container.encode(googleClientId, forKey: .googleClientId)
+        try container.encode(googleClientSecretSet, forKey: .googleClientSecretSet)
+        try container.encode(googleRedirectUris, forKey: .googleRedirectUris)
+    }
+}
+
+
 extension AdminSettingsDTO {
     private enum ContractWireKeys: String, CodingKey {
         case instanceName
@@ -2996,6 +3432,12 @@ extension AdminSettingsDTO {
         case elevenLabsSource
         case calendarRefreshMinutes
         case calendarLookAheadDays
+        case signIn
+        case storage
+        case liveMaxSessions
+        case liveHoldSeconds
+        case apps
+        case unusedEnvironment
         case updatedAt
     }
     public func encode(to encoder: Encoder) throws {
@@ -3014,6 +3456,12 @@ extension AdminSettingsDTO {
         try container.encode(elevenLabsSource, forKey: .elevenLabsSource)
         try container.encode(calendarRefreshMinutes, forKey: .calendarRefreshMinutes)
         try container.encode(calendarLookAheadDays, forKey: .calendarLookAheadDays)
+        try container.encodeIfPresent(signIn, forKey: .signIn)
+        try container.encodeIfPresent(storage, forKey: .storage)
+        try container.encodeIfPresent(liveMaxSessions, forKey: .liveMaxSessions)
+        try container.encodeIfPresent(liveHoldSeconds, forKey: .liveHoldSeconds)
+        try container.encodeIfPresent(apps, forKey: .apps)
+        try container.encodeIfPresent(unusedEnvironment, forKey: .unusedEnvironment)
         try container.encode(updatedAt, forKey: .updatedAt)
     }
 }
@@ -3252,5 +3700,94 @@ extension ShareDTO {
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(expiresAt, forKey: .expiresAt)
         try container.encode(revokedAt, forKey: .revokedAt)
+    }
+}
+
+
+extension MACDownloadDTO {
+    private enum ContractWireKeys: String, CodingKey {
+        case arch
+        case minimumSystem
+        case installer
+        case update
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: ContractWireKeys.self)
+        try container.encode(arch, forKey: .arch)
+        try container.encode(minimumSystem, forKey: .minimumSystem)
+        try container.encode(installer, forKey: .installer)
+        try container.encode(update, forKey: .update)
+    }
+}
+
+
+extension DownloadsDTO {
+    private enum ContractWireKeys: String, CodingKey {
+        case version
+        case mac
+        case iosAppStoreUrl
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: ContractWireKeys.self)
+        try container.encode(version, forKey: .version)
+        try container.encode(mac, forKey: .mac)
+        try container.encode(iosAppStoreUrl, forKey: .iosAppStoreUrl)
+    }
+}
+
+
+extension StorageSettingsDTO {
+    private enum ContractWireKeys: String, CodingKey {
+        case backend
+        case source
+        case endpoint
+        case region
+        case bucket
+        case prefix
+        case forcePathStyle
+        case accessKeyId
+        case secretAccessKeySet
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: ContractWireKeys.self)
+        try container.encode(backend, forKey: .backend)
+        try container.encode(source, forKey: .source)
+        try container.encode(endpoint, forKey: .endpoint)
+        try container.encode(region, forKey: .region)
+        try container.encode(bucket, forKey: .bucket)
+        try container.encode(storageSettingsDTOPrefix, forKey: .prefix)
+        try container.encode(forcePathStyle, forKey: .forcePathStyle)
+        try container.encode(accessKeyId, forKey: .accessKeyId)
+        try container.encode(secretAccessKeySet, forKey: .secretAccessKeySet)
+    }
+}
+
+
+extension StorageTestDTO {
+    private enum ContractWireKeys: String, CodingKey {
+        case ok
+        case backend
+        case step
+        case message
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: ContractWireKeys.self)
+        try container.encode(ok, forKey: .ok)
+        try container.encode(backend, forKey: .backend)
+        try container.encode(step, forKey: .step)
+        try container.encode(message, forKey: .message)
+    }
+}
+
+
+extension AppsSettingsDTO {
+    private enum ContractWireKeys: String, CodingKey {
+        case iosAppIds
+        case iosAppStoreId
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: ContractWireKeys.self)
+        try container.encode(iosAppIds, forKey: .iosAppIds)
+        try container.encode(iosAppStoreId, forKey: .iosAppStoreId)
     }
 }

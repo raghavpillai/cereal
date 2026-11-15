@@ -1,0 +1,36 @@
+/* The sign-in page: what it adds to the shared card, field and button styles (base.css, pages.css). */
+.sign-in-body { display: grid; gap: var(--space-4); margin-top: var(--space-6); }
+.sign-in-body:empty { display: none; }
+.sign-in-body form { margin-top: 0; }
+.sign-in-body .admin-notice { margin: 0; }
+.sign-in-body > .button { margin-top: 0; }
+
+/* Google's button: neutral surface, its mark on the left, the same height and shape as "Sign in". */
+.sign-in-google {
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.625rem;
+  width: 100%; min-height: 2.875rem; padding: 0 1.5rem;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-pill);
+  background: var(--surface); color: var(--ink);
+  font-size: var(--text-md); line-height: 1.2; white-space: nowrap; text-decoration: none;
+  transition: background-color var(--dur-hover-out) var(--ease-fade), border-color var(--dur-hover-out) var(--ease-fade);
+}
+.sign-in-google:hover { background: var(--wash); border-color: var(--ink-faint); }
+.sign-in-google:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.sign-in-google svg { flex-shrink: 0; }
+
+.sign-in-divider { display: flex; align-items: center; gap: var(--space-3); color: var(--ink-faint); font-size: var(--text-sm); }
+.sign-in-divider::before, .sign-in-divider::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+
+/* "Continue as": which account the app is about to get. */
+.sign-in-account { display: flex; align-items: center; gap: var(--space-3); min-width: 0; padding: var(--space-3) var(--space-4); border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--wash); }
+.sign-in-avatar { display: grid; place-items: center; flex-shrink: 0; width: 2.25rem; height: 2.25rem; border-radius: 50%; background: var(--brand-soft); color: var(--on-brand-soft); font-size: var(--text-base); }
+.sign-in-account > span:last-child { display: grid; min-width: 0; }
+.sign-in-account strong { font-weight: 500; font-size: var(--text-base); color: var(--ink); overflow-wrap: anywhere; }
+.sign-in-account strong + span { color: var(--ink-soft); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.sign-in-secondary { justify-self: center; min-height: 2rem; padding: 0 0.625rem; border: 0; border-radius: var(--radius-pill); background: none; color: var(--ink-soft); font-size: var(--text-sm); text-decoration: underline; text-underline-offset: 0.2em; }
+.sign-in-secondary:hover:not(:disabled) { color: var(--ink); }
+.sign-in-secondary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* A quiet way to the apps, under the card. */
+.sign-in-download { margin-top: var(--space-3); color: var(--ink-soft); font-size: var(--text-sm); text-decoration: underline; text-underline-offset: 0.2em; text-decoration-color: var(--line-strong); }
+.sign-in-download:hover { color: var(--ink); }

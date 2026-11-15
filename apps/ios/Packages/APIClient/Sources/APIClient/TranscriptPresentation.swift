@@ -1,80 +1,108 @@
 import Foundation
 import Contracts
 
-/// Diarization identifies voices within an audio part, not calendar people.
-/// Never infer the owner's identity from a microphone source or join batch-local
-/// IDs across parts merely because the provider reused a display label.
+/// Who a line of a transcript is shown as belonging to, and when it was said.
+///
+/// A speaker the server named keeps that name. A voice it did not name is the
+/// person's own when it came through the microphone of a recording that also
+/// has the other side of a call (a desktop recording: the microphone is the
+/// person, the system audio is everyone else). In a recording of a room, where
+/// one microphone hears several people, an unnamed voice is "Speaker", with a
+/// number when there is more than one of them. Which audio a line came from,
+/// and which part of the recording, is not shown.
 public enum TranscriptPresentation {
     public struct Row: Identifiable, Sendable {
         public let segment: TranscriptSegmentDTO
         public let speaker: String
-        public let source: String
-        public let audioPart: Int?
         public var id: String { segment.id }
+        /// Speaker and time: "Speaker 3 · 1:10".
         public var caption: String {
-            let source = audioPart.map { "\(self.source) part \($0)" } ?? self.source
-            let time = Duration.seconds(Double(max(0, segment.startMs)) / 1000).formatted(.time(pattern: .minuteSecond))
-            return [speaker, source, time, segment.isFinal ? nil : "Interim"].compactMap { $0 }.joined(separator: " · ")
+            [speaker, TranscriptPresentation.time(segment.startMs), segment.isFinal ? nil : "Interim"].compactMap { $0 }.joined(separator: " · ")
         }
     }
 
     /// Caption of text that is still being spoken. The speaker is a draft from
-    /// the provider and is left out when it has none yet.
-    public static func interimCaption(channel: AudioChannel, startMs: Int, speakerLabel: String?) -> String {
-        let speaker = speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let time = Duration.seconds(Double(max(0, startMs)) / 1000).formatted(.time(pattern: .minuteSecond))
-        return [speaker?.isEmpty == false ? speaker : nil, channel == .mic ? "Microphone" : "System audio", time, "Interim"]
-            .compactMap { $0 }.joined(separator: " · ")
+    /// the provider and is left out when it has none yet, unless the words
+    /// came through a microphone that is the person's own.
+    public static func interimCaption(channel: AudioChannel, startMs: Int, speakerLabel: String?, microphoneIsMe: Bool = false) -> String {
+        let label = speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let speaker = label?.isEmpty == false ? label : channel == .mic && microphoneIsMe ? me : nil
+        return [speaker, time(startMs), "Interim"].compactMap { $0 }.joined(separator: " · ")
     }
 
-    public static let speakerNotice = "Speaker labels can change between audio parts. Audio source does not identify a person."
+    /// True for a recording that has the other side of a call beside the
+    /// microphone. Its microphone is the person who recorded it.
+    public static func microphoneIsMe(_ segments: [TranscriptSegmentDTO]) -> Bool {
+        segments.contains { $0.channel == .system }
+    }
+
+    static let me = "Me"
+    static let speaker = "Speaker"
 
     public static func rows(_ segments: [TranscriptSegmentDTO]) -> [Row] {
         // Keep equal-time sources in their server order and retain every utterance.
         let ordered = segments.enumerated().sorted {
             $0.element.startMs == $1.element.startMs ? $0.offset < $1.offset : $0.element.startMs < $1.element.startMs
+        }.map(\.element)
+        let microphoneIsMe = microphoneIsMe(segments)
+
+        // The unnamed voices, in the order they first speak. The same voice in a
+        // later part of the recording has the same key and so keeps its number.
+        var voices: [VoiceKey] = []
+        var named: Set<String> = []
+        for segment in ordered {
+            if let label = label(segment) { named.insert(label); continue }
+            guard !(segment.channel == .mic && microphoneIsMe), let key = voice(segment), !voices.contains(key) else { continue }
+            voices.append(key)
         }
-        var partNumbers: [String: Int] = [:]
-        var partCounts: [String: Int] = [:]
-        var unlabeledNumbers: [SpeakerKey: Int] = [:]
-        var unlabeledCounts: [String: Int] = [:]
-        return ordered.map { _, segment in
-            let channel = segment.channel.rawValue
-            let scope = chunkScope(segment)
-            var part: Int?
-            if let scope {
-                let key = channel + ":" + scope.chunk
-                if partNumbers[key] == nil {
-                    partCounts[channel, default: 0] += 1
-                    partNumbers[key] = partCounts[channel]
-                }
-                part = partNumbers[key]
+        // A number is only needed to tell unnamed voices apart, and never one
+        // that the server has already given to a speaker it named.
+        var numbers: [VoiceKey: Int] = [:]
+        if voices.count > 1 {
+            var next = 1
+            for key in voices {
+                while named.contains("\(speaker) \(next)") { next += 1 }
+                numbers[key] = next
+                next += 1
             }
-            let scopeKey = channel + ":" + (scope?.chunk ?? "legacy")
-            let label = segment.speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let speaker: String
-            if let label, !label.isEmpty {
-                speaker = label
-            } else if segment.speakerId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (scope?.providerSpeaker ?? segment.speakerId) == "unknown" {
-                speaker = "Unknown speaker"
-            } else {
-                let key = SpeakerKey(channel: channel, speakerID: segment.speakerId)
-                if unlabeledNumbers[key] == nil {
-                    unlabeledCounts[scopeKey, default: 0] += 1
-                    unlabeledNumbers[key] = unlabeledCounts[scopeKey]
-                }
-                speaker = "Unlabeled speaker \(unlabeledNumbers[key]!)"
-            }
-            return Row(segment: segment, speaker: speaker,
-                       source: segment.channel == .mic ? "Microphone" : "System audio", audioPart: part)
+        }
+
+        return ordered.map { segment in
+            let name: String
+            if let label = label(segment) { name = label }
+            else if segment.channel == .mic && microphoneIsMe { name = me }
+            // A voice the provider could not tell apart from the others is nobody in particular.
+            else if let key = voice(segment), let number = numbers[key] { name = "\(speaker) \(number)" }
+            else { name = speaker }
+            return Row(segment: segment, speaker: name)
         }
     }
 
-    private struct SpeakerKey: Hashable { let channel: String; let speakerID: String }
-    private static func chunkScope(_ segment: TranscriptSegmentDTO) -> (chunk: String, providerSpeaker: String)? {
+    private static func time(_ milliseconds: Int) -> String {
+        Duration.seconds(Double(max(0, milliseconds)) / 1000).formatted(.time(pattern: .minuteSecond))
+    }
+
+    private static func label(_ segment: TranscriptSegmentDTO) -> String? {
+        guard let label = segment.speakerLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty else { return nil }
+        return label
+    }
+
+    private struct VoiceKey: Hashable { let channel: String; let speakerID: String }
+
+    /// The voice a line belongs to, or nil when the provider did not attribute it to one.
+    private static func voice(_ segment: TranscriptSegmentDTO) -> VoiceKey? {
+        let id = segment.speakerId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty, providerSpeaker(segment) != "unknown" else { return nil }
+        return VoiceKey(channel: segment.channel.rawValue, speakerID: segment.speakerId)
+    }
+
+    /// `<channel>:<audio part>:<speaker>` is how the server names a voice it
+    /// heard in one part of the recording; the last piece is the provider's own name for it.
+    private static func providerSpeaker(_ segment: TranscriptSegmentDTO) -> String {
         let parts = segment.speakerId.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
-        guard parts.count == 3, parts[0] == segment.channel.rawValue,
-              let id = UUID(uuidString: String(parts[1])), !parts[2].isEmpty else { return nil }
-        return (id.uuidString.lowercased(), String(parts[2]))
+        guard parts.count == 3, parts[0] == segment.channel.rawValue, UUID(uuidString: String(parts[1])) != nil, !parts[2].isEmpty else {
+            return segment.speakerId
+        }
+        return String(parts[2])
     }
 }

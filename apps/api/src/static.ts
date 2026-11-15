@@ -27,8 +27,9 @@ async function body(request: Request, file: ReturnType<typeof Bun.file>, type: s
   return { body: head ? null : bytes, headers: { ...headers, "Content-Encoding": "gzip", "Content-Length": String(bytes.byteLength) } }
 }
 
-/** Serve the read-only Start SPA without exposing application source or API fallbacks. */
-export function makeWebHandler(directory: string) {
+/** Serve the read-only Start SPA without exposing application source or API fallbacks.
+ * `head` returns ready-made, already escaped tags for a client route (link previews), added to the shell's `<head>`. */
+export function makeWebHandler(directory: string, options: { head?: (pathname: string) => Promise<string | null> } = {}) {
   const root = resolve(directory)
   return async (request: Request): Promise<Response> => {
     if (request.method !== "GET" && request.method !== "HEAD") {
@@ -62,7 +63,18 @@ export function makeWebHandler(directory: string) {
     }
     const shell = Bun.file(resolve(root, "_shell.html"))
     if (!await shell.exists()) return new Response("Web reader is not built", { status: 503, headers: securityHeaders })
+    const headers = { ...securityHeaders, "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }
+    const tags = options.head ? await options.head(pathname).catch(() => null) : null
+    if (tags) {
+      const html = await shell.text(), end = html.indexOf("</head>")
+      // A shell without a head is served as it is rather than guessed at.
+      if (end >= 0) {
+        const page = new TextEncoder().encode(html.slice(0, end) + tags + html.slice(end)), gzip = acceptsGzip(request)
+        const bytes = gzip ? Bun.gzipSync(page) as Uint8Array<ArrayBuffer> : page
+        return new Response(request.method === "HEAD" ? null : bytes, { headers: { ...headers, Vary: "Accept-Encoding", ...(gzip ? { "Content-Encoding": "gzip" } : {}), "Content-Length": String(bytes.byteLength) } })
+      }
+    }
     const content = await body(request, shell, "text/html", null)
-    return new Response(content.body, { headers: { ...securityHeaders, "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", ...content.headers } })
+    return new Response(content.body, { headers: { ...headers, ...content.headers } })
   }
 }

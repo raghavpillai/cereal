@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import type { AuthSessionDTO, UserDTO } from '@meeting-notes/contracts'
 import { AdministratorsPanel, AdministratorsList, AddAdministrator } from '../components/admin/administrators-panel'
 import { UserDirectory } from '../components/admin/users-panel'
-import { Login } from '../components/account/session-gate'
+import { signInPath } from '../components/account/session-gate'
 import { createAdminClient, AdminClientError } from './admin-client'
 import { createSessionAuthClient, signInProblem } from './auth-client'
 
@@ -15,13 +15,9 @@ function transport(handler: (request: Request, init?: RequestInit) => Response):
 }
 
 describe('individual accounts and roles', () => {
-  test('login uses ordinary account credentials and has no bootstrap-token or public sign-up field', () => {
-    const markup = renderToStaticMarkup(<Login connected={async () => {}} />)
-    expect(markup).toContain('type="email"')
-    expect(markup).toContain('autoComplete="current-password"')
-    expect(markup).toContain('Sign in')
-    expect(markup).not.toContain('access token')
-    expect(markup).not.toContain('Sign up')
+  test('a signed-out visitor is sent to the one sign-in page, never shown a form of the page\'s own', () => {
+    expect(signInPath({ pathname: '/admin', search: '', hash: '' })).toBe('/login?return=%2Fadmin')
+    expect(signInPath({ pathname: '/notes', search: '', hash: '' })).toBe('/login')
   })
   test('owner and admin see the same directory; only the owner sees role changes and owner has no mutation control', () => {
     const users = [owner, admin, user]

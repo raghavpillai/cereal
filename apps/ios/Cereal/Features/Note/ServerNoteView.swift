@@ -367,7 +367,8 @@ private struct DocumentIdentity: Hashable {
 }
 
 /// Native, selectable note content. Raw HTML and embedded resources remain text.
-private struct ServerNoteMarkdown: View {
+/// A note someone else shared is drawn by this same view.
+struct ServerNoteMarkdown: View {
     let text: String
     private enum Block {
         case heading(String), bullet(String, Int), paragraph(String), code(String), space
@@ -518,7 +519,6 @@ struct ServerTranscriptView: View {
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: 20) {
                                 if note.transcriptSegments.isEmpty { Text("No transcript is saved for this note.") }
-                                if !note.transcriptSegments.isEmpty { Text(TranscriptPresentation.speakerNotice).font(.footnote).foregroundStyle(Theme.textSecondary) }
                                 ForEach(TranscriptPresentation.rows(note.transcriptSegments)) { row in
                                     VStack(alignment: .leading, spacing: 6) {
                                         Text(row.caption).font(.caption).foregroundStyle(Theme.textSecondary)

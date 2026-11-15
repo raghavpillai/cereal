@@ -16,6 +16,11 @@ test("unauthorized MCP advertises the full requested connection scope without gr
  const challenge=extractWWWAuthenticateParams(response)
  expect(new Set(challenge.scope?.split(" "))).toEqual(new Set([...MCP_SCOPES,"offline_access"]))
  expect(challenge.resourceMetadataUrl?.href).toBe(baseURL+"/.well-known/oauth-protected-resource/mcp")
+ // The endpoint's own address is /api/mcp; a request there is pointed at that address's metadata.
+ const current=await makeMcpAuthentication({} as Database,auth,baseURL).protect(new Request(baseURL+"/api/mcp"),async()=>{executed=true;return new Response()})
+ expect(current.status).toBe(401)
+ expect(extractWWWAuthenticateParams(current).resourceMetadataUrl?.href).toBe(baseURL+"/.well-known/oauth-protected-resource/api/mcp")
+ expect(new Set(extractWWWAuthenticateParams(current).scope?.split(" "))).toEqual(new Set([...MCP_SCOPES,"offline_access"]))
  expect(executed).toBe(false)
  expect(MCP_OAUTH_SCOPES).toContain("offline_access")
 })

@@ -66,6 +66,55 @@ fn metadata_anchors(
     }
 }
 
+/// What the joined view tabs of a note page show.
+#[derive(Clone, Copy)]
+pub(crate) struct NoteTabs {
+    /// The first tab's label: "My notes" on a note of one's own.
+    pub notes_label: &'static str,
+    /// That tab's width while it is the active one.
+    pub notes_width: f32,
+    /// Whether the Enhanced tab carries its template-menu chevron.
+    pub menu: bool,
+}
+
+/// The width of a view tab's label as it is drawn: 13 px in the body face.
+pub(crate) fn note_tab_label_width(label: &'static str, window: &Window) -> f32 {
+    let runs = [TextRun {
+        len: label.len(),
+        font: font(FONT),
+        color: gpui::black(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }];
+    f32::from(
+        window
+            .text_system()
+            .shape_line(label.into(), px(13.), &runs, None)
+            .width,
+    )
+}
+
+/// The outlined capsule of a note's facts (its day, who was there): 28 px
+/// tall, 13 px secondary text, 14 px icons 6 px apart.
+pub(crate) fn note_meta_chip(id: &'static str, t: Theme) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_shrink_0()
+        .whitespace_nowrap()
+        .h(px(28.))
+        .px(px(12.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(6.))
+        .rounded_full()
+        .border_1()
+        .border_color(t.hairline)
+        .text_size(px(13.))
+        .text_color(t.muted)
+}
+
 impl Cereal {
     pub(crate) fn note_metadata_anchors(&self, window: &Window) -> NoteMetadataAnchors {
         let Some(note) = self.current_note.and_then(|id| self.workspace.note(id)) else {
@@ -103,6 +152,107 @@ impl Cereal {
             self.active_tab,
             width,
         )
+    }
+
+    /// The joined capsule that switches a note between its two documents.
+    /// The active tab's fill is one shape that flows across to the other tab
+    /// while both tabs trade widths on the same spring. `select` is told the
+    /// tab that was pressed and whether it was already the active one.
+    pub(crate) fn note_view_tabs(
+        &self,
+        tabs_shown: NoteTabs,
+        display_tab: NoteTab,
+        window: &Window,
+        cx: &mut Context<Self>,
+        select: fn(&mut Self, NoteTab, bool, &mut Window, &mut Context<Self>),
+    ) -> Div {
+        let t = self.theme();
+        let tabs = self.stage.glide("note-tabs");
+        let mut views = div()
+            .h(px(28.))
+            .flex()
+            .items_center()
+            .gap(px(0.))
+            .rounded_full()
+            .border_1()
+            .border_color(t.hairline)
+            // A sunken track; the selected tab is a raised, outlined capsule.
+            .bg(t.sidebar)
+            .flex_shrink_0()
+            .child(tabs.outlined_indicator(t.card, Some(t.hairline), 14.));
+        // The Enhanced tab's menu chevron and the room it takes.
+        let chevron = if tabs_shown.menu { 12. } else { 0. };
+        for (index, (tab, label, symbol)) in [
+            (NoteTab::Notes, tabs_shown.notes_label, "notes-lines"),
+            (NoteTab::Enhanced, "Enhanced", "sparkles"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let active = display_tab == tab;
+            let enhanced = tab == NoteTab::Enhanced;
+            let target = if active {
+                if enhanced {
+                    100. + chevron
+                } else {
+                    tabs_shown.notes_width
+                }
+            } else if enhanced {
+                // Collapsed, Enhanced still shows its menu chevron.
+                34. + chevron
+            } else {
+                34.
+            };
+            let width = self
+                .stage
+                .aim(("note-tab", index as u64), target, crate::motion::GOOEY);
+            // Content is pinned to the leading edge with the inset that centres
+            // it at rest, so the icon stays put and the label is uncovered as
+            // the tab widens instead of sliding in from a clipped centre.
+            let content = if active {
+                15. + 6. + note_tab_label_width(label, window) + if enhanced { chevron } else { 0. }
+            } else if enhanced {
+                15. + chevron
+            } else {
+                15.
+            };
+            let inset = self.stage.aim(
+                ("note-tab-inset", index as u64),
+                ((target - content) / 2.).max(0.),
+                crate::motion::GOOEY,
+            );
+            views = views.child(
+                round_tool(
+                    SharedString::from(format!("note-tab-{label}")),
+                    if enhanced && active {
+                        "sparkles-solid"
+                    } else {
+                        symbol
+                    },
+                    label,
+                    t,
+                )
+                .w(px(width.max(28.)))
+                .h(px(28.))
+                .justify_start()
+                .pl(px(inset.max(0.)))
+                .gap(px(6.))
+                .text_size(px(13.))
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .when(active, |d| {
+                    d.text_color(t.text).child(tabs.probe(index)).child(label)
+                })
+                // The chevron hugs the label, and stays on the collapsed tab.
+                .when(enhanced && tabs_shown.menu, |d| {
+                    d.child(icon("chevron-down", 9., t.secondary).ml(px(-3.)))
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    select(this, tab, active, window, cx)
+                })),
+            );
+        }
+        views
     }
 
     pub fn render_note(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -145,108 +295,26 @@ impl Cereal {
         } else {
             NoteTab::Notes
         };
-        // The active tab's fill is one shape that flows across to the other
-        // tab while both tabs trade widths on the same spring.
-        let tabs = self.stage.glide("note-tabs");
-        let mut views = div()
-            .h(px(28.))
-            .flex()
-            .items_center()
-            .gap(px(0.))
-            .rounded_full()
-            .border_1()
-            .border_color(t.hairline)
-            // A sunken track; the selected tab is a raised, outlined capsule.
-            .bg(t.sidebar)
-            .flex_shrink_0()
-            .child(tabs.outlined_indicator(t.card, Some(t.hairline), 14.));
-        for (index, (tab, label, symbol)) in [
-            (NoteTab::Notes, "My notes", "notes-lines"),
-            (NoteTab::Enhanced, "Enhanced", "sparkles"),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let active = display_tab == tab;
-            let enhanced = tab == NoteTab::Enhanced;
-            let target = if active {
-                if enhanced { 112. } else { 100. }
-            } else if enhanced {
-                // Collapsed, Enhanced still shows its menu chevron.
-                46.
-            } else {
-                34.
-            };
-            let width = self
-                .stage
-                .aim(("note-tab", index as u64), target, crate::motion::GOOEY);
-            // Content is pinned to the leading edge with the inset that centres
-            // it at rest, so the icon stays put and the label is uncovered as
-            // the tab widens instead of sliding in from a clipped centre.
-            let content = if active {
-                let runs = [TextRun {
-                    len: label.len(),
-                    font: font(FONT),
-                    color: t.text,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }];
-                let text = f32::from(
-                    window
-                        .text_system()
-                        .shape_line(label.into(), px(13.), &runs, None)
-                        .width,
-                );
-                15. + 6. + text + if enhanced { 12. } else { 0. }
-            } else if enhanced {
-                15. + 12.
-            } else {
-                15.
-            };
-            let inset = self.stage.aim(
-                ("note-tab-inset", index as u64),
-                ((target - content) / 2.).max(0.),
-                crate::motion::GOOEY,
-            );
-            views = views.child(
-                round_tool(
-                    SharedString::from(format!("note-tab-{label}")),
-                    if enhanced && active {
-                        "sparkles-solid"
-                    } else {
-                        symbol
-                    },
-                    label,
-                    t,
-                )
-                .w(px(width.max(28.)))
-                .h(px(28.))
-                .justify_start()
-                .pl(px(inset.max(0.)))
-                .gap(px(6.))
-                .text_size(px(13.))
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .when(active, |d| {
-                    d.text_color(t.text).child(tabs.probe(index)).child(label)
-                })
-                // The chevron hugs the label, and stays on the collapsed tab.
-                .when(enhanced, |d| {
-                    d.child(icon("chevron-down", 9., t.secondary).ml(px(-3.)))
-                })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.focus.focus(window);
-                    if active && tab == NoteTab::Enhanced {
-                        this.menu = Some(Menu::Templates);
-                    } else {
-                        this.summary.dismiss();
-                        this.active_tab = tab;
-                    }
-                    cx.notify();
-                })),
-            );
-        }
+        let views = self.note_view_tabs(
+            NoteTabs {
+                notes_label: "My notes",
+                notes_width: 100.,
+                menu: true,
+            },
+            display_tab,
+            window,
+            cx,
+            |this, tab, active, window, cx| {
+                this.focus.focus(window);
+                if active && tab == NoteTab::Enhanced {
+                    this.menu = Some(Menu::Templates);
+                } else {
+                    this.summary.dismiss();
+                    this.active_tab = tab;
+                }
+                cx.notify();
+            },
+        );
         // The generation chip has a presence of its own. If the user watched
         // the generation finish, the chip leaves and the notes arrive block
         // by block, once. If it finished while they were elsewhere, the
@@ -333,21 +401,7 @@ impl Cereal {
                     .mb(px(20.))
                     .when(has_enhanced, |d| d.child(views))
                     .child(
-                        div()
-                            .id("note-details")
-                            .flex_shrink_0()
-                            .whitespace_nowrap()
-                            .h(px(28.))
-                            .px(px(12.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .gap(px(6.))
-                            .rounded_full()
-                            .border_1()
-                            .border_color(t.hairline)
-                            .text_size(px(13.))
-                            .text_color(t.muted)
+                        note_meta_chip("note-details", t)
                             .cursor_pointer()
                             .child(row_feedback(t, 0.).round())
                             .child(icon("calendar-dots", 14., t.muted))

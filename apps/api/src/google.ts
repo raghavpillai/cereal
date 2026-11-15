@@ -78,14 +78,17 @@ export function normalizeGoogleEvent(raw: unknown, calendar: GoogleCalendar): Go
  * OAuth codes and provider errors never appear in logs, application DTOs or URLs. */
 export function makeGoogleService(store: GoogleStore, box: SecretBox, options: {
   clientId?: string; clientSecret?: string; baseURL: string; fetch?: typeof fetch; clock?: () => Date; worker?: boolean
+  /** The OAuth client as it is right now (set on the admin panel, else the environment). Read on every use, so a change needs no restart. */
+  credentials?: () => Promise<{ clientId: string; clientSecret: string } | null>
 }) {
-  const base = new URL(options.baseURL), configured = Boolean(options.clientId && options.clientSecret)
+  const base = new URL(options.baseURL), fixed = options.clientId && options.clientSecret ? { clientId: options.clientId, clientSecret: options.clientSecret } : null
+  const credentials = async () => options.credentials ? await options.credentials() : fixed
   if (base.protocol !== 'https:' && !(base.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(base.hostname))) throw new Error('Google callback requires HTTPS except loopback development')
   const redirectUri = `${base.origin}/api/integrations/google/callback`, transport = options.fetch ?? globalThis.fetch, now = options.clock ?? (() => new Date())
   const shutdown = new AbortController(), running = new Map<string, Promise<void>>()
   let disposed = false, ticking = false
   const boundary = <A,>(f: () => Promise<A>) => Effect.tryPromise({ try: f, catch: (e): ApiError => e instanceof Failure ? e.payload : e instanceof MeetingBindingConflict ? {error:'conflict',message:e.message} : { error: 'unavailable', message: 'Google Calendar could not finish this request. Please retry or reconnect.' } })
-  const requireConfigured = () => { if (!configured) throw disabled() }
+  const requireConfigured = async () => { const client = await credentials(); if (!client) throw disabled(); return client }
   async function json(url: string, init?: RequestInit): Promise<Record<string, unknown>> {
     const response = await transport(url, { ...init, redirect: 'error', cache: 'no-store', signal: AbortSignal.any([shutdown.signal, AbortSignal.timeout(15_000)]) })
     const reader = response.body?.getReader(), chunks: Uint8Array[] = []; let size = 0
@@ -102,8 +105,9 @@ export function makeGoogleService(store: GoogleStore, box: SecretBox, options: {
     const c=state.connection,current=await store.getConnection(c.userId,c.id);if(!current||current.encryptedGrant!==c.encryptedGrant)throw new StaleGoogleSync()
     const g = grant(c)
     if (g.accessToken && g.expiresAt > now().getTime() + 60_000) return g.accessToken
+    const client = await requireConfigured()
     try {
-      const response = await json(TOKEN_URL, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: options.clientId!, client_secret: options.clientSecret!, refresh_token: g.refreshToken, grant_type: 'refresh_token' }) })
+      const response = await json(TOKEN_URL, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: client.clientId, client_secret: client.clientSecret, refresh_token: g.refreshToken, grant_type: 'refresh_token' }) })
       const token = text(response.access_token, 10_000)
       if (!token) throw new ProviderFailure(true)
       const updated: Grant = { ...g, accessToken: token, refreshToken: text(response.refresh_token, 10_000) ?? g.refreshToken, expiresAt: now().getTime() + Math.min(Number(response.expires_in) || 3600, 86400) * 1000 }
@@ -127,7 +131,7 @@ export function makeGoogleService(store: GoogleStore, box: SecretBox, options: {
     if(!await store.saveCalendars(c.userId,c.id,rows,c.encryptedGrant))throw new StaleGoogleSync()
   }
   async function performSync(state:{connection:GoogleConnection}) {
-    requireConfigured()
+    await requireConfigured()
     const token = await access(state),c=state.connection
     await calendars(c, token)
     const names = new Map<string, ReturnType<typeof exactContactName>>(); let contactsReady = false
@@ -172,32 +176,33 @@ export function makeGoogleService(store: GoogleStore, box: SecretBox, options: {
     })
     running.set(key,job);try{await job}finally{if(running.get(key)===job)running.delete(key)}
   }
-  async function status(userId: string): Promise<GoogleStatusDTO> { return { configured, redirectUri: configured ? redirectUri : null, connections: (await store.listConnections(userId)).map(safeConnection) } }
+  async function status(userId: string): Promise<GoogleStatusDTO> { const configured = !!await credentials(); return { configured, redirectUri: configured ? redirectUri : null, connections: (await store.listConnections(userId)).map(safeConnection) } }
   let timer: ReturnType<typeof setInterval> | undefined
-  if (options.worker && configured) {
-    timer = setInterval(() => { if (ticking || disposed) return; ticking = true; void (async () => { for (const c of await store.listConnections()) { if (disposed) break; if (c.status === 'connected' && (!c.lastSyncedAt || Date.parse(c.lastSyncedAt) < now().getTime() - 15 * 60_000)) await sync(c) } })().catch(() => {}).finally(() => { ticking = false }) }, 60_000); timer.unref()
+  // The client can be added on the admin panel after start, so the worker always runs and checks each time.
+  if (options.worker) {
+    timer = setInterval(() => { if (ticking || disposed) return; ticking = true; void (async () => { if (!await credentials()) return; for (const c of await store.listConnections()) { if (disposed) break; if (c.status === 'connected' && (!c.lastSyncedAt || Date.parse(c.lastSyncedAt) < now().getTime() - 15 * 60_000)) await sync(c) } })().catch(() => {}).finally(() => { ticking = false }) }, 60_000); timer.unref()
   }
   const service = {
     getStatus: (userId: string) => boundary(() => status(userId)),
     beginConnect: (userId: string, sessionHash: string, contacts = false) => boundary(async () => {
-      requireConfigured(); if (!/^[a-f\d]{64}$/.test(sessionHash)) throw new Failure({ error: 'forbidden', message: 'A signed-in browser session is required' })
+      const client = await requireConfigured(); if (!/^[a-f\d]{64}$/.test(sessionHash)) throw new Failure({ error: 'forbidden', message: 'A signed-in browser session is required' })
       const state = randomBytes(32).toString('base64url'), verifier = randomBytes(48).toString('base64url')
       await store.saveState({ stateHash: sha(state), userId, sessionHash, encryptedVerifier: box.seal(verifier), contacts, expiresAt: new Date(now().getTime() + 10 * 60_000).toISOString() })
       const u = new URL('https://accounts.google.com/o/oauth2/v2/auth')
       const scopes = ['openid', 'email', 'profile', CALENDAR_LIST, CALENDAR_EVENTS, ...(contacts ? [CONTACTS] : [])]
-      for (const [k, v] of Object.entries({ client_id: options.clientId!, redirect_uri: redirectUri, response_type: 'code', scope: scopes.join(' '), access_type: 'offline', include_granted_scopes: 'true', prompt: 'consent select_account', state, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' })) u.searchParams.set(k, v)
+      for (const [k, v] of Object.entries({ client_id: client.clientId, redirect_uri: redirectUri, response_type: 'code', scope: scopes.join(' '), access_type: 'offline', include_granted_scopes: 'true', prompt: 'consent select_account', state, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256' })) u.searchParams.set(k, v)
       return { authorizationUrl: u.href }
     }),
     async callback(request: Request, principal: PrincipalData): Promise<Response> {
       let success = false
       try {
-        requireConfigured()
+        const client = await requireConfigured()
         if (principal.source !== 'session' || !principal.sessionId || request.headers.has('authorization')) throw new ProviderFailure()
         const u = new URL(request.url), state = u.searchParams.get('state'), code = u.searchParams.get('code')
         if (!state || !/^[A-Za-z\d_-]{43}$/.test(state)) throw new ProviderFailure()
         const attempt = await store.consumeState(sha(state), principal.id, sha(principal.sessionId), now().toISOString())
         if (!attempt || u.searchParams.has('error') || !code || code.length > 4096) throw new ProviderFailure()
-        const data = await json(TOKEN_URL, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ code, client_id: options.clientId!, client_secret: options.clientSecret!, redirect_uri: redirectUri, grant_type: 'authorization_code', code_verifier: box.open(attempt.encryptedVerifier) }) })
+        const data = await json(TOKEN_URL, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ code, client_id: client.clientId, client_secret: client.clientSecret, redirect_uri: redirectUri, grant_type: 'authorization_code', code_verifier: box.open(attempt.encryptedVerifier) }) })
         const accessToken = text(data.access_token, 10000), scopes = String(data.scope ?? '').split(' ')
         // Google may consolidate a previously granted broader scope when
         // include_granted_scopes is enabled. Require actual read capability,
@@ -215,10 +220,10 @@ export function makeGoogleService(store: GoogleStore, box: SecretBox, options: {
       return new Response(null, { status: 303, headers: { Location: `/account?google=${success ? 'connected' : 'failed'}`, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' } })
     },
     listCalendars: (userId: string, id: string) => boundary(async () => { if (!await store.getConnection(userId, id)) throw missing(); return (await store.listCalendars(userId, id)).map(safeCalendar) }),
-    selectCalendar: (userId: string, id: string, selected: boolean) => boundary(async () => { const c = await store.selectCalendar(userId, id, selected); if (!c) throw missing(); const connection = await store.getConnection(userId, c.connectionId); if (selected && configured && connection) await sync(connection); return safeCalendar(c) }),
-    syncConnection: (userId: string, id: string) => boundary(async () => { requireConfigured(); const c = await store.getConnection(userId, id); if (!c) throw missing(); await sync(c); return status(userId) }),
+    selectCalendar: (userId: string, id: string, selected: boolean) => boundary(async () => { const c = await store.selectCalendar(userId, id, selected); if (!c) throw missing(); const connection = await store.getConnection(userId, c.connectionId); if (selected && connection && await credentials()) await sync(connection); return safeCalendar(c) }),
+    syncConnection: (userId: string, id: string) => boundary(async () => { await requireConfigured(); const c = await store.getConnection(userId, id); if (!c) throw missing(); await sync(c); return status(userId) }),
     disconnect: (userId: string, id: string) => boundary(async () => { const c = await store.getConnection(userId, id); if (!c) throw missing(); try { await transport('https://oauth2.googleapis.com/revoke', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token: grant(c).refreshToken }), signal: AbortSignal.timeout(10_000), redirect: 'error' }) } catch { /* Local revocation is still final if Google is offline. */ } await store.deleteConnection(userId, id); return { deleted: true } }),
-    listEvents: (userId: string, query: { from: string; to: string }) => boundary(async () => { if (!configured) return []; const rows = await store.listEvents(userId, query.from, query.to); if (rows.length > 10000) throw new Failure({ error: 'invalid_request', message: 'Request a shorter event range' }); return rows }),
+    listEvents: (userId: string, query: { from: string; to: string }) => boundary(async () => { if (!await credentials()) return []; const rows = await store.listEvents(userId, query.from, query.to); if (rows.length > 10000) throw new Failure({ error: 'invalid_request', message: 'Request a shorter event range' }); return rows }),
     createEventNote: (userId: string, id: string) => boundary(() => store.createEventNote(userId, id)),
     getNoteContext: (userId: string, noteId: string) => boundary(async () => { const context = await store.getContext(userId, noteId); if (!context) throw missing(); return context }),
     putExternalContext: (userId: string, noteId: string, meeting: MeetingContextDTO | null) => boundary(async () => { const context = await store.putContext(userId, noteId, meeting); if (!context) throw missing(); return context }),

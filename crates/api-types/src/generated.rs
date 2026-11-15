@@ -774,7 +774,42 @@ pub struct CalendarPreferencesDTO {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AuthMethodsDTO {
+    pub google: bool,
+
+    pub instance_name: String,
+
+    pub password: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppHandoffInput {
+    pub challenge: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppHandoffDTO {
+    pub code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppHandoffExchangeInput {
+    pub code: String,
+
+    pub verifier: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppHandoffTokenDTO {
+    pub token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AdminSettingsDTO {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apps: Option<AppsSettingsDTO>,
+
     pub calendar_look_ahead_days: i64,
 
     pub calendar_refresh_minutes: i64,
@@ -794,6 +829,12 @@ pub struct AdminSettingsDTO {
     pub language_model: String,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_hold_seconds: Option<i64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_max_sessions: Option<i64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub live_transcription_model: Option<LiveTranscriptionModelSelection>,
 
     pub open_router_configured: bool,
@@ -802,9 +843,26 @@ pub struct AdminSettingsDTO {
 
     pub providers: Vec<ProviderStatusDTO>,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<SignInSettingsDTO>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<StorageSettingsDTO>,
+
     pub transcription_model: TranscriptionModelSelection,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unused_environment: Option<Vec<String>>,
+
     pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppsSettingsDTO {
+    pub ios_app_ids: Vec<String>,
+
+    pub ios_app_store_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -841,6 +899,62 @@ pub struct ProviderStatusDTO {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignInSettingsDTO {
+    pub allowed_emails: Vec<String>,
+
+    pub google: bool,
+
+    pub google_client_id: Option<String>,
+
+    pub google_client_secret_set: bool,
+
+    pub google_redirect_uris: Vec<String>,
+
+    pub password: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageSettingsDTO {
+    pub access_key_id: Option<String>,
+
+    pub backend: StorageBackend,
+
+    pub bucket: Option<String>,
+
+    pub endpoint: Option<String>,
+
+    pub force_path_style: bool,
+
+    pub prefix: String,
+
+    pub region: Option<String>,
+
+    pub secret_access_key_set: bool,
+
+    pub source: StorageSettingsDtoSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageBackend {
+    Local,
+
+    S3,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageSettingsDtoSource {
+    Default,
+
+    Environment,
+
+    Stored,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptionModelSelection {
     pub model: String,
 
@@ -860,6 +974,9 @@ pub enum TranscriptionModelSelectionProvider {
 pub struct UpdateAdminSettingsInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anthropic_api_key: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apps: Option<UpdateAppsSettingsInput>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub calendar_look_ahead_days: Option<i32>,
@@ -886,6 +1003,12 @@ pub struct UpdateAdminSettingsInput {
     pub language_model: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_hold_seconds: Option<i32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_max_sessions: Option<i32>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub live_transcription_model: Option<LiveTranscriptionModelSelection>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -895,7 +1018,70 @@ pub struct UpdateAdminSettingsInput {
     pub open_router_api_key: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<UpdateSignInSettingsInput>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<UpdateStorageSettingsInput>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub transcription_model: Option<TranscriptionModelSelection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateAppsSettingsInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ios_app_ids: Option<Vec<String>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ios_app_store_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSignInSettingsInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_emails: Option<Vec<String>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub google: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub google_client_id: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub google_client_secret: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateStorageSettingsInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_key_id: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<StorageBackend>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bucket: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub force_path_style: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret_access_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1450,6 +1636,88 @@ pub enum ApiErrorCode {
     Unauthorized,
 
     Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadsDTO {
+    pub ios_app_store_url: Option<String>,
+
+    pub mac: Option<MacDownloadDTO>,
+
+    pub version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacDownloadDTO {
+    pub arch: String,
+
+    pub installer: DownloadFileDTO,
+
+    pub minimum_system: String,
+
+    pub update: Option<DownloadFileDTO>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DownloadFileDTO {
+    pub file: String,
+
+    pub sha256: String,
+
+    pub size: i64,
+
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageTestInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_key_id: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<StorageBackend>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bucket: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub force_path_style: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret_access_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StorageTestDTO {
+    pub backend: StorageBackend,
+
+    pub message: String,
+
+    pub ok: bool,
+
+    pub step: Option<Step>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Step {
+    Delete,
+
+    Read,
+
+    Write,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

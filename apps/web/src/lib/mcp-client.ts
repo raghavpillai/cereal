@@ -31,6 +31,8 @@ export function createMCPClient(origin: string, transport: typeof fetch = global
     authorization: (query: string, signal?: AbortSignal) => request(`mcp/authorize-info?${new URLSearchParams({ oauth_query: query })}`, undefined, signal).then(decode(MCPAuthorization)),
     connections: (signal?: AbortSignal) => request('mcp/connections', undefined, signal).then(decode(Connections)),
     revoke: (id: string, signal?: AbortSignal) => request(`mcp/connections/${encodeURIComponent(id)}/revoke`, {}, signal).then(decode(Revoked)),
+    /** Carry on with an app's signed request now that someone is signed in: the answer is the next page of the authorization. */
+    resume: (query: string, signal?: AbortSignal) => request('oauth2/continue', { postLogin: true, oauth_query: query }, signal).then(decode(ConsentRedirect)),
     consent: (query: string, accept: boolean, signal?: AbortSignal) => request('oauth2/consent', { accept, oauth_query: query }, signal).then(decode(ConsentRedirect)),
   }
 }

@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")/.."
+# Where Mac builds are published from (Compose mounts it into the server read-only).
+mkdir -p dist/release
 if [ -e .env ]; then
   printf '.env already exists; leaving it unchanged.\n'
   exit 0
@@ -15,4 +17,4 @@ DATABASE_URL=postgresql://meeting_notes:$meeting_db_secret@127.0.0.1:54329/meeti
 PORT=3000
 BIND_ADDRESS=127.0.0.1
 EOF
-printf 'Created private .env. Start with docker compose up --build -d.\n'
+printf 'Created private .env. Start with docker compose up --build -d, then open /admin to add provider keys and choose models.\n'

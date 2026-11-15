@@ -8,6 +8,8 @@ import {Input} from '../ui/input'
 import {Badge} from '../ui/badge'
 import {Card,CardContent,CardHeader,CardTitle} from '../ui/card'
 import {Select,SelectContent,SelectItem,SelectTrigger} from '../ui/select'
+import {SignInSettings} from './sign-in-panel'
+import {StorageSettings} from './storage-panel'
 import {Check,ChevronRight,ImagePlus,Loader2,Plus,RefreshCw,Trash2,X} from 'lucide-react'
 
 export function ProviderLogo({provider}:{provider:AIProvider}){return <img className="provider-logo" src={`/providers/${provider}.svg`} width="20" height="20" alt=""/>}
@@ -19,7 +21,7 @@ export function SettingsPanel({settings,client,expired,busy,save,children}:{chil
  const[draft,setDraft]=useState(()=>instanceDraft(settings)),[editing,setEditing]=useState<AIProvider|null>(null),[catalogs,setCatalogs]=useState<Partial<Record<AIProvider,CatalogState>>>({}),[logoError,setLogoError]=useState<string|null>(null)
  const requests=useRef(new Map<AIProvider,AbortController>()),logoVersion=useRef(0),logoInput=useRef<HTMLInputElement>(null)
  const draftRef=useRef(draft);draftRef.current=draft
- const problem=instanceProblem(draft),patch=instancePatch(draft,settings),dirty=Object.keys(patch).length>0
+ const problem=instanceProblem(draft,settings),patch=instancePatch(draft,settings),dirty=Object.keys(patch).length>0
  const update=<K extends keyof InstanceDraft>(key:K,value:InstanceDraft[K])=>setDraft(old=>({...old,[key]:value}))
  const loadCatalog=useCallback(async(provider:AIProvider,refresh=false)=>{
   requests.current.get(provider)?.abort();const controller=new AbortController();requests.current.set(provider,controller)
@@ -36,12 +38,18 @@ export function SettingsPanel({settings,client,expired,busy,save,children}:{chil
   const reader=new FileReader();reader.onload=()=>{if(version!==logoVersion.current)return;const value=reader.result;if(typeof value==='string'&&/^data:image\/(png|jpeg|webp);base64,/.test(value))update('instanceLogo',value);else setLogoError('This image could not be read.')};reader.onerror=()=>setLogoError('This image could not be read.');reader.readAsDataURL(file)
  }
  function setKey(provider:AIProvider,value:string){requests.current.get(provider)?.abort();setCatalogs(old=>({...old,[provider]:{}}));setDraft(old=>({...old,keys:{...old.keys,[provider]:value},removed:{...old.removed,[provider]:false}}))}
+ // The page's sections in order. Administrators is drawn by the caller, and only for the owner.
+ const sections:Array<[string,string]>=[['identity','Identity'],['providers','AI providers'],['models','Models'],...(settings.signIn?[['sign-in','Sign-in'] as [string,string]]:[]),...(settings.storage?[['storage','Storage'] as [string,string]]:[]),...(settings.apps?[['apps','Apps'] as [string,string]]:[]),['administrators','Administrators']]
+ const[administratorsShown,setAdministratorsShown]=useState(false)
+ useEffect(()=>{setAdministratorsShown(document.getElementById('administrators')!==null)})
  const available=(id:AIProvider)=>!draft.removed[id]&&(Boolean(draft.keys[id].trim())||Boolean(settings.providers.find(p=>p.id===id)?.configured))
  return <><form id={formId} className="instance-form" onSubmit={event=>{event.preventDefault();if(!problem&&dirty)void save(patch)}}>
  <fieldset disabled={busy} className="admin-fieldset">
+  <nav className="settings-index" aria-label="Sections">{sections.filter(([id])=>id!=='administrators'||administratorsShown).map(([id,label])=><a key={id} href={`#${id}`}>{label}</a>)}</nav>
+  {settings.unusedEnvironment&&settings.unusedEnvironment.length>0&&<p className="environment-note" role="note">These are still set in the server’s environment but are no longer read, because their settings now live on this page: <code>{settings.unusedEnvironment.join(', ')}</code>. You can delete them.</p>}
   <Card id="identity"><CardHeader><CardTitle>Identity</CardTitle></CardHeader><CardContent>
    <div className="identity-fields"><div><label className="settings-label" htmlFor="instance-name">Team name</label><Input id="instance-name" value={draft.instanceName} maxLength={100} required onChange={e=>update('instanceName',e.target.value)}/></div>
-    <div><label className="settings-label">Team logo</label><div className="logo-control"><div className="team-logo-preview">{draft.instanceLogo?<img src={draft.instanceLogo} alt="Team logo"/>:<img src="/mark.svg" width="26" height="26" alt="Cereal"/>}</div><div><Button type="button" variant="outline" size="sm" onClick={()=>logoInput.current?.click()}><ImagePlus/>Upload logo</Button><p className="settings-help">PNG, JPG, WebP · 250 KB max</p></div>{draft.instanceLogo&&<Button type="button" variant="ghost" size="icon" aria-label="Remove team logo" onClick={()=>{logoVersion.current++;update('instanceLogo',null)}}><X/></Button>}</div><input ref={logoInput} type="file" className="sr-only" accept="image/png,image/jpeg,image/webp" aria-label="Upload team logo" onChange={e=>void readLogo(e.target.files?.[0])}/></div>
+    <div><label className="settings-label">Team logo</label><div className="logo-control"><div className="team-logo-preview">{draft.instanceLogo?<img src={draft.instanceLogo} alt="Team logo"/>:<img src="/mark.svg" width="26" height="26" alt="Cereal"/>}</div><div><Button type="button" variant="outline" onClick={()=>logoInput.current?.click()}><ImagePlus/>Upload logo</Button><p className="settings-help">PNG, JPG, WebP · 250 KB max</p></div>{draft.instanceLogo&&<Button type="button" variant="ghost" size="icon" aria-label="Remove team logo" onClick={()=>{logoVersion.current++;update('instanceLogo',null)}}><X/></Button>}</div><input ref={logoInput} type="file" className="sr-only" accept="image/png,image/jpeg,image/webp" aria-label="Upload team logo" onChange={e=>void readLogo(e.target.files?.[0])}/></div>
    </div>{logoError&&<p role="alert" className="settings-error">{logoError}</p>}
   </CardContent></Card>
   <Card id="providers"><CardHeader><CardTitle>AI providers</CardTitle>  </CardHeader><CardContent><div className="provider-list">{providers.map(id=>{const saved=settings.providers.find(p=>p.id===id),connected=available(id),state=catalogs[id];return <div className="provider-entry" key={id}>
@@ -62,9 +70,21 @@ export function SettingsPanel({settings,client,expired,busy,save,children}:{chil
     <label className="live-toggle"><input type="checkbox" checked={draft.liveTranscriptionModel!==null} onChange={e=>update('liveTranscriptionModel',e.target.checked?settings.liveTranscriptionModel??defaultLiveModel:null)}/>Show the transcript while a meeting is being recorded</label>
     {draft.liveTranscriptionModel&&<ModelPicker value={draft.liveTranscriptionModel} kind="live_transcription" catalogs={catalogs} available={available} load={loadCatalog} label="Live transcription model" change={model=>update('liveTranscriptionModel',model as LiveTranscriptionModelSelection)}/>}
     <p className="settings-help">{draft.liveTranscriptionModel?(available('elevenlabs')?'Words appear within about a second. Recordings are still uploaded in parts as a backup.':'Connect ElevenLabs above to start. Until then, recordings are transcribed in parts after upload.'):'Recordings are transcribed in parts after upload.'}</p>
+    {settings.liveMaxSessions!==undefined&&<div className="live-limits">
+     <div><label className="settings-label" htmlFor="live-max-sessions">Live recordings at once</label><Input id="live-max-sessions" type="text" inputMode="numeric" autoComplete="off" maxLength={3} aria-describedby="live-max-sessions-help" value={draft.liveMaxSessions} onChange={e=>update('liveMaxSessions',e.target.value)}/><p id="live-max-sessions-help" className="settings-help">1 to 200. A recording started beyond this is transcribed after upload instead.</p></div>
+     <div><label className="settings-label" htmlFor="live-hold-seconds">Seconds to keep speakers after Stop</label><Input id="live-hold-seconds" type="text" inputMode="numeric" autoComplete="off" maxLength={4} aria-describedby="live-hold-seconds-help" value={draft.liveHoldSeconds} onChange={e=>update('liveHoldSeconds',e.target.value)}/><p id="live-hold-seconds-help" className="settings-help">0 to 3600. A Resume within this time keeps its speaker labels; 0 turns it off.</p></div>
+    </div>}
    </div></div>
    <div className="model-section"><div className="model-section-heading"><h3>Meeting notes</h3></div><ModelPicker value={draft.generationModel} kind="language" catalogs={catalogs} available={available} load={loadCatalog} label="Meeting notes model" change={model=>update('generationModel',model as LanguageModelSelection)}/></div>
   </CardContent></Card>
+  {draft.signIn&&settings.signIn&&<SignInSettings draft={draft.signIn} saved={settings.signIn} change={next=>update('signIn',next)}/>}
+  {draft.storage&&settings.storage&&<StorageSettings draft={draft.storage} saved={settings.storage} change={next=>update('storage',next)} test={async(input,signal)=>{try{return await client.testStorage(input,signal)}catch(error){if(error instanceof AdminClientError&&error.status===401)expired();throw error}}}/>}
+  {draft.apps&&settings.apps&&<Card id="apps"><CardHeader><CardTitle>Apps</CardTitle></CardHeader><CardContent>
+   <div className="model-section"><div className="model-section-heading"><h3>iPhone app</h3><span>{draft.apps.iosAppStoreId.trim()?'On the App Store':'Not published'}</span></div><div className="model-controls sign-in-block"><div className="storage-fields">
+    <div><label className="settings-label" htmlFor="ios-app-ids">App IDs that open note links</label><Input id="ios-app-ids" type="text" autoComplete="off" autoCapitalize="none" spellCheck={false} aria-describedby="ios-app-ids-help" placeholder="LZWN2FF7YB.dev.cereal.mobile" value={draft.apps.iosAppIds} onChange={e=>update('apps',{...draft.apps!,iosAppIds:e.target.value})}/><p id="ios-app-ids-help" className="settings-help">Team ID, a dot, the bundle ID; several separated by commas. Leave blank for the Cereal app.</p></div>
+    <div><label className="settings-label" htmlFor="ios-app-store-id">App Store ID</label><Input id="ios-app-store-id" type="text" inputMode="numeric" autoComplete="off" maxLength={20} aria-describedby="ios-app-store-id-help" placeholder="Not published yet" value={draft.apps.iosAppStoreId} onChange={e=>update('apps',{...draft.apps!,iosAppStoreId:e.target.value})}/><p id="ios-app-store-id-help" className="settings-help">The number in the app’s App Store address. Adds the iPhone link on the download page and the “open in the app” banner in Safari.</p></div>
+   </div></div></div>
+  </CardContent></Card>}
  </fieldset>
  </form>
  {children}

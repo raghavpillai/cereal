@@ -62,7 +62,13 @@ describe("typed owner API and opaque shared snapshots", () => {
     const share = await created.json()
     expect(share.token).toMatch(/^[A-Za-z0-9_-]{43}$/)
     expect(share.path).toBe(`/s/${share.token}`)
-    const response = await request(`/api/v1/shared/${share.token}`, "GET", undefined, false)
+    // Reading a share needs an account: without one the answer is 401, whether or not the token exists.
+    const anonymous = await request(`/api/v1/shared/${share.token}`, "GET", undefined, false)
+    expect(anonymous.status).toBe(401)
+    expect((await anonymous.json()).error).toBe("unauthorized")
+    expect(JSON.stringify(await (await request(`/api/v1/shared/${"a".repeat(43)}`, "GET", undefined, false)).json())).toBe(JSON.stringify({ error: "unauthorized", message: "Authentication required" }))
+    expect((await request("/api/v1/shared/not-a-token", "GET", undefined, false)).status).toBe(401)
+    const response = await request(`/api/v1/shared/${share.token}`)
     expect(response.status).toBe(200)
     expect(response.headers.get("Cache-Control")).toBe("no-store")
     expect(response.headers.get("Referrer-Policy")).toBe("no-referrer")
@@ -73,7 +79,7 @@ describe("typed owner API and opaque shared snapshots", () => {
     expect(JSON.stringify(projection)).not.toContain("Private spoken words")
     expect(JSON.stringify(projection)).not.toContain("Other private")
     await request(`/api/v1/notes/${note.id}`, "PATCH", { enhanced: "Later private edits" })
-    expect((await (await request(`/api/v1/shared/${share.token}`, "GET", undefined, false)).json()).enhanced).toBe("Public summary")
+    expect((await (await request(`/api/v1/shared/${share.token}`)).json()).enhanced).toBe("Public summary")
     const metadata = await (await request(`/api/v1/notes/${note.id}/shares`)).json()
     expect(JSON.stringify(metadata)).not.toContain(share.token)
     expect(JSON.stringify(metadata)).not.toContain("tokenHash")
@@ -85,16 +91,18 @@ describe("typed owner API and opaque shared snapshots", () => {
     const note = await create(request)
     const share = await (await request(`/api/v1/notes/${note.id}/shares`, "POST", { includeBody: true, includeEnhanced: false, expiresAt: "2026-11-12T13:00:00.000Z" })).json()
     now = new Date("2026-11-12T14:00:00.000Z")
-    const expired = await request(`/api/v1/shared/${share.token}`, "GET", undefined, false)
-    const unknown = await request(`/api/v1/shared/${"a".repeat(43)}`, "GET", undefined, false)
+    const expired = await request(`/api/v1/shared/${share.token}`)
+    const unknown = await request(`/api/v1/shared/${"a".repeat(43)}`)
     expect(expired.status).toBe(404)
     expect(await expired.json()).toEqual(await unknown.json())
     now = new Date("2026-11-12T12:00:00.000Z")
     expect((await request(`/api/v1/shares/${share.share.id}`, "DELETE")).status).toBe(200)
-    const revoked = await request(`/api/v1/shared/${share.token}`, "GET", undefined, false)
+    const revoked = await request(`/api/v1/shared/${share.token}`)
     expect(revoked.status).toBe(404)
     expect(await revoked.json()).toEqual({ error: "not_found", message: "Shared note not found" })
-    expect((await request("/api/v1/shared/not-a-token", "GET", undefined, false)).status).toBe(404)
+    expect((await request("/api/v1/shared/not-a-token")).status).toBe(404)
+    // Someone without an account cannot tell a revoked, expired or unknown link from a live one.
+    for (const path of [`/api/v1/shared/${share.token}`, `/api/v1/shared/${"a".repeat(43)}`, "/api/v1/shared/not-a-token"]) expect((await request(path, "GET", undefined, false)).status).toBe(401)
   })
 
   test("deleting a note removes its shares and does not affect another note", async () => {
@@ -105,23 +113,28 @@ describe("typed owner API and opaque shared snapshots", () => {
     expect((await request(`/api/v1/notes/${note.id}`, "DELETE")).status).toBe(200)
     expect((await request(`/api/v1/notes/${note.id}`)).status).toBe(404)
     expect((await request(`/api/v1/notes/${other.id}`)).status).toBe(200)
-    expect((await request(`/api/v1/shared/${share.token}`, "GET", undefined, false)).status).toBe(404)
+    expect((await request(`/api/v1/shared/${share.token}`)).status).toBe(404)
   })
 
-  test("typed anonymous client preserves transport privacy and decodes the public DTO", async () => {
+  test("typed shared-note client sends the browser session to its own origin only and reports a missing session as 401", async () => {
     const { request, repository } = fixture()
     const note = await create(request)
     const share = await (await request(`/api/v1/notes/${note.id}/shares`, "POST", { includeBody: false, includeEnhanced: true })).json()
     const api = makeApiHandler(repository, token)
     disposals.push(api.dispose)
     let observed: RequestInit | undefined
+    // The browser attaches the session cookie; here the stand-in for it is the operator's credential.
+    let signedIn = true
     const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
       observed = init
-      return api.handler(new Request(input, init))
+      const sent = new Request(input, init)
+      if (signedIn) sent.headers.set("Authorization", `Bearer ${token}`)
+      return api.handler(sent)
     }) as typeof fetch
     const client = createSharedNotesClient("http://localhost", fetcher)
     expect((await client.getSharedNote(share.token)).enhanced).toBe("Public summary")
-    expect(observed?.credentials).toBe("omit")
+    expect(observed?.credentials).toBe("same-origin")
+    expect(observed?.redirect).toBe("error")
     expect(observed?.cache).toBe("no-store")
     expect(observed?.referrerPolicy).toBe("no-referrer")
     expect(new Headers(observed?.headers).has("Authorization")).toBe(false)
@@ -131,6 +144,21 @@ describe("typed owner API and opaque shared snapshots", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(SharedNoteClientError)
       expect((error as SharedNoteClientError).status).toBe(404)
+    }
+    signedIn = false
+    const refused = await client.getSharedNote(share.token).catch(error => error)
+    expect(refused).toBeInstanceOf(SharedNoteClientError)
+    expect((refused as SharedNoteClientError).status).toBe(401)
+  })
+
+  test("a path under /api that is not an endpoint answers 404 in JSON, signed in or not", async () => {
+    const { request } = fixture()
+    for (const path of ["/api", "/api/", "/api/zzz", "/api/v1", "/api/v1/nope", "/api/v2/notes", "/api/mcp/extra", "/api/v1/notes/not-a-uuid/extra/deeper"]) for (const authorized of [true, false]) {
+      const response = await request(path, "GET", undefined, authorized)
+      expect(response.status).toBe(404)
+      expect(response.headers.get("Content-Type")).toContain("application/json")
+      expect((await response.json()).error).toBe("not_found")
+      expect(response.headers.get("Cache-Control")).toBe("no-store")
     }
   })
 

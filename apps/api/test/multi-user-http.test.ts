@@ -69,18 +69,24 @@ test("HTTP isolation covers list, detail, recording, transcript, chat, evidence,
   expect((await (await call("alice", `/notes/${note.id}`)).json()).body).toBe("ALICE_PRIVATE_TOKEN")
 })
 
-test("public share readers see the explicit snapshot; another account cannot list or revoke it", async () => {
+test("a shared link is read by any signed-in account that holds it, never anonymously; another account cannot list or revoke it", async () => {
   const { call } = fixture()
   const note = await (await call("alice", "/notes", "POST", { title: "Shared title", body: "EXPLICIT_SNAPSHOT" })).json()
   const response = await call("alice", `/notes/${note.id}/shares`, "POST", { includeBody: true, includeEnhanced: false })
   expect(response.status).toBe(200)
   const share = await response.json()
   expect((await call("bob", `/shares/${share.share.id}`, "DELETE")).status).toBe(404)
-  const publicResponse = await call(null, `/shared/${share.token}`)
-  expect(publicResponse.status).toBe(200)
-  expect((await publicResponse.json()).body).toBe("EXPLICIT_SNAPSHOT")
+  expect((await call(null, `/shared/${share.token}`)).status).toBe(401)
+  // Bob holds the link. He reads the snapshot, though the note itself is not his to open.
+  expect((await call("bob", `/notes/${note.id}`)).status).toBe(404)
+  for (const reader of ["bob", "alice", "admin"] as const) {
+    const read = await call(reader, `/shared/${share.token}`)
+    expect(read.status).toBe(200)
+    expect((await read.json()).body).toBe("EXPLICIT_SNAPSHOT")
+  }
   expect((await call("alice", `/shares/${share.share.id}`, "DELETE")).status).toBe(200)
-  expect((await call(null, `/shared/${share.token}`)).status).toBe(404)
+  expect((await call("bob", `/shared/${share.token}`)).status).toBe(404)
+  expect((await call(null, `/shared/${share.token}`)).status).toBe(401)
 })
 
 test("configuration gates distinguish anonymous, user, admin and owner on the server", async () => {

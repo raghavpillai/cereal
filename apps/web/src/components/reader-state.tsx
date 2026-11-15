@@ -1,50 +1,45 @@
 import { Link } from '@tanstack/react-router'
-import { Compass, FileQuestion, TriangleAlert, WifiOff } from 'lucide-react'
 
 /** What a page shows while its code loads: quiet space, because the shell cannot know which page is coming. */
 export function RoutePending() {
   return <div className="route-pending" aria-busy="true"><span className="sr-only" role="status">Loading…</span></div>
 }
 
+/** A note before its text is known: the title, the chips and a few lines, where they will be. */
 export function ReaderLoading() {
-  return <section className="note-page" aria-busy="true" aria-label="Loading"><div className="reader-skeleton">
-    <div className="skeleton kicker-skeleton" /><div className="skeleton title-skeleton" /><div className="skeleton meta-skeleton" /><div className="skeleton line-skeleton" /><div className="skeleton line-skeleton" /><div className="skeleton line-skeleton short" />
+  return <section className="note-doc" aria-busy="true" aria-label="Loading"><div className="note-loading is-page">
+    <div className="skeleton is-title" /><div className="skeleton is-chips" /><div className="skeleton" /><div className="skeleton" /><div className="skeleton is-short" />
     <span className="sr-only" role="status">Loading…</span>
   </div></section>
 }
 
 export function ReaderUnavailable() {
-  return <section className="empty-state">
-    <div className="empty-tile" aria-hidden="true"><FileQuestion /></div>
-    <p className="eyebrow">Shared note</p><h1>This note is unavailable.</h1>
-    <p>The link may have expired or been removed. Ask the sender for a new link.</p>
-    <div className="empty-state-actions"><Link to="/" className="button is-secondary">Back to Cereal</Link></div>
+  return <section className="reader-state">
+    <h1 className="app-heading">This note is unavailable.</h1>
+    <p>The link may have expired or been revoked. Ask the person who shared it for a new link.</p>
   </section>
 }
 
 export function ReaderError({ retry }: { retry: () => void }) {
-  return <section className="empty-state" role="alert">
-    <div className="empty-tile" aria-hidden="true"><WifiOff /></div>
-    <p className="eyebrow">Shared note</p><h1>We couldn’t load this note.</h1>
+  return <section className="reader-state" role="alert">
+    <h1 className="app-heading">We couldn’t load this note.</h1>
     <p>Check your connection and try again.</p>
-    <div className="empty-state-actions"><button type="button" className="button" onClick={retry}>Try again</button></div>
+    <div className="reader-state-actions"><button type="button" className="app-pill" onClick={retry}><span>Try again</span></button></div>
   </section>
 }
 
 export function PageNotFound() {
-  return <section className="empty-state">
-    <div className="empty-tile" aria-hidden="true"><Compass /></div>
-    <p className="eyebrow">Not found</p><h1>There’s nothing at this address.</h1>
+  return <section className="reader-state">
+    <h1 className="app-heading">There’s nothing at this address.</h1>
     <p>The page may have moved, or the link may be mistyped.</p>
-    <div className="empty-state-actions"><Link to="/notes" className="button">Your notes</Link><Link to="/" className="button is-secondary">Home</Link></div>
+    <div className="reader-state-actions"><Link to="/notes" className="app-pill"><span>Your notes</span></Link></div>
   </section>
 }
 
 export function PageError() {
-  return <section className="empty-state" role="alert">
-    <div className="empty-tile" aria-hidden="true"><TriangleAlert /></div>
-    <p className="eyebrow">Something went wrong</p><h1>This page stopped working.</h1>
+  return <section className="reader-state" role="alert">
+    <h1 className="app-heading">This page stopped working.</h1>
     <p>Reloading usually fixes it. Your notes are not affected.</p>
-    <div className="empty-state-actions"><button type="button" className="button" onClick={() => window.location.reload()}>Reload</button><Link to="/" className="button is-secondary">Home</Link></div>
+    <div className="reader-state-actions"><button type="button" className="app-pill" onClick={() => window.location.reload()}><span>Reload</span></button><Link to="/notes" className="app-pill"><span>Your notes</span></Link></div>
   </section>
 }

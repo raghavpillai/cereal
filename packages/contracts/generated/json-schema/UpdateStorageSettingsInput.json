@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/UpdateStorageSettingsInput",
+  "$defs": {
+    "StorageBackend": {
+      "type": "string",
+      "enum": [
+        "local",
+        "s3"
+      ]
+    },
+    "UpdateStorageSettingsInput": {
+      "type": "object",
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/StorageBackend"
+        },
+        "endpoint": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "region": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 40
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bucket": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 63
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prefix": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "forcePathStyle": {
+          "type": "boolean"
+        },
+        "accessKeyId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "secretAccessKey": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 512
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

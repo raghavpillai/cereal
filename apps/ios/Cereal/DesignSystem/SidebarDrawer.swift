@@ -85,7 +85,7 @@ import APIClient
     }
 }
 
-/// The sidebar: Home, Account and workspaces, and My notes. This wrapper is
+/// The sidebar: Home, Account and workspaces, Shared with me, and My notes. This wrapper is
 /// the only view that follows the drag; it moves the panel and dims the page.
 /// The panel's contents are a separate view that is not rebuilt per touch.
 struct SidebarDrawer: View {
@@ -169,6 +169,7 @@ private struct SidebarPanel: View {
                 row("Home", symbol: "house", selected: router.path.isEmpty) { router.path = [] }
                     .accessibilityFocused($focusedOnOpen)
                 row("Account and workspaces", symbol: "person.crop.circle", selected: false) { router.showConnection = true }
+                row("Shared with me", symbol: "link", selected: selected(.sharedWithMe)) { router.path = [.sharedWithMe] }
                 Text("My notes").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.textSecondary)
                     .accessibilityAddTraits(.isHeader)
                     .padding(.horizontal, 14).padding(.top, 18).padding(.bottom, 6)

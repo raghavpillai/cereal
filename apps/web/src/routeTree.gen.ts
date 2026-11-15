@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AccountRouteImport } from './routes/account'
 import { Route as AdminRouteImport } from './routes/admin'
+import { Route as DownloadRouteImport } from './routes/download'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as NotesRouteImport } from './routes/notes'
 import { Route as McpConnectRouteImport } from './routes/mcp.connect'
@@ -33,6 +34,11 @@ const AccountRoute = AccountRouteImport.update({
 const AdminRoute = AdminRouteImport.update({
   id: '/admin',
   path: '/admin',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DownloadRoute = DownloadRouteImport.update({
+  id: '/download',
+  path: '/download',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -75,6 +81,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/account': typeof AccountRoute
   '/admin': typeof AdminRoute
+  '/download': typeof DownloadRoute
   '/login': typeof LoginRoute
   '/notes': typeof NotesRouteWithChildren
   '/mcp/connect': typeof McpConnectRoute
@@ -87,6 +94,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/account': typeof AccountRoute
   '/admin': typeof AdminRoute
+  '/download': typeof DownloadRoute
   '/login': typeof LoginRoute
   '/mcp/connect': typeof McpConnectRoute
   '/mcp/consent': typeof McpConsentRoute
@@ -99,6 +107,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/account': typeof AccountRoute
   '/admin': typeof AdminRoute
+  '/download': typeof DownloadRoute
   '/login': typeof LoginRoute
   '/notes': typeof NotesRouteWithChildren
   '/mcp/connect': typeof McpConnectRoute
@@ -113,6 +122,7 @@ export interface FileRouteTypes {
     | '/'
     | '/account'
     | '/admin'
+    | '/download'
     | '/login'
     | '/notes'
     | '/mcp/connect'
@@ -125,6 +135,7 @@ export interface FileRouteTypes {
     | '/'
     | '/account'
     | '/admin'
+    | '/download'
     | '/login'
     | '/mcp/connect'
     | '/mcp/consent'
@@ -136,6 +147,7 @@ export interface FileRouteTypes {
     | '/'
     | '/account'
     | '/admin'
+    | '/download'
     | '/login'
     | '/notes'
     | '/mcp/connect'
@@ -149,6 +161,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AccountRoute: typeof AccountRoute
   AdminRoute: typeof AdminRoute
+  DownloadRoute: typeof DownloadRoute
   LoginRoute: typeof LoginRoute
   NotesRoute: typeof NotesRouteWithChildren
   McpConnectRoute: typeof McpConnectRoute
@@ -177,6 +190,13 @@ declare module '@tanstack/react-router' {
       path: '/admin'
       fullPath: '/admin'
       preLoaderRoute: typeof AdminRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/download': {
+      id: '/download'
+      path: '/download'
+      fullPath: '/download'
+      preLoaderRoute: typeof DownloadRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -247,6 +267,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AccountRoute: AccountRoute,
   AdminRoute: AdminRoute,
+  DownloadRoute: DownloadRoute,
   LoginRoute: LoginRoute,
   NotesRoute: NotesRouteWithChildren,
   McpConnectRoute: McpConnectRoute,

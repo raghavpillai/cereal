@@ -75,6 +75,25 @@ describe("official MCP SDK Streamable HTTP interoperability",()=>{
    expect(await Promise.race([cancelled.then(()=>true),Bun.sleep(1000).then(()=>false)])).toBe(true)
   }finally{await c.close();await endpoint.close()}
  })
+ test("the endpoint answers at /api/mcp and at its previous address /mcp, and nowhere else",async()=>{
+  const {endpoint}=setup()
+  try{
+   for(const path of["/api/mcp","/mcp"]){
+    const c=new Client({name:"official-sdk-fixture",version:"1.0.0"})
+    await c.connect(new StreamableHTTPClientTransport(new URL(base+path),{fetch:async(input,init)=>endpoint.fetch(new Request(input,init)),requestInit:{headers:{Authorization:"Bearer alice"}}}))
+    try{
+     expect((await c.listTools()).tools.some(tool=>tool.name==="get_account_info")).toBe(true)
+     const result=await c.callTool({name:"get_account_info",arguments:{}});expect((result.structuredContent as {ownerId:string}).ownerId).toBe(alice.principal.id)
+    }finally{await c.close()}
+    const unauthorized=await endpoint.fetch(new Request(base+path));expect(unauthorized.status).toBe(401)
+    const preflight=await endpoint.fetch(new Request(base+path,{method:"OPTIONS",headers:{Origin:base}}));expect(preflight.status).toBe(204)
+   }
+   // The pages under /mcp/ and near-misses are not the endpoint.
+   for(const path of["/mcp/","/mcp/connect","/mcp/consent","/api/mcp/","/api/mcp/extra","/api/mcpx","/api"]){
+    const response=await endpoint.fetch(new Request(base+path,{headers:{Authorization:"Bearer alice"}}));expect(response.status).toBe(404);expect(await response.json()).toEqual({error:"not_found"})
+   }
+  }finally{await endpoint.close()}
+ })
  test("Host/Origin validation, OAuth challenges and body bounds precede tool execution",async()=>{
   let calls=0;const {endpoint}=setup(async()=>{calls++;return{content:[]}})
   try{

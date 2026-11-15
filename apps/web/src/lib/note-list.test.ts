@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { NoteListFilter, NoteSearchPageDTO, NoteSearchResultDTO, NoteSummaryDTO } from '@meeting-notes/contracts'
-import { defaultNoteView, noteFacts } from './notes'
-import { createFeed, createNoteSearch, groupSummariesByDay, invitedLine, provisionalNote, searchableTerms, shortDay, summaryFacts, summaryStatus, summaryView, type FeedPage } from './note-list'
+import { noteFacts } from './notes'
+import { createFeed, createNoteSearch, finishedResults, finishedSummaries, groupSummariesByDay, provisionalNote, searchableTerms, summaryFacts, summaryStatus, type FeedPage } from './note-list'
 
 const now = new Date(2026, 10, 13, 15, 30) // Friday 13 November 2026, local time
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
@@ -269,39 +269,42 @@ describe('search', () => {
 
 describe('what a row shows', () => {
   test('facts come from the row alone and are computed once', () => {
-    const plain = row(1, { title: '  ' }), rich = row(2, { duration: ' 31:07 ', speakerCount: 3, hasSummary: true, hasTranscript: true, generationState: 'ready', transcriptRevision: 2, generatedRevision: 1 })
-    expect(summaryFacts(plain)).toMatchObject({ title: 'Untitled note', details: ['Empty note'], status: null, invited: '' })
-    expect(summaryFacts(row(3, { hasBody: true })).details).toEqual(['Written note'])
-    expect(summaryFacts(rich)).toMatchObject({ details: ['31:07', '3 speakers'], status: { label: 'Summary out of date' } })
-    expect(summaryFacts(row(4, { speakerCount: 1 })).details).toEqual(['1 speaker'])
+    const plain = row(1, { title: '  ', createdAt: new Date(2026, 10, 13, 7, 47).toISOString() }), rich = row(2, { hasSummary: true, hasTranscript: true, generationState: 'ready', transcriptRevision: 2, generatedRevision: 1 })
+    expect(summaryFacts(plain)).toEqual({ title: 'Untitled note', time: '7:47 AM', status: null })
+    expect(summaryFacts(rich)).toMatchObject({ title: 'Note 2', status: { label: 'Notes out of date' } })
     expect(summaryFacts(rich)).toBe(summaryFacts(rich))
-    expect(summaryStatus(row(5, { recordingState: 'recording' }))?.tone).toBe('live')
-    expect(summaryStatus(row(6, { generationState: 'unsupported' }))?.label).toBe('No summary')
+    // A row never reports a recording: such a note is not listed at all.
+    expect(summaryStatus(row(5, { recordingState: 'recording' }))).toBeNull()
+    expect(summaryStatus(row(6, { generationState: 'unsupported' }))?.label).toBe('No notes')
     expect(summaryStatus(row(7, { generationState: 'unsupported', hasSummary: true }))).toBeNull()
   })
 
-  test('who was invited: the first names that fit, then how many more', () => {
-    const person = (shortName: string) => ({ name: `${shortName} Surname`, shortName, initials: shortName[0]! })
-    expect(invitedLine(row(1))).toBe('')
-    expect(invitedLine(row(1, { attendees: { people: [person('Ada')], others: 1, total: 2 } }))).toBe('Ada')
-    expect(invitedLine(row(1, { attendees: { people: [person('Ada'), person('Grace')], others: 2, total: 3 } }))).toBe('Ada, Grace')
-    expect(invitedLine(row(1, { attendees: { people: [person('Ada'), person('Grace'), person('Alan'), person('Kay')], others: 9, total: 10 } }))).toBe('Ada, Grace +7')
+  test('only finished notes are listed and found: a recording in progress and an empty note stay in the apps', () => {
+    const rows = [
+      row(1, { recordingState: 'recording', hasTranscript: true }), row(2, { recordingState: 'stopped' }), row(3),
+      row(4, { hasTranscript: true }), row(5, { hasBody: true }), row(6, { recordingState: 'recording' }), row(7, { recordingState: 'stopped', hasSummary: true }),
+    ]
+    expect(finishedSummaries(rows).map(note => note.id)).toEqual([id(2), id(4), id(5), id(7)])
+    // The order is the server's, and the rows are the same objects, so their cached facts are kept.
+    expect(finishedSummaries(rows)[0]).toBe(rows[1]!)
+    expect(finishedSummaries([])).toEqual([])
+    const results = [result(1), { ...result(2), note: row(2, { recordingState: 'recording', hasSummary: true }) }, { ...result(3), note: row(3, { recordingState: 'stopped' }) }, { ...result(4), note: row(4, { hasSummary: true }) }]
+    expect(finishedResults(results).map(found => found.note.id)).toEqual([id(3), id(4)])
   })
 
   test('days are runs of neighbouring rows, in the order the server sent them', () => {
-    const rows = [row(5, { date: '2026-11-13' }), row(1, { date: '2026-11-13' }), row(9, { date: '2026-11-12' }), row(3, { date: '2025-12-04' })]
-    const groups = groupSummariesByDay(rows, now, 'en-GB')
-    expect(groups.map(group => group.label)).toEqual(['Today', 'Yesterday', 'Thu, 4 Dec 2025'])
+    const rows = [row(5, { date: '2026-11-13' }), row(1, { date: '2026-11-13' }), row(9, { date: '2026-11-12', createdAt: new Date(2026, 10, 12, 9).toISOString() }), row(3, { date: '2025-12-04', createdAt: new Date(2025, 11, 4, 9).toISOString() })]
+    const groups = groupSummariesByDay(rows, now)
+    expect(groups.map(group => group.label)).toEqual(['Today', 'Yesterday', 'Thu, Dec 4'])
     expect(groups.map(group => group.notes.map(note => note.id))).toEqual([[id(5), id(1)], [id(9)], [id(3)]])
     expect(groupSummariesByDay([], now)).toEqual([])
-    expect([shortDay('2026-11-13', now, 'en-GB'), shortDay('2026-11-12', now, 'en-GB'), shortDay('2026-03-02', now, 'en-GB'), shortDay('2025-12-04', now, 'en-GB'), shortDay('nope', now)]).toEqual(['Today', 'Yesterday', '2 Mar', 'Dec 2025', ''])
+    // A note made today for a meeting that happened earlier is listed under the meeting's day, as in the app.
+    expect(groupSummariesByDay([row(1, { date: '2026-11-12' })], now).map(group => group.label)).toEqual(['Yesterday'])
   })
 
-  test('a note opens from its row on the view it will have, with no text yet', () => {
-    expect([summaryView(row(1, { hasSummary: true, hasTranscript: true })), summaryView(row(1, { hasBody: true, hasTranscript: true })), summaryView(row(1, { hasTranscript: true })), summaryView(row(1))]).toEqual(['summary', 'notes', 'transcript', 'summary'])
+  test('a note opens from its row with its heading and no text yet', () => {
     const source = row(8, { title: 'Pricing', duration: '12:00', hasSummary: true, speakerCount: 2, recordingState: 'stopped', transcriptRevision: 3, generatedRevision: 3 }), note = provisionalNote(source)
     expect(note).toMatchObject({ id: id(8), title: 'Pricing', duration: '12:00', body: '', enhanced: '', transcriptSegments: [], recordingState: 'stopped', transcriptRevision: 3, generatedRevision: 3 })
     expect(noteFacts(note).title).toBe('Pricing')
-    expect(defaultNoteView(note)).toBe('summary')
   })
 })

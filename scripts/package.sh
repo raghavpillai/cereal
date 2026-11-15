@@ -37,6 +37,15 @@ bundle="${CEREAL_BUNDLE_OUT:-$project_root/dist}/Cereal.app"
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 install -m 755 "$binary" "$bundle/Contents/MacOS/cereal"
 install -m 644 "$project_root/apps/desktop/assets/Info.plist" "$bundle/Contents/Info.plist"
+# CEREAL_BUNDLE_VERSION packages the same build under another version number (default: the plist's own).
+# The app reads its version from its bundle, so this is how an older or newer build is made for testing updates.
+if [[ -n "${CEREAL_BUNDLE_VERSION:-}" ]]; then
+  if [[ ! "$CEREAL_BUNDLE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+    printf 'CEREAL_BUNDLE_VERSION must look like 1.2.3\n' >&2
+    exit 2
+  fi
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $CEREAL_BUNDLE_VERSION" "$bundle/Contents/Info.plist"
+fi
 if [[ -f "$project_root/apps/desktop/native/OpenOats-LICENSE" ]]; then
   install -m 644 "$project_root/apps/desktop/native/OpenOats-LICENSE" "$bundle/Contents/Resources/OpenOats-LICENSE"
 fi

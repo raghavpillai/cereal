@@ -6,9 +6,12 @@ mod chat;
 mod chrome;
 mod desktop_preferences;
 mod environment;
+mod fetch;
+mod handoff;
 mod home;
 mod input;
 mod lazy;
+mod link;
 mod live;
 mod live_view;
 mod login;
@@ -21,11 +24,15 @@ mod recording;
 mod recording_view;
 mod screens;
 mod server;
+mod shared;
+mod shared_view;
 mod smoke;
 mod store;
 mod summary;
 mod tour;
 mod ui;
+mod update;
+mod update_view;
 #[cfg(test)]
 mod validation;
 use gpui::*;
@@ -41,6 +48,10 @@ fn main() {
         }
     }
     let application = Application::new().with_assets(ui::Assets);
+    // `cereal://` URLs: a shared note, a note of one's own, the answer to a
+    // sign-in in the browser. One that launches the app arrives before the
+    // window exists and is read once it does.
+    application.on_open_urls(shared_view::receive);
     application.on_reopen(|cx| {
         if pill::reopen_preview(cx) {
             return;
@@ -67,6 +78,8 @@ fn main() {
         cx.set_menus(vec![Menu {
             name: "Cereal".into(),
             items: vec![
+                MenuItem::action("Check for Updates…", app::CheckForUpdates),
+                MenuItem::separator(),
                 MenuItem::action("New Note", app::NewNote),
                 MenuItem::action("Search Notes", app::Search),
                 MenuItem::action("Close Window", app::CloseWindow),
@@ -189,6 +202,9 @@ fn main() {
             .and_then(|seconds| seconds.parse::<u64>().ok());
         pill::install(handle, if probe.is_some() { "pill" } else { &mode }, cx);
         store::install(handle, cx);
+        shared_view::install(handle, cx);
+        // What an earlier update left behind is cleared away.
+        update::tidy();
         if let Some(seconds) = probe {
             assert!(
                 crate::environment::var_os("CEREAL_DATA_DIR").is_some(),

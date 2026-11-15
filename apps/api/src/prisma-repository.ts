@@ -1,7 +1,8 @@
 import { Effect, Schema } from "effect"
 import { createDatabase, type Database } from "@meeting-notes/database"
 import { NoteDTO, SharedNoteDTO, type ShareDTO, type CreateNoteInput } from "@meeting-notes/contracts"
-import { BOOTSTRAP_OWNER_ID, RepositoryError, scopeRepository, transcriptContentKey, type NotesRepositoryService, type StoredShare, type StoredAudioChunk } from "./repository"
+import { BOOTSTRAP_OWNER_ID, RepositoryError, scopeRepository, transcriptContentKey, withoutPlaceholderTitle, type NotesRepositoryService, type StoredShare, type StoredAudioChunk } from "./repository"
+import {isDefaultNoteTitle} from "./meeting-context-errors"
 import {meetingSearchTerms,transcriptPassage} from "./meeting-search"
 import {DEFAULT_ORGANIZATION_ID} from "./organizations"
 import {makePrismaLiveRepository,replaceLiveWithin} from "./live/prisma-repository"
@@ -111,11 +112,12 @@ export function makePrismaRepository(databaseUrl: string) {
       const n=await tx.note.findUnique({where:{id},include});if(!n||n.transcriptRevision!==revision||n.recordingState==="recording"||(["analyzing_transcript","writing_notes"].includes(n.generationState)&&n.updatedAt.getTime()>Date.now()-180000)||await tx.audioChunk.count({where:{noteId:id,state:{not:"ready"}}}))return null
       return noteDTO(await tx.note.update({where:{id},data:{generationState:"writing_notes",generationRun:runId},include}))
     })),
-    finishGeneration: (id,revision,runId,enhanced)=>attempt("finishGeneration",()=>db.$transaction(async tx=>{
+    finishGeneration: (id,revision,runId,enhanced,title)=>attempt("finishGeneration",()=>db.$transaction(async tx=>{
       await tx.$queryRaw`SELECT "id" FROM "Note" WHERE "id" = ${id}::uuid FOR UPDATE`
       const n=await tx.note.findUnique({where:{id},include});if(!n||n.generationRun!==runId)return null
       if(n.transcriptRevision!==revision||n.recordingState==="recording"||await tx.audioChunk.count({where:{noteId:id,state:{not:"ready"}}})){await tx.note.update({where:{id},data:{generationState:"idle",generationRun:null}});return null}
-      return noteDTO(await tx.note.update({where:{id},data:{generationRun:null,generationState:enhanced===null?"failed":"ready",...(enhanced===null?{}:{enhanced,generatedRevision:revision})},include}))
+      // The row is locked: `n.title` is the title as it is now. One the person or a calendar event has given the note is kept.
+      return noteDTO(await tx.note.update({where:{id},data:{generationRun:null,generationState:enhanced===null?"failed":"ready",...(enhanced===null?{}:{enhanced,generatedRevision:revision,...(title&&isDefaultNoteTitle(n.title)?{title}:{})})},include}))
     })),
 
     listNotes: () => attempt("listNotes", async () => (await db.note.findMany({ include, orderBy: { updatedAt: "desc" } })).map(noteDTO)),
@@ -125,6 +127,7 @@ export function makePrismaRepository(databaseUrl: string) {
       await tx.$queryRaw`SELECT "id" FROM "Note" WHERE "id" = ${id}::uuid FOR UPDATE`
       const current = await tx.note.findUnique({ where: { id }, include })
       if (!current) return null
+      input = withoutPlaceholderTitle(input, current.title)
       const changed = input.transcriptSegments !== undefined && transcriptContentKey(input.transcriptSegments) !== transcriptContentKey(current.transcriptSegments)
       const edited = changed || (["title", "body", "enhanced", "duration"] as const).some(key => input[key] !== undefined && input[key] !== current[key]) || input.date !== undefined && input.date !== current.date.toISOString().slice(0, 10)
       const { transcriptSegments, date, ...fields } = input

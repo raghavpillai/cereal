@@ -866,7 +866,7 @@ struct NoteMetaChips: View {
     }
 
     private var metadataCapsule: some View {
-        HStack(spacing: 6) {
+        NoteMetaCapsule {
             if showCalendarIcon {
                 Image(systemName: "calendar").font(.system(size: 14.5))
             }
@@ -874,12 +874,22 @@ struct NoteMetaChips: View {
             Image(systemName: "person.2").font(.system(size: 14)).padding(.leading, 9)
             Text(attendeeCount > 0 ? "+\(attendeeCount)" : "Me")
         }
-        .font(.system(size: 14))
-        .foregroundStyle(Theme.textSecondary)
-        .padding(.leading, 14).padding(.trailing, 17)
-        .frame(height: 36)
-        .contentShape(Rectangle().inset(by: -4))
-        .overlay(Capsule().strokeBorder(Self.outline, lineWidth: 1))
+    }
+}
+
+/// The outlined capsule of facts under a note title: 36 pt tall, 14 pt text.
+/// Shared by a note's own page and by a note someone else shared.
+struct NoteMetaCapsule<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        HStack(spacing: 6) { content }
+            .font(.system(size: 14))
+            .foregroundStyle(Theme.textSecondary)
+            .padding(.leading, 14).padding(.trailing, 17)
+            .frame(height: 36)
+            .contentShape(Rectangle().inset(by: -4))
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.10), lineWidth: 1))
     }
 }
 

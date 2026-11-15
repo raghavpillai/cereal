@@ -1021,6 +1021,12 @@ impl crate::app::Cereal {
         if crate::audio::preview_mode() {
             return;
         }
+        // Connected to a server with nobody signed in: there is no private
+        // history to write and no account to keep it under. (A link's page
+        // can be opened and left in this state.)
+        if crate::server::enabled() && crate::account::identity().is_none() {
+            return;
+        }
         // Encode here, write in the background: the next render starts the
         // write (`drain_chat_history`), and identical bytes are not queued.
         match history_path().and_then(|path| {

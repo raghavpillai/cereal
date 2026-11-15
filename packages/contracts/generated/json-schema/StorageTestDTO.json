@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/StorageTestDTO",
+  "$defs": {
+    "StorageBackend": {
+      "type": "string",
+      "enum": [
+        "local",
+        "s3"
+      ]
+    },
+    "StorageTestDTO": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "backend": {
+          "$ref": "#/$defs/StorageBackend"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "write",
+                "read",
+                "delete"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok",
+        "backend",
+        "step",
+        "message"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

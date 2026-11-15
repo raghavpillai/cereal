@@ -168,6 +168,20 @@ impl Note {
         }
     }
 
+    /// Take the title the server gave a note nobody had named (it names one
+    /// when its notes are generated). Only a note whose title is still the
+    /// empty or placeholder one that was sent with the request takes it: a
+    /// title typed since then, or any real title, is the person's and stays.
+    /// Returns whether the title changed.
+    pub fn adopt_server_title(&mut self, submitted: &str, remote: &str) -> bool {
+        let unnamed = crate::meeting::is_default_note_title;
+        if self.title != submitted || !unnamed(&self.title) || unnamed(remote) {
+            return false;
+        }
+        self.title = remote.to_owned();
+        true
+    }
+
     /// Existing enhanced notes form the baseline when migrating an older file.
     pub fn normalize_generation_revision(&mut self) {
         if !self.enhanced.trim().is_empty() && self.generated_revision.is_none() {

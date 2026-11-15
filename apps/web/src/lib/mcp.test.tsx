@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ConnectionInstructions, ConnectionRow } from '../components/mcp/connect'
 import { ConsentDetails, InvalidAuthorization, MCPConsent } from '../components/mcp/consent'
-import { Login } from '../components/account/session-gate'
+import { signInPath } from '../components/account/session-gate'
 import { createMCPClient, type MCPAuthorization } from './mcp-client'
 import { AdminClientError } from './admin-client'
 import { mcpConnectionURL, safeConsentCallback, safeOAuthResume, signedOAuthQuery } from './mcp-state'
@@ -13,8 +13,8 @@ const stub = (handler: (request: Request, init?: RequestInit) => Response | Prom
 
 describe('MCP authorization boundaries', () => {
   test('server address always uses this instance origin and requires HTTPS outside loopback', () => {
-    expect(mcpConnectionURL('https://instance.example')).toBe('https://instance.example/mcp')
-    expect(mcpConnectionURL('http://localhost:3000')).toBe('http://localhost:3000/mcp')
+    expect(mcpConnectionURL('https://instance.example')).toBe('https://instance.example/api/mcp')
+    expect(mcpConnectionURL('http://localhost:3000')).toBe('http://localhost:3000/api/mcp')
     for (const value of ['http://public.example', 'https://user:password@instance.example', 'https://instance.example/path', 'https://instance.example?url=elsewhere', 'javascript:alert(1)']) expect(mcpConnectionURL(value)).toBeNull()
   })
   test('signed query extraction preserves provider signed keys and ignores unsigned identity/returnTo', () => {
@@ -47,6 +47,7 @@ describe('MCP cookie transport', () => {
       calls.push({ path: url.pathname, method: request.method, body: request.method === 'POST' ? await request.json() : null })
       if (url.pathname.endsWith('authorize-info')) { expect(url.searchParams.get('oauth_query')).toBe(signed); return Response.json(preview) }
       if (url.pathname.endsWith('/consent')) return Response.json({ redirect: true, url: 'http://localhost:8787/callback?app=cedar&error=access_denied' })
+      if (url.pathname.endsWith('/continue')) return Response.json({ redirect: true, url: `https://instance.example/mcp/consent?${signed}` })
       if (url.pathname.endsWith('/revoke')) return Response.json({ success: true })
       return Response.json({ connections: [] })
     }))
@@ -56,6 +57,10 @@ describe('MCP cookie transport', () => {
     expect(await client.revoke('grant/one')).toEqual({ success: true })
     expect(calls[1]).toEqual({ path: '/api/auth/oauth2/consent', method: 'POST', body: { accept: false, oauth_query: signed } })
     expect(calls[3]).toEqual({ path: '/api/auth/mcp/connections/grant%2Fone/revoke', method: 'POST', body: {} })
+    // After sign-in on the sign-in page, the request carries on from the connect page with the query it arrived with.
+    const next = await client.resume(signed)
+    expect(calls[4]).toEqual({ path: '/api/auth/oauth2/continue', method: 'POST', body: { postLogin: true, oauth_query: signed } })
+    expect(safeOAuthResume(next.url, 'https://instance.example')).toBe(`https://instance.example/mcp/consent?${signed}`)
   })
   test('expired session and malformed identity never enter authorization UI', async () => {
     const expired = createMCPClient('https://instance.example', stub(() => Response.json({ error: 'private server detail' }, { status: 401 })))
@@ -72,8 +77,8 @@ describe('MCP cookie transport', () => {
 
 describe('MCP page states', () => {
   test('public instructions contain actual self-hosted address and standard OAuth command', () => {
-    const html = renderToStaticMarkup(<ConnectionInstructions url="https://instance.example/mcp" />)
-    expect(html).toContain('claude mcp add --transport http meeting-notes https://instance.example/mcp')
+    const html = renderToStaticMarkup(<ConnectionInstructions url="https://instance.example/api/mcp" />)
+    expect(html).toContain('claude mcp add --transport http meeting-notes https://instance.example/api/mcp')
     expect(html).toContain('review the permissions'); expect(html).not.toContain('API key')
   })
   test('signed preview displays explicit read/write permissions and global workspace effect', () => {
@@ -92,8 +97,8 @@ describe('MCP page states', () => {
     expect(html).toContain('Start again'); expect(html).not.toContain('>Allow<'); expect(html).not.toContain('>Deny<')
     expect(renderToStaticMarkup(<MCPConsent />)).toContain('Start again')
   })
-  test('logged-out uses existing account login and connected grant offers explicit Disconnect', () => {
-    expect(renderToStaticMarkup(<Login connected={async () => {}} />)).toContain('current-password')
+  test('logged-out goes to the sign-in page and back; a connected grant offers explicit Disconnect', () => {
+    expect(signInPath({ pathname: '/mcp/connect', search: '?sig=a&ba_param=sig', hash: '' })).toBe('/login?return=%2Fmcp%2Fconnect%3Fsig%3Da%26ba_param%3Dsig')
     const html = renderToStaticMarkup(<ConnectionRow connection={{ id: 'grant', clientId: 'client', clientName: '<script>bad</script>', scopes: ['notes:read'], createdAt: '2026-11-13T12:00:00Z', updatedAt: '2026-11-13T12:00:00Z' }} disconnect={() => {}} />)
     expect(html).toContain('&lt;script&gt;bad&lt;/script&gt;'); expect(html).toContain('Disconnect'); expect(html).not.toContain('<script>bad')
   })

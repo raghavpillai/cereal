@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/UpdateSignInSettingsInput",
+  "$defs": {
+    "UpdateSignInSettingsInput": {
+      "type": "object",
+      "properties": {
+        "password": {
+          "type": "boolean"
+        },
+        "google": {
+          "type": "boolean"
+        },
+        "allowedEmails": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 254
+          },
+          "maxItems": 500
+        },
+        "googleClientId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 5,
+              "maxLength": 255
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "googleClientSecret": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 4,
+              "maxLength": 512
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

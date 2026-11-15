@@ -1,7 +1,9 @@
 import {createHash,timingSafeEqual} from "node:crypto"
 import {readFile} from "node:fs/promises"
 import {betterAuth} from "better-auth"
-import {APIError,createAuthMiddleware} from "better-auth/api"
+import {APIError,createAuthEndpoint,createAuthMiddleware} from "better-auth/api"
+import {setSessionCookie} from "better-auth/cookies"
+import {z} from "zod"
 import {prismaAdapter} from "better-auth/adapters/prisma"
 import {bearer,organization,admin as adminPlugin} from "better-auth/plugins"
 import {createAccessControl} from "better-auth/plugins/access"
@@ -13,7 +15,8 @@ import {Effect} from "effect"
 import type {Database} from "@meeting-notes/database"
 import type {CreateUserInput,UserDTO} from "@meeting-notes/contracts"
 import {AuthPrincipal,type PrincipalData,type ApiError} from "@meeting-notes/contracts/api"
-import {loadSecretBox} from "./admin-secrets"
+import {loadSecretBox,secretBoxFromKey} from "./admin-secrets"
+import {makeSignInService,passwordOnly,type GoogleEndpoints,type SignInPolicy} from "./sign-in"
 import {withAccountMutation} from "./account-mutations"
 import {makeMcpAuthPlugins,makeMcpAuthentication} from "./mcp-auth"
 export {AuthPrincipal}
@@ -34,7 +37,18 @@ const boundary=<A>(f:()=>Promise<A>)=>Effect.tryPromise({try:f,catch:(e):ApiErro
  return{error:"unavailable",message:"Account service is temporarily unavailable"}
 }})
 const instanceAccess=createAccessControl(adminStatements)
-export function makeAuthenticationEngine(db:Database,options:{secret:string},baseURL:string,origins:string[]){
+/** Sessions for people who proved who they are some other way than a password (Google, or a browser handing
+ * its account to an app). Callable only from this process: it has no URL. Better Auth creates the session and
+ * sets the cookie, so the bearer plugin adds the same `set-auth-token` header it adds after password sign-in. */
+const sessionIssuer={id:"cereal-session-issuer",endpoints:{issueSession:createAuthEndpoint.serverOnly({method:"POST",body:z.object({userId:z.string().uuid(),remember:z.boolean()})},async ctx=>{
+ const user=await ctx.context.internalAdapter.findUserById(ctx.body.userId)
+ if(!user)throw new APIError("UNAUTHORIZED")
+ const session=await ctx.context.internalAdapter.createSession(user.id,!ctx.body.remember)
+ if(!session)throw new APIError("UNAUTHORIZED")
+ await setSessionCookie(ctx,{session,user},!ctx.body.remember)
+ return ctx.json({userId:user.id})
+})}}
+export function makeAuthenticationEngine(db:Database,options:{secret:string},baseURL:string,origins:string[],policy:()=>Promise<SignInPolicy>=async()=>passwordOnly){
  return betterAuth({
   disabledPaths:["/token"],database:prismaAdapter(db,{provider:"postgresql",transaction:true}),secret:options.secret,baseURL:baseURL,basePath:"/api/auth",trustedOrigins:origins,
   emailAndPassword:{enabled:true,minPasswordLength:12,maxPasswordLength:128,autoSignIn:false},
@@ -43,13 +57,15 @@ export function makeAuthenticationEngine(db:Database,options:{secret:string},bas
   // Supported provider pre-hook adds review before the provider signs browser
   // continuation data. Refresh never visits authorize and remains silent.
   hooks:{before:createAuthMiddleware(async ctx=>{
+   // Turned off on the admin panel: refused for every account, before any password is looked at.
+   if(ctx.path==="/sign-in/email"&&!(await policy()).password)throw new APIError("FORBIDDEN",{code:"PASSWORD_SIGN_IN_DISABLED",message:"Email and password sign-in is turned off on this server"})
    if(ctx.path!=="/oauth2/authorize"||!ctx.request||ctx.request.method!=="GET"||new URL(ctx.request.url).pathname!=="/api/auth/oauth2/authorize")return
    const prompts=String(ctx.query?.prompt??"").split(/\s+/).filter(Boolean)
    if(prompts.includes("none"))throw new APIError("BAD_REQUEST",{error:"consent_required",error_description:"Explicit client consent is required"})
    return {context:{query:{...ctx.query,prompt:[...new Set([...prompts,"consent"])].join(" ")}}}
   })},
   databaseHooks:{user:{create:{before:async(user)=>({data:{...user,role:"user"}})}}},
-  plugins:[...makeMcpAuthPlugins(db,baseURL),bearer({requireSignature:true}),adminPlugin({defaultRole:"user",ac:instanceAccess,roles:{
+  plugins:[...makeMcpAuthPlugins(db,baseURL),bearer({requireSignature:true}),sessionIssuer,adminPlugin({defaultRole:"user",ac:instanceAccess,roles:{
    owner:instanceAccess.newRole({user:["create","list","set-role"],session:[]}),
    admin:instanceAccess.newRole({user:["create","list"],session:[]}),
    user:instanceAccess.newRole({user:[],session:[]}),
@@ -68,13 +84,28 @@ export function makeAuthenticationEngine(db:Database,options:{secret:string},bas
 export type AuthenticationEngine=ReturnType<typeof makeAuthenticationEngine>
 /** Only an explicit operator token can initialize the owner. Anonymous signup is
  * never mounted. Better Auth handles hashing, sessions, cookies and revocation. */
-export function makeAuthenticationService(db:Database,bootstrapToken:string,options:{secret:string;baseURL:string;trustedOrigins?:ReadonlyArray<string>}){
+export function makeAuthenticationService(db:Database,bootstrapToken:string,options:{secret:string;baseURL:string;trustedOrigins?:ReadonlyArray<string>;
+ /** The sign-in settings as they are right now. Without it only email and password sign-in exists. */
+ signIn?:()=>Promise<SignInPolicy>;
+ /** Google's endpoints and transport; only tests replace them. */
+ google?:{endpoints?:GoogleEndpoints;fetch?:typeof fetch};clock?:()=>Date}){
  const base=new URL(options.baseURL)
  if(!["https:","http:"].includes(base.protocol)||base.username||base.password||base.pathname!=="/"||base.search||base.hash||base.protocol==="http:"&&!["localhost","127.0.0.1","[::1]"].includes(base.hostname))throw new Error("PUBLIC_BASE_URL must use HTTPS except for loopback development")
  if(options.secret.length<32)throw new Error("Authentication secret must contain at least 32 characters")
  const origins=[base.origin];if(base.protocol==="http:"){const alias=new URL(base);alias.hostname=base.hostname==="localhost"?"127.0.0.1":"localhost";origins.push(alias.origin)}
  for(const raw of options.trustedOrigins??[]){const origin=new URL(raw);if(raw!==origin.origin||origin.username||origin.password||origin.protocol!=="https:"&&!(origin.protocol==="http:"&&["localhost","127.0.0.1","[::1]"].includes(origin.hostname)))throw new Error("AUTH_TRUSTED_ORIGINS must contain explicit HTTPS origins or loopback development origins");if(!origins.includes(origin.origin))origins.push(origin.origin)}
- const auth=makeAuthenticationEngine(db,options,base.origin,origins)
+ const policy=options.signIn??(async()=>passwordOnly)
+ const auth=makeAuthenticationEngine(db,options,base.origin,origins,policy)
+ /** Only the address and the browser name are kept with the session, as for password sign-in. No credentials are passed on. */
+ async function issueSession(userId:string,remember:boolean,request:Headers){
+  const headers=new Headers();for(const name of["user-agent","x-forwarded-for"]){const value=request.get(name);if(value)headers.set(name,value)}
+  const issued=await auth.api.issueSession({body:{userId,remember},headers,returnHeaders:true})
+  return{cookies:issued.headers.getSetCookie(),token:issued.headers.get("set-auth-token")??""}
+ }
+ const signIn=makeSignInService({db,origin:base.origin,policy,issueSession,defaultOrganizationId:DEFAULT_ORGANIZATION_ID,
+  // The state table holds a PKCE verifier for a few minutes; it is sealed with a key derived from the authentication secret.
+  box:secretBoxFromKey(createHash("sha256").update("cereal.sign-in.state:"+options.secret).digest()),
+  ...(options.google?.endpoints?{endpoints:options.google.endpoints}:{}),...(options.google?.fetch?{fetch:options.google.fetch}:{}),...(options.clock?{clock:options.clock}:{})})
  const organizations=makeOrganizationService(db,auth)
  const mcp=makeMcpAuthentication(db,auth,base.origin)
  const allowed=new Map([
@@ -87,7 +118,7 @@ export function makeAuthenticationService(db:Database,bootstrapToken:string,opti
   ["/oauth2/continue",["POST"]],["/oauth2/public-client",["GET"]],["/oauth2/public-client-prelogin",["POST"]],
  ])
  return {
-  organizations,mcp,
+  organizations,mcp,signIn,
   async resolve(headers:Headers):Promise<PrincipalData|null>{
    if(isBootstrapToken(headers,bootstrapToken)){const owner=await db.user.findUnique({where:{id:BOOTSTRAP_OWNER_ID}});return owner?{...userDTO(owner),source:"bootstrap",expiresAt:null}:null}
    // Explicit bearer credentials take precedence over cookies, so a stale browser

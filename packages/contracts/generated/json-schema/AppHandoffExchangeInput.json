@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/AppHandoffExchangeInput",
+  "$defs": {
+    "AppHandoffExchangeInput": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "verifier": {
+          "type": "string",
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "code",
+        "verifier"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

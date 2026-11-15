@@ -1,0 +1,170 @@
+/* The desktop app's controls, value for value (apps/desktop/src/ui.rs and chrome.rs):
+   the title-bar-height header, pills, icon tools, floating cards and their rows.
+   Sizes are the app's points; one point is one CSS pixel. */
+
+:root {
+  /* Text the app sets without a line height of its own inherits its window's: 18 px (apps/desktop/src/app.rs). */
+  --app-leading: 18px;
+}
+
+/* Where a line of text sits. The app's text engine and a browser round a baseline differently at 1x:
+   measured against the app, 13 px labels, 14/20 and 16/24 text stand one pixel lower there than a
+   browser sets them, and 12 px text and the 24/28 display face one pixel higher. Each style is moved
+   by that pixel, so glyphs land where the app draws them; boxes are untouched. */
+:is(.app-pill, .app-menu-row, .site-back, .site-link, .share-button, .note-view, .note-chip, .share-anyone) > span,
+.share-owner-name > span:first-child, .app-menu-who > span { position: relative; top: 1px; }
+.app-small, .app-heading, .share-label, .share-hint { position: relative; top: -1px; }
+
+.icon { display: block; flex-shrink: 0; }
+.app-heading { margin: 0; font: 400 24px / 28px var(--font-display); letter-spacing: 0; color: var(--app-text); text-wrap: wrap; }
+.app-small { font-size: 12px; line-height: 16px; color: var(--app-muted); }
+
+/* The keyboard focus outline: 1.5 px of the focus gold, 1 px clear of the control. */
+:is(.app-tool, .app-pill, .app-menu-row, .site-back, .site-link, .site-avatar, .site-mark, .note-row, .note-view, .note-chip.is-button, .share-button, .share-link-button, .share-revoke, .transcript-toggle, .transcript-body, .transcript-panel):focus-visible {
+  outline: 1.5px solid var(--app-focus); outline-offset: 1px;
+}
+
+/* ── Header: where the app has its title bar, and as tall ──────────────── */
+.site-header {
+  position: sticky; top: 0; z-index: 30;
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
+  height: 48px; padding: 8px 8px 0 88px;
+  background: var(--app-bg);
+  view-transition-name: site-header;
+}
+.site-mark {
+  position: absolute; left: 16px; top: 8px;
+  display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px;
+  color: var(--app-text);
+}
+.site-mark .mark { width: 22px; height: 22px; }
+.site-nav, .site-actions { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.header-slot { display: contents; }
+/* The app's back pill: on a note it carries the chevron and leads back to the list. */
+.site-back {
+  display: flex; align-items: center; justify-content: center; gap: 2px;
+  height: 28px; min-width: 44px; padding: 0 8px;
+  border: 1px solid var(--app-hairline); border-radius: 999px;
+  color: var(--app-secondary); font-size: 13px; line-height: var(--app-leading); text-decoration: none; white-space: nowrap;
+}
+.site-link {
+  display: flex; align-items: center; height: 28px; padding: 0 8px; border-radius: 999px;
+  color: var(--app-secondary); font-size: 13px; line-height: var(--app-leading); text-decoration: none; white-space: nowrap;
+}
+:is(.site-back, .site-link, .site-mark):hover { background: var(--app-hover); }
+.site-avatar {
+  display: grid; place-items: center; flex-shrink: 0; width: 28px; height: 28px; padding: 0;
+  border: 0; border-radius: 50%; background: var(--app-fill); color: var(--app-text);
+  font-size: 12px; line-height: var(--app-leading);
+}
+.site-avatar.is-placeholder { background: var(--app-hover); }
+.account-popover { top: 32px; right: 0; min-width: 200px; max-width: min(280px, calc(100vw - 16px)); }
+.app-menu-who { display: flex; flex-direction: column; gap: 2px; padding: 6px 6px 4px; font-size: 13px; line-height: var(--app-leading); overflow-wrap: anywhere; }
+.app-menu-who small { font-size: 12px; line-height: 16px; color: var(--app-muted); }
+/* On a phone the administration link moves into the menu behind the initial. */
+.site-link-row { display: none; }
+
+/* ── Controls ──────────────────────────────────────────────────────────── */
+.app-tool {
+  display: grid; place-items: center; flex-shrink: 0; width: 28px; height: 28px; padding: 0;
+  border: 0; border-radius: 6px; background: transparent; color: var(--app-muted);
+}
+.app-tool.is-small { width: 20px; height: 20px; border-radius: 4px; }
+.app-tool:hover:not(:disabled) { background: var(--app-hover); }
+.app-pill {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; flex-shrink: 0;
+  height: 28px; padding: 0 12px;
+  border: 1px solid var(--app-hairline); border-radius: 999px; background: transparent;
+  color: var(--app-text); font-size: 13px; line-height: var(--app-leading); text-decoration: none; white-space: nowrap;
+}
+.app-pill:hover:not(:disabled) { background: hsl(0 0% 50% / 0.14); }
+.app-pill.is-primary { border-color: transparent; background: var(--app-text); color: var(--app-bg); }
+.app-pill.is-primary:hover { background: var(--app-text); opacity: 0.9; }
+.app-pill .mark { width: 16px; height: 16px; }
+:is(.app-tool, .app-pill, .app-menu-row, .site-back, .site-link, .site-avatar, .note-view, .share-button, .share-link-button, .transcript-toggle) {
+  transition: background-color var(--dur-hover-out) var(--ease-fade), opacity var(--dur-hover-out) var(--ease-fade), transform var(--dur-snappy) var(--spring-snappy);
+}
+:is(.app-tool, .app-pill, .site-back, .site-link, .site-avatar, .share-button, .share-link-button, .transcript-toggle):active:not(:disabled) { transform: scale(var(--squash)); transition-duration: var(--dur-hover-in), var(--dur-hover-in), var(--dur-press); }
+.app-separator { flex-shrink: 0; height: 1px; background: var(--app-border); }
+.app-separator.is-roomy { margin: 6px 0; }
+
+/* A floating card: menus, the Share card, a note's details. */
+.app-popover-root { position: relative; display: flex; }
+.app-popover {
+  position: absolute; z-index: 40; top: 32px; right: 0;
+  display: flex; flex-direction: column; padding: 6px;
+  border: 1px solid var(--app-border); border-radius: 12px;
+  background: var(--app-card); color: var(--app-text);
+  box-shadow: var(--app-shadow-lg);
+  transform-origin: calc(100% - 20px) 0;
+  animation: panel-in var(--dur-gooey) var(--spring-gooey) backwards, fade-in calc(var(--dur-gooey) * 0.4) var(--ease-fade) backwards;
+}
+.app-popover:focus { outline: none; }
+.app-popover[data-state='closing'] { pointer-events: none; animation: panel-out var(--dur-gooey-exit) var(--ease-exit) both, fade-out var(--dur-gooey-exit) var(--ease-fade) both; }
+.app-menu-row {
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  width: 100%; height: 28px; padding: 0 6px;
+  border: 0; border-radius: 6px; background: transparent;
+  color: var(--app-text); font-size: 13px; line-height: var(--app-leading); text-align: left; text-decoration: none; white-space: nowrap;
+}
+.app-menu-row .icon { color: var(--app-secondary); }
+.app-menu-row:is(:hover, :focus-visible):not(:disabled) { background: var(--app-hover); }
+.app-menu-row:disabled { opacity: 0.45; }
+
+/* The find capsule: a search field the size of the app's own. */
+.app-find {
+  display: flex; align-items: center; gap: 4px;
+  width: 220px; max-width: 60%; height: 32px; padding: 0 4px 0 8px;
+  border: 0.5px solid var(--app-border); border-radius: 999px;
+  color: var(--app-muted);
+}
+.app-find input {
+  flex: 1; min-width: 0; padding: 0; border: 0; background: transparent; outline: none;
+  color: var(--app-text); font: 12px / 18px var(--font-ui);
+}
+.app-find input::placeholder { color: var(--app-muted); opacity: 1; }
+.app-find input::-webkit-search-cancel-button { display: none; }
+.app-find:focus-within { border-color: var(--app-focus); }
+
+/* The theme control swaps sun and moon with a quarter turn. */
+.theme-toggle .icon { grid-area: 1 / 1; transition: transform var(--dur-gooey) var(--spring-gooey), opacity var(--dur-snappy-exit) var(--ease-fade); }
+.theme-toggle .theme-moon { opacity: 0; transform: rotate(-70deg) scale(0.6); }
+:root[data-theme='dark'] .theme-toggle .theme-sun { opacity: 0; transform: rotate(70deg) scale(0.6); }
+:root[data-theme='dark'] .theme-toggle .theme-moon { opacity: 1; transform: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .theme-toggle .theme-sun { opacity: 0; transform: rotate(70deg) scale(0.6); }
+  :root:not([data-theme='light']) .theme-toggle .theme-moon { opacity: 1; transform: none; }
+}
+
+/* "Open in Cereal": a pill with the mark; on a phone the mark alone. */
+.open-in-app .mark { color: var(--app-muted); }
+
+/* States a page can be in instead of its content: unavailable, in progress, an error. */
+.reader-state {
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+  max-width: 560px; margin: 0 auto; padding: 78px 24px 96px; text-align: center;
+}
+.reader-state > p { max-width: 350px; margin: 0; color: var(--app-muted); font-size: 14px; line-height: 22px; }
+.reader-state-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 10px; }
+
+@media (hover: none) {
+  :is(.app-tool, .app-menu-row, .site-back, .site-link, .site-mark):hover:not(:disabled) { background: transparent; }
+  .app-pill:hover:not(:disabled) { background: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .theme-toggle .icon { transform: none !important; }
+}
+@media (max-width: 600px) {
+  .site-header { padding-left: 48px; }
+  .site-mark { left: 10px; }
+  .site-actions { gap: 6px; }
+  .site-actions > .site-link, .header-slot > .site-link { display: none; }
+  .site-link-row { display: flex; }
+  .open-in-app { width: 28px; padding: 0; }
+  .open-in-app-label { display: none; }
+  .open-in-app.is-prominent { width: auto; padding: 0 12px; }
+  .open-in-app.is-prominent .open-in-app-label { display: inline; }
+}
+@media print {
+  .site-header { display: none; }
+}

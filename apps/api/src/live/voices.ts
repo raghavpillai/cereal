@@ -61,6 +61,8 @@ export interface VoiceMatcherOptions {
   readonly parts: (noteId: string) => Promise<ReadonlyArray<{ channel: string; startMs: number; durationMs: number; hash: string }>>
   /** Directory of the durable parts (`<dir>/<note>/<hash>.wav`, as the processing service stores them). */
   readonly storageDir: string
+  /** Reads one durable part from wherever audio is kept (`storage.ts`). Default: the file in `storageDir`. */
+  readonly readPart?: (noteId: string, hash: string) => Promise<Uint8Array | null>
   /** The batch recogniser: speaker turns of one file, speaker in the last `:` field of `speakerId`. */
   readonly transcribe: (input: { audio: Uint8Array; channel: AudioChannelName; chunkId: string; startMs: number; durationMs: number }) => Promise<ReadonlyArray<{ speakerId: string; startMs: number; endMs?: number | null }>>
 }
@@ -140,8 +142,8 @@ export function judgeVoices(turns: ReadonlyArray<{ speaker: string } & Interval>
 }
 
 /** The matcher over a notes repository, the directory of its durable parts and the batch recogniser the worker uses. */
-export const makeNoteVoiceMatcher = (repository: Pick<NotesRepositoryService, "getNote" | "listAudioChunks">, transcribe: ProviderServices["transcribe"], storageDir: string) => makeVoiceMatcher({
-  storageDir, segments: async noteId => (await Effect.runPromise(repository.getNote(noteId)))?.transcriptSegments ?? [], parts: noteId => Effect.runPromise(repository.listAudioChunks(noteId)), transcribe: input => Effect.runPromise(transcribe(input)),
+export const makeNoteVoiceMatcher = (repository: Pick<NotesRepositoryService, "getNote" | "listAudioChunks">, transcribe: ProviderServices["transcribe"], storageDir: string, readPart?: (noteId: string, hash: string) => Promise<Uint8Array | null>) => makeVoiceMatcher({
+  storageDir, ...(readPart ? { readPart } : {}), segments: async noteId => (await Effect.runPromise(repository.getNote(noteId)))?.transcriptSegments ?? [], parts: noteId => Effect.runPromise(repository.listAudioChunks(noteId)), transcribe: input => Effect.runPromise(transcribe(input)),
 })
 export function makeVoiceMatcher(options: VoiceMatcherOptions): VoiceMatcher {
   return {
@@ -151,7 +153,7 @@ export function makeVoiceMatcher(options: VoiceMatcherOptions): VoiceMatcher {
       const [segments, parts] = await Promise.all([options.segments(question.noteId), options.parts(question.noteId)])
       const mine = parts.filter(part => part.channel === question.channel).sort((a, b) => a.startMs - b.startMs), decoded = new Map<string, { rate: number; samples: Int16Array } | null>()
       const audio = async (hash: string) => {
-        if (!decoded.has(hash)) decoded.set(hash, await readFile(join(options.storageDir, question.noteId, `${hash}.wav`)).then(bytes => decodeWav(new Uint8Array(bytes)), () => null))
+        if (!decoded.has(hash)) decoded.set(hash, await (options.readPart ? options.readPart(question.noteId, hash) : readFile(join(options.storageDir, question.noteId, `${hash}.wav`)).then(bytes => new Uint8Array(bytes))).then(bytes => bytes ? decodeWav(bytes) : null, () => null))
         return decoded.get(hash)!
       }
       /** The stored audio of a stretch of note time, or null when a part of it is not on disk. */

@@ -1,6 +1,7 @@
-import { createRootRoute, HeadContent, Link, Outlet, Scripts } from '@tanstack/react-router'
-import { useEffect, useState } from 'react'
+import { createRootRoute, HeadContent, Link, Outlet, Scripts, useRouterState } from '@tanstack/react-router'
+import { useEffect, useMemo, useState } from 'react'
 import { HeaderSlotContext } from '../components/kit/header-slot'
+import { Icon } from '../components/kit/icon'
 import { PageError, PageNotFound } from '../components/reader-state'
 import appIcon from '../assets/app-icon.svg?url'
 import touchIcon from '../assets/apple-touch-icon.png?url'
@@ -11,7 +12,7 @@ import stylesheet from '../styles.css?url'
 /** Applies a remembered light/dark choice before first paint. Only the theme
  * name is stored; note content never enters browser storage. */
 const themeBootstrap = `try{var t=localStorage.getItem('cereal-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch(e){}`
-const PAPER = { light: '#faf8f0', dark: '#1c1a17' }
+const PAPER = { light: '#f7f7f2', dark: '#292929' }
 
 export const Route = createRootRoute({
   head: () => ({
@@ -39,20 +40,31 @@ export const Route = createRootRoute({
   component: Root,
 })
 
+/** The header stands where the desktop app's title bar does and is as tall: the mark,
+ * the way back to the notes, then who is signed in, the theme, and what the page can do. */
 function Root() {
-  const [slot, setSlot] = useState<HTMLElement | null>(null)
+  const [account, setAccount] = useState<HTMLElement | null>(null), [page, setPage] = useState<HTMLElement | null>(null)
+  const slots = useMemo(() => ({ account, page }), [account, page])
+  // On a note the link is the way back, and says so with the app's own chevron. The shell is rendered
+  // ahead of time for no page in particular, so what depends on the address waits for the browser.
+  const [mounted, setMounted] = useState(false)
+  useEffect(() => { setMounted(true) }, [])
+  const path = useRouterState({ select: state => state.location.pathname })
+  const inside = mounted && /^\/(notes\/[^/]+|s\/)/.test(path), onList = mounted && /^\/notes\/?$/.test(path)
   return <html lang="en" suppressHydrationWarning><head><HeadContent /></head><body>
     <a className="skip-link" href="#main-content">Skip to content</a>
     <header className="site-header">
-      <Link to="/" className="brand"><span className="brand-chip" aria-hidden="true"><span className="mark" /></span><span>Cereal</span></Link>
+      <Link to="/notes" className="site-mark" aria-label="Cereal"><span className="mark" aria-hidden="true" /></Link>
       <nav className="site-nav" aria-label="Site">
-        <Link to="/notes" className="nav-link" activeProps={{ 'aria-current': 'page' }}>Notes</Link>
-        <span className="header-slot" ref={setSlot} />
-        <ThemeToggle />
+        <Link to="/notes" className="site-back" aria-current={onList ? 'page' : undefined}>{inside && <Icon name="chevron-left" size={10} />}<span>Notes</span></Link>
       </nav>
+      <div className="site-actions">
+        <span className="header-slot" ref={setAccount} />
+        <ThemeToggle />
+        <span className="header-slot is-page" ref={setPage} />
+      </div>
     </header>
-    <HeaderSlotContext value={slot}><main id="main-content" tabIndex={-1}><Outlet /></main></HeaderSlotContext>
-    <footer className="site-footer"><span className="site-footer-line">A little more clarity.</span><nav aria-label="Footer"><Link to="/notes">Notes</Link><Link to="/account">Account</Link><Link to="/mcp/connect">Connections</Link></nav></footer>
+    <HeaderSlotContext value={slots}><main id="main-content" tabIndex={-1}><Outlet /></main></HeaderSlotContext>
     <Scripts />
   </body></html>
 }
@@ -94,8 +106,8 @@ function ThemeToggle() {
     else { apply(); requestAnimationFrame(() => requestAnimationFrame(done)) }
     setTheme(next)
   }
-  return <button type="button" className="icon-button theme-toggle" aria-label="Dark theme" aria-pressed={dark} title={dark ? 'Switch to light theme' : 'Switch to dark theme'} onClick={toggle}>
-    <svg className="theme-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4" /></svg>
-    <svg className="theme-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z" /></svg>
+  return <button type="button" className="app-tool theme-toggle" aria-label="Dark theme" aria-pressed={dark} title={dark ? 'Switch to light theme' : 'Switch to dark theme'} onClick={toggle}>
+    <Icon name="sun" size={15} className="theme-sun" />
+    <Icon name="moon" size={15} className="theme-moon" />
   </button>
 }

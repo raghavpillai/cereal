@@ -631,6 +631,9 @@ impl Cereal {
 
     pub fn render_header(&self, cx: &mut Context<Self>) -> Div {
         let t = self.theme();
+        if self.current_note.is_none() && self.screen == Screen::Link {
+            return self.render_link_header(cx);
+        }
         if self.current_note.is_some() {
             // The session pill belongs to the other pages; coming back to
             // them it arrives again rather than already being there.
@@ -1439,7 +1442,10 @@ impl Cereal {
                                         .flex_1()
                                         .min_w_0()
                                         .text_size(px(13.))
-                                        .child("Anyone with the link"),
+                                        .line_height(px(18.))
+                                        .child(
+                                            "Anyone signed in to this server who has the link can read it.",
+                                        ),
                                 )
                                 .child(if connected {
                                     pill("share-copy-link", "Copy link", "", t).on_click(
@@ -2253,6 +2259,7 @@ pub fn header_action(screen: Screen) -> Option<HeaderAction> {
 pub fn screen_icon(screen: Screen) -> &'static str {
     match screen {
         Screen::Shared => "people",
+        Screen::Link => "link-chain",
         Screen::Chat => "speech-bubble",
         Screen::Connect => "connect-grid",
         Screen::MyNotes => "lock-solid",
@@ -2282,7 +2289,9 @@ pub fn record_navigation(history: &mut Vec<Screen>, from: Screen, to: Screen) {
         history.clear();
         return;
     }
-    if from == to || matches!(from, Screen::Login | Screen::Account) {
+    // A link's page is passed through, not returned to: what it may show
+    // depends on the account, and following the link again shows it afresh.
+    if from == to || matches!(from, Screen::Login | Screen::Account | Screen::Link) {
         return;
     }
     // Returning to a page already on the trail unwinds to it instead of
@@ -2755,6 +2764,13 @@ mod chrome_tests {
         record_navigation(&mut trail, Screen::Settings, Screen::Settings);
         record_navigation(&mut trail, Screen::Account, Screen::Settings);
         assert_eq!(trail, [Screen::Home, Screen::Chat]);
+        // A link's page is reached from somewhere and returns there, but is
+        // never itself a place to return to.
+        record_navigation(&mut trail, Screen::Settings, Screen::Link);
+        assert_eq!(trail, [Screen::Home, Screen::Chat, Screen::Settings]);
+        record_navigation(&mut trail, Screen::Link, Screen::Account);
+        assert_eq!(trail, [Screen::Home, Screen::Chat, Screen::Settings]);
+        trail.pop();
         // Revisiting a page on the trail unwinds to it instead of looping.
         record_navigation(&mut trail, Screen::Settings, Screen::Chat);
         assert_eq!(trail, [Screen::Home]);

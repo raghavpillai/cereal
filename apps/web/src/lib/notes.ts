@@ -3,16 +3,6 @@ import type { MeetingParticipantDTO, NoteDTO, TranscriptSegmentDTO } from '@meet
 /** Presentation logic for the notes reader. Pure functions: no DOM, no network. */
 
 export type NoteView = 'summary' | 'notes' | 'transcript'
-export type NoteFilter = 'all' | 'summarized' | 'transcribed'
-
-const formatters = new Map<string, Intl.DateTimeFormat>()
-/** Constructing a formatter costs far more than using one, and rows ask for the same few shapes. */
-export function dateFormatter(locale: string | undefined, name: string, options: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
-  const key = `${locale ?? ''}|${name}`
-  let formatter = formatters.get(key)
-  if (!formatter) { formatter = new Intl.DateTimeFormat(locale, options); formatters.set(key, formatter) }
-  return formatter
-}
 
 export function localDateKey(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
@@ -34,86 +24,87 @@ export function dayOffset(key: string, now: Date): number | null {
   return Math.round((day.getTime() - today.getTime()) / 86_400_000)
 }
 
-/** "Today", "Yesterday", then "Wed 11 Nov" like the native apps; other years add the year. */
-export function dayLabel(key: string, now: Date, locale?: string): string {
-  const day = dayAtNoon(key), offset = dayOffset(key, now)
-  if (!day || offset === null) return 'Undated'
-  if (offset === 0) return 'Today'
-  if (offset === -1) return 'Yesterday'
-  if (offset === 1) return 'Tomorrow'
-  return day.getFullYear() === now.getFullYear()
-    ? dateFormatter(locale, 'day', { weekday: 'short', day: 'numeric', month: 'short' }).format(day)
-    : dateFormatter(locale, 'day-year', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }).format(day)
-}
-
-export function longDayLabel(key: string, locale?: string): string {
-  const day = dayAtNoon(key)
-  return day ? dateFormatter(locale, 'long-day', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).format(day) : ''
-}
-
-export interface DayGroup { key: string; label: string; notes: NoteDTO[] }
-
-/** Newest day first; within a day, the most recently created note first. */
-export function groupNotesByDay(notes: readonly NoteDTO[], now: Date, locale?: string): DayGroup[] {
-  const groups = new Map<string, NoteDTO[]>()
-  for (const note of notes) {
-    const list = groups.get(note.date)
-    if (list) list.push(note)
-    else groups.set(note.date, [note])
-  }
-  return [...groups.entries()]
-    .sort(([a], [b]) => (a < b ? 1 : a > b ? -1 : 0))
-    .map(([key, list]) => ({
-      key, label: dayLabel(key, now, locale),
-      notes: list.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || (a.id < b.id ? -1 : 1)),
-    }))
-}
-
-/** The time a note was started, shown only when that moment falls on the note's own day. */
-export function noteTime(note: Pick<NoteDTO, 'createdAt' | 'date'>, locale?: string): string | null {
-  const created = new Date(note.createdAt)
-  if (Number.isNaN(created.getTime()) || localDateKey(created) !== note.date) return null
-  return dateFormatter(locale, 'time', { hour: 'numeric', minute: '2-digit' }).format(created)
-}
-
 export function noteTitle(note: Pick<NoteDTO, 'title'>): string {
   return note.title.trim() || 'Untitled note'
+}
+
+// ── The desktop app's own labels ───────────────────────────────────────────
+// The apps write dates and times one way, in English; the web writes them the same way.
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+
+/** The day heading of the notes list: "Today", "Yesterday", then "Thu, Nov 12". */
+export function listDayLabel(key: string, now: Date): string {
+  const day = dayAtNoon(key), offset = dayOffset(key, now)
+  if (!day || offset === null) return key
+  return offset === 0 ? 'Today' : offset === -1 ? 'Yesterday' : `${WEEKDAYS[day.getDay()]}, ${MONTHS[day.getMonth()]} ${day.getDate()}`
+}
+/** The date in a note's details chip: "Today", "Yesterday", then "Nov 12". */
+export function chipDayLabel(key: string, now: Date): string {
+  const day = dayAtNoon(key), offset = dayOffset(key, now)
+  if (!day || offset === null) return 'Today'
+  return offset === 0 ? 'Today' : offset === -1 ? 'Yesterday' : `${MONTHS[day.getMonth()]} ${day.getDate()}`
+}
+/** When a note was made, as the list shows it: "7:47 AM". */
+export function createdClock(createdAt: string): string {
+  const created = new Date(createdAt)
+  if (Number.isNaN(created.getTime())) return ''
+  const hours = created.getHours()
+  return `${hours % 12 || 12}:${String(created.getMinutes()).padStart(2, '0')} ${hours < 12 ? 'AM' : 'PM'}`
+}
+/** A moment as the apps would write it in a list of links: "Nov 15, 9:41 AM". */
+export function stampLabel(value: string): string {
+  const at = new Date(value)
+  return Number.isNaN(at.getTime()) ? '' : `${MONTHS[at.getMonth()]} ${at.getDate()}, ${createdClock(value)}`
+}
+/** A clock string as its digits and a trailing AM/PM, which is set as small capitals. */
+export function clockParts(time: string): { digits: string; meridiem: string | null } {
+  const text = time.trim(), match = /^(.*?)\s*(AM|PM|am|pm)$/.exec(text)
+  return match ? { digits: match[1]!, meridiem: match[2]!.toUpperCase() } : { digits: text, meridiem: null }
+}
+/** The day a note is listed under: its meeting day, or the day it was made if that came first
+ * (a note prepared for a meeting still to come is listed on the day it was prepared). */
+export function timelineDate(note: Pick<NoteDTO, 'date' | 'createdAt'>): string {
+  const created = new Date(note.createdAt), made = Number.isNaN(created.getTime()) ? null : localDateKey(created)
+  if (!dayAtNoon(note.date)) return made ?? note.date
+  return made !== null && made < note.date ? made : note.date
+}
+/** The date a note's chip shows: the meeting's own day when a calendar event is attached, else the note's. */
+export function noteDay(note: Pick<NoteDTO, 'date'>, meeting: { startAt: string; allDay: boolean } | null | undefined): string {
+  if (meeting) {
+    const start = new Date(meeting.startAt)
+    if (!Number.isNaN(start.getTime())) return meeting.allDay ? meeting.startAt.slice(0, 10) : localDateKey(start)
+  }
+  return note.date
 }
 
 const spoken = (segment: TranscriptSegmentDTO) => segment.text.trim().length > 0
 const speakerKey = (segment: TranscriptSegmentDTO) => `${segment.channel}:${segment.speakerId}`
 
-export function speakerCount(note: Pick<NoteDTO, 'transcriptSegments'>): number {
-  return new Set(note.transcriptSegments.filter(spoken).map(speakerKey)).size
-}
+export interface NoteStatus { tone: 'busy' | 'warning' | 'info'; label: string; detail: string }
 
-export interface NoteStatus { tone: 'live' | 'busy' | 'warning' | 'info'; label: string; detail: string }
-
-/** What the reader should know about a note that is not simply ready. */
-export function noteStatus(note: Pick<NoteDTO, 'recordingState' | 'generationState' | 'transcriptRevision' | 'generatedRevision' | 'enhanced'>): NoteStatus | null {
-  if (note.recordingState === 'recording') return { tone: 'live', label: 'Recording', detail: 'This meeting is being recorded. New transcript appears after you refresh.' }
-  if (note.generationState === 'analyzing_transcript') return { tone: 'busy', label: 'Reading transcript', detail: 'Cereal is reading the transcript. The summary will appear here shortly.' }
-  if (note.generationState === 'writing_notes') return { tone: 'busy', label: 'Writing notes', detail: 'Cereal is writing the summary. Refresh in a moment to read it.' }
-  if (note.generationState === 'failed') return { tone: 'warning', label: 'Summary failed', detail: 'The summary could not be written. Generate it again from the desktop or iPhone app.' }
-  if (note.generationState === 'unsupported' && !note.enhanced.trim()) return { tone: 'info', label: 'No summary', detail: 'This instance has no model configured for summaries.' }
+/** What the reader should know about a finished note whose summary is not simply ready.
+ * A note that is still being recorded is not shown on the web at all (see `isFinished`). */
+export function noteStatus(note: Pick<NoteDTO, 'generationState' | 'transcriptRevision' | 'generatedRevision' | 'enhanced'>): NoteStatus | null {
+  if (note.generationState === 'analyzing_transcript') return { tone: 'busy', label: 'Analyzing transcript', detail: 'Cereal is reading the transcript. The notes will be here shortly.' }
+  if (note.generationState === 'writing_notes') return { tone: 'busy', label: 'Writing notes', detail: 'Cereal is writing the notes. They will be here shortly.' }
+  if (note.generationState === 'failed') return { tone: 'warning', label: 'Notes failed', detail: 'The notes could not be written. Generate them again in the Cereal app.' }
+  if (note.generationState === 'unsupported' && !note.enhanced.trim()) return { tone: 'info', label: 'No notes', detail: 'This instance has no model configured for notes.' }
   if (note.generatedRevision !== null && note.generatedRevision < note.transcriptRevision && note.enhanced.trim()) {
-    return { tone: 'info', label: 'Summary out of date', detail: 'The transcript changed after this summary was written. Regenerate it from the desktop or iPhone app.' }
+    return { tone: 'info', label: 'Notes out of date', detail: 'The transcript changed after these notes were written. Regenerate them in the Cereal app.' }
   }
   return null
 }
 
-export function availableViews(note: Pick<NoteDTO, 'enhanced' | 'body' | 'transcriptSegments'>): Record<NoteView, boolean> {
-  return { summary: note.enhanced.trim().length > 0, notes: note.body.trim().length > 0, transcript: note.transcriptSegments.some(spoken) }
+/** The web reads finished notes only. A meeting that is being recorded is live in the
+ * apps, and a note nothing has been recorded or written into has nothing to read yet. */
+export function isFinished(note: { recordingState: NoteDTO['recordingState']; hasSummary: boolean; hasBody: boolean; hasTranscript: boolean }): boolean {
+  if (note.recordingState === 'recording') return false
+  return note.recordingState === 'stopped' || note.hasSummary || note.hasBody || note.hasTranscript
 }
-
-/** Open on the richest thing the note has: summary, then the writer's notes, then the transcript. */
-export function defaultNoteView(note: Pick<NoteDTO, 'enhanced' | 'body' | 'transcriptSegments'>): NoteView {
-  const views = availableViews(note)
-  return views.summary ? 'summary' : views.notes ? 'notes' : views.transcript ? 'transcript' : 'summary'
-}
-
-export function matchesFilter(note: NoteDTO, filter: NoteFilter): boolean {
-  return filter === 'all' || (filter === 'summarized' ? noteFacts(note).hasSummary : noteFacts(note).hasTranscript)
+export function noteIsFinished(note: Pick<NoteDTO, 'recordingState' | 'enhanced' | 'body' | 'transcriptSegments'>): boolean {
+  return isFinished({ recordingState: note.recordingState, hasSummary: note.enhanced.trim().length > 0, hasBody: note.body.trim().length > 0, hasTranscript: note.transcriptSegments.some(spoken) })
 }
 
 // ── Search ────────────────────────────────────────────────────────────────
@@ -182,27 +173,19 @@ function excerpt(text: string, terms: readonly string[], radius = 70): TextPart[
 // note is. A list render, a keystroke or a scroll then reads cached values
 // instead of walking every summary and transcript again.
 
-export interface NoteFacts { title: string; time: string | null; preview: string; status: NoteStatus | null; hasSummary: boolean; hasBody: boolean; hasTranscript: boolean }
+export interface NoteFacts { title: string; preview: string; status: NoteStatus | null; hasSummary: boolean; hasBody: boolean; hasTranscript: boolean }
 const factsCache = new WeakMap<NoteDTO, NoteFacts>()
-/** What a list row shows, apart from anything that needs the transcript read in full. */
+/** What the note page shows of a note, apart from anything that needs the transcript read in full. */
 export function noteFacts(note: NoteDTO): NoteFacts {
   let facts = factsCache.get(note)
   if (!facts) {
     facts = {
-      title: noteTitle(note), time: noteTime(note), preview: notePreview(note), status: noteStatus(note),
+      title: noteTitle(note), preview: notePreview(note), status: noteStatus(note),
       hasSummary: note.enhanced.trim().length > 0, hasBody: note.body.trim().length > 0, hasTranscript: note.transcriptSegments.some(spoken),
     }
     factsCache.set(note, facts)
   }
   return facts
-}
-
-const speakersCache = new WeakMap<NoteDTO, number>()
-/** Distinct voices, counted the first time a row for this note is actually shown. */
-export function cachedSpeakerCount(note: NoteDTO): number {
-  let count = speakersCache.get(note)
-  if (count === undefined) { count = speakerCount(note); speakersCache.set(note, count) }
-  return count
 }
 
 interface SearchText { head: string; summary: string; body: string; transcript: string | null; transcriptLower: string | null }
@@ -344,6 +327,57 @@ export function turnSource(turn: Pick<TranscriptTurn, 'source' | 'part'>): strin
   return turn.part ? `${turn.source} · Part ${turn.part}` : turn.source
 }
 
+/** One bubble of the transcript panel, as the desktop app lays a transcript out:
+ * every spoken segment is its own bubble, the reader's own microphone on the right. */
+export interface Utterance {
+  id: string
+  /** The voice: a speaker id within a source. Neighbouring bubbles of one voice sit closer together. */
+  key: string
+  /** The name above the bubble, when the bubble is named at all (see `names`). */
+  speaker: string | null
+  /** One-based audio part within its source, when the speaker id carries one. */
+  part: number | null
+  own: boolean
+  source: 'Microphone' | 'System audio'
+  /** mm:ss from the start of the recording. */
+  time: string
+  text: string
+  final: boolean
+  /** This bubble starts a run of its voice, in a transcript where that voice needs naming. */
+  names: boolean
+  sameBefore: boolean
+  sameAfter: boolean
+}
+
+export function transcriptUtterances(segments: readonly TranscriptSegmentDTO[]): Utterance[] {
+  const said = segments.filter(spoken)
+  const parts: Record<'mic' | 'system', string[]> = { mic: [], system: [] }
+  for (const segment of said) {
+    const scope = partScope(segment)
+    if (scope && !parts[segment.channel].includes(scope)) parts[segment.channel].push(scope)
+  }
+  const rows = said.map(segment => {
+    const own = segment.channel === 'mic', scope = partScope(segment)
+    const part = scope ? parts[segment.channel].indexOf(scope) + 1 : null
+    const label = segment.speakerLabel?.trim() || null
+    const start = Math.max(0, segment.startMs)
+    return {
+      id: segment.id, key: speakerKey(segment), part, own,
+      speaker: part !== null ? `${label ?? 'Unlabeled speaker'} · ${own ? 'Mic' : 'System'} · Part ${part}` : label,
+      source: own ? 'Microphone' as const : 'System audio' as const,
+      time: `${String(Math.floor(start / 60000)).padStart(2, '0')}:${String(Math.floor(start / 1000) % 60).padStart(2, '0')}`,
+      text: segment.text, final: segment.isFinal,
+    }
+  })
+  // A speaker is named only where a source carries more than one voice, or its audio came in parts.
+  const voices = (own: boolean) => new Set(rows.filter(row => row.own === own && (row.final || row.speaker !== null)).map(row => row.key)).size
+  const several = { own: voices(true) > 1, other: voices(false) > 1 }
+  return rows.map((row, index) => {
+    const sameBefore = index > 0 && rows[index - 1]!.key === row.key, sameAfter = rows[index + 1]?.key === row.key
+    return { ...row, sameBefore, sameAfter, names: !sameBefore && ((row.own ? several.own : several.other) || row.part !== null) && row.speaker !== null }
+  })
+}
+
 // ── People ────────────────────────────────────────────────────────────────
 
 export function initials(name: string): string {
@@ -361,14 +395,6 @@ export function participantName(person: Pick<MeetingParticipantDTO, 'displayName
 /** People who were invited, without rooms and equipment. */
 export function meetingPeople(participants: readonly MeetingParticipantDTO[]): MeetingParticipantDTO[] {
   return participants.filter(person => !person.isResource)
-}
-
-/** "Ada, Grace +2": the first names that fit, then a count. */
-export function peopleSummary(participants: readonly MeetingParticipantDTO[], shown = 2): string {
-  const people = meetingPeople(participants).filter(person => !person.isSelf)
-  const names = people.slice(0, shown).map(person => (person.givenName?.trim() || participantName(person).split(/[\s@]/)[0] || participantName(person)))
-  if (!names.length) return ''
-  return people.length > shown ? `${names.join(', ')} +${people.length - shown}` : names.join(', ')
 }
 
 // ── Export ────────────────────────────────────────────────────────────────

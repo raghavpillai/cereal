@@ -59,6 +59,8 @@ import Foundation
     var systemState: String { activity.map { String(describing: $0.activityState) } ?? "none" }
     private var activity: (any RecordingActivitySession)?
     private var latestState: RecordingActivityAttributes.ContentState?
+    /// The recorded note's title as the activity shows it. Nil for a note without one.
+    private var title: String?
     private var pending: Task<Void, Never>?
     private var gate = RecordingActivityUpdateGate()
 
@@ -82,15 +84,20 @@ import Foundation
 
     func endPreviewActivities() async { await Self.endOrphanedActivities(backend: backend, previewOnly: true) }
 
+    /// An empty `title` means "as it was": a resume or a new part of the same
+    /// recording does not know the title and must not blank it.
     func start(noteID: UUID, title: String, elapsed: TimeInterval) {
         lastError = nil
+        let shown = RecordingActivityAttributes.ContentState.shownTitle(title)
         if activity?.noteID == noteID {
+            if let shown { self.title = shown }
             // Chunk rotation is still one recording. Re-requesting from the background
             // is disallowed by ActivityKit and would remove the recording indicator.
             update(phase: .recording, elapsed: elapsed, force: true)
             return
         }
         end()
+        self.title = shown
         guard backend.enabled else { lastError = "Live Activities are disabled in Settings."; return }
         let state = contentState(phase: .recording, elapsed: elapsed)
         do {
@@ -101,6 +108,23 @@ import Foundation
             // Recording remains valid when Live Activities are unavailable or disabled.
             activity = nil; latestState = nil
             lastError = "The system could not start this Live Activity. Open the app in the foreground and check Live Activity settings."
+        }
+    }
+
+    /// The note was given a title, or a different one, while it is being recorded.
+    /// The timer is untouched: only the name on the activity changes.
+    func setTitle(_ text: String) {
+        let shown = RecordingActivityAttributes.ContentState.shownTitle(text)
+        guard shown != title else { return }
+        title = shown
+        guard let activity, var state = latestState else { return }
+        state.title = shown; state.updatedAt = now()
+        latestState = state
+        let staleDate = state.phase == .recording ? state.updatedAt.addingTimeInterval(75) : nil
+        let previous = pending
+        pending = Task {
+            await previous?.value
+            await activity.update(state, staleDate: staleDate)
         }
     }
 
@@ -144,7 +168,7 @@ import Foundation
     private func contentState(phase: RecordingActivityAttributes.ContentState.Phase, elapsed: TimeInterval) -> RecordingActivityAttributes.ContentState {
         let date = now()
         let elapsed = elapsed.isFinite ? max(0, elapsed) : 0
-        return .init(phase: phase, elapsed: elapsed, timerAnchor: date.addingTimeInterval(-elapsed), updatedAt: date)
+        return .init(phase: phase, elapsed: elapsed, timerAnchor: date.addingTimeInterval(-elapsed), updatedAt: date, title: title)
     }
 }
 

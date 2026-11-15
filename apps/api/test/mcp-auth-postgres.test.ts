@@ -16,28 +16,28 @@ describe.skipIf(!enabled)("MCP official OAuth PKCE, durable consent and account 
  const json=async(path:string,body?:unknown,headers:Record<string,string>={})=>fetch(baseURL+path,{method:body===undefined?"GET":"POST",headers:{"x-forwarded-for":"192.0.2.203",...(body===undefined?{}:{"Content-Type":"application/json"}),...headers},...(body===undefined?{}:{body:JSON.stringify(body)}),redirect:"manual"})
  const form=async(path:string,body:Record<string,string>)=>fetch(baseURL+path,{method:"POST",headers:{"x-forwarded-for":"192.0.2.203","Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams(body),redirect:"manual"})
  async function login(oauthQuery?:string){const response=await json("/api/auth/sign-in/email",{email,password,...(oauthQuery?{oauth_query:oauthQuery}:{})});expect(response.status).toBe(200);cookie=response.headers.getSetCookie().map(c=>c.split(";")[0]).join("; ");native=response.headers.get("set-auth-token")!;expect(Boolean(native)).toBe(true);return response.json()}
- async function authorize(scope="notes:read offline_access"){
+ async function authorize(scope="notes:read offline_access",resource=baseURL+"/mcp"){
   const verifier=randomBytes(40).toString("base64url"),challenge=createHash("sha256").update(verifier).digest("base64url")
-  const query=new URLSearchParams({client_id:clientId,redirect_uri:callback,response_type:"code",scope,resource:baseURL+"/mcp",state:"fictional-state",code_challenge:challenge,code_challenge_method:"S256"})
+  const query=new URLSearchParams({client_id:clientId,redirect_uri:callback,response_type:"code",scope,resource,state:"fictional-state",code_challenge:challenge,code_challenge_method:"S256"})
   const response=await json("/api/auth/oauth2/authorize?"+query,undefined,{Cookie:cookie,Accept:"text/html"})
   expect([302,303]).toContain(response.status)
   const location=response.headers.get("location");expect(Boolean(location)).toBe(true)
   const next=new URL(location!,baseURL);expect(next.pathname).toBe("/mcp/consent")
   return{verifier,oauthQuery:next.searchParams.toString()}
  }
- async function grant(scope="notes:read offline_access"){
-  const authorization=await authorize(scope)
+ async function grant(scope="notes:read offline_access",resource=baseURL+"/mcp"){
+  const authorization=await authorize(scope,resource)
   const response=await json("/api/auth/oauth2/consent",{accept:true,oauth_query:authorization.oauthQuery},{Cookie:cookie,Origin:baseURL})
   expect(response.status).toBe(200);const body=await response.json();const redirect=new URL(body.url);expect(redirect.origin+redirect.pathname).toBe(new URL(callback).origin+new URL(callback).pathname)
   expect(redirect.searchParams.get("state")).toBe("fictional-state")
-  const token=await form("/api/auth/oauth2/token",{grant_type:"authorization_code",client_id:clientId,code:redirect.searchParams.get("code")!,redirect_uri:callback,code_verifier:authorization.verifier,resource:baseURL+"/mcp"})
+  const token=await form("/api/auth/oauth2/token",{grant_type:"authorization_code",client_id:clientId,code:redirect.searchParams.get("code")!,redirect_uri:callback,code_verifier:authorization.verifier,resource})
   const tokens=await token.json();expect(token.status).toBe(200);expect(Boolean(tokens.access_token)).toBe(true);return tokens
  }
- const protect=(token:string)=>fetch(baseURL+"/mcp",{headers:{Authorization:"Bearer "+token}})
+ const protect=(token:string,path="/mcp")=>fetch(baseURL+path,{headers:{Authorization:"Bearer "+token}})
  beforeAll(async()=>{
   server=Bun.serve({hostname:"127.0.0.1",port:0,fetch:async request=>{
    const path=new URL(request.url).pathname
-   if(path==="/mcp")return authentication.mcp.protect(request,async(_req,grant)=>Response.json({id:grant.principal.id,workspaceId:grant.workspaceId,scopes:[...grant.scopes],connectionId:grant.connectionId,clientId:grant.clientId}))
+   if(path==="/mcp"||path==="/api/mcp")return authentication.mcp.protect(request,async(_req,grant)=>Response.json({id:grant.principal.id,workspaceId:grant.workspaceId,scopes:[...grant.scopes],connectionId:grant.connectionId,clientId:grant.clientId}))
    if(path.startsWith("/.well-known/"))return authentication.mcp.metadata(request)
    return authentication.handler(request)
   }})
@@ -76,6 +76,49 @@ describe.skipIf(!enabled)("MCP official OAuth PKCE, durable consent and account 
   const otherResource=await form("/api/auth/oauth2/token",{grant_type:"refresh_token",client_id:clientId,refresh_token:refresh,resource:"https://evil.example/mcp"});expect(otherResource.status).toBe(400)
   const authorization=await authorize(),consent=await json("/api/auth/oauth2/consent",{accept:true,oauth_query:authorization.oauthQuery},{Cookie:cookie,Origin:baseURL}),redirect=new URL((await consent.json()).url)
   const wrong=await form("/api/auth/oauth2/token",{grant_type:"authorization_code",client_id:clientId,code:redirect.searchParams.get("code")!,redirect_uri:callback,code_verifier:randomBytes(40).toString("base64url"),resource:baseURL+"/mcp"});expect(wrong.status).toBe(400)
+ })
+ test("the endpoint lives at /api/mcp with /mcp as its previous address: each has its own metadata, and a token for either works at both",async()=>{
+  const audience=(token:string)=>JSON.parse(Buffer.from(token.split(".")[1]!,"base64url").toString()).aud
+  const metadataOf=async(path:string)=>{const response=await json(path);expect(response.status).toBe(200);expect(response.headers.get("content-type")).toContain("application/json");return response.json()}
+  // Discovery: the bare document and the path form name /api/mcp; the previous address keeps a document that names itself.
+  const current=await metadataOf("/.well-known/oauth-protected-resource/api/mcp"),bare=await metadataOf("/.well-known/oauth-protected-resource"),previous=await metadataOf("/.well-known/oauth-protected-resource/mcp")
+  expect(current.resource).toBe(baseURL+"/api/mcp");expect(bare).toEqual(current);expect(previous).toEqual({...current,resource:baseURL+"/mcp"})
+  expect(current.scopes_supported).toContain("notes:read");expect(current.authorization_servers).toHaveLength(1)
+  const head=await fetch(baseURL+"/.well-known/oauth-protected-resource/mcp",{method:"HEAD"});expect(head.status).toBe(200);expect(await head.text()).toBe("")
+  expect((await fetch(baseURL+"/.well-known/oauth-protected-resource/mcp",{method:"POST"})).status).toBe(405)
+  // A request without a token is pointed at the metadata of the address it called.
+  const challenged=async(path:string,token?:string)=>{const response=await fetch(baseURL+path,token?{headers:{Authorization:"Bearer "+token}}:{});expect(response.status).toBe(401);return response.headers.get("www-authenticate")!}
+  expect(await challenged("/api/mcp")).toContain(`resource_metadata="${baseURL}/.well-known/oauth-protected-resource/api/mcp"`)
+  expect(await challenged("/mcp")).toContain(`resource_metadata="${baseURL}/.well-known/oauth-protected-resource/mcp"`)
+  // The token from before the move (audience <origin>/mcp) is valid at both addresses, for the same connection.
+  expect(audience(access)).toBe(baseURL+"/mcp")
+  const atPrevious=await(await protect(access,"/mcp")).json(),atCurrent=await protect(access,"/api/mcp");expect(atCurrent.status).toBe(200);expect(await atCurrent.json()).toEqual(atPrevious)
+  // A client that connects to the new address asks for the new resource and gets a token that is also valid at both.
+  const preview=await json("/api/auth/mcp/authorize-info?"+new URLSearchParams({oauth_query:(await authorize("notes:read offline_access",baseURL+"/api/mcp")).oauthQuery}),undefined,{Cookie:cookie})
+  expect(preview.status).toBe(200);expect((await preview.json()).resource).toBe(baseURL+"/api/mcp")
+  const moved=await grant("notes:read offline_access",baseURL+"/api/mcp");expect(audience(moved.access_token)).toBe(baseURL+"/api/mcp")
+  for(const path of["/api/mcp","/mcp"]){const response=await protect(moved.access_token,path);expect(response.status).toBe(200);expect((await response.json()).id).toBe(userId)}
+  // Tokens stay bound to our two resources: a tampered audience, another site's, or a session token is refused at both, each with its own metadata hint.
+  const [header,payload,signature]=moved.access_token.split(".") as [string,string,string]
+  const forged=header+"."+Buffer.from(JSON.stringify({...JSON.parse(Buffer.from(payload,"base64url").toString()),aud:baseURL+"/mcp"})).toString("base64url")+"."+signature
+  const foreign=header+"."+Buffer.from(JSON.stringify({...JSON.parse(Buffer.from(payload,"base64url").toString()),aud:"https://evil.example/mcp"})).toString("base64url")+"."+signature
+  for(const token of[forged,foreign,native,"not-a-token"]){
+   expect(await challenged("/api/mcp",token)).toContain("/.well-known/oauth-protected-resource/api/mcp")
+   expect(await challenged("/mcp",token)).toContain(`/.well-known/oauth-protected-resource/mcp"`)
+  }
+  expect((await form("/api/auth/oauth2/token",{grant_type:"refresh_token",client_id:clientId,refresh_token:moved.refresh_token,resource:"https://evil.example/api/mcp"})).status).toBe(400)
+  // A client registered before the move is linked to the previous resource only; the migration links it to the new one.
+  await db!.oauthClientResource.deleteMany({where:{clientId,resourceId:baseURL+"/api/mcp"}})
+  const query=new URLSearchParams({client_id:clientId,redirect_uri:callback,response_type:"code",scope:"notes:read",resource:baseURL+"/api/mcp",state:"s",code_challenge:createHash("sha256").update("v".repeat(43)).digest("base64url"),code_challenge_method:"S256"})
+  const unlinked=await json("/api/auth/oauth2/authorize?"+query,undefined,{Cookie:cookie,Accept:"application/json"});expect(new URL((await unlinked.json()).url).searchParams.get("error")).toBe("invalid_target")
+  const migration=await Bun.file(new URL("../../../packages/database/prisma/migrations/20261126000100_mcp_api_path/migration.sql",import.meta.url)).text()
+  for(const statement of migration.split(/;\s*\n/).map(part=>part.replace(/^\s*--.*$/gm,"").trim()).filter(Boolean))await db!.$executeRawUnsafe(statement)
+  expect(await db!.oauthClientResource.count({where:{clientId,resourceId:baseURL+"/api/mcp"}})).toBe(1)
+  expect(await db!.oauthClientResource.count({where:{clientId,resourceId:baseURL+"/mcp"}})).toBe(1)
+  expect(await db!.oauthResource.count({where:{identifier:{in:[baseURL+"/mcp",baseURL+"/api/mcp"]}}})).toBe(2)
+  expect((await authorize("notes:read offline_access",baseURL+"/api/mcp")).oauthQuery).toContain("api%2Fmcp")
+  // The connection made at the previous address is untouched by all of this.
+  expect((await protect(access)).status).toBe(200)
  })
  test("first MCP connection preserves an app-selected workspace and account-info cannot reset it",async()=>{
   fixtureOrganizationId=crypto.randomUUID()

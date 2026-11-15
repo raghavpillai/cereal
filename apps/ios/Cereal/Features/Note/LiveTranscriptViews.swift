@@ -69,16 +69,14 @@ struct LiveTranscriptList: View {
         // says: a revised word redraws that one line (and the follower below).
         let _ = PerfProbe.hit("LiveTranscriptList.body")
         let lines = live.lines
+        // With the other side of a call in the note, the microphone is the person recording.
+        let microphoneIsMe = TranscriptPresentation.microphoneIsMe(live.segments)
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 20) {
-                    if lines.isEmpty {
-                        LiveTranscriptPlaceholder(live: live, recording: recording)
-                    } else {
-                        Text(TranscriptPresentation.speakerNotice).font(.footnote).foregroundStyle(Theme.textSecondary)
-                    }
+                    if lines.isEmpty { LiveTranscriptPlaceholder(live: live, recording: recording) }
                     ForEach(lines) { line in
-                        LiveTranscriptLineView(line: line).id(line.id)
+                        LiveTranscriptLineView(line: line, microphoneIsMe: microphoneIsMe).id(line.id)
                     }
                     LiveStatusLine(live: live).frame(maxWidth: .infinity, alignment: .leading)
                     // Full width, so scrolling to it never moves the list sideways.
@@ -163,6 +161,7 @@ private struct LiveTranscriptPlaceholder: View {
 /// provider revises the words.
 struct LiveTranscriptLineView: View {
     let line: LiveTranscriptLine
+    var microphoneIsMe = false
     @Environment(\.motion) private var motion
     @State private var arrived = false
 
@@ -194,7 +193,8 @@ struct LiveTranscriptLineView: View {
         case .stored(let row, _):
             (row.caption, row.segment.text, row.segment.isFinal, row.segment.id)
         case .interim(let utterance):
-            (TranscriptPresentation.interimCaption(channel: utterance.channel, startMs: utterance.startMs, speakerLabel: utterance.speakerLabel),
+            (TranscriptPresentation.interimCaption(channel: utterance.channel, startMs: utterance.startMs, speakerLabel: utterance.speakerLabel,
+                                                   microphoneIsMe: microphoneIsMe),
              utterance.text, false, utterance.id)
         }
     }

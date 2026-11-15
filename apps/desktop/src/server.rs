@@ -239,8 +239,19 @@ fn display_created_at(value: &str) -> String {
         .unwrap_or_default()
 }
 
+/// What every save sends of a note. A note nobody has named sends no title:
+/// its empty or placeholder one must never replace a title the server has
+/// given it since (from its generated notes, or from a calendar event).
+fn note_fields(note: &Note) -> Value {
+    let mut fields = json!({"body":note.body,"date":note.date});
+    if !crate::meeting::is_default_note_title(&note.title) {
+        fields["title"] = json!(note.title);
+    }
+    fields
+}
+
 fn note_update_payload(note: &Note) -> Value {
-    let mut update = json!({"title":note.title,"body":note.body,"date":note.date});
+    let mut update = note_fields(note);
     if note.enhanced_dirty {
         update["enhanced"] = json!(note.enhanced);
     }
@@ -351,7 +362,7 @@ fn stream_chat_with_client(
                 let _: NoteDTO = client.request_with_cancel(
                     "PATCH",
                     &format!("/api/v1/notes/{id}"),
-                    Some(json!({"title":note.title,"body":note.body,"date":note.date})),
+                    Some(note_fields(&note)),
                     Some(cancel.clone()),
                 )?;
                 format!("/api/v1/notes/{id}/chat/stream")
@@ -2090,6 +2101,82 @@ impl Cereal {
         .detach();
     }
 
+    /// Open the note of the signed-in account that the server calls
+    /// `server_id` (a link to it was followed). One that has not been listed
+    /// here yet is read from the server first; one the server does not have
+    /// for this account says so.
+    pub fn open_server_note(&mut self, server_id: String, cx: &mut Context<Self>) {
+        let Ok(credentials) = crate::account::credentials() else {
+            return;
+        };
+        let url = credentials.url.clone();
+        let local = |this: &Self, server_id: &str, url: &str| {
+            this.workspace
+                .notes
+                .iter()
+                .find(|note| {
+                    note.server_id.as_deref() == Some(server_id)
+                        && note.server_url.as_deref() == Some(url)
+                })
+                .map(|note| note.id)
+        };
+        if let Some(id) = local(self, &server_id, &url) {
+            self.open_note(id, cx);
+            return;
+        }
+        let account_epoch = crate::account::epoch();
+        let token = credentials.token;
+        cx.spawn(async move |this, cx| {
+            let address = format!("{url}/api/v1/notes/{server_id}");
+            // Asked of the signed-in server, with its own session.
+            let reply = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::fetch::Request {
+                        method: "GET",
+                        url: &address,
+                        bearer: Some(&token),
+                        body: None,
+                    }
+                    .send(8 * 1024 * 1024)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if crate::account::epoch() != account_epoch {
+                    return;
+                }
+                let remote = match reply {
+                    Ok(reply) if reply.status == 200 => {
+                        serde_json::from_slice::<NoteDTO>(&reply.body).ok()
+                    }
+                    Ok(reply) if matches!(reply.status, 403 | 404 | 410) => None,
+                    Ok(reply) => {
+                        let status = reply.status;
+                        this.show_toast(&format!("Server rejected the request (HTTP {status})"), cx);
+                        return;
+                    }
+                    Err(_) => {
+                        this.show_toast("Could not reach this server", cx);
+                        return;
+                    }
+                };
+                match remote.filter(|remote| remote.id.eq_ignore_ascii_case(&server_id)) {
+                    Some(remote) => {
+                        let server_id = remote.id.clone();
+                        this.apply_server_note(remote, &url);
+                        this.persist(cx);
+                        if let Some(id) = local(this, &server_id, &url) {
+                            this.open_note(id, cx);
+                        }
+                    }
+                    // Not a note of this account, or not a note any more.
+                    None => this.show_toast("This note is no longer available.", cx),
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Bring the copy of a server note kept here up to date, creating it when it
     /// is new. The note open for editing is left as it is.
     fn apply_server_note(&mut self, remote: NoteDTO, url: &str) {
@@ -2146,6 +2233,7 @@ impl Cereal {
         };
         let submitted_enhanced = note.enhanced.clone();
         let submitted_enhanced_dirty = note.enhanced_dirty;
+        let submitted_title = note.title.clone();
         let receiver = self
             .server_bridge
             .get_or_insert_with(Bridge::new)
@@ -2191,9 +2279,17 @@ impl Cereal {
                             );
                         }
                         let live_note = this.live.streams(id);
+                        let mut named = None;
                         if let Some(note) = this.workspace.note_mut(id) {
                             note.server_id = Some(reply.note.id.clone());
                             note.server_url = Some(reply.url);
+                            // The server names a note nobody has named when
+                            // its notes are generated: the list row and the
+                            // title field show that name at once, and later
+                            // saves send it rather than the placeholder.
+                            if note.adopt_server_title(&submitted_title, &reply.note.title) {
+                                named = Some(note.title.clone());
+                            }
                             if this.recording.note_id != Some(id) || !this.recording.is_active() {
                                 note.duration = reply.note.duration.clone();
                             }
@@ -2222,6 +2318,12 @@ impl Cereal {
                                 reply.note.generated_revision.map(|v| v.max(0) as u64),
                                 !generating || epoch == Some(this.generation.epoch),
                             );
+                        }
+                        if let Some(title) = named
+                            && this.current_note == Some(id)
+                        {
+                            this.title_input
+                                .update(cx, |input, cx| input.set_content(title, cx));
                         }
                         // The server has the note in the recording state:
                         // the live transcript stream can connect.
@@ -2583,6 +2685,56 @@ mod tests {
             other, id,
             "An event note from another instance is never reused"
         );
+    }
+
+    #[test]
+    fn a_generated_title_is_adopted_and_the_placeholder_is_never_sent_back() {
+        // Generate was asked for a note nobody had named, in each of the
+        // forms an unnamed note takes here.
+        for placeholder in ["", "Untitled note", "New note", "  untitled NOTE "] {
+            let mut note = crate::model::Note {
+                title: placeholder.into(),
+                body: "typed".into(),
+                ..Default::default()
+            };
+            // The request carries no title, so the server's is not replaced.
+            let sent = super::note_update_payload(&note);
+            assert!(sent.get("title").is_none(), "{placeholder:?}");
+            assert_eq!(sent["body"], "typed");
+            assert!(super::note_fields(&note).get("title").is_none());
+            // The reply carries the generated title: the note takes it.
+            assert!(note.adopt_server_title(placeholder, "Flour supplier switch to Windrush"));
+            assert_eq!(note.title, "Flour supplier switch to Windrush");
+            // Every later save sends the name, not the placeholder.
+            assert_eq!(
+                super::note_update_payload(&note)["title"],
+                "Flour supplier switch to Windrush"
+            );
+            assert_eq!(super::note_fields(&note)["title"], "Flour supplier switch to Windrush");
+        }
+        // A title typed while the request was on its way is the person's.
+        let mut typed = crate::model::Note {
+            title: "Budget review".into(),
+            ..Default::default()
+        };
+        assert!(!typed.adopt_server_title("", "Hiring plan and budget for Q3"));
+        assert_eq!(typed.title, "Budget review");
+        // So is one that was there all along.
+        assert!(!typed.adopt_server_title("Budget review", "Hiring plan and budget for Q3"));
+        assert_eq!(typed.title, "Budget review");
+        // A placeholder typed over another since the request is a change too.
+        let mut retyped = crate::model::Note {
+            title: "New note".into(),
+            ..Default::default()
+        };
+        assert!(!retyped.adopt_server_title("", "Hiring plan and budget for Q3"));
+        assert_eq!(retyped.title, "New note");
+        // A reply that has no title to give changes nothing.
+        let mut unnamed = crate::model::Note::default();
+        for remote in ["", "Untitled note", "New note"] {
+            assert!(!unnamed.adopt_server_title("", remote), "{remote:?}");
+            assert_eq!(unnamed.title, "");
+        }
     }
 
     #[test]

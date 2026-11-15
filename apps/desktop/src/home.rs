@@ -334,8 +334,47 @@ impl Cereal {
     ) -> Stateful<Div> {
         let t = self.theme();
         let hovered = crate::motion::reveal_key(("note-row", id));
+        self.list_row_frame(
+            ("note-row", id),
+            hovered,
+            title,
+            "Me",
+            time,
+            tool_tip(("note-row-more", id), "more", "More actions", t)
+                .size(px(24.))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    let at = window.mouse_position();
+                    this.open_row_menu(id, at, cx);
+                })),
+        )
+        .on_click(cx.listener(move |this, _, _, cx| this.open_note(id, cx)))
+        // Secondary click opens the row's menu under the pointer.
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.open_row_menu(id, event.position, cx);
+            }),
+        )
+    }
+
+    /// One row of a list of notes, as every such list draws it: a document
+    /// tile, a title over a caption, and at the trailing edge a time that
+    /// gives way to `action` under the pointer. The caller says what a click
+    /// does.
+    pub(crate) fn list_row_frame(
+        &self,
+        id: impl Into<ElementId>,
+        hovered: u64,
+        title: SharedString,
+        subtitle: impl Into<SharedString>,
+        time: &str,
+        action: Stateful<Div>,
+    ) -> Stateful<Div> {
+        let t = self.theme();
         div()
-            .id(("note-row", id))
+            .id(id)
             .w_full()
             // A 44 px row on a 48 px pitch: the fill never touches its
             // neighbours.
@@ -351,15 +390,7 @@ impl Cereal {
             // Rows cascade in after navigation and squash under the pointer.
             .map(|row| crate::motion::lift(row, self.stage.cascade_next("page")))
             .child(row_feedback(t, 12.).reveals(hovered))
-            .reach().on_click(cx.listener(move |this, _, _, cx| this.open_note(id, cx)))
-            // Secondary click opens the row's menu under the pointer.
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    cx.stop_propagation();
-                    this.open_row_menu(id, event.position, cx);
-                }),
-            )
+            .reach()
             .child(
                 div()
                     .size(px(28.))
@@ -394,7 +425,7 @@ impl Cereal {
                             .truncate()
                             .child(title),
                     )
-                    .child(small("Me", t)),
+                    .child(small(subtitle, t).truncate()),
             )
             // Under the pointer the time gives way to the row's actions.
             .child(
@@ -412,15 +443,7 @@ impl Cereal {
                             .absolute()
                             .top_0()
                             .right_0()
-                            .child(
-                                tool_tip(("note-row-more", id), "more", "More actions", t)
-                                    .size(px(24.))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        let at = window.mouse_position();
-                                        this.open_row_menu(id, at, cx);
-                                    })),
-                            ),
+                            .child(action),
                     ),
             )
     }

@@ -2,6 +2,9 @@ import { Context, Schema } from "effect"
 import {UploadNoteAttachmentInput,NoteAttachmentDTO,AgentBriefDTO,UpdateAgentBriefInput} from "./index"
 import {ModelCatalogInput,ModelCatalogDTO,ChatModelsDTO} from "./index"
 import {NoteListFilter,NoteSummariesPageDTO,NoteSearchPageDTO} from "./index"
+import {AuthMethodsDTO,AppHandoffInput,AppHandoffDTO,AppHandoffExchangeInput,AppHandoffTokenDTO} from "./index"
+import {DownloadsDTO} from "./index"
+import {StorageTestInput,StorageTestDTO} from "./index"
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, HttpApiSecurity, OpenApi } from "effect/http-api"
 import { OrganizationDTO, OrganizationsDTO, OrganizationMemberDTO, OrganizationInvitationDTO, OrganizationDetailsDTO, OrganizationInvitationsDTO, CreateOrganizationInput, UpdateOrganizationInput, SetActiveOrganizationInput, InviteOrganizationMemberInput, UpdateOrganizationMemberRoleInput, ManualParticipantInput, GoogleStatusDTO, GoogleConnectInput, GoogleConnectDTO, GoogleCalendarsDTO, GoogleCalendarDTO, UpdateGoogleCalendarInput, NoteContextDTO, UpdateNoteContextInput, AuthSessionDTO, UsersDTO, UserDTO, CreateUserInput, UpdateUserRoleInput, CalendarPreferencesDTO, CalendarEventsDTO, CalendarsDTO, CalendarDTO, CreateCalendarInput, UpdateCalendarInput, AdminSettingsDTO, UpdateAdminSettingsInput, Timestamp, ChatStreamEventDTO, EvidenceRequestDTO, EvidenceDTO, AudioChunkDTO, AudioChunksDTO, UploadAudioChunkInput, RecordingCommandDTO, GenerateNotesCommandDTO, ChatInput, ChatAnswerDTO, CreateNoteInput, CreateShareInput, CreatedShareDTO, DeletedDTO, HealthDTO, NoteDTO, NotesDTO, SharedNoteDTO, ShareDTO, SharesDTO, UUID, UpdateNoteInput } from "./index"
 
@@ -11,6 +14,9 @@ export const Conflict = Schema.Struct({ error: Schema.Literal("conflict"), messa
 export const NotFound = Schema.Struct({ error: Schema.Literal("not_found"), message: Schema.String }).pipe(HttpApiSchema.status(404))
 export const InvalidRequest = Schema.Struct({ error: Schema.Literal("invalid_request"), message: Schema.String }).pipe(HttpApiSchema.status(400))
 export const Unavailable = Schema.Struct({ error: Schema.Literal("unavailable"), message: Schema.String }).pipe(HttpApiSchema.status(503))
+/** The app sign-in handoff: an unknown, used, expired or mismatched code, and too many attempts. */
+export const InvalidCode = Schema.Struct({ error: Schema.Literal("invalid_code"), message: Schema.String }).pipe(HttpApiSchema.status(401))
+export const RateLimited = Schema.Struct({ error: Schema.Literal("rate_limited"), message: Schema.String }).pipe(HttpApiSchema.status(429))
 export type ApiError = typeof Unauthorized.Type | typeof Forbidden.Type | typeof Conflict.Type | typeof NotFound.Type | typeof InvalidRequest.Type | typeof Unavailable.Type
 const errors = [Unauthorized, Forbidden, Conflict, NotFound, InvalidRequest, Unavailable] as const
 
@@ -30,9 +36,14 @@ export class OwnerAuth extends HttpApiMiddleware.Service<OwnerAuth, {provides:Au
 export const MeetingsApi = HttpApi.make("MeetingNotesApi")
   .add(HttpApiGroup.make("public")
     .add(HttpApiEndpoint.get("health", "/api/v1/health", { success: HealthDTO }))
-    .add(HttpApiEndpoint.get("getSharedNote", "/api/v1/shared/:token", {
-      params: { token: Schema.String }, success: SharedNoteDTO, error: [NotFound, Unavailable],
-    })))
+    .add(HttpApiEndpoint.get("getAuthMethods", "/api/v1/auth/methods", { success: AuthMethodsDTO, error: [Unavailable] }))
+    .add(HttpApiEndpoint.post("exchangeAppHandoff", "/api/v1/auth/app-handoff/exchange", { payload: AppHandoffExchangeInput, success: AppHandoffTokenDTO, error: [InvalidRequest, InvalidCode, RateLimited, Unavailable] }))
+    // The apps for the version this server is running, and the files themselves. Both are public.
+    .add(HttpApiEndpoint.get("getDownloads", "/api/v1/downloads", { success: DownloadsDTO, error: [Unavailable] }))
+    // Answered outside the typed handlers (GET and HEAD, single byte ranges, an ETag, five minutes of caching);
+    // listed here so the address and its answers are part of the published description. Only the files named
+    // by getDownloads exist: anything else is 404.
+    .add(HttpApiEndpoint.get("getDownloadFile", "/api/v1/downloads/files/:file", { params: { file: Schema.String }, success: HttpApiSchema.StreamUint8Array({ contentType: ["application/x-apple-diskimage", "application/zip"] }), error: [NotFound, Unavailable] })))
   .add(HttpApiGroup.make("owner")
     .add(HttpApiEndpoint.get("getGoogleStatus", "/api/v1/integrations/google", {success:GoogleStatusDTO,error:errors}))
     .add(HttpApiEndpoint.post("beginGoogleConnect", "/api/v1/integrations/google/connect", {payload:GoogleConnectInput,success:GoogleConnectDTO,error:errors}))
@@ -56,6 +67,9 @@ export const MeetingsApi = HttpApi.make("MeetingNotesApi")
     .add(HttpApiEndpoint.post("acceptOrganizationInvitation", "/api/v1/organization-invitations/:id/accept", {params:{id:UUID},success:OrganizationDTO,error:errors}))
     .add(HttpApiEndpoint.post("rejectOrganizationInvitation", "/api/v1/organization-invitations/:id/reject", {params:{id:UUID},success:DeletedDTO,error:errors}))
     .add(HttpApiEndpoint.get("getSession", "/api/v1/session", {success:AuthSessionDTO,error:errors}))
+    // A shared link is read by anyone signed in to this server who holds it; the token is still required. Not signed in: 401, before the token is looked at.
+    .add(HttpApiEndpoint.get("getSharedNote", "/api/v1/shared/:token", {params:{token:Schema.String},success:SharedNoteDTO,error:errors}))
+    .add(HttpApiEndpoint.post("createAppHandoff", "/api/v1/auth/app-handoff", {payload:AppHandoffInput,success:AppHandoffDTO,error:errors}))
     .add(HttpApiEndpoint.get("getAgentBrief", "/api/v1/profile/agent-brief", {success:AgentBriefDTO,error:errors}))
     .add(HttpApiEndpoint.patch("updateAgentBrief", "/api/v1/profile/agent-brief", {payload:UpdateAgentBriefInput,success:AgentBriefDTO,error:errors}))
     .add(HttpApiEndpoint.post("uploadNoteAttachment", "/api/v1/notes/:id/attachments", {params:{id:UUID},payload:UploadNoteAttachmentInput,success:NoteAttachmentDTO,error:errors}))
@@ -68,6 +82,7 @@ export const MeetingsApi = HttpApi.make("MeetingNotesApi")
     .add(HttpApiEndpoint.get("getAdminSettings", "/api/v1/admin/settings", { success: AdminSettingsDTO, error: errors }))
     .add(HttpApiEndpoint.patch("updateAdminSettings", "/api/v1/admin/settings", { payload: UpdateAdminSettingsInput, success: AdminSettingsDTO, error: errors }))
     .add(HttpApiEndpoint.post("getModelCatalog", "/api/v1/admin/models", {payload: ModelCatalogInput, success: ModelCatalogDTO, error: errors}))
+    .add(HttpApiEndpoint.post("testStorage", "/api/v1/admin/storage/test", {payload: StorageTestInput, success: StorageTestDTO, error: errors}))
     .add(HttpApiEndpoint.get("getChatModels", "/api/v1/models/chat", {success: ChatModelsDTO, error: errors}))
     .add(HttpApiEndpoint.get("listCalendars", "/api/v1/calendars", { success: CalendarsDTO, error: errors }))
     .add(HttpApiEndpoint.post("createCalendar", "/api/v1/calendars", { payload: CreateCalendarInput, success: CalendarDTO, error: errors }))

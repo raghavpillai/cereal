@@ -2,7 +2,10 @@
 //! remain in macOS Keychain, and private caches are keyed by stable user UUID.
 use crate::{
     app::{Cereal, Screen},
+    fetch::{Failure, Request},
+    handoff::{BrowserSignIn, HandoffError, SignInMethods},
     input::{InputChanged, InputSubmitted, TextInput},
+    link::AuthCallback,
     ui::*,
 };
 use gpui::{prelude::*, *};
@@ -36,10 +39,52 @@ struct Runtime {
 static RUNTIME: OnceLock<Mutex<Runtime>> = OnceLock::new();
 const SERVICE: &str = "dev.cereal.desktop.session";
 const ACCOUNT: &str = "current-session";
+/// An instance pointed at its own `CEREAL_DATA_DIR` keeps its session and its
+/// server address in that directory, and never opens the Keychain: a test
+/// instance cannot read, replace or delete the session of the installed app.
+/// A debug build does so whenever the directory is set. A release build does
+/// so only when `CEREAL_ISOLATED_SESSION=1` asks for it as well; otherwise it
+/// always uses the Keychain.
+fn isolated_directory() -> Option<std::path::PathBuf> {
+    let asked = crate::environment::var("CEREAL_ISOLATED_SESSION").is_ok_and(|value| value == "1");
+    if !cfg!(debug_assertions) && !asked {
+        return None;
+    }
+    crate::environment::var_os("CEREAL_DATA_DIR")
+        .filter(|directory| !directory.is_empty())
+        .map(std::path::PathBuf::from)
+}
 fn metadata_path() -> Option<std::path::PathBuf> {
+    if let Some(directory) = isolated_directory() {
+        return Some(directory.join("connection.json"));
+    }
     std::env::var_os("HOME").map(|p| {
         std::path::PathBuf::from(p).join("Library/Application Support/Cereal/connection.json")
     })
+}
+fn read_saved_session() -> Option<Vec<u8>> {
+    match isolated_directory() {
+        Some(directory) => std::fs::read(directory.join("session.json")).ok(),
+        None => security_framework::passwords::get_generic_password(SERVICE, ACCOUNT).ok(),
+    }
+}
+fn write_saved_session(bytes: &[u8]) -> Result<(), String> {
+    match isolated_directory() {
+        Some(directory) => crate::shared::write_private(&directory.join("session.json"), bytes)
+            .map_err(|_| "The session could not be saved".into()),
+        None => security_framework::passwords::set_generic_password(SERVICE, ACCOUNT, bytes)
+            .map_err(|_| "The session could not be saved in Keychain".into()),
+    }
+}
+fn delete_saved_session() {
+    match isolated_directory() {
+        Some(directory) => {
+            let _ = std::fs::remove_file(directory.join("session.json"));
+        }
+        None => {
+            let _ = security_framework::passwords::delete_generic_password(SERVICE, ACCOUNT);
+        }
+    }
 }
 fn runtime() -> &'static Mutex<Runtime> {
     RUNTIME.get_or_init(|| {
@@ -55,8 +100,7 @@ fn runtime() -> &'static Mutex<Runtime> {
         // The origin travels atomically with the token inside Keychain. An env
         // URL override must never send a saved session to another server.
         let saved_credentials =
-            security_framework::passwords::get_generic_password(SERVICE, ACCOUNT)
-                .ok()
+            read_saved_session()
                 .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
                 .and_then(|v| {
                     let saved_url = v.get("url")?.as_str()?;
@@ -115,6 +159,11 @@ pub fn identity() -> Option<String> {
 }
 pub fn configured_url() -> String {
     runtime().lock().unwrap().url.clone()
+}
+/// The server this app is set up to use, as a checked origin, whether or not
+/// anyone is signed in to it.
+pub fn server_origin() -> Option<String> {
+    validate_url(&configured_url()).ok()
 }
 fn validate_url(raw: &str) -> Result<String, String> {
     let raw = raw.trim().trim_end_matches('/');
@@ -272,16 +321,13 @@ fn sign_in(url: String, email: String, password: String) -> Result<VerifiedAccou
     verify(credentials)
 }
 fn persist(account: &VerifiedAccount) -> Result<(), String> {
-    security_framework::passwords::set_generic_password(
-        SERVICE,
-        ACCOUNT,
+    write_saved_session(
         serde_json::to_vec(
             &json!({"url":account.credentials.url,"token":account.credentials.token}),
         )
         .unwrap()
         .as_slice(),
-    )
-    .map_err(|_| "The session could not be saved in Keychain")?;
+    )?;
     let path = metadata_path().ok_or("Cannot find account preferences")?;
     std::fs::create_dir_all(path.parent().unwrap())
         .map_err(|_| "Cannot save account preferences")?;
@@ -313,7 +359,7 @@ fn clear() {
     state.credentials = None;
     state.session = None;
     drop(state);
-    let _ = security_framework::passwords::delete_generic_password(SERVICE, ACCOUNT);
+    delete_saved_session();
     if let Some(path) = metadata_path() {
         let _ = std::fs::remove_file(path);
     }
@@ -324,12 +370,78 @@ pub enum AccountEvent {
     SignedIn(VerifiedAccount),
     SignOut,
 }
+
+/// What the sign-in form knows about the server whose address is in the field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Discovery {
+    /// No address yet, or one that is still being typed.
+    Idle,
+    Checking,
+    Ready(SignInMethods),
+    Failed(String),
+}
+
+/// How long the form waits after the last keystroke before asking a server
+/// how it signs in, and how long a sign-in in the browser may take.
+const DISCOVERY_PAUSE: Duration = Duration::from_millis(500);
+const BROWSER_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// Ask a server how people sign in to it. No credentials are sent.
+fn sign_in_methods(url: &str) -> Result<SignInMethods, String> {
+    let address = format!("{url}/api/v1/auth/methods");
+    let reply = Request {
+        method: "GET",
+        url: &address,
+        bearer: None,
+        body: None,
+    }
+    .send(65_536)
+    .map_err(transport_message)?;
+    SignInMethods::read(reply.status, &reply.body)
+}
+
+fn transport_message(failure: Failure) -> String {
+    match failure {
+        Failure::TimedOut => "The server took too long to respond. Try again.",
+        Failure::TooLarge => "The server returned an unexpected response.",
+        Failure::Unreachable | Failure::Transport => "Could not reach this server",
+    }
+    .into()
+}
+
+/// Trade the code the browser handed back for a session: the same kind of
+/// token a password sign-in returns, checked against the server the same way.
+fn exchange(attempt: &BrowserSignIn, code: &str) -> Result<VerifiedAccount, String> {
+    let (address, body) = attempt.exchange(code);
+    let reply = Request {
+        method: "POST",
+        url: &address,
+        bearer: None,
+        body: Some(&body),
+    }
+    .send(65_536)
+    .map_err(transport_message)?;
+    let token = BrowserSignIn::read_exchange(reply.status, &reply.body)?;
+    verify(Credentials {
+        url: attempt.server().to_owned(),
+        token,
+    })
+}
+
 pub struct AccountView {
     pub url: Entity<TextInput>,
     email: Entity<TextInput>,
     password: Entity<TextInput>,
     busy: bool,
     error: Option<String>,
+    discovery: Discovery,
+    /// The address the form last asked about, and which question that was.
+    /// Only the answer for the address now in the field is ever shown.
+    asked: Option<String>,
+    question: u64,
+    /// The sign-in that is waiting for the browser to answer, and its turn.
+    waiting: Option<(BrowserSignIn, u64)>,
+    turn: u64,
     _subscriptions: Vec<Subscription>,
     focus: FocusHandle,
 }
@@ -345,6 +457,7 @@ impl AccountView {
             cx.subscribe(&password, |this, _, _: &InputSubmitted, cx| this.submit(cx)),
             cx.subscribe(&email, |_, _, _: &InputChanged, cx| cx.notify()),
             cx.subscribe(&password, |_, _, _: &InputChanged, cx| cx.notify()),
+            cx.subscribe(&url, |_, _, _: &InputChanged, cx| cx.notify()),
         ];
         Self {
             url,
@@ -352,12 +465,113 @@ impl AccountView {
             password,
             busy: false,
             error: None,
+            discovery: Discovery::Idle,
+            asked: None,
+            question: 0,
+            waiting: None,
+            turn: 0,
             _subscriptions: subscriptions,
             focus: cx.focus_handle(),
         }
     }
+
+    /// Start a sign-in to `server`: its address goes in the field and the
+    /// form asks it how it signs in.
+    pub fn sign_in_to(&mut self, server: String, cx: &mut Context<Self>) {
+        self.url.update(cx, |input, cx| input.set_content(server, cx));
+        self.error = None;
+        self.asked = None;
+        cx.notify();
+    }
+
+    /// Ask the server whose address is in the field how people sign in to
+    /// it, once typing has paused. Each change starts a new question, and an
+    /// answer to an earlier one, however late it arrives, is dropped.
+    fn follow_address(&mut self, cx: &mut Context<Self>) {
+        let address = self.url.read(cx).content().trim().to_owned();
+        if self.asked.as_deref() == Some(address.as_str()) {
+            return;
+        }
+        let first = self.asked.is_none();
+        self.ask(address, if first { Duration::ZERO } else { DISCOVERY_PAUSE }, cx);
+    }
+
+    fn ask(&mut self, address: String, pause: Duration, cx: &mut Context<Self>) {
+        self.asked = Some(address.clone());
+        self.question = self.question.wrapping_add(1);
+        let asked = self.question;
+        // What was offered for the old address is withdrawn at once, and a
+        // browser sign-in that was waiting for it is over.
+        self.discovery = Discovery::Idle;
+        self.waiting = None;
+        if address.is_empty() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(pause).await;
+            let target = this
+                .update(cx, |this, cx| {
+                    if this.question != asked {
+                        return None;
+                    }
+                    cx.notify();
+                    match validate_url(&address) {
+                        Ok(url) => {
+                            this.discovery = Discovery::Checking;
+                            Some(url)
+                        }
+                        Err(error) => {
+                            this.discovery = Discovery::Failed(error);
+                            None
+                        }
+                    }
+                })
+                .ok()
+                .flatten();
+            let Some(url) = target else { return };
+            let found = cx
+                .background_executor()
+                .spawn(async move { sign_in_methods(&url) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.question != asked {
+                    return;
+                }
+                this.discovery = match found {
+                    Ok(methods) => Discovery::Ready(methods),
+                    Err(error) => Discovery::Failed(error),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The end of a sign-in, by password or through the browser: the session
+    /// is saved and announced, or the reason it failed is shown.
+    fn finish(
+        &mut self,
+        request_attempt: u64,
+        result: Result<VerifiedAccount, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.busy = false;
+        if request_attempt != attempt() {
+            cx.notify();
+            return;
+        }
+        match result {
+            Ok(a) => match persist(&a) {
+                Ok(()) => cx.emit(AccountEvent::SignedIn(a)),
+                Err(error) => self.error = Some(error),
+            },
+            Err(e) => self.error = Some(e),
+        }
+        cx.notify();
+    }
+
     fn submit(&mut self, cx: &mut Context<Self>) {
-        if self.busy {
+        if self.busy || self.waiting.is_some() {
             return;
         }
         let url = self.url.read(cx).content();
@@ -391,21 +605,76 @@ impl AccountView {
                     }
                 }
             };
-            let _ = this.update(cx, |this, cx| {
-                this.busy = false;
-                if request_attempt != attempt() {
-                    cx.notify();
-                    return;
-                }
-                match result {
-                    Ok(a) => match persist(&a) {
-                        Ok(()) => cx.emit(AccountEvent::SignedIn(a)),
-                        Err(error) => this.error = Some(error),
-                    },
-                    Err(e) => this.error = Some(e),
-                }
+            let _ = this.update(cx, |this, cx| this.finish(request_attempt, result, cx));
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Sign in on the server's own page, in the default browser, by
+    /// whichever method the server offers there. The session that comes back
+    /// is kept exactly as one from the password form is.
+    fn continue_in_browser(&mut self, cx: &mut Context<Self>) {
+        if self.busy || self.waiting.is_some() {
+            return;
+        }
+        self.error = None;
+        let started = validate_url(&self.url.read(cx).content())
+            .and_then(|server| BrowserSignIn::new(server).map_err(|error| error.message().into()));
+        let attempt = match started {
+            Ok(attempt) => attempt,
+            Err(error) => {
+                self.error = Some(error);
                 cx.notify();
+                return;
+            }
+        };
+        crate::shared_view::open_in_browser(&attempt.login_url(), cx);
+        self.turn = self.turn.wrapping_add(1);
+        let turn = self.turn;
+        self.waiting = Some((attempt, turn));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(BROWSER_TIMEOUT).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.waiting.as_ref().is_some_and(|(_, waiting)| *waiting == turn) {
+                    this.waiting = None;
+                    this.error = Some(HandoffError::TimedOut.message().into());
+                    cx.notify();
+                }
             });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn cancel_browser(&mut self, cx: &mut Context<Self>) {
+        self.waiting = None;
+        cx.notify();
+    }
+
+    /// The browser's answer, `cereal://auth?…`. Only the sign-in that is
+    /// waiting for one can use it; with nothing waiting it is ignored.
+    pub fn receive_answer(&mut self, answer: AuthCallback, cx: &mut Context<Self>) {
+        let Some((attempt, _)) = self.waiting.take() else {
+            return;
+        };
+        let code = match attempt.code(&answer) {
+            Ok(code) => code.to_owned(),
+            Err(error) => {
+                self.error = Some(error.message().into());
+                cx.notify();
+                return;
+            }
+        };
+        self.busy = true;
+        self.error = None;
+        let request_attempt = next_attempt();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { exchange(&attempt, &code) })
+                .await;
+            let _ = this.update(cx, |this, cx| this.finish(request_attempt, result, cx));
         })
         .detach();
         cx.notify();
@@ -414,6 +683,17 @@ impl AccountView {
 impl Render for AccountView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = Theme::new(true);
+        self.follow_address(cx);
+        let field = |input: &Entity<TextInput>| {
+            div()
+                .w_full()
+                .p(px(12.))
+                .rounded(px(12.))
+                .bg(t.card)
+                .border_1()
+                .border_color(t.border)
+                .child(input.clone())
+        };
         let mut form = div()
             .w(px(400.))
             .max_w_full()
@@ -433,37 +713,109 @@ impl Render for AccountView {
                     pill("account-sign-out", "Sign out", "log-out", t)
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(AccountEvent::SignOut))),
                 );
-        }
-        for input in [&self.url, &self.email, &self.password] {
+        } else if !configured() {
+            // Nothing is connected yet: the notes on this Mac are still there
+            // to go back to.
             form = form.child(
-                div()
-                    .w_full()
-                    .p(px(12.))
-                    .rounded(px(12.))
-                    .bg(t.card)
-                    .border_1()
-                    .border_color(t.border)
-                    .child(input.clone()),
+                pill("account-back", "Back to notes", "chevron-left", t)
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(AccountEvent::Back))),
             );
         }
-        form = form.child(
-            pill(
-                "account-sign-in",
-                if self.busy {
-                    "Signing in…"
-                } else {
-                    "Sign in"
-                },
-                "users",
-                t,
-            )
-            .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
-        );
+        form = form.child(field(&self.url));
+        let mut password_offered = true;
+        match self.discovery.clone() {
+            Discovery::Idle => {}
+            Discovery::Checking => {
+                form = form.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(crate::motion::spinner(t.muted))
+                        .child(small("Checking how this server signs in…", t)),
+                );
+            }
+            Discovery::Failed(message) => {
+                form = form.child(small(message, t)).child(
+                    pill("account-check-again", "Try again", "refresh", t).on_click(cx.listener(
+                        |this, _, _, cx| {
+                            let address = this.url.read(cx).content().trim().to_owned();
+                            this.ask(address, Duration::ZERO, cx);
+                            cx.notify();
+                        },
+                    )),
+                );
+            }
+            Discovery::Ready(_) if self.waiting.is_some() => {
+                password_offered = false;
+                form = form
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(crate::motion::spinner(t.muted))
+                            .child(small("Waiting for you to sign in in your browser…", t)),
+                    )
+                    .child(
+                        pill("account-browser-cancel", "Cancel", "", t)
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel_browser(cx))),
+                    );
+            }
+            Discovery::Ready(methods) => {
+                password_offered = methods.password;
+                if methods.password {
+                    form = form
+                        .child(field(&self.email))
+                        .child(field(&self.password))
+                        .child(
+                            pill(
+                                "account-sign-in",
+                                if self.busy {
+                                    "Signing in…"
+                                } else {
+                                    "Sign in"
+                                },
+                                "users",
+                                t,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
+                        );
+                }
+                if let Some(label) = methods.browser_label() {
+                    let google = label == "Continue with Google";
+                    // The pill's own shape, with Google's mark in its four
+                    // colours where a tinted icon would otherwise be.
+                    form = form.child(
+                        pill(
+                            "account-browser",
+                            if self.busy && !methods.password {
+                                "Signing in…"
+                            } else {
+                                label
+                            },
+                            if google { "" } else { "globe" },
+                            t,
+                        )
+                        .when(google, |pill| {
+                            pill.flex_row_reverse().child(
+                                img("icons/google.svg").size(px(16.)).flex_shrink_0(),
+                            )
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| this.continue_in_browser(cx))),
+                    );
+                }
+            }
+        }
         if let Some(error) = &self.error {
             form = form.child(small(error.clone(), t));
         }
         form = form.child(small(
-            "Your password is used only to sign in. The session is kept in macOS Keychain.",
+            if password_offered {
+                "Your password is used only to sign in. The session is kept in macOS Keychain."
+            } else {
+                "Your session is kept in macOS Keychain."
+            },
             t,
         ));
         div()
@@ -541,6 +893,9 @@ impl Cereal {
         self.chat_recipes = crate::chat::load_recipes();
         self.screen = Screen::Home;
         self.connect_server(cx);
+        // A link that was waiting for this session, or the note this
+        // sign-in was started for.
+        self.resume_links(cx);
         cx.notify();
     }
     pub fn sign_out_account(&mut self, cx: &mut Context<Self>) {
@@ -590,7 +945,10 @@ impl Cereal {
                     Ok(a) => this.accept_account(a, cx),
                     Err(e) => {
                         this.server_status = Some(e.clone());
-                        this.show_toast(&e, cx)
+                        this.show_toast(&e, cx);
+                        // Nobody is signed in: a link that was waiting to
+                        // find that out says where its note is.
+                        this.resume_links(cx);
                     }
                 }
             });

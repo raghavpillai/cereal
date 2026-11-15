@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/UpdateAppsSettingsInput",
+  "$defs": {
+    "UpdateAppsSettingsInput": {
+      "type": "object",
+      "properties": {
+        "iosAppIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "maxItems": 10
+        },
+        "iosAppStoreId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 20
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

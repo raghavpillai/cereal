@@ -108,12 +108,14 @@ try {
   assert(/monday/i.test(answer.answer), "Chat did not use latest server transcript")
   checks.push("OpenRouter chat grounded in updated note")
   const share = await (await call(`${path}/shares`, { includeBody: false, includeEnhanced: true }, "POST")).json()
-  const shared = await (await call(`/api/v1/shared/${share.token}`, undefined, "GET", false)).json()
+  // Reading a shared link needs an account on the server: anonymous is refused, the signed-in caller reads it.
+  await call(`/api/v1/shared/${share.token}`, undefined, "GET", false, 401)
+  const shared = await (await call(`/api/v1/shared/${share.token}`, undefined, "GET", true)).json()
   assert(shared.enhanced === regenerated.enhanced && !("transcriptSegments" in shared), "Shared projection exposed private transcript or stale notes")
   const page = await fetch(new URL(share.path, base), { redirect: "error" })
   assert(page.ok && (await page.text()).includes("/assets/"), "Shared reader route failed")
   await call(`/api/v1/shares/${share.share.id}`, undefined, "DELETE")
-  await call(`/api/v1/shared/${share.token}`, undefined, "GET", false, 404)
+  await call(`/api/v1/shared/${share.token}`, undefined, "GET", true, 404)
   checks.push("generated-note web reader projection and revocation")
   evidence.passed = true
   if (process.env.PIPELINE_KEEP_FIXTURE === "1") evidence.fixtureNoteId = id

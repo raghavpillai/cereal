@@ -1,5 +1,5 @@
 import {createMcpHandler,McpServer,fromJsonSchema,type CallToolResult,type JsonSchemaType} from "@modelcontextprotocol/server"
-import type {McpGrant} from "./mcp-auth"
+import {MCP_PATH,LEGACY_MCP_PATH,type McpGrant} from "./mcp-auth"
 import {MCP_TOOL_DEFINITIONS,McpToolError,type McpToolContext,type McpToolResult,createMcpToolExecutor} from "./mcp-tools"
 
 type Protector=(request:Request,next:(request:Request,grant:McpGrant)=>Promise<Response>)=>Promise<Response>
@@ -100,7 +100,7 @@ export function makeMcpEndpoint(options:McpEndpointOptions){
     close:()=>{for(const controller of running.values())controller.abort();running.clear();sessions.clear();return handler.close()},
     async fetch(request:Request):Promise<Response>{
       const url=new URL(request.url),host=(request.headers.get("host")??url.host).toLowerCase(),origin=request.headers.get("origin")
-      if(url.pathname!=="/mcp")return failure("not_found",404)
+      if(url.pathname!==MCP_PATH&&url.pathname!==LEGACY_MCP_PATH)return failure("not_found",404)
       if(!hosts.has(host)||origin&&!origins.has(origin))return failure("forbidden",403)
       if(request.method==="OPTIONS")return new Response(null,{status:204,headers:{...noStore,"Access-Control-Allow-Methods":"POST, GET, DELETE, OPTIONS","Access-Control-Allow-Headers":"Authorization, Content-Type, Accept, MCP-Protocol-Version, Mcp-Session-Id, Last-Event-ID, DPoP","Access-Control-Max-Age":"600",...(origin?{"Access-Control-Allow-Origin":origin,Vary:"Origin"}:{})}})
       if(!["POST","GET","DELETE"].includes(request.method))return failure("method_not_allowed",405,{Allow:"POST, GET, DELETE, OPTIONS"})

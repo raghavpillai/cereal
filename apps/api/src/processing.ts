@@ -1,7 +1,5 @@
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import { mkdir, open, link, unlink, readFile, rm } from "node:fs/promises";
-import { resolve, join } from "node:path";
+import { resolve } from "node:path";
 import { Effect, Stream } from "effect";
 import type {
   AudioChunkDTO,
@@ -28,6 +26,8 @@ import type { LiveHub } from "./live/hub";
 import { COVERAGE_TOLERANCE_MS, overlapMs, type Interval } from "./live/coverage";
 import { liveChatState } from "./live/chat";
 import type { LiveConversationStore } from "./ai/live-conversation";
+import { cleanNoteTitle, isUntitled } from "./ai/note-title";
+import { audioKey, audioPrefix, makeStorage, type StorageService } from "./storage";
 
 const invalid = (message: string): ApiError => ({
   error: "invalid_request",
@@ -116,6 +116,8 @@ function makeProcessingServiceBase(
   repository: NotesRepositoryService,
   options: {
     storageDir?: string;
+    /** Where audio parts are kept (`storage.ts`). Default: local disk only, in `storageDir`. */
+    storage?: StorageService;
     providers?: ProviderServices;
     worker?: boolean;
     meetingContext?: (noteId:string)=>Effect.Effect<MeetingContextDTO|null,ApiError>;
@@ -141,45 +143,11 @@ function makeProcessingServiceBase(
   );
   let closed = false,
     running: Promise<void> | undefined;
-  const filepath = (hash: string, noteId: string) =>
-    join(root, noteId, `${hash}.wav`);
-  async function store(audio: Uint8Array, hash: string, noteId: string) {
-    const directoryPath = join(root, noteId);
-    await mkdir(directoryPath, { recursive: true, mode: 0o700 });
-    const temporary = join(directoryPath, `.upload-${crypto.randomUUID()}`);
-    const file = await open(
-      temporary,
-      constants.O_WRONLY |
-        constants.O_CREAT |
-        constants.O_EXCL |
-        constants.O_NOFOLLOW,
-      0o600,
-    );
-    try {
-      await file.writeFile(audio);
-      await file.sync();
-    } finally {
-      await file.close();
-    }
-    try {
-      try {
-        await link(temporary, filepath(hash, noteId));
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-        const existing = await readFile(filepath(hash, noteId));
-        if (createHash("sha256").update(existing).digest("hex") !== hash)
-          throw new Error("Corrupt audio storage");
-      }
-      const directory = await open(directoryPath, constants.O_RDONLY);
-      try {
-        await directory.sync();
-      } finally {
-        await directory.close();
-      }
-    } finally {
-      await unlink(temporary).catch(() => {});
-    }
-  }
+  const storage = options.storage ?? makeStorage({ audioDir: root, downloadsDir: process.env.DOWNLOADS_DIR || "/data/downloads" });
+  /** One part, under a key made of the note's ID and the audio's own SHA-256: the same audio stored
+   * twice is one file, and nothing a client names ever becomes part of a path. */
+  const store = (audio: Uint8Array, hash: string, noteId: string) =>
+    storage.audio.put(audioKey(noteId, hash), audio, { sha256: hash, contentType: "audio/wav" });
   // Parts held back for a live session, by chunk ID, with the time they were first held.
   const held = new Map<string, number>();
   /** What a claimed part still needs from the batch provider, given what the live path has stored.
@@ -214,8 +182,9 @@ function makeProcessingServiceBase(
       try {
         const plan = await coveragePlan(c);
         if (!plan) continue;
-        const audio = await readFile(filepath(c.hash, c.noteId));
-        if (createHash("sha256").update(audio).digest("hex") !== c.hash)
+        // Wherever the part is: the selected storage, or the other one if it was recorded before a switch.
+        const audio = await storage.audio.bytes(audioKey(c.noteId, c.hash));
+        if (!audio || createHash("sha256").update(audio).digest("hex") !== c.hash)
           throw new Error("Corrupt audio storage");
         const segments = await Effect.runPromise(
           providers.transcribe({
@@ -270,13 +239,25 @@ function makeProcessingServiceBase(
     if(meeting&&JSON.stringify(providerMeetingContext(meeting)).length>100_000)return yield* Effect.fail(invalid("Attached meeting context is too large for processing"))
     return {...note,...(meeting?{meetingContext:meeting}:{})} satisfies ProviderNote
   })
+  /** The model's title for a note without one, or null. Never fails, whatever the provider does. The log
+   * line names the note and the reason, never the title, the notes or the transcript. */
+  const suggestTitle = (note: ProviderNote, notes: string) => {
+    if (!providers.title) return Effect.succeed<string | null>(null);
+    const skipped = (reason: string) => {
+      if (process.env.NODE_ENV !== "test") console.warn(`note title not saved note=${note.id} reason=${reason}`);
+      return null;
+    };
+    return Effect.map(Effect.exit(Effect.suspend(() => providers.title!(note, notes))), (exit) =>
+      exit._tag === "Success" ? (cleanNoteTitle(exit.value) ?? skipped("unusable_answer")) : skipped("request_failed"),
+    );
+  };
   return {
     deleteNote: (id: string) =>
       Effect.gen(function* () {
         const deleted = yield* persist(repository.deleteNote(id));
         if (!deleted) return yield* Effect.fail(missing);
         yield* Effect.tryPromise({
-          try: () => rm(join(root, id), { recursive: true, force: true }),
+          try: () => storage.audio.deletePrefix(audioPrefix(id)),
           catch: () => unavailable,
         });
         return { deleted };
@@ -387,6 +368,9 @@ function makeProcessingServiceBase(
           );
           return yield* Effect.fail(unavailable);
         }
+        // A note nobody has named is named from its finished notes. This never costs the notes: no
+        // answer, or one that is not a title, leaves the note untitled.
+        const title = isUntitled(n.title) ? yield* suggestTitle(enriched, result.success) : null;
         const contextCheck=yield* Effect.result(Effect.flatMap(getNote(id),providerNote));
         if(contextCheck._tag==="Failure"){yield* persist(repository.finishGeneration(id,revision,runId,null));return yield* Effect.fail(contextCheck.failure)}
         const latestContext=contextCheck.success;
@@ -395,7 +379,8 @@ function makeProcessingServiceBase(
           return yield* Effect.fail(invalid("Meeting context changed during generation; generate again using its current association"));
         }
         const finished = yield* persist(
-          repository.finishGeneration(id, revision, runId, result.success),
+          // The title is only a suggestion: the write keeps a title the note has been given meanwhile.
+          repository.finishGeneration(id, revision, runId, result.success, title),
         );
         return (
           finished ??

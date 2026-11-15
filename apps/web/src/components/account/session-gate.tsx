@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { AuthSessionDTO } from '@meeting-notes/contracts'
-import { authClient, signInProblem } from '../../lib/auth-client'
+import { authClient } from '../../lib/auth-client'
 import { AdminClientError, createAdminClient, type AdminClient } from '../../lib/admin-client'
 import { Loading, Notice } from '../admin/shared'
-import { safeOAuthResume, signedOAuthQuery } from '../../lib/mcp-state'
-import appIcon from '../../assets/app-icon.svg?url'
 
 type State = { kind: 'loading' } | { kind: 'anonymous' } | { kind: 'error' } | { kind: 'signingOut' }
   | { kind: 'closed'; error: boolean } | { kind: 'ready'; session: AuthSessionDTO; client: AdminClient }
@@ -57,58 +55,23 @@ export function SessionGate({ children, fallback, onClient }: {
   if (state.kind === 'error') return <section className="admin-login"><h1>Unable to check your session.</h1><p>Your private notes and settings are hidden until the connection returns.</p><button type="button" className="button" onClick={() => void refresh()}>Try again</button></section>
   if (state.kind === 'ready') return <>{children(state.session, state.client, expired, signOut)}</>
   if (state.kind === 'closed' && state.error) return <section className="admin-login"><h1>Your private view is closed.</h1><Notice error>The server could not finish signing out. Retry to end this browser session.</Notice><button type="button" className="button" onClick={() => void signOut()}>Retry sign out</button></section>
-  return <Login signedOut={state.kind === 'closed'} connected={async () => { signedOut.current = false; await refresh() }} />
+  // Signed out: the sign-in page, which offers every way of signing in this server has turned on, and comes back here.
+  return <ToSignIn />
+}
+
+/** The sign-in page's address for someone who was on `location`, so that signing in brings them back to
+ * exactly that address: its query is carried whole, because a page reached while connecting an app holds
+ * that app's signed request there. */
+export function signInPath(location: { pathname: string; search: string; hash: string }): string {
+  const here = `${location.pathname}${location.search}${location.hash}`
+  return here === '/' || here === '/notes' || location.pathname === '/login' ? '/login' : `/login?return=${encodeURIComponent(here)}`
+}
+
+function ToSignIn() {
+  useEffect(() => { window.location.replace(signInPath(window.location)) }, [])
+  return <div className="account-loading"><Loading label="Opening sign-in…" /></div>
 }
 
 function sameUser(a: AuthSessionDTO, b: AuthSessionDTO) {
   return a.user.id === b.user.id && a.user.role === b.user.role && a.user.name === b.user.name && a.user.email === b.user.email
-}
-
-export function Login({ connected, signedOut = false }: { connected: () => Promise<void>; signedOut?: boolean }) {
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [pending, setPending] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const request = useRef<AbortController | null>(null)
-  useEffect(() => () => request.current?.abort(), [])
-  async function login() {
-    if (pending) return
-    const controller = new AbortController(); request.current = controller
-    setPending(true); setError(null)
-    const submittedPassword = password; setPassword('')
-    try {
-      const result = await authClient.signIn.email({ email: email.trim(), password: submittedPassword, rememberMe: false }, { signal: controller.signal })
-      if (controller.signal.aborted) return
-      if (result.error) { setError(signInProblem(result.error.status)); requestAnimationFrame(() => document.getElementById('account-password')?.focus()) }
-      else {
-        // The provider resumes a signed OAuth request after password sign-in.
-        // Only our own authorization pages can be entered before explicit consent.
-        const response = result.data as { redirect?: boolean; url?: string } | null
-        if (signedOAuthQuery(window.location.search) && response?.redirect) {
-          const resume = safeOAuthResume(response.url, window.location.origin)
-          if (!resume) { setError('This connection could not be resumed. Start again from your app.'); return }
-          window.location.assign(resume)
-        } else await connected()
-      }
-    } catch { if (!controller.signal.aborted) setError('Unable to reach the instance. Please try again.') }
-    finally { if (!controller.signal.aborted) setPending(false) }
-  }
-  return <section className="auth">
-    <div className="card auth-card rise-in">
-      <img className="auth-icon" src={appIcon} width="68" height="68" alt="" />
-      <p className="eyebrow">Your meeting notes</p><h1>Welcome back.</h1>
-      <p>Sign in to read your notes and manage your account.</p>
-      {signedOut && <Notice>You are signed out.</Notice>}
-      <form onSubmit={event => { event.preventDefault(); void login() }}>
-        <fieldset disabled={pending}>
-          <label className="field" htmlFor="account-email">Email address<input id="account-email" name="email" type="email" value={email} autoComplete="username" required autoCapitalize="none" spellCheck={false} onChange={e => setEmail(e.target.value)} /></label>
-          <label className="field" htmlFor="account-password">Password<input id="account-password" name="password" type="password" value={password} aria-invalid={error ? true : undefined} aria-describedby={error ? 'sign-in-problem' : undefined} autoComplete="current-password" required maxLength={128} onChange={e => setPassword(e.target.value)} /></label>
-          {error && <div id="sign-in-problem"><Notice error>{error}</Notice></div>}
-          {/* Always pressable: the fields are required, so the browser explains what is missing. */}
-          <button className="button is-large" type="submit" disabled={pending}>{pending ? 'Signing in…' : 'Sign in'}</button>
-        </fieldset>
-      </form>
-    </div>
-    <p className="auth-footnote">Accounts are provided by your instance administrator. Shared links open without signing in.</p>
-  </section>
 }

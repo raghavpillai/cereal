@@ -5,15 +5,38 @@ import { Empty, Loading, Modal, Notice, useAdminTask, useResource } from '../adm
 import { createMCPClient, type MCPConnection } from '../../lib/mcp-client'
 import { Segmented } from '../kit/segmented'
 import { AccountMenu } from '../account/account-menu'
-import { mcpConnectionURL, mcpScopeDescriptions } from '../../lib/mcp-state'
+import { AdminClientError } from '../../lib/admin-client'
+import { mcpConnectionURL, mcpScopeDescriptions, safeOAuthResume, signedOAuthQuery } from '../../lib/mcp-state'
 
 export function MCPConnect() {
   const [url, setURL] = useState<string | null>(null)
   useEffect(() => { setURL(mcpConnectionURL(window.location.origin)) }, [])
   return <div className="admin-page mcp-page"><div className="admin-heading"><div><p className="eyebrow">Connections</p><h1>Your notes, where you work.</h1><p>Connect an AI app to your meeting notes.</p></div><Link to="/notes" className="admin-secondary-button">Your notes</Link></div>
     <ConnectionInstructions url={url} />
-    <SessionGate>{(session, _client, expired, signOut) => <div key={session.user.id}><AccountMenu session={session} signOut={signOut} /><ConnectedApps expired={expired} /><p className="admin-page-footnote">Signed in as {session.user.email}.</p></div>}</SessionGate>
+    <SessionGate>{(session, _client, expired, signOut) => <div key={session.user.id}><AccountMenu session={session} signOut={signOut} /><ResumeAuthorization expired={expired} /><ConnectedApps expired={expired} /><p className="admin-page-footnote">Signed in as {session.user.email}.</p></div>}</SessionGate>
   </div>
+}
+
+/** An app that asked to connect sent its signed request here, and sign-in brought the person back with it.
+ * Now that they are signed in the request carries on: to the page that asks for their consent. Only this
+ * instance's own authorization pages are entered from here; an app's callback comes after consent. */
+function ResumeAuthorization({ expired }: { expired: () => void }) {
+  const [failed, setFailed] = useState(false)
+  useEffect(() => {
+    const query = signedOAuthQuery(window.location.search)
+    if (!query) return
+    const controller = new AbortController()
+    createMCPClient(window.location.origin).resume(query, controller.signal).then(answer => {
+      if (controller.signal.aborted) return
+      const next = safeOAuthResume(answer.url, window.location.origin)
+      if (next) window.location.assign(next); else setFailed(true)
+    }, error => {
+      if (controller.signal.aborted) return
+      if (error instanceof AdminClientError && error.status === 401) expired(); else setFailed(true)
+    })
+    return () => controller.abort()
+  }, [expired])
+  return failed ? <Notice error>This connection could not be resumed. Start again from your app.</Notice> : null
 }
 
 export function ConnectionInstructions({ url }: { url: string | null }) {

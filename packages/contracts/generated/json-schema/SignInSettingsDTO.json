@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/SignInSettingsDTO",
+  "$defs": {
+    "SignInSettingsDTO": {
+      "type": "object",
+      "properties": {
+        "password": {
+          "type": "boolean"
+        },
+        "google": {
+          "type": "boolean"
+        },
+        "allowedEmails": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "googleClientId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "googleClientSecretSet": {
+          "type": "boolean"
+        },
+        "googleRedirectUris": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "password",
+        "google",
+        "allowedEmails",
+        "googleClientId",
+        "googleClientSecretSet",
+        "googleRedirectUris"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

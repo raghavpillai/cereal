@@ -10,7 +10,7 @@ import {ArrowUpRight,LogOut} from 'lucide-react'
 import '../../admin.css'
 
 export function AdminPortal(){return <div className="admin-page instance-settings"><SessionGate>{(session,client,expired,signOut)=>session.user.role==='user'
- ?<section className="admin-login"><p className="eyebrow">Instance settings</p><h1>Administrator access required.</h1><p>Ask your instance owner for access to these settings.</p><a href="/account" className="button">Your account</a></section>
+ ?<section className="admin-login"><p className="eyebrow">Instance settings</p><h1>Administrator access required.</h1><p>Ask your instance owner for access to these settings.</p><a href="/notes" className="button">Back to notes</a></section>
  :<LoadWorkspace session={session} client={client} expired={expired} signOut={signOut}/>}</SessionGate></div>}
 function LoadWorkspace({session,client,expired,signOut}:{session:AuthSessionDTO;client:AdminClient;expired:()=>void;signOut:()=>Promise<void>}){
  const load=useCallback((signal:AbortSignal)=>client.getSettings(signal),[client]),resource=useResource(load,expired)
@@ -24,6 +24,6 @@ function Workspace({session,client,initialSettings,expired,signOut}:{session:Aut
   <div className="instance-heading"><div><h1>Instance settings</h1><p>{settings.instanceName}</p></div><span className="instance-owner">{session.user.role==='owner'?'Owner':'Administrator'}</span></div>
   {notice&&<Notice>{notice}</Notice>}{tasks.error&&<Notice error>{tasks.error}</Notice>}
   <SettingsPanel key={settings.updatedAt??'initial'} settings={settings} client={client} expired={expired} busy={tasks.pending.has('settings')} save={save}><AdministratorsPanel client={client} viewer={session.user} expired={expired}/></SettingsPanel>
-  <div className="instance-footer"><span>Signed in as {session.user.email}</span><div><a href="/account">Your account <ArrowUpRight size={12}/></a><Button variant="ghost" size="sm" onClick={()=>void signOut()}><LogOut/>Sign out</Button></div></div>
+  <div className="instance-footer"><span>Signed in as {session.user.email}</span><div><a href="/account">Google Calendar <ArrowUpRight size={12}/></a><Button variant="ghost" size="sm" onClick={()=>void signOut()}><LogOut/>Sign out</Button></div></div>
  </>
 }

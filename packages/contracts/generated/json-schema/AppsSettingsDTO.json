@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/AppsSettingsDTO",
+  "$defs": {
+    "AppsSettingsDTO": {
+      "type": "object",
+      "properties": {
+        "iosAppIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "iosAppStoreId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "iosAppIds",
+        "iosAppStoreId"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

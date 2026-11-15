@@ -4,6 +4,7 @@ import {selectMeetings,selectTranscriptPassages,type MeetingSearchInput,type Tra
 import type {NoteSearchPageDTO,NoteSummariesPageDTO} from "@meeting-notes/contracts"
 import type {NoteListInput,NoteSearchInput} from "./note-summaries"
 import {makeMemoryLiveRepository,type ChunkResolution,type FinishChunkOptions,type LiveRepository} from "./live/repository"
+import {isDefaultNoteTitle} from "./meeting-context-errors"
 
 export class RepositoryError extends Error {
   readonly _tag = "RepositoryError"
@@ -35,7 +36,10 @@ export interface NotesRepositoryService {
    * Request-scoped repositories leave it out. */
   readonly live?: LiveRepository
   readonly beginGeneration: (id: string, revision: number, runId: string) => Effect.Effect<NoteDTO | null, RepositoryError>
-  readonly finishGeneration: (id: string, revision: number, runId: string, enhanced: string | null) => Effect.Effect<NoteDTO | null, RepositoryError>
+  /** Saves a finished generation, or refuses it (null) when the note changed since it began. `title` is a
+   * suggestion for a note nobody has named: it is saved with the notes only if, inside this same write, the
+   * note still has no title of its own. A title the person or a calendar event gave it meanwhile is kept. */
+  readonly finishGeneration: (id: string, revision: number, runId: string, enhanced: string | null, title?: string | null) => Effect.Effect<NoteDTO | null, RepositoryError>
 
   readonly listNotes: () => Effect.Effect<ReadonlyArray<NoteDTO>, RepositoryError>
   readonly searchNotes?: (input:MeetingSearchInput) => Effect.Effect<ReadonlyArray<NoteDTO>,RepositoryError>
@@ -90,7 +94,7 @@ export function scopeRepository(repository: NotesRepositoryService, userId: stri
     claimAudioChunk: () => Effect.succeed(null),
     finishAudioChunk: () => Effect.succeed(false),
     beginGeneration: (id, revision, runId) => note(id, () => repository.beginGeneration(id, revision, runId), null),
-    finishGeneration: (id, revision, runId, enhanced) => note(id, () => repository.finishGeneration(id, revision, runId, enhanced), null),
+    finishGeneration: (id, revision, runId, enhanced, title) => note(id, () => repository.finishGeneration(id, revision, runId, enhanced, title), null),
     listShares: id => note(id, () => repository.listShares(id), []),
     createShare: share => Effect.flatMap(access.ownsNote(share.metadata.noteId), allowed => allowed
       ? repository.createShare(share) : Effect.fail(new RepositoryError("createShare"))),
@@ -100,6 +104,16 @@ export function scopeRepository(repository: NotesRepositoryService, userId: stri
       ? repository.revokeShare(id, now) : Effect.succeed(null)),
   }
   return scoped
+}
+
+/** "Untitled note" and "New note" are what an app shows for a note that has no title, and an app that has
+ * not yet read the note's real title (one written after its notes were generated, or taken from a calendar
+ * event) sends the placeholder back with every save. A placeholder never replaces a real title; an empty
+ * title still clears it, and a real one still renames the note. */
+export function withoutPlaceholderTitle<T extends { readonly title?: string | undefined }>(input: T, currentTitle: string): T {
+  if (input.title === undefined || input.title.trim() === "" || !isDefaultNoteTitle(input.title) || isDefaultNoteTitle(currentTitle)) return input
+  const { title: _placeholder, ...rest } = input
+  return rest as T
 }
 
 /** Changes to timing/finality alone do not make already-generated text stale. */
@@ -166,11 +180,11 @@ export function makeMemoryRepository(seed: ReadonlyArray<NoteDTO> = [], clock: (
       if (!n || n.transcriptRevision!==revision || n.recordingState==="recording" || ["analyzing_transcript","writing_notes"].includes(n.generationState) || [...chunks.values()].some(c=>c.noteId===id && c.state!=="ready")) return null
       const next: NoteDTO = {...n,generationState:"writing_notes",updatedAt:clock().toISOString()};notes.set(id,next);generationRuns.set(id,runId);return clone(next)
     }),
-    finishGeneration: (id, revision, runId, enhanced) => Effect.sync(() => {
+    finishGeneration: (id, revision, runId, enhanced, title) => Effect.sync(() => {
       const n=notes.get(id);if(!n || generationRuns.get(id)!==runId)return null
       generationRuns.delete(id)
       if(n.transcriptRevision!==revision||n.recordingState==="recording"||[...chunks.values()].some(c=>c.noteId===id&&c.state!=="ready")){notes.set(id,{...n,generationState:"idle"});return null}
-      const next:NoteDTO={...n,generationState:enhanced===null?"failed":"ready",...(enhanced===null?{}:{enhanced,generatedRevision:revision}),updatedAt:clock().toISOString()};notes.set(id,next);return clone(next)
+      const next:NoteDTO={...n,generationState:enhanced===null?"failed":"ready",...(enhanced===null?{}:{enhanced,generatedRevision:revision,...(title&&isDefaultNoteTitle(n.title)?{title}:{})}),updatedAt:clock().toISOString()};notes.set(id,next);return clone(next)
     }),
     listNotes: () => Effect.sync(() => clone([...notes.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)))),
     getNote: (id) => Effect.sync(() => clone(notes.get(id) ?? null)),
@@ -189,6 +203,7 @@ export function makeMemoryRepository(seed: ReadonlyArray<NoteDTO> = [], clock: (
     updateNote: (id, input) => Effect.sync(() => {
       const note = notes.get(id)
       if (!note) return null
+      input = withoutPlaceholderTitle(input, note.title)
       const changed = input.transcriptSegments !== undefined && transcriptContentKey(input.transcriptSegments) !== transcriptContentKey(note.transcriptSegments)
       const edited = changed || (["title", "body", "enhanced", "duration", "date"] as const).some(key => input[key] !== undefined && input[key] !== note[key])
       if (edited) generationRuns.delete(id)

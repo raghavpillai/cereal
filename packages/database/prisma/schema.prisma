@@ -148,6 +148,27 @@ model InstanceSettings {
   elevenLabsSecret       String?
   calendarRefreshMinutes Int      @default(15)
   calendarLookAheadDays   Int      @default(30)
+  /// Which ways of signing in are offered. At least one stays on; the bootstrap owner token always works.
+  signInPassword         Boolean  @default(true)
+  signInGoogle           Boolean  @default(false)
+  /// Lower-cased addresses and "@domain" entries that may create an account by signing in with Google.
+  signInAllowedEmails    Json?
+  /// Google OAuth web client, shared by Google sign-in and the Google Calendar connection. The secret is sealed.
+  googleClientId         String?  @db.VarChar(255)
+  googleClientSecret     String?
+  /// Where audio and app builds are kept: "local" or "s3". Null: nobody has chosen (the environment, else local disk).
+  storageBackend         String?  @db.VarChar(16)
+  /// {endpoint, region, bucket, prefix, forcePathStyle, accessKeyId} of the S3-compatible bucket. The secret is sealed.
+  storageS3              Json?
+  storageS3Secret        String?
+  /// Live transcription limits; null means the built-in default (20 sessions, 300 seconds).
+  liveMaxSessions        Int?
+  liveHoldSeconds        Int?
+  /// The iPhone app: app IDs that may open note links (null: the Cereal app), and its App Store ID.
+  iosAppIds              Json?
+  iosAppStoreId          String?  @db.VarChar(20)
+  /// Names of environment variables whose values were taken into these settings once; they are not read again.
+  importedEnvironment    Json?
   updatedAt              DateTime @updatedAt @db.Timestamptz(3)
 }
 
@@ -222,6 +243,7 @@ model User {
  notes Note[]
  calendarMeetings CalendarMeeting[]
  googleConnections GoogleConnection[]
+ appSignInHandoffs AppSignInHandoff[]
  googleStates GoogleOAuthState[]
  meetingContexts NoteMeetingContext[]
  googleMeetings GoogleMeeting[]
@@ -279,6 +301,26 @@ model GoogleOAuthState {
  encryptedVerifier String
  contacts Boolean @default(false)
  expiresAt DateTime @db.Timestamptz(3)
+ @@index([expiresAt])
+}
+/// One Google sign-in in progress. No account exists yet, so it is bound to the browser by a cookie.
+model GoogleSignInState {
+ stateHash String @id @db.Char(64)
+ browserHash String @db.Char(64)
+ encryptedVerifier String
+ returnPath String @db.VarChar(16384)
+ expiresAt DateTime @db.Timestamptz(3)
+ @@index([expiresAt])
+}
+/// A signed-in browser handing its account to an app: single use, short lived, redeemed with the PKCE verifier.
+model AppSignInHandoff {
+ codeHash String @id @db.Char(64)
+ userId String @db.Uuid
+ user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+ challenge String @db.Char(43)
+ expiresAt DateTime @db.Timestamptz(3)
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ @@index([userId])
  @@index([expiresAt])
 }
 model GoogleConnection {

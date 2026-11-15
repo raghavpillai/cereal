@@ -1,138 +1,63 @@
-/* Notes home: a searchable list grouped by day. */
+/* The notes list, laid out as the desktop app's Home list (apps/desktop/src/home.rs):
+   a 674 px column with 24 px gutters, a display heading, then each day's rows. */
 
-.notes-home {
-  /* The same column as a note, so a row and the note it opens share their edges. */
-  width: 100%; max-width: calc(var(--measure) + 2 * var(--gutter)); margin: 0 auto;
-  padding: var(--space-6) var(--gutter) var(--space-16);
-}
-.notes-head { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; }
-.notes-head h1 { font-size: var(--text-4xl); }
-/* Tall enough that the footer starts below the fold whether the list has loaded or not. */
-.notes-home, .note-page { min-height: calc(100dvh - 4.5rem); }
-.notes-sub { margin-top: var(--space-2); color: var(--ink-soft); font-size: var(--text-base); }
-.notes-head-actions { display: flex; align-items: center; gap: var(--space-2); }
+/* The app's list scrolls in a pane with a 10 px gutter for its scroll thumb; the
+   column is centred in what is left, and so sits 5 px left of the window's centre. */
+.notes-home { display: flex; flex-direction: column; align-items: center; width: 100%; padding-right: 10px; }
+.notes-column { display: flex; flex-direction: column; width: 100%; max-width: 674px; padding: 0 24px 130px; }
+.notes-head { position: relative; display: flex; justify-content: space-between; align-items: center; padding: 14px 8px 4px; }
+/* The search field opens over the row, so the list below it does not move. */
+.notes-head .app-find { position: absolute; right: 8px; top: 12px; background: var(--app-bg); }
+.notes-column > .admin-notice { margin: 12px 8px 0; }
 
-.workspace-trigger {
-  display: inline-flex; align-items: center; gap: 0.5rem;
-  min-height: 2.25rem; max-width: 15rem; padding: 0 0.625rem 0 0.375rem;
-  border: 1px solid var(--line-strong); border-radius: var(--radius-pill);
-  background: transparent; color: var(--ink); font-size: var(--text-sm);
-}
-.workspace-trigger:hover:not(:disabled) { background: var(--wash); }
-.workspace-trigger.is-placeholder { width: 11.5rem; border-color: var(--line); background: var(--wash); }
-.workspace-trigger > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.workspace-trigger svg { width: 0.875rem; height: 0.875rem; flex-shrink: 0; color: var(--ink-faint); transition: transform var(--dur-gooey) var(--spring-gooey); }
-.workspace-trigger[aria-expanded='true'] svg { transform: rotate(180deg); }
-.is-spinning svg { animation: spin 0.8s linear infinite; }
+/* On Home the list sits a pixel inside the column above it. */
+.notes-list { display: flex; flex-direction: column; width: 100%; padding: 0 1px; }
+.notes-list.is-waiting { opacity: 0.55; transition: opacity var(--dur-hover-out) var(--ease-fade); }
+.notes-list ul { margin: 0; padding: 0; list-style: none; }
+.notes-day { margin: 0; padding: 24px 8px 3px; color: var(--app-muted); font: 500 12px / 16px var(--font-ui); letter-spacing: 0; }
+.notes-day.is-results { padding: 27px 8px 9px; font-weight: 400; }
 
-.notes-tools { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-6) 0 var(--space-2); }
-.notes-search { position: relative; flex: 1 1 16rem; min-width: 0; }
-.notes-search > svg { position: absolute; left: 0.875rem; top: 50%; width: 1.0625rem; height: 1.0625rem; margin-top: -0.53125rem; color: var(--ink-faint); pointer-events: none; }
-.notes-search input {
-  width: 100%; min-height: 2.875rem; padding: 0 2.75rem 0 2.625rem;
-  border: 1px solid var(--field-line); border-radius: var(--radius-pill);
-  background: var(--surface); color: var(--ink); font-size: var(--text-md);
-  transition: border-color var(--dur-hover-out) var(--ease-fade), box-shadow var(--dur-snappy) var(--spring-snappy);
-}
-.notes-search input::placeholder { color: var(--ink-faint); opacity: 1; }
-.notes-search input::-webkit-search-cancel-button { display: none; }
-.notes-search input:hover { border-color: var(--ink-soft); }
-.notes-search input:disabled { opacity: 1; }
-.notes-search input:focus-visible { outline: none; border-color: var(--focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 28%, transparent); }
-.notes-search-end { position: absolute; right: 0.375rem; top: 50%; transform: translateY(-50%); display: flex; align-items: center; }
-.notes-search-end .icon-button { width: 2.125rem; height: 2.125rem; }
-.notes-search kbd {
-  display: grid; place-items: center; min-width: 1.5rem; height: 1.5rem; margin-right: 0.5rem; padding: 0 0.375rem;
-  border: 1px solid var(--line-strong); border-radius: var(--radius-xs);
-  color: var(--ink-faint); font: var(--text-xs) / 1 var(--font-ui);
-}
-.notes-search input:focus ~ .notes-search-end kbd { display: none; }
-.notes-result-line { min-height: 1.25rem; margin: var(--space-3) 0 0; color: var(--ink-faint); font-size: var(--text-sm); }
-
-/* Rows are inset for their hover wash; the list is pulled out by the same amount so its text
-   stands on the page's edge with the heading and the search field. */
-.notes-list, .notes-skeleton { margin-inline: calc(var(--space-3) * -1); }
-.notes-list { transition: opacity var(--dur-hover-out) var(--ease-fade); }
-.notes-list.is-switching { opacity: 0.5; }
-.notes-more { height: 1px; }
-/* The list being continued: placeholders in the rows' own rhythm, and a quiet line when a page fails. */
-.notes-list > .notes-skeleton.is-more { margin: var(--space-5) 0 0; }
-.notes-more-error { margin: var(--space-4) 0 0; padding: 0 var(--space-3); color: var(--ink-soft); font-size: var(--text-sm); }
-.day-group { margin-top: var(--space-8); }
-.day-group:first-child { margin-top: var(--space-6); }
-.day-label {
-  display: flex; align-items: baseline; gap: 0.625rem;
-  margin: 0 0 var(--space-2); padding: 0 var(--space-3);
-  font: 400 var(--text-lg) / 1.3 var(--font-display); color: var(--ink);
-}
-.day-label small { color: var(--ink-faint); font: var(--text-xs) / 1 var(--font-ui); }
-.day-notes { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
-
-.note-row {
-  position: relative;
-  display: grid; grid-template-columns: 4.25rem minmax(0, 1fr) auto; align-items: start; column-gap: var(--space-3);
-  padding: 0.875rem var(--space-3);
-  border-radius: var(--radius-lg);
-  color: var(--ink); text-decoration: none;
+/* A 44 px row on a 48 px pitch: the hover fill never touches its neighbours. */
+.note-row { display: block; border-radius: 12px; color: var(--app-text); text-decoration: none; }
+.note-row-box {
+  display: flex; align-items: center; gap: 16px;
+  height: 44px; margin-bottom: 4px; padding: 0 8px; border-radius: 12px;
   transition: background-color var(--dur-hover-out) var(--ease-fade), transform var(--dur-snappy) var(--spring-snappy);
 }
-.note-row:hover { background: var(--wash); transition-duration: var(--dur-hover-in), var(--dur-snappy); }
-.note-row:active { transform: scale(var(--squash-row)); transition-duration: var(--dur-hover-in), var(--dur-press); transition-timing-function: var(--ease-fade); }
-.note-row:focus-visible { outline-offset: -2px; background: var(--wash); }
-.note-row-time { padding-top: 0.25rem; color: var(--ink-faint); font-size: var(--text-sm); white-space: nowrap; }
-.note-row-main { display: grid; gap: 0.25rem; min-width: 0; }
-.note-row-title { font-size: var(--text-lg); line-height: 1.35; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
-/* Every row has this line, tall enough for avatars, so who was invited can arrive later without moving anything. */
-.note-row-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.125rem 0.5rem; min-height: 1.5rem; color: var(--ink-soft); font-size: var(--text-sm); line-height: 1.5; }
-.note-row-meta > span + span:not(.people-stack)::before { content: '·'; margin-right: 0.5rem; opacity: 0.55; }
-.note-row-meta > .people-stack { margin-left: auto; }
-.note-row-meta .phone-time { display: none; }
-.note-row-meta .phone-time + span::before { display: none; }
-.note-row-snippet {
-  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
-  color: var(--ink-faint); font-size: var(--text-sm); line-height: 1.5;
+.note-row:hover .note-row-box { background: var(--app-hover); transition-duration: var(--dur-hover-in), var(--dur-snappy); }
+.note-row:active .note-row-box { transform: scale(var(--squash-row)); transition-duration: var(--dur-press); }
+.note-row:focus-visible { outline-offset: -1px; }
+.note-row-tile {
+  display: grid; place-items: center; flex-shrink: 0; width: 28px; height: 28px;
+  border: 1px solid var(--app-tile-edge); border-radius: 6px; background: var(--app-tile); color: var(--app-text);
 }
-.note-row-snippet mark, .note-row-title mark { background: var(--brand-soft); color: var(--on-brand-soft); border-radius: 3px; box-shadow: 0 0 0 0.125em var(--brand-soft); }
-.note-row-end { display: flex; align-items: center; gap: var(--space-2); padding-top: 0.125rem; }
-.note-row-chevron {
-  width: 1rem; height: 1rem; color: var(--ink-faint);
-  opacity: 0; transform: translateX(-4px);
-  transition: opacity var(--dur-hover-out) var(--ease-fade), transform var(--dur-snappy) var(--spring-snappy);
+.note-row-main { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.note-row-title { position: relative; top: 1px; overflow: hidden; font-size: 14px; line-height: 20px; white-space: nowrap; text-overflow: ellipsis; }
+.note-row-time { display: flex; align-items: center; justify-content: flex-end; flex-shrink: 0; min-width: 48px; height: 24px; }
+/* A time in 12 px secondary ink, its AM/PM a smaller run on the same baseline. */
+.time-label { display: flex; align-items: baseline; gap: 3px; flex-shrink: 0; padding-right: 1px; color: var(--app-muted); font-size: 12px; line-height: 16px; white-space: nowrap; }
+.meridiem { font-size: 7.5px; line-height: 16px; font-weight: 500; }
+.note-row-snippet { position: relative; top: -1px; display: block; margin-bottom: 4px; padding: 0 8px 0 52px; color: var(--app-muted); font-size: 12px; line-height: 16px; overflow-wrap: anywhere; }
+.note-row mark { background: var(--app-search-hit); color: inherit; }
+
+.notes-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 70px 0; color: var(--app-muted); text-align: center; }
+.notes-none { margin: 0; padding: 40px 8px; color: var(--app-muted); font-size: 14px; line-height: var(--app-leading); }
+.notes-more { height: 1px; }
+.notes-more-error { margin: 0; padding: 12px 8px; color: var(--app-muted); font-size: 13px; }
+
+/* Placeholders shaped like the rows that are coming. */
+.notes-skeleton { padding-top: 43px; }
+.notes-skeleton.is-more { padding-top: 0; }
+.notes-skeleton > div { display: grid; grid-template-columns: 28px minmax(0, 1fr) 40px; align-items: center; column-gap: 16px; height: 44px; margin-bottom: 4px; padding: 0 8px; }
+.notes-skeleton .skeleton { height: 12px; }
+.notes-skeleton .skeleton:first-child { height: 28px; border-radius: 6px; }
+.notes-skeleton .skeleton:nth-child(2) { width: min(60%, 260px); }
+
+@media (hover: none) {
+  .note-row:hover .note-row-box { background: transparent; }
 }
-.note-row:hover .note-row-chevron, .note-row:focus-visible .note-row-chevron { opacity: 1; transform: none; }
-@media (hover: none) { .note-row-chevron { display: none; } .note-row:hover { background: transparent; } }
-.people-stack { display: inline-flex; }
-.people-stack .avatar { margin-left: -0.125rem; box-shadow: 0 0 0 2px var(--paper); font-size: 0.5625rem; letter-spacing: -0.02em; }
-.people-stack .avatar:first-child { margin-left: 0; }
-
-.notes-empty { margin-top: var(--space-6); border: 1px dashed var(--line-strong); border-radius: var(--radius-xl); }
-.notes-empty .empty-state { padding-block: var(--space-12); }
-.notes-empty .empty-state h2 { font: 400 var(--text-2xl) / 1.25 var(--font-display); }
-.notes-empty .empty-state h2 + p { color: var(--ink-soft); }
-
-.notes-skeleton { display: grid; gap: var(--space-5); margin-top: var(--space-8); padding: 0 var(--space-3); }
-.notes-skeleton > div { display: grid; grid-template-columns: 4.25rem minmax(0, 1fr); column-gap: var(--space-3); row-gap: 0.5rem; }
-.notes-skeleton .skeleton { height: 0.875rem; }
-.notes-skeleton .skeleton:nth-child(1) { width: 2.75rem; grid-row: span 2; }
-.notes-skeleton .skeleton:nth-child(2) { width: 58%; height: 1.125rem; }
-.notes-skeleton .skeleton:nth-child(3) { width: 32%; }
-.notes-skeleton > div:nth-child(2) .skeleton:nth-child(2) { width: 44%; }
-.notes-skeleton > div:nth-child(3) .skeleton:nth-child(2) { width: 66%; }
-
-@media (max-width: 600px) {
-  .notes-home { padding-top: var(--space-4); }
-  .notes-head { align-items: flex-start; }
-  .note-row { grid-template-columns: minmax(0, 1fr) auto; padding-inline: var(--space-2); }
-  .note-row-time { display: none; }
-  /* The avatars already say who; the names would wrap the line. */
-  .note-row-people { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
-  .note-row-meta .phone-time { display: inline; }
-  .note-row-meta .phone-time + span::before { display: inline; }
-  .day-label { padding-inline: var(--space-2); }
-  .notes-list, .notes-skeleton { margin-inline: calc(var(--space-2) * -1); }
-  .notes-search kbd { display: none; }
-  .notes-skeleton { padding-inline: var(--space-2); }
-  .notes-more-error { padding-inline: var(--space-2); }
-  .notes-skeleton > div { grid-template-columns: minmax(0, 1fr); }
-  .notes-skeleton .skeleton:nth-child(1) { display: none; }
+@media (max-width: 720px) {
+  /* A phone has no scroll gutter to leave, and the column's own gutters come in to 16 px. */
+  .notes-home { padding-right: 0; }
+  .notes-column { padding: 0 16px 96px; }
 }

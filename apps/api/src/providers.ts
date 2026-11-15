@@ -12,6 +12,7 @@ import { completionSettings, DEFAULT_LANGUAGE_PARAMETERS, type LanguageRequestPa
 import { chatAnswerMessages, chatAnswerParameters, chatFeature, chatLayout } from "./ai";
 import { cachedRequest, logLanguageUsage, readUsage, type LanguageUsage, type LanguageUsageEvent } from "./ai/prompt-cache";
 import { generationMessages, GENERATION_PARAMETERS } from "./ai/notes-generation";
+import { titleMessages, TITLE_PARAMETERS, TITLE_TIMEOUT_MS } from "./ai/note-title";
 import { evidenceMessages, EVIDENCE_PARAMETERS } from "./ai/evidence";
 import { PLANNER_PARAMETERS } from "./ai/workspace-chat";
 
@@ -49,6 +50,9 @@ export interface ProviderServices {
     keep?: ReadonlyArray<{ readonly fromMs: number; readonly toMs: number }>;
   }) => Effect.Effect<TranscriptionResult, ProviderFailure>;
   readonly generate: (note: ProviderNote) => Effect.Effect<string, ProviderFailure>;
+  /** What to call a meeting nobody named, from its finished notes (`ai/note-title.ts`): the model's answer as
+   * it came, cleaned and judged by the caller. A provider without it leaves untitled notes untitled. */
+  readonly title?: (note: ProviderNote, notes: string) => Effect.Effect<string, ProviderFailure>;
   readonly chat: (
     note: ProviderNote,
     input: ChatInput,
@@ -224,6 +228,7 @@ export function makeProviderServices(
   const complete = (
     messages: ReadonlyArray<{ role: string; content: string; cache?: true }>, json = false,
     parameters: LanguageRequestParameters = DEFAULT_LANGUAGE_PARAMETERS,
+    timeoutMs = 90000,
   ) =>
     Effect.tryPromise({
       async try(signal) {
@@ -246,7 +251,7 @@ export function makeProviderServices(
               ...(json ? { response_format: { type: "json_object" } } : {}),
               ...wire.extra,
             }),
-            signal: AbortSignal.any([signal, AbortSignal.timeout(90000)]),
+            signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
             redirect: "error",
           },
         );
@@ -353,6 +358,8 @@ export function makeProviderServices(
     }, catch: () => new ProviderFailure("language", "invalid_response") })),
     generate: (note) =>
       complete(generationMessages(note), false, GENERATION_PARAMETERS),
+    title: (note, notes) =>
+      complete(titleMessages(note, notes), false, TITLE_PARAMETERS, TITLE_TIMEOUT_MS),
     chat: (note, input) =>
       complete(chatAnswerMessages(note, input), false, chatAnswerParameters(note)),
   };

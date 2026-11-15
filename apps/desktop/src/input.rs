@@ -165,6 +165,7 @@ pub struct TextInput {
     submit_on_enter: bool,
     wrap: bool,
     list_formatting: bool,
+    read_only: bool,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -192,6 +193,7 @@ impl TextInput {
             submit_on_enter: false,
             wrap: multiline,
             list_formatting: false,
+            read_only: false,
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -222,6 +224,12 @@ impl TextInput {
     /// edits. Existing content and non-multiline fields remain unchanged.
     pub fn set_list_formatting(&mut self, enabled: bool) {
         self.list_formatting = enabled;
+    }
+    /// Show text that is not the user's to change: it can be selected and
+    /// copied, and nothing typed, pasted, cut or undone alters it. No caret
+    /// is drawn. Only `set_content` changes what it shows.
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
     }
     /// Change soft wrapping without changing Enter or pasted-newline behavior.
     /// For example, a title can wrap visually while Enter still submits it.
@@ -414,12 +422,18 @@ impl TextInput {
         self.select_to(self.line_end(), cx);
     }
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         if self.selected_range.is_empty() {
             self.select_to(self.previous_boundary(self.cursor_offset()), cx);
         }
         self.replace_text_in_range(None, "", window, cx);
     }
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         if self.selected_range.is_empty() {
             self.select_to(self.next_boundary(self.cursor_offset()), cx);
         }
@@ -463,12 +477,18 @@ impl TextInput {
         }
     }
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         if let Some(snap) = self.undo.pop() {
             self.redo.push(self.snapshot());
             self.restore(snap, cx);
         }
     }
     fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
         if let Some(snap) = self.redo.pop() {
             self.undo.push(self.snapshot());
             self.restore(snap, cx);
@@ -598,6 +618,9 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         let range = range
             .as_ref()
             .map(|r| self.range_from_utf16(r))
@@ -644,6 +667,9 @@ impl EntityInputHandler for TextInput {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.read_only {
+            return;
+        }
         let range = range
             .as_ref()
             .map(|r| self.range_from_utf16(r))
@@ -867,7 +893,8 @@ impl Element for TextElement {
         let input = self.input.read(cx);
         let focus = input.focus_handle.clone();
         let cursor = input.cursor_offset();
-        let empty_selection = input.selected_range.is_empty();
+        // Text that cannot be changed has a selection but no caret.
+        let empty_selection = input.selected_range.is_empty() && !input.read_only;
         window.handle_input(
             &focus,
             ElementInputHandler::new(bounds, self.input.clone()),

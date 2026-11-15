@@ -4,7 +4,11 @@
 /* The faces are bundled, so they are fingerprinted and cached for good, and the
    root route preloads them. Until they arrive, metric-matched local faces hold
    the same line breaks, so the swap does not move text. */
-@font-face { font-family: Melange; src: url('../fonts/melange.ttf') format('truetype'); font-display: swap; }
+@font-face { font-family: Melange; font-weight: 400; src: url('../fonts/melange.ttf') format('truetype'); font-display: swap; }
+/* The desktop app's own medium and semibold cuts of the same family (apps/desktop/assets/fonts):
+   day captions, headings and bold text in notes are set in them, at the desktop's widths. */
+@font-face { font-family: Melange; font-weight: 500; src: url('../fonts/melange-medium.ttf') format('truetype'); font-display: swap; }
+@font-face { font-family: Melange; font-weight: 600; src: url('../fonts/melange-semibold.ttf') format('truetype'); font-display: swap; }
 @font-face { font-family: Quadrant; src: url('../fonts/quadrant.ttf') format('truetype'); font-display: swap; }
 /* size-adjust is measured (web face width over local face width on running text);
    the overrides restate both faces' 986/327 ascent and descent at the adjusted size. */
@@ -22,29 +26,59 @@
   --midnight: #253c4a;
   --rust: #8b442f;
 
-  /* Surfaces and ink: paper cream with warm bronze-black ink */
-  --paper: #faf8f0;
-  --surface: #fffefa;
-  --surface-raised: #fffefa;
-  --surface-sunken: #f4eedc;
-  --ink: #332b1c;
-  --ink-soft: #635c4f;
-  --ink-faint: #6e6759;
-  --line: #332b1c20;
-  --line-strong: #332b1c3d;
-  --line-solid: #e3e0d0;
+  /* The desktop app's theme (apps/desktop/src/ui.rs, Theme::new), value for value.
+     Translucent tokens stay translucent so they tint whatever they sit on. */
+  --app-bg: #f7f7f2;
+  --app-sidebar: #f2f2ec;
+  --app-card: #ffffff;
+  --app-text: #292929;
+  --app-muted: #72726e;
+  --app-secondary: #4e4d4b;
+  --app-border: #e6e6de;
+  --app-hairline: #47432a33;
+  --app-hover: #625a220f;
+  --app-fill: #56512e1f;
+  --app-accent: #835e00;
+  --app-danger: #cf3527;
+  --app-focus: #a5790099;
+  /* Text of generated notes, a list tile and its edge, a bullet, the two transcript bubbles. */
+  --app-prose: #72726e;
+  --app-tile: #d8d9d3;
+  --app-tile-edge: #cdc9c0;
+  --app-marker: #71717a;
+  --app-bubble-own: #e0af2f66;
+  --app-bubble-own-ink: #363024;
+  --app-bubble-other: #f2f2ec;
+  --app-bubble-other-ink: #292929;
+  --app-search-hit: #b9853455;
+  /* The app's shadows. Its blur radius is the blur's standard deviation; a CSS blur is twice that. */
+  --app-shadow-sm: 0 1px 6px #0000001a, 0 1px 4px -1px #0000001a;
+  --app-shadow-lg: 0 10px 30px -3px #0000001a, 0 4px 12px -4px #0000001a;
+  --app-shadow-capsule: 0 4px 12px -2px #0000000d;
+
+  /* Surfaces and ink: the same neutrals as the desktop app, so every page sits on one canvas. */
+  --paper: var(--app-bg);
+  --surface: var(--app-card);
+  --surface-raised: var(--app-card);
+  --surface-sunken: var(--app-sidebar);
+  --ink: var(--app-text);
+  --ink-soft: var(--app-secondary);
+  --ink-faint: var(--app-muted);
+  --line: #29292920;
+  --line-strong: #2929293d;
+  --line-solid: var(--app-border);
   /* Borders that are the only edge of a control must reach 3:1; decorative lines need not. */
-  --field-line: #332b1c8c;
-  --segment-track: #332b1c17;
-  --segment-thumb: #fffefa;
-  --wash: #332b1c0d;
-  --wash-strong: #332b1c1a;
-  --wash-solid: #efecdf;
+  --field-line: #2929298c;
+  --segment-track: #29292917;
+  --segment-thumb: #ffffff;
+  --wash: #2929290d;
+  --wash-strong: #2929291a;
+  --wash-solid: #ecece6;
 
   /* Accent roles */
   --brand: #e3b025;
   --brand-hover: #d8a512;
-  --on-brand: #332b1c;
+  --on-brand: #292929;
   --brand-soft: #f3deb1;
   --on-brand-soft: #4d380c;
   --accent-ink: #7b5800;
@@ -55,11 +89,11 @@
   --danger-line: #8b442f4d;
   --focus: #7b5800;
   --selection: #f3deb1;
-  --scrim: #332b1c66;
+  --scrim: #29292966;
 
-  --shadow-sm: 0 1px 2px #332b1c0f;
-  --shadow-md: 0 1px 2px #332b1c0a, 0 8px 28px -6px #332b1c29;
-  --shadow-lg: 0 2px 6px #332b1c0f, 0 28px 70px -12px #332b1c47;
+  --shadow-sm: 0 1px 2px #2929290f;
+  --shadow-md: 0 1px 2px #2929290a, 0 8px 28px -6px #29292929;
+  --shadow-lg: 0 2px 6px #2929290f, 0 28px 70px -12px #29292947;
 
   /* Type */
   --font-display: Quadrant, 'Quadrant Fallback', Georgia, serif;
@@ -147,29 +181,41 @@
   --ring: var(--focus);
 }
 
-/* Dark: warm charcoal surfaces with paper-cream ink. Declared twice because the
-   theme follows the system unless the reader chooses one. */
+/* Dark: the desktop app's dark theme. Declared twice because the theme follows
+   the system unless the reader chooses one. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
-    --paper: #1c1a17;
-    --surface: #2b2722;
-    --surface-raised: #332f29;
-    --surface-sunken: #171512;
-    --ink: #f4eedc;
-    --ink-soft: #beb6a3;
-    --ink-faint: #a8a08f;
-    --line: #f4eedc1f;
-    --line-strong: #f4eedc3d;
-    --line-solid: #423c31;
-    --field-line: #f4eedc66;
-    --segment-track: #f4eedc12;
-    --segment-thumb: #4e4536;
-    --wash: #f4eedc0f;
-    --wash-strong: #f4eedc1f;
-    --wash-solid: #383226;
+    --app-bg: #292929;
+    --app-sidebar: #212121;
+    --app-card: #363635;
+    --app-text: #fcfcf8;
+    --app-muted: #9e9e99;
+    --app-secondary: #acada8;
+    --app-border: #ffffff26;
+    --app-hairline: #ffffff26;
+    --app-hover: #ffffff0f;
+    --app-fill: #ffffff1f;
+    --app-accent: #e0af2f;
+    --app-danger: #f0806e;
+    --app-focus: #e0af2f99;
+    --app-prose: #acada8;
+    --app-tile: #515150;
+    --app-tile-edge: #ffffff26;
+    --app-bubble-own: #292929;
+    --app-bubble-own-ink: #fcf2df;
+    --app-bubble-other: #4e4d4b;
+    --app-bubble-other-ink: #fcfcf8;
+    --line: #fcfcf81f;
+    --line-strong: #fcfcf83d;
+    --field-line: #fcfcf866;
+    --segment-track: #fcfcf812;
+    --segment-thumb: #515150;
+    --wash: #fcfcf80f;
+    --wash-strong: #fcfcf81f;
+    --wash-solid: #3b3b3a;
     --brand: #e3b025;
     --brand-hover: #f1be3e;
-    --on-brand: #241e15;
+    --on-brand: #292929;
     --brand-soft: #e3b02529;
     --on-brand-soft: #f7d486;
     --accent-ink: #f1be3e;
@@ -180,7 +226,7 @@
     --danger-line: #e79f8959;
     --focus: #f4c247;
     --selection: #e3b02559;
-    --scrim: #080b09b3;
+    --scrim: #000000b3;
     --shadow-sm: 0 1px 2px #00000033;
     --shadow-md: 0 1px 2px #00000033, 0 10px 30px -6px #00000080;
     --shadow-lg: 0 2px 6px #00000040, 0 30px 80px -12px #000000b3;
@@ -188,25 +234,37 @@
 }
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --paper: #1c1a17;
-  --surface: #2b2722;
-  --surface-raised: #332f29;
-  --surface-sunken: #171512;
-  --ink: #f4eedc;
-  --ink-soft: #beb6a3;
-  --ink-faint: #a8a08f;
-  --line: #f4eedc1f;
-  --line-strong: #f4eedc3d;
-  --line-solid: #423c31;
-  --field-line: #f4eedc66;
-  --segment-track: #f4eedc12;
-  --segment-thumb: #4e4536;
-  --wash: #f4eedc0f;
-  --wash-strong: #f4eedc1f;
-  --wash-solid: #383226;
+  --app-bg: #292929;
+  --app-sidebar: #212121;
+  --app-card: #363635;
+  --app-text: #fcfcf8;
+  --app-muted: #9e9e99;
+  --app-secondary: #acada8;
+  --app-border: #ffffff26;
+  --app-hairline: #ffffff26;
+  --app-hover: #ffffff0f;
+  --app-fill: #ffffff1f;
+  --app-accent: #e0af2f;
+  --app-danger: #f0806e;
+  --app-focus: #e0af2f99;
+  --app-prose: #acada8;
+  --app-tile: #515150;
+  --app-tile-edge: #ffffff26;
+  --app-bubble-own: #292929;
+  --app-bubble-own-ink: #fcf2df;
+  --app-bubble-other: #4e4d4b;
+  --app-bubble-other-ink: #fcfcf8;
+  --line: #fcfcf81f;
+  --line-strong: #fcfcf83d;
+  --field-line: #fcfcf866;
+  --segment-track: #fcfcf812;
+  --segment-thumb: #515150;
+  --wash: #fcfcf80f;
+  --wash-strong: #fcfcf81f;
+  --wash-solid: #3b3b3a;
   --brand: #e3b025;
   --brand-hover: #f1be3e;
-  --on-brand: #241e15;
+  --on-brand: #292929;
   --brand-soft: #e3b02529;
   --on-brand-soft: #f7d486;
   --accent-ink: #f1be3e;
@@ -217,7 +275,7 @@
   --danger-line: #e79f8959;
   --focus: #f4c247;
   --selection: #e3b02559;
-  --scrim: #080b09b3;
+  --scrim: #000000b3;
   --shadow-sm: 0 1px 2px #00000033;
   --shadow-md: 0 1px 2px #00000033, 0 10px 30px -6px #00000080;
   --shadow-lg: 0 2px 6px #00000040, 0 30px 80px -12px #000000b3;

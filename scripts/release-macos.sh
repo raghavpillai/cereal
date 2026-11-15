@@ -1,7 +1,10 @@
 #!/bin/bash
-# Builds a signed, notarized Cereal.app and DMG for distribution.
+# Builds a signed, notarized Cereal.app, the DMG people install it from and the zip the app updates itself from.
 #
 #   CEREAL_SIGNING_DIR=<folder> ./scripts/release-macos.sh [--skip-build]
+#
+# Optional, for testing updates: CEREAL_BUNDLE_VERSION=<version> releases the same build under another
+# version number, and CEREAL_RELEASE_OUT=<folder> writes the output somewhere other than dist/release.
 #
 # The folder is private and lives outside the repository. It holds:
 #   certificate.p12   Developer ID Application certificate and private key
@@ -10,7 +13,9 @@
 # Every file must be readable by its owner only. Nothing from it is printed or copied into the output.
 #
 # The certificate is imported into a temporary keychain that is removed when the script ends, so the
-# login keychain is never changed. Output: dist/release/Cereal-<version>-mac-<arch>.dmg
+# login keychain is never changed. Output, in dist/release:
+#   Cereal-<version>-mac-<arch>.dmg   the installer (signed, notarized, stapled)
+#   Cereal-<version>-mac-<arch>.zip   the stapled app alone, which the desktop app downloads to update itself
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -84,7 +89,7 @@ if "$build"; then cargo build --locked --release -p cereal; fi
 stage="$work/stage"
 mkdir -p "$stage"
 CEREAL_BUNDLE_OUT="$stage" CEREAL_CODESIGN_IDENTITY="$identity" CEREAL_CODESIGN_KEYCHAIN="$keychain" \
-  "$root/scripts/package.sh" --release --no-build >/dev/null
+  CEREAL_BUNDLE_VERSION="${CEREAL_BUNDLE_VERSION:-}" "$root/scripts/package.sh" --release --no-build >/dev/null
 app="$stage/Cereal.app"
 version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
 identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")"
@@ -94,8 +99,24 @@ ditto -c -k --keepParent "$app" "$work/Cereal.zip"
 notarize "$work/Cereal.zip"
 xcrun stapler staple "$app" >/dev/null
 
-output="$root/dist/release"
+output="${CEREAL_RELEASE_OUT:-$root/dist/release}"
 mkdir -p "$output"
+
+# The update archive: the app with its notarization ticket stapled, so it validates offline once unpacked.
+# Verified as the app will see it: unpacked into an empty folder.
+archive="$output/Cereal-$version-mac-$architecture.zip"
+rm -f "$archive"
+ditto -c -k --keepParent "$app" "$archive"
+unpacked="$work/unpacked"
+mkdir -p "$unpacked"
+ditto -x -k "$archive" "$unpacked"
+codesign --verify --deep --strict "$unpacked/Cereal.app"
+spctl --assess --type execute "$unpacked/Cereal.app"
+xcrun stapler validate "$unpacked/Cereal.app" >/dev/null
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$unpacked/Cereal.app/Contents/Info.plist")" == "$version" ]] \
+  || fail "the archived app is not version $version"
+rm -rf "$unpacked"
+
 dmg="$output/Cereal-$version-mac-$architecture.dmg"
 ln -s /Applications "$stage/Applications"
 rm -f "$dmg"
@@ -123,4 +144,4 @@ xcrun stapler validate "$mounted" >/dev/null
 detach
 trap cleanup EXIT
 
-printf 'Released %s (%s, version %s)\n' "$dmg" "$identifier" "$version"
+printf 'Released %s and %s (%s, version %s)\n' "$dmg" "$archive" "$identifier" "$version"

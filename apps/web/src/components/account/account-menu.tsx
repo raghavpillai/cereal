@@ -1,24 +1,26 @@
 import { Link } from '@tanstack/react-router'
 import type { AuthSessionDTO } from '@meeting-notes/contracts'
-import { LogOut, Plug, Settings2, ShieldCheck } from 'lucide-react'
 import { HeaderActions } from '../kit/header-slot'
-import { Menu, MenuItem } from '../kit/menu'
-import { initials } from '../../lib/notes'
+import { Popover } from '../kit/popover'
 
-/** The signed-in person's menu, placed in the site header by any gated page. */
+/** The signed-in person in the site header: their initial, which opens who they are
+ * and Sign out, the page for connecting an AI client, and for administrators a link to
+ * the instance's settings. Everything else about an account is done in the desktop and iPhone apps. */
 export function AccountMenu({ session, signOut }: { session: AuthSessionDTO; signOut: () => Promise<void> }) {
   const { user } = session, name = user.name.trim() || user.email
+  const admin = user.role !== 'user'
   return <HeaderActions>
-    <Menu label="Account" align="end" buttonClassName="avatar-button pressable" buttonLabel={`Account menu for ${name}`} button={<span className="avatar" aria-hidden="true">{initials(name)}</span>}>
+    <Link to="/download" className="site-link" activeProps={{ 'aria-current': 'page' }}><span>Download</span></Link>
+    {admin && <Link to="/admin" className="site-link" activeProps={{ 'aria-current': 'page' }}><span>Admin</span></Link>}
+    <Popover label="Account" className="account-popover" buttonClassName="site-avatar" buttonLabel={`Signed in as ${name}`} button={<span aria-hidden="true">{[...name][0]?.toLocaleUpperCase() ?? '?'}</span>}>
       {close => <>
-        <div className="menu-label"><strong>{name}</strong>{user.name.trim() && user.email}</div>
-        <div className="menu-separator" role="separator" />
-        <Link to="/account" className="menu-item" role="menuitem" tabIndex={-1} onClick={close}><Settings2 aria-hidden="true" /><span>Account</span></Link>
-        <Link to="/mcp/connect" className="menu-item" role="menuitem" tabIndex={-1} onClick={close}><Plug aria-hidden="true" /><span>Connections</span></Link>
-        {user.role !== 'user' && <Link to="/admin" className="menu-item" role="menuitem" tabIndex={-1} onClick={close}><ShieldCheck aria-hidden="true" /><span>Instance settings</span></Link>}
-        <div className="menu-separator" role="separator" />
-        <MenuItem icon={<LogOut aria-hidden="true" />} onSelect={() => { close(); void signOut() }}>Sign out</MenuItem>
+        <div className="app-menu-who"><span>{name}</span>{user.name.trim() && <small>{user.email}</small>}</div>
+        <div className="app-separator" role="separator" />
+        {admin && <Link to="/admin" className="app-menu-row site-link-row" role="menuitem" onClick={close}><span>Admin</span></Link>}
+        <Link to="/download" className="app-menu-row site-link-row" role="menuitem" onClick={close}><span>Download</span></Link>
+        <Link to="/mcp/connect" className="app-menu-row" role="menuitem" onClick={close}><span>Connect an AI client</span></Link>
+        <button type="button" className="app-menu-row" role="menuitem" onClick={() => { close(); void signOut() }}><span>Sign out</span></button>
       </>}
-    </Menu>
+    </Popover>
   </HeaderActions>
 }

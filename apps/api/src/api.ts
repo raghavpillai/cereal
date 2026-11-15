@@ -13,6 +13,10 @@ import { makeAdministrationService, type AdministrationService } from "./adminis
 import { makeMemoryCalendarStore } from "./calendar-store"
 import { NotesRepository, type NotesRepositoryService, type RepositoryError } from "./repository"
 import {McpStoreError,type McpStore} from "./mcp-store"
+import {SignInFailure} from "./sign-in"
+import {DOWNLOAD_FILES_PATH,makeDownloads,type DownloadsService} from "./downloads"
+import {readAppVersion} from "./version"
+import type {StorageService} from "./storage"
 import {InvalidPageRequest,parseListInput,parseSearchInput,selectNoteSearch,selectNoteSummaries,withMeeting} from "./note-summaries"
 
 const unavailable = { error: "unavailable", message: "The note service is temporarily unavailable" } as const
@@ -46,13 +50,15 @@ function createShare(noteId: string, input: CreateShareInput, clock: () => Date)
 }
 
 /** The caller owns repository lifetime; dispose releases only the API runtime. */
-export function makeApiHandler(repository: NotesRepositoryService, adminToken: string, options: { clock?: () => Date; processing?: ProcessingService; administration?: AdministrationService; authentication?: AuthenticationService; google?: GoogleIntegration; noteParticipants?:NoteParticipantsService; mcpStore?:McpStore; principalResolver?: (headers: Headers) => Promise<PrincipalData|null> } = {}) {
+export function makeApiHandler(repository: NotesRepositoryService, adminToken: string, options: { clock?: () => Date; processing?: ProcessingService; administration?: AdministrationService; authentication?: AuthenticationService; google?: GoogleIntegration; noteParticipants?:NoteParticipantsService; mcpStore?:McpStore; downloads?:DownloadsService; storage?:StorageService; principalResolver?: (headers: Headers) => Promise<PrincipalData|null> } = {}) {
   if (adminToken.length < 32) throw new Error("ADMIN_TOKEN must contain at least 32 characters")
   const processing = options.processing ?? makeProcessingService(repository, { worker: false })
   const administration = options.administration ?? makeAdministrationService(makeMemoryCalendarStore(repository), undefined, { clock: options.clock })
   const useProcessing = <A, E, R>(operation: (service: ReturnType<ProcessingService["forRepository"]>) => Effect.Effect<A, E, R>) =>
     Effect.gen(function*(){const repo=yield* NotesRepository,principal=yield* AuthPrincipal,request=yield* HttpServerRequest.HttpServerRequest;return yield* operation(processing.forRepository(repo,{actor:principal.id,requestSignal:request.source instanceof Request?request.source.signal:undefined,meetingContext:options.google?noteId=>Effect.map(options.google!.getNoteContext(principal.id,noteId),context=>context.meeting):undefined}))})
   const clock = options.clock ?? (() => new Date())
+  // The apps this server hands out. The server passes its own; anything else reads the same environment.
+  const downloads = options.downloads ?? makeDownloads({ directory: process.env.DOWNLOADS_DIR || "/data/downloads", version: readAppVersion(), iosAppStoreId: process.env.IOS_APP_STORE_ID })
   const auth = Layer.succeed(OwnerAuth, {
     bearer: (httpEffect) => Effect.gen(function*() {
       const request = yield* HttpServerRequest.HttpServerRequest
@@ -101,16 +107,19 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
     const principal=yield* AuthPrincipal
     return yield* options.google.getNoteContext(principal.id,summary.id).pipe(Effect.map(context=>withMeeting(summary,context.meeting)),Effect.catch(()=>Effect.succeed(summary)))
   })
+  const signInFailure=(error:unknown)=>error instanceof SignInFailure?{error:error.code,message:error.message}:{error:"unavailable" as const,message:"Sign-in is temporarily unavailable"}
   const publicHandlers = HttpApiBuilder.group(MeetingsApi, "public", (handlers) => handlers
     .handle("health", () => Effect.succeed({ status: "ok", version: "v1" } as const))
-    .handle("getSharedNote", ({ params }) => Effect.gen(function*() {
-      if (!validToken.test(params.token)) return yield* Effect.fail(missingShare)
-      const repo = yield* NotesRepository
-      const share = yield* persist(repo.findShare(hashToken(params.token)))
-      if (!share || share.metadata.revokedAt || (share.metadata.expiresAt && Date.parse(share.metadata.expiresAt) <= clock().getTime())) {
-        return yield* Effect.fail(missingShare)
-      }
-      return share.snapshot
+    // What the sign-in page and the apps offer. Nothing here depends on who is asking.
+    .handle("getAuthMethods", () => Effect.tryPromise({try:async()=>{const policy=await administration.signInPolicy();return{password:policy.password,google:policy.google&&!!options.authentication,instanceName:policy.instanceName}},catch:()=>({error:"unavailable",message:"Sign-in is temporarily unavailable"} as const)}))
+    .handle("getDownloads", () => Effect.tryPromise({try:()=>downloads.manifest(),catch:()=>({error:"unavailable",message:"Downloads are temporarily unavailable"} as const)}))
+    // The files are answered in `handler` below, before the typed routes, because they need byte ranges and
+    // HEAD. This is only reached if that ever stops matching, and then says what a missing file says.
+    .handle("getDownloadFile", () => Effect.fail({error:"not_found",message:"Download not found"} as const))
+    .handle("exchangeAppHandoff", ({payload}) => Effect.gen(function*(){
+      const request=yield* HttpServerRequest.HttpServerRequest,authentication=options.authentication
+      if(!authentication)return yield* Effect.fail({error:"unavailable",message:"Account service is not configured"} as const)
+      return yield* Effect.tryPromise({try:()=>authentication.signIn.exchangeHandoff(payload.code,payload.verifier,new Headers(request.headers)),catch:error=>{const failure=signInFailure(error);return failure.error==="invalid_request"||failure.error==="invalid_code"||failure.error==="rate_limited"?failure as {error:"invalid_request"|"invalid_code"|"rate_limited";message:string}:{error:"unavailable" as const,message:"Sign-in is temporarily unavailable"}}})
     })))
   const ownerHandlers = HttpApiBuilder.group(MeetingsApi, "owner", (handlers) => handlers
     .handle("getGoogleStatus", () => Effect.flatMap(AuthPrincipal,p=>options.google?options.google.getStatus(p.id):Effect.succeed({configured:false,redirectUri:null,connections:[]})))
@@ -134,7 +143,24 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
     .handle("listOrganizationInvitations",()=>organization((s,p,h)=>s.incoming(p,h)))
     .handle("acceptOrganizationInvitation",({params})=>organization((s,p,h)=>s.accept(p,h,params.id)))
     .handle("rejectOrganizationInvitation",({params})=>organization((s,p,h)=>s.reject(p,h,params.id)))
+    // Signed in comes first (the middleware answers 401), so nobody without an account learns which tokens exist.
+    // The share belongs to whoever made it, so it is looked up across accounts, not in the reader's own notes.
+    .handle("getSharedNote", ({ params }) => Effect.gen(function*() {
+      if (!validToken.test(params.token)) return yield* Effect.fail(missingShare)
+      const share = yield* persist(repository.findShare(hashToken(params.token)))
+      if (!share || share.metadata.revokedAt || (share.metadata.expiresAt && Date.parse(share.metadata.expiresAt) <= clock().getTime())) {
+        return yield* Effect.fail(missingShare)
+      }
+      return share.snapshot
+    }))
     .handle("getSession", () => Effect.map(AuthPrincipal, ({source,...principal})=>({user:{id:principal.id,name:principal.name,email:principal.email,role:principal.role,createdAt:principal.createdAt},expiresAt:principal.expiresAt})))
+    // Only a browser session can hand its account to an app: never the bootstrap token, never another bearer token.
+    .handle("createAppHandoff", ({payload}) => Effect.gen(function*(){
+      const principal=yield* AuthPrincipal,request=yield* HttpServerRequest.HttpServerRequest,authentication=options.authentication
+      if(!authentication)return yield* Effect.fail({error:"unavailable",message:"Account service is not configured"} as const)
+      if(principal.source!=="session"||!principal.sessionId||request.headers.authorization)return yield* Effect.fail({error:"forbidden",message:"Sign in through the browser to continue in the app"} as const)
+      return yield* Effect.tryPromise({try:()=>authentication.signIn.createHandoff(principal.id,payload.challenge),catch:(error):ApiError=>{const failure=signInFailure(error);return failure.error==="invalid_request"?{error:"invalid_request",message:failure.message}:{error:"unavailable",message:"Sign-in is temporarily unavailable"}}})
+    }))
     .handle("listUsers", () => adminOnly(accountOperation(headers=>options.authentication?.listUsers(headers))))
     .handle("createUser", ({payload}) => adminOnly(accountOperation(headers=>options.authentication?.createUser(payload,headers))))
     .handle("createAdministrator", ({payload}) => ownerOnly(accountOperation(headers=>options.authentication?.createAdministrator(payload,headers))))
@@ -145,6 +171,8 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
     .handle("getModelCatalog", ({payload}) => adminOnly(administration.getModelCatalog(payload)))
     .handle("getAdminSettings", () => adminOnly(administration.getSettings()))
     .handle("updateAdminSettings", ({payload}) => adminOnly(administration.updateSettings(payload)))
+    // "Test connection": the stored storage settings with the draft laid over them. Nothing is saved.
+    .handle("testStorage", ({payload}) => adminOnly(Effect.flatMap(administration.storageDraft(payload),configuration=>options.storage?Effect.promise(()=>options.storage!.test(configuration)):Effect.fail(unavailable))))
     .handle("listCalendars", () => administration.listCalendars())
     .handle("createCalendar", ({payload}) => adminOnly(administration.createCalendar(payload)))
     .handle("updateCalendar", ({params,payload}) => adminOnly(administration.updateCalendar(params.id,payload)))
@@ -218,6 +246,19 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
         if(request.method!=="GET")return new Response(null,{status:405,headers:{Allow:"GET"}})
         try{if(!options.google||!options.authentication||request.headers.has("authorization"))throw new Error("Browser sign-in required");const principal=await options.authentication.resolve(request.headers);if(!principal||principal.source!=="session"||!principal.sessionId)throw new Error("Browser sign-in required");const response=await options.google.callback(request,principal);response.headers.set("Cache-Control","no-store");response.headers.set("Referrer-Policy","no-referrer");return response}catch{return new Response(null,{status:303,headers:{Location:"/account?google=failed","Cache-Control":"no-store","Referrer-Policy":"no-referrer"}})}
       }
+      // A published app file: public, cacheable for a few minutes, with byte ranges. Its headers are its own.
+      const pathname=new URL(request.url).pathname
+      if(pathname.startsWith(DOWNLOAD_FILES_PATH)&&!pathname.slice(DOWNLOAD_FILES_PATH.length).includes("/")&&pathname.length>DOWNLOAD_FILES_PATH.length)
+        return downloads.file(request,pathname.slice(DOWNLOAD_FILES_PATH.length))
+      // Google sign-in is two browser navigations that answer with redirects, so it sits outside the JSON API.
+      const signInRoute=/^\/api\/v1\/auth\/google\/(start|callback)$/.exec(new URL(request.url).pathname)?.[1]
+      if(signInRoute){
+        const headers={"Cache-Control":"no-store","Referrer-Policy":"no-referrer","X-Content-Type-Options":"nosniff"}
+        if(request.method!=="GET")return new Response(null,{status:405,headers:{...headers,Allow:"GET"}})
+        if(!options.authentication)return new Response(null,{status:303,headers:{...headers,Location:"/login?error=google_unavailable"}})
+        const response=signInRoute==="start"?await options.authentication.signIn.googleStart(request):await options.authentication.signIn.googleCallback(request)
+        response.headers.set("X-Content-Type-Options","nosniff");return response
+      }
       const streamAbort=/^\/api\/v1\/(?:notes\/[^/]+\/)?chat\/stream$/.test(new URL(request.url).pathname)?new AbortController():null
       const forwarded=streamAbort?new Request(request,{signal:AbortSignal.any([request.signal,streamAbort.signal])}):request
       const response = new URL(request.url).pathname.startsWith("/api/auth/") && options.authentication ? await options.authentication.handler(request) : await web.handler(forwarded)
@@ -226,6 +267,12 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
       headers.set("Referrer-Policy", "no-referrer")
       headers.set("X-Content-Type-Options", "nosniff")
       if (headers.get("Content-Type")?.includes("text/event-stream")) headers.set("X-Accel-Buffering", "no")
+      // A path under /api that is not an endpoint answers in JSON like every other API response, never with a bare
+      // status (and never with the web app's page: the server routes all of /api here).
+      if((response.status===404||response.status===405)&&!headers.has("Content-Type")){
+        headers.set("Content-Type","application/json")
+        return new Response(JSON.stringify(response.status===404?{error:"not_found",message:"API route not found"}:{error:"method_not_allowed",message:"Method not allowed for this API route"}),{status:response.status,headers})
+      }
       let body=response.body
       if(streamAbort&&body&&headers.get("Content-Type")?.includes("text/event-stream")){
         const reader=body.getReader();let ended=false

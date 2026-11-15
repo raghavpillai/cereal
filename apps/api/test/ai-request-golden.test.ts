@@ -97,6 +97,19 @@ test("generation requests",async()=>{
   }
 })
 
+test("title requests for a note without a title",async()=>{
+  // The finished notes and the opening of the transcript, on the notes model; nothing else about the note.
+  for(const [name,options] of [
+    ["title/gpt-6-sol",{languageModel:"openai/gpt-6-sol"}],
+    ["title/gpt-4o-mini",{languageModel:"openai/gpt-4o-mini"}],
+    ["title/anthropic-direct",{languageProvider:"anthropic",anthropicKey:"fixture-key",languageModel:"claude-fixture-model"}],
+  ] as const){
+    const r=recorder()
+    expect(await Effect.runPromise(makeProviderServices({openRouterKey:"fixture-key",...options,fetch:r.transport}).title!({...pricing,title:""},pricing.enhanced))).toBe("ok")
+    check(name,r.requests)
+  }
+})
+
 test("note chat, evidence and planner requests at the provider boundary",async()=>{
   const inputs:Record<string,ChatInput>={
     "plain":{message:"What discount was discussed?",history:[]},

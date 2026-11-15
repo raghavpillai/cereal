@@ -28,7 +28,7 @@ targets:
         embed: true
     sources:
       - path: Cereal
-        excludes: ["Resources/Info.plist"]
+        excludes: ["Resources/Info.plist", "Resources/*.entitlements"]
       - path: ActivityShared
     info:
       path: Cereal/Resources/Info.plist
@@ -54,6 +54,16 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.cereal.mobile
         TARGETED_DEVICE_FAMILY: "1"
+        # The domain whose https://<domain>/s/… and /notes/… links open this app
+        # (universal links), for example notes.example.com. Empty: the app claims
+        # no domain and is signed without the Associated Domains entitlement;
+        # cereal:// links work either way. Set it for a build with
+        # `xcodebuild … CEREAL_LINK_DOMAIN=notes.example.com`.
+        CEREAL_LINK_DOMAIN: ""
+        # With no domain the lookup below finds this setting; with one it finds
+        # nothing and falls back to the file that carries the entitlement.
+        CEREAL_LINK_ENTITLEMENTS_: Cereal/Resources/NoLinks.entitlements
+        CODE_SIGN_ENTITLEMENTS: "$(CEREAL_LINK_ENTITLEMENTS_$(CEREAL_LINK_DOMAIN:identifier):default=Cereal/Resources/Links.entitlements)"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
   CerealRecordingActivity:
     type: app-extension

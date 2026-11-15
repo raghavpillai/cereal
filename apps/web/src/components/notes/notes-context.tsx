@@ -1,19 +1,14 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react'
-import type { AuthSessionDTO, MeetingContextDTO, NoteDTO, NoteListFilter, NoteSummariesPageDTO, NoteSummaryDTO, OrganizationsDTO } from '@meeting-notes/contracts'
+import type { AuthSessionDTO, MeetingContextDTO, NoteDTO, NoteListFilter, NoteSummariesPageDTO, NoteSummaryDTO } from '@meeting-notes/contracts'
 import { AdminClientError, type AdminClient } from '../../lib/admin-client'
 import { PAGE, createFeed, createNoteSearch, type Feed, type FeedPage, type NoteSearch } from '../../lib/note-list'
-import { useAdminTask, useResource } from '../admin/shared'
 
-/** What changes rarely: who is signed in, their notes and their workspaces. */
+/** What changes rarely: who is signed in and their notes. */
 export interface NotesContextValue {
   session: AuthSessionDTO
   client: AdminClient
   expired: () => void
   notes: NotesStore
-  workspaces: OrganizationsDTO | null
-  switching: boolean
-  workspaceError: string | null
-  switchWorkspace: (id: string) => Promise<void>
   meetings: MeetingStore
   morph: MorphStore
 }
@@ -22,9 +17,10 @@ export interface NotesContextValue {
 export interface NotesSearchValue {
   query: string
   setQuery: (query: string) => void
-  filter: NoteListFilter
-  setFilter: (filter: NoteListFilter) => void
 }
+
+/** The web lists every note of the active workspace; the server's narrower filters are not offered. */
+export const LISTED: NoteListFilter = 'all'
 
 const NotesContext = createContext<NotesContextValue | null>(null)
 const NotesSearchContext = createContext<NotesSearchValue | null>(null)
@@ -147,22 +143,12 @@ export function useMeeting(noteId: string): MeetingContextDTO | null | undefined
   return useSyncExternalStore(useCallback(listener => meetings.subscribe(noteId, listener), [meetings, noteId]), () => meetings.get(noteId))
 }
 
-// ── The note whose row and masthead share a view-transition name ───────────
+// ── The note last opened, so that going back returns focus to its row ──────
 
-export interface MorphStore { get: () => string | null; set: (id: string | null) => void; subscribe: (listener: () => void) => () => void }
+export interface MorphStore { get: () => string | null; set: (id: string | null) => void }
 function createMorphStore(): MorphStore {
   let current: string | null = null
-  const listeners = new Set<() => void>()
-  return {
-    get: () => current,
-    set(id) { if (id !== current) { current = id; listeners.forEach(listener => listener()) } },
-    subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener) } },
-  }
-}
-/** True for the one row that should morph; changing it re-renders two rows, not the list. */
-export function useIsMorphTarget(noteId: string): boolean {
-  const { morph } = useNotes()
-  return useSyncExternalStore(morph.subscribe, () => morph.get() === noteId)
+  return { get: () => current, set(id) { current = id } }
 }
 
 // ── A list request started alongside the session check ─────────────────────
@@ -183,24 +169,10 @@ export function NotesProvider({ session, client, expired, children }: { session:
   const signedOut = useCallback((error: unknown) => { if (error instanceof AdminClientError && error.status === 401) expired() }, [expired])
   const notes = useMemo(() => createNotesStore(client, signedOut), [client, signedOut])
   useEffect(() => () => notes.dispose(), [notes])
-  const loadWorkspaces = useCallback((signal: AbortSignal) => client.listOrganizations(signal), [client])
-  const workspaces = useResource(loadWorkspaces, expired), tasks = useAdminTask(expired)
-  const [query, setQuery] = useState(''), [filter, setFilter] = useState<NoteListFilter>('all')
-
+  const [query, setQuery] = useState('')
   const meetings = useMemo(createMeetingStore, [client])
   const morph = useMemo(createMorphStore, [])
-
-  const reloadWorkspaces = workspaces.reload, run = tasks.run
-  const switchWorkspace = useCallback(async (id: string) => {
-    const result = await run('workspace', signal => client.setActiveOrganization(id, signal))
-    if (result.ok) await Promise.all([reloadWorkspaces(), notes.reload(filter)])
-  }, [client, run, notes, filter, reloadWorkspaces])
-
-  const switching = tasks.pending.has('workspace')
-  const value = useMemo<NotesContextValue>(() => ({
-    session, client, expired, notes,
-    workspaces: workspaces.data, switching, workspaceError: tasks.error, switchWorkspace, meetings, morph,
-  }), [session, client, expired, notes, workspaces.data, switching, tasks.error, switchWorkspace, meetings, morph])
-  const search = useMemo<NotesSearchValue>(() => ({ query, setQuery, filter, setFilter }), [query, filter])
+  const value = useMemo<NotesContextValue>(() => ({ session, client, expired, notes, meetings, morph }), [session, client, expired, notes, meetings, morph])
+  const search = useMemo<NotesSearchValue>(() => ({ query, setQuery }), [query])
   return <NotesContext value={value}><NotesSearchContext value={search}>{children}</NotesSearchContext></NotesContext>
 }

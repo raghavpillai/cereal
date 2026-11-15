@@ -111,6 +111,30 @@ export const ApiErrorDTO = Schema.Struct({ error: ApiErrorCode, message: Schema.
 export type ApiErrorDTO = typeof ApiErrorDTO.Type
 export const HealthDTO = Schema.Struct({ status: Schema.Literal("ok"), version: Schema.Literal("v1") }).annotate({ identifier: "HealthDTO" })
 export const DeletedDTO = Schema.Struct({ deleted: Schema.Boolean }).annotate({ identifier: "DeletedDTO" })
+/** One file this server hands out: its name, the path to fetch it from on this server, its size in bytes and its SHA-256 in lower-case hex. */
+export const DownloadFileDTO = Schema.Struct({
+  file: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}$/)),
+  url: Schema.String.check(Schema.isPattern(/^\/api\/v1\/downloads\/files\/[A-Za-z0-9][A-Za-z0-9._+-]{0,199}$/)),
+  size: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  sha256: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
+}).annotate({ identifier: "DownloadFileDTO" })
+export type DownloadFileDTO = typeof DownloadFileDTO.Type
+/** The Mac app for this server's version: the installer people download, and the archive the app updates itself from (null when only the installer has been published). */
+export const MacDownloadDTO = Schema.Struct({
+  // "arm64" today. A string, not a closed list, so an app built now can still read the answer when another build exists.
+  arch: Schema.String.check(Schema.isPattern(/^[a-z0-9_]{1,20}$/)),
+  minimumSystem: Schema.String.check(Schema.isPattern(/^\d{1,3}(\.\d{1,3}){0,2}$/)),
+  installer: DownloadFileDTO,
+  update: Schema.NullOr(DownloadFileDTO),
+}).annotate({ identifier: "MacDownloadDTO" })
+export type MacDownloadDTO = typeof MacDownloadDTO.Type
+/** The apps for the version this server is running. `mac` is null when no build of that version has been published to this server. Public. */
+export const DownloadsDTO = Schema.Struct({
+  version: Schema.String.check(Schema.isPattern(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/), Schema.isMaxLength(40)),
+  mac: Schema.NullOr(MacDownloadDTO),
+  iosAppStoreUrl: Schema.NullOr(Schema.String),
+}).annotate({ identifier: "DownloadsDTO" })
+export type DownloadsDTO = typeof DownloadsDTO.Type
 export const NotesDTO = Schema.Array(NoteDTO)
 export const SharesDTO = Schema.Array(ShareDTO)
 
@@ -262,6 +286,96 @@ export type ModelCatalogDTO = typeof ModelCatalogDTO.Type
 export const ChatModelsDTO = Schema.Struct({models: Schema.Array(LanguageModelSelection)}).annotate({identifier:"ChatModelsDTO"})
 // Raster-only data URLs avoid remote tracking and active SVG content.
 const InstanceLogo = Schema.String.check(Schema.isMaxLength(350_000), Schema.isPattern(/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/))
+// How people sign in to this instance: set on the admin panel and kept in the database.
+/** A full address ("someone@example.com") or a whole domain ("@example.com"). The server stores them lower-cased. */
+const AllowedEmail = Schema.String.check(Schema.isMaxLength(254), Schema.isPattern(/^[^\s@]*@[^\s@.]+(?:\.[^\s@.]+)+$/))
+const GoogleClientId = Schema.String.check(Schema.isMinLength(10), Schema.isMaxLength(255), Schema.isPattern(/^[A-Za-z0-9._-]+$/))
+const GoogleClientSecret = Schema.String.check(Schema.isMinLength(8), Schema.isMaxLength(512), Schema.isPattern(/^[^\s]+$/))
+export const SignInSettingsDTO = Schema.Struct({
+  password: Schema.Boolean, google: Schema.Boolean,
+  /** Who may create an account by signing in with Google. An existing account signs in whether or not it is listed. */
+  allowedEmails: Schema.Array(Schema.String),
+  googleClientId: Schema.NullOr(Schema.String),
+  /** The secret itself is never returned. */
+  googleClientSecretSet: Schema.Boolean,
+  /** The redirect URIs to register in Google Cloud: sign-in first, then the calendar connection. */
+  googleRedirectUris: Schema.Array(Schema.String),
+}).annotate({ identifier: "SignInSettingsDTO" })
+export type SignInSettingsDTO = typeof SignInSettingsDTO.Type
+export const UpdateSignInSettingsInput = Schema.Struct({
+  password: Schema.optionalKey(Schema.Boolean), google: Schema.optionalKey(Schema.Boolean),
+  allowedEmails: Schema.optionalKey(Schema.Array(AllowedEmail).check(Schema.isMaxLength(500))),
+  googleClientId: Schema.optionalKey(Schema.NullOr(GoogleClientId)),
+  /** Null clears the stored secret. */
+  googleClientSecret: Schema.optionalKey(Schema.NullOr(GoogleClientSecret)),
+}).annotate({ identifier: "UpdateSignInSettingsInput" })
+export type UpdateSignInSettingsInput = typeof UpdateSignInSettingsInput.Type
+/** What the sign-in page and the apps offer. Public: it says nothing about accounts. */
+export const AuthMethodsDTO = Schema.Struct({ password: Schema.Boolean, google: Schema.Boolean, instanceName: Schema.String }).annotate({ identifier: "AuthMethodsDTO" })
+export type AuthMethodsDTO = typeof AuthMethodsDTO.Type
+/** Browser-to-app sign-in. The app keeps a random verifier and sends base64url(SHA-256(verifier)) as the challenge. */
+export const AppHandoffInput = Schema.Struct({ challenge: Schema.String.check(Schema.isMaxLength(128)) }).annotate({ identifier: "AppHandoffInput" })
+export type AppHandoffInput = typeof AppHandoffInput.Type
+/** Single use; expires after 120 seconds. */
+export const AppHandoffDTO = Schema.Struct({ code: Schema.String }).annotate({ identifier: "AppHandoffDTO" })
+export type AppHandoffDTO = typeof AppHandoffDTO.Type
+export const AppHandoffExchangeInput = Schema.Struct({ code: Schema.String.check(Schema.isMaxLength(256)), verifier: Schema.String.check(Schema.isMaxLength(256)) }).annotate({ identifier: "AppHandoffExchangeInput" })
+export type AppHandoffExchangeInput = typeof AppHandoffExchangeInput.Type
+/** A bearer session token, the same kind the `set-auth-token` header carries after password sign-in. */
+export const AppHandoffTokenDTO = Schema.Struct({ token: Schema.String }).annotate({ identifier: "AppHandoffTokenDTO" })
+export type AppHandoffTokenDTO = typeof AppHandoffTokenDTO.Type
+/** Where the server keeps recorded audio and the app builds it hands out: its own disk, or an S3-compatible bucket. */
+export const StorageBackend = Schema.Literals(["local", "s3"]).annotate({ identifier: "StorageBackend" })
+export type StorageBackend = typeof StorageBackend.Type
+/** The secret access key is never returned: `secretAccessKeySet` says whether one is stored. `source` says where
+ * the settings in force come from: saved on the admin panel, the server environment (a fallback when nothing was
+ * saved), or the built-in default (local disk). */
+export const StorageSettingsDTO = Schema.Struct({
+  backend: StorageBackend,
+  source: Schema.Literals(["stored", "environment", "default"]),
+  endpoint: Schema.NullOr(Schema.String),
+  region: Schema.NullOr(Schema.String),
+  bucket: Schema.NullOr(Schema.String),
+  prefix: Schema.String,
+  forcePathStyle: Schema.Boolean,
+  accessKeyId: Schema.NullOr(Schema.String),
+  secretAccessKeySet: Schema.Boolean,
+}).annotate({ identifier: "StorageSettingsDTO" })
+export type StorageSettingsDTO = typeof StorageSettingsDTO.Type
+const StorageText = (max: number) => Schema.String.check(Schema.isMaxLength(max))
+/** Every key is optional: only what is sent changes. `endpoint: null` means Amazon S3 itself; `secretAccessKey: null`
+ * removes the stored secret. The server checks the values (address, bucket name, prefix) and answers 400 with the reason. */
+export const UpdateStorageSettingsInput = Schema.Struct({
+  backend: Schema.optionalKey(StorageBackend),
+  endpoint: Schema.optionalKey(Schema.NullOr(StorageText(2048))),
+  region: Schema.optionalKey(Schema.NullOr(StorageText(40))),
+  bucket: Schema.optionalKey(Schema.NullOr(StorageText(63))),
+  prefix: Schema.optionalKey(StorageText(200)),
+  forcePathStyle: Schema.optionalKey(Schema.Boolean),
+  accessKeyId: Schema.optionalKey(Schema.NullOr(StorageText(128))),
+  secretAccessKey: Schema.optionalKey(Schema.NullOr(StorageText(512))),
+}).annotate({ identifier: "UpdateStorageSettingsInput" })
+export type UpdateStorageSettingsInput = typeof UpdateStorageSettingsInput.Type
+/** "Test connection": the stored settings with these values laid over them, so a draft can be tried before it is saved. */
+export const StorageTestInput = UpdateStorageSettingsInput.annotate({ identifier: "StorageTestInput" })
+export type StorageTestInput = typeof StorageTestInput.Type
+/** A small file was written, read back and deleted. `step` is the one that failed, null when all three worked. */
+export const StorageTestDTO = Schema.Struct({
+  ok: Schema.Boolean,
+  backend: StorageBackend,
+  step: Schema.NullOr(Schema.Literals(["write", "read", "delete"])),
+  message: Schema.String,
+}).annotate({ identifier: "StorageTestDTO" })
+export type StorageTestDTO = typeof StorageTestDTO.Type
+/** The iPhone app: which app IDs (team ID, a dot, the bundle ID) may open this server's note links, and the app's
+ * numeric App Store ID once it is published (the download page and the Smart App Banner use it). */
+export const AppsSettingsDTO = Schema.Struct({ iosAppIds: Schema.Array(Schema.String), iosAppStoreId: Schema.NullOr(Schema.String) }).annotate({ identifier: "AppsSettingsDTO" })
+export type AppsSettingsDTO = typeof AppsSettingsDTO.Type
+export const UpdateAppsSettingsInput = Schema.Struct({
+  iosAppIds: Schema.optionalKey(Schema.Array(Schema.String.check(Schema.isMaxLength(200))).check(Schema.isMaxLength(10))),
+  iosAppStoreId: Schema.optionalKey(Schema.NullOr(Schema.String.check(Schema.isMaxLength(20)))),
+}).annotate({ identifier: "UpdateAppsSettingsInput" })
+export type UpdateAppsSettingsInput = typeof UpdateAppsSettingsInput.Type
 export const AdminSettingsDTO = Schema.Struct({
   instanceName: Schema.String, languageModel: Schema.String,
   instanceLogo: Schema.NullOr(InstanceLogo),
@@ -275,6 +389,17 @@ export const AdminSettingsDTO = Schema.Struct({
   openRouterSource: Schema.Literals(["environment", "stored", "none"]),
   elevenLabsSource: Schema.Literals(["environment", "stored", "none"]),
   calendarRefreshMinutes: Schema.Number.check(Schema.isInt32()), calendarLookAheadDays: Schema.Number.check(Schema.isInt32()),
+  /** Always sent by this server; optional so responses from older servers stay valid. */
+  signIn: Schema.optionalKey(SignInSettingsDTO),
+  /** Always sent by this server; optional so older fixtures stay valid. */
+  storage: Schema.optionalKey(StorageSettingsDTO),
+  /** How many recordings may be transcribed live at once, and how many seconds a stopped recording's provider
+   * sessions are kept for a Resume (0: not kept). Always sent by this server. */
+  liveMaxSessions: Schema.optionalKey(Schema.Number.check(Schema.isInt32())),
+  liveHoldSeconds: Schema.optionalKey(Schema.Number.check(Schema.isInt32())),
+  apps: Schema.optionalKey(AppsSettingsDTO),
+  /** Variables still set in the server's environment whose settings now live here: they are ignored and can be deleted. */
+  unusedEnvironment: Schema.optionalKey(Schema.Array(Schema.String)),
   updatedAt: Schema.NullOr(Timestamp),
 }).annotate({ identifier: "AdminSettingsDTO" })
 export type AdminSettingsDTO = typeof AdminSettingsDTO.Type
@@ -293,6 +418,11 @@ export const UpdateAdminSettingsInput = Schema.Struct({
   elevenLabsApiKey: Schema.optionalKey(Schema.NullOr(ProviderKey)),
   calendarRefreshMinutes: Schema.optionalKey(Schema.Number.check(Schema.isInt32(), Schema.isBetween({ minimum: 5, maximum: 1440 }))),
   calendarLookAheadDays: Schema.optionalKey(Schema.Number.check(Schema.isInt32(), Schema.isBetween({ minimum: 1, maximum: 90 }))),
+  signIn: Schema.optionalKey(UpdateSignInSettingsInput),
+  storage: Schema.optionalKey(UpdateStorageSettingsInput),
+  liveMaxSessions: Schema.optionalKey(Schema.Number.check(Schema.isInt32(), Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(200))),
+  liveHoldSeconds: Schema.optionalKey(Schema.Number.check(Schema.isInt32(), Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(3600))),
+  apps: Schema.optionalKey(UpdateAppsSettingsInput),
 }).annotate({ identifier: "UpdateAdminSettingsInput" })
 export type UpdateAdminSettingsInput = typeof UpdateAdminSettingsInput.Type
 const CalendarName = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200))
@@ -459,11 +589,15 @@ export const WireSchemas = {
   OrganizationDTO, OrganizationsDTO, OrganizationMemberDTO, OrganizationInvitationDTO, OrganizationDetailsDTO, OrganizationInvitationsDTO, CreateOrganizationInput, UpdateOrganizationInput, SetActiveOrganizationInput, InviteOrganizationMemberInput, UpdateOrganizationMemberRoleInput,
   ManualParticipantInput, GoogleConnectionDTO, GoogleStatusDTO, GoogleConnectInput, GoogleConnectDTO, GoogleCalendarDTO, UpdateGoogleCalendarInput, MeetingParticipantDTO, MeetingContextDTO, NoteContextDTO, UpdateNoteContextInput,
   UserDTO, AuthSessionDTO, UsersDTO, CreateUserInput, UpdateUserRoleInput, CalendarPreferencesDTO,
+  SignInSettingsDTO, UpdateSignInSettingsInput, AuthMethodsDTO, AppHandoffInput, AppHandoffDTO, AppHandoffExchangeInput, AppHandoffTokenDTO,
   AdminSettingsDTO, UpdateAdminSettingsInput, CalendarDTO, CreateCalendarInput, UpdateCalendarInput, CalendarEventDTO,
   UploadAudioChunkInput, AudioChunkDTO, ChatMessageDTO, ChatInput, ChatAnswerDTO, ChatCitationDTO, ChatToolMeetingDTO, ChatToolProgressDTO, ChatStreamEventDTO,
   EvidenceRequestDTO, EvidenceQuoteDTO, EvidenceDTO,
   TranscriptSegmentDTO, NoteDTO, CreateNoteInput, UpdateNoteInput, RecordingCommandDTO, GenerateNotesCommandDTO, GenerationProgressDTO,
   SharedNoteDTO, CreateShareInput, ShareDTO, CreatedShareDTO, HealthDTO, DeletedDTO, ApiErrorDTO,
+  DownloadFileDTO, MacDownloadDTO, DownloadsDTO,
+  StorageSettingsDTO, UpdateStorageSettingsInput, StorageTestInput, StorageTestDTO,
+  AppsSettingsDTO, UpdateAppsSettingsInput,
 } as const
 
 export interface NoteGenerationProvider {

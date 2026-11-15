@@ -1,5 +1,5 @@
 import type { NoteDTO, NoteListFilter, NoteSearchPageDTO, NoteSearchResultDTO, NoteSummaryDTO } from '@meeting-notes/contracts'
-import { dateFormatter, dayLabel, dayOffset, noteStatus, noteTime, noteTitle, type NoteStatus, type NoteView } from './notes'
+import { createdClock, isFinished, listDayLabel, noteStatus, noteTitle, timelineDate, type NoteStatus } from './notes'
 
 /** The notes list as the server pages it: rows without bodies or transcripts,
  * loaded a page at a time, and a search that runs on the server. No DOM here. */
@@ -189,60 +189,44 @@ export function createNoteSearch(load: SearchLoader, options: { delay?: number; 
 
 // ── What a row shows ───────────────────────────────────────────────────────
 
-export interface SummaryFacts { title: string; time: string | null; status: NoteStatus | null; details: string[]; invited: string }
+/** Rows of finished notes only: a meeting still being recorded, or a note with nothing in it yet, lives in the apps. */
+export function finishedSummaries(notes: readonly NoteSummaryDTO[]): NoteSummaryDTO[] {
+  return notes.filter(isFinished)
+}
+export function finishedResults(results: readonly NoteSearchResultDTO[]): NoteSearchResultDTO[] {
+  return results.filter(result => isFinished(result.note))
+}
+
+export interface SummaryFacts { title: string; time: string; status: NoteStatus | null }
 const factsCache = new WeakMap<NoteSummaryDTO, SummaryFacts>()
 /** Derived once per row object; a re-render of the list reads the cached value. */
 export function summaryFacts(note: NoteSummaryDTO): SummaryFacts {
   let facts = factsCache.get(note)
   if (!facts) {
-    const details = [note.duration.trim(), note.speakerCount > 0 ? `${note.speakerCount} ${note.speakerCount === 1 ? 'speaker' : 'speakers'}` : ''].filter(Boolean)
-    if (!details.length) details.push(note.hasSummary || note.hasBody ? 'Written note' : 'Empty note')
-    facts = { title: noteTitle(note), time: noteTime(note), status: summaryStatus(note), details, invited: invitedLine(note) }
+    facts = { title: noteTitle(note), time: createdClock(note.createdAt), status: summaryStatus(note) }
     factsCache.set(note, facts)
   }
   return facts
 }
 /** The status rules read a summary's text only to ask whether there is any. */
 export function summaryStatus(note: NoteSummaryDTO): NoteStatus | null {
-  return noteStatus({ recordingState: note.recordingState, generationState: note.generationState, transcriptRevision: note.transcriptRevision, generatedRevision: note.generatedRevision, enhanced: note.hasSummary ? 'summary' : '' })
-}
-/** "Ada, Grace +2": the first names that fit, then how many more were invited. */
-export function invitedLine(note: Pick<NoteSummaryDTO, 'attendees'>, shown = 2): string {
-  const names = note.attendees.people.slice(0, shown).map(person => person.shortName)
-  if (!names.length) return ''
-  return note.attendees.others > names.length ? `${names.join(', ')} +${note.attendees.others - names.length}` : names.join(', ')
+  return noteStatus({ generationState: note.generationState, transcriptRevision: note.transcriptRevision, generatedRevision: note.generatedRevision, enhanced: note.hasSummary ? 'summary' : '' })
 }
 
 export interface SummaryGroup { key: string; label: string; notes: NoteSummaryDTO[] }
 /** Rows arrive newest first, so a day is a run of neighbours. Their order is the server's and is never changed here. */
-export function groupSummariesByDay(notes: readonly NoteSummaryDTO[], now: Date, locale?: string): SummaryGroup[] {
+export function groupSummariesByDay(notes: readonly NoteSummaryDTO[], now: Date): SummaryGroup[] {
   const groups: SummaryGroup[] = []
   for (const note of notes) {
-    const last = groups[groups.length - 1]
-    if (last?.key === note.date) last.notes.push(note)
-    else groups.push({ key: note.date, label: dayLabel(note.date, now, locale), notes: [note] })
+    const last = groups[groups.length - 1], day = timelineDate(note)
+    if (last?.key === day) last.notes.push(note)
+    else groups.push({ key: day, label: listDayLabel(day, now), notes: [note] })
   }
   return groups
 }
-/** A search result is not under a day heading, so it carries its own day, short enough for the time column. */
-export function shortDay(key: string, now: Date, locale?: string): string {
-  const offset = dayOffset(key, now)
-  if (offset === null) return ''
-  if (offset === 0) return 'Today'
-  if (offset === -1) return 'Yesterday'
-  const day = new Date(Number(key.slice(0, 4)), Number(key.slice(5, 7)) - 1, Number(key.slice(8, 10)), 12)
-  return day.getFullYear() === now.getFullYear()
-    ? dateFormatter(locale, 'short-day', { day: 'numeric', month: 'short' }).format(day)
-    : dateFormatter(locale, 'month-year', { month: 'short', year: 'numeric' }).format(day)
-}
-
 // ── Opening a note from its row ────────────────────────────────────────────
 
-/** The view a note will open on, known before its text has loaded. */
-export function summaryView(note: Pick<NoteSummaryDTO, 'hasSummary' | 'hasBody' | 'hasTranscript'>): NoteView {
-  return note.hasSummary ? 'summary' : note.hasBody ? 'notes' : note.hasTranscript ? 'transcript' : 'summary'
-}
-/** A note with everything the masthead shows and no text yet, so the page can open from its row while the note loads. */
+/** A note with everything its heading shows and no text yet, so the page can open from its row while the note loads. */
 export function provisionalNote(note: NoteSummaryDTO): NoteDTO {
   return {
     id: note.id, title: note.title, body: '', enhanced: '', date: note.date, duration: note.duration, createdAt: note.createdAt, updatedAt: note.updatedAt,

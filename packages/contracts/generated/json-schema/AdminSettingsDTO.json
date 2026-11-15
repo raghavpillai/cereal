@@ -103,6 +103,161 @@
       ],
       "additionalProperties": true
     },
+    "SignInSettingsDTO": {
+      "type": "object",
+      "properties": {
+        "password": {
+          "type": "boolean"
+        },
+        "google": {
+          "type": "boolean"
+        },
+        "allowedEmails": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "googleClientId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "googleClientSecretSet": {
+          "type": "boolean"
+        },
+        "googleRedirectUris": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "password",
+        "google",
+        "allowedEmails",
+        "googleClientId",
+        "googleClientSecretSet",
+        "googleRedirectUris"
+      ],
+      "additionalProperties": true
+    },
+    "StorageBackend": {
+      "type": "string",
+      "enum": [
+        "local",
+        "s3"
+      ]
+    },
+    "StorageSettingsDTO": {
+      "type": "object",
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/StorageBackend"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "stored",
+            "environment",
+            "default"
+          ]
+        },
+        "endpoint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "region": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bucket": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prefix": {
+          "type": "string"
+        },
+        "forcePathStyle": {
+          "type": "boolean"
+        },
+        "accessKeyId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "secretAccessKeySet": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "backend",
+        "source",
+        "endpoint",
+        "region",
+        "bucket",
+        "prefix",
+        "forcePathStyle",
+        "accessKeyId",
+        "secretAccessKeySet"
+      ],
+      "additionalProperties": true
+    },
+    "AppsSettingsDTO": {
+      "type": "object",
+      "properties": {
+        "iosAppIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "iosAppStoreId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "iosAppIds",
+        "iosAppStoreId"
+      ],
+      "additionalProperties": true
+    },
     "Timestamp": {
       "type": "string"
     },
@@ -201,6 +356,47 @@
               "maximum": 2147483647
             }
           ]
+        },
+        "signIn": {
+          "$ref": "#/$defs/SignInSettingsDTO"
+        },
+        "storage": {
+          "$ref": "#/$defs/StorageSettingsDTO"
+        },
+        "liveMaxSessions": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ]
+        },
+        "liveHoldSeconds": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ]
+        },
+        "apps": {
+          "$ref": "#/$defs/AppsSettingsDTO"
+        },
+        "unusedEnvironment": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "updatedAt": {
           "anyOf": [

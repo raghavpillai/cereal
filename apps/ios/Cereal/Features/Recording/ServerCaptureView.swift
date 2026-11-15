@@ -34,6 +34,9 @@ struct ServerCaptureView: View {
     @Environment(\.railMetrics) private var rail
     @Namespace private var glass
     @State private var title = ""
+    /// The note's title as the server last gave it. While the field still holds
+    /// this, the person has not typed a title, and none is sent.
+    @State private var serverTitle = ""
     @State private var text = ""
     @State private var initial: NoteDTO?
     @State private var loaded = false
@@ -156,7 +159,7 @@ struct ServerCaptureView: View {
             guard !loaded else { return }
             do {
                 let value = try await server.note(id: noteID)
-                initial = value; title = value.title; text = value.body; loaded = true
+                initial = value; title = value.title; serverTitle = value.title; text = value.body; loaded = true
                 // Returning to a recording in progress neither restarts it nor raises the keyboard.
                 let returning = active
                 if !returning { await recording.start(note: value) }
@@ -169,7 +172,7 @@ struct ServerCaptureView: View {
             let previous = title
             Task {
                 guard let fresh = try? await server.note(id: noteID) else { return }
-                if title == previous, ["", "new note", "untitled note"].contains(title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) { title = fresh.title }
+                if title == previous, ["", "new note", "untitled note"].contains(title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) { title = fresh.title; serverTitle = fresh.title }
                 initial = fresh
             }
         } }
@@ -177,6 +180,13 @@ struct ServerCaptureView: View {
             if let note { ServerTranscriptView(note: note, live: recording.transcript(for: noteID), recording: active) }
         }
         .onChange(of: title) { queueSave() }.onChange(of: text) { queueSave() }
+        // A title the server gave the note (its notes were generated) appears in
+        // the field unless the person has typed one of their own, which stays.
+        .onChange(of: note?.title) { _, new in
+            guard loaded, let new, new != serverTitle else { return }
+            if title == serverTitle { title = new }
+            serverTitle = new
+        }
         // Leaving this screen, by any route, does not stop the recording. What was
         // typed is sent on its way out.
         .onDisappear { saveTask?.cancel(); flushUnsaved() }
@@ -210,15 +220,16 @@ struct ServerCaptureView: View {
     private func save() async throws {
         guard title.count <= 500, text.count <= 1_000_000 else { throw APIClientError.invalidJSON }
         let sent = (title, text)
-        _ = try await server.update(id: noteID, title: title, body: text)
+        let saved = try await server.update(id: noteID, Self.edit(title: title, serverTitle: serverTitle, text: text))
+        if title == sent.0 { serverTitle = saved.title }
         if sent == (title, text) { unsaved = false }
         error = nil
     }
     /// For a screen that went away without its own save (a swipe).
     private func flushUnsaved() {
         guard loaded, unsaved, title.count <= 500, text.count <= 1_000_000 else { return }
-        let server = server, noteID = noteID, title = title, text = text
-        Task { _ = try? await server.update(id: noteID, title: title, body: text) }
+        let server = server, noteID = noteID, edit = Self.edit(title: title, serverTitle: serverTitle, text: text)
+        Task { _ = try? await server.update(id: noteID, edit) }
     }
     /// Saves what was typed, then shows `path` with this screen gone. The recording is untouched.
     private func leave(to path: @escaping @MainActor () -> [Route]) {
@@ -237,6 +248,13 @@ struct ServerCaptureView: View {
             } catch { self.error = error.localizedDescription }
         }
     }
+    /// What typing on this screen changes. The title is sent only when it is
+    /// not the one the server gave: a field the person never touched must not
+    /// write its old (often empty) title over one the server has since given the note.
+    static func edit(title: String, serverTitle: String, text: String) -> UpdateNoteInput {
+        UpdateNoteInput(body: text, date: nil, duration: nil, enhanced: nil, title: title == serverTitle ? nil : title, transcriptSegments: nil)
+    }
+
     private func close() {
         leave { CaptureNavigation.pathAfterClosing(from: router.path, noteID: noteID, recording: active) }
     }

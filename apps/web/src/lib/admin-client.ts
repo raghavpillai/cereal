@@ -2,7 +2,7 @@ import { Effect, Result } from 'effect'
 import { FetchHttpClient } from 'effect/http'
 import { HttpApiClient } from 'effect/http-api'
 import { MeetingsApi } from '@meeting-notes/contracts/api'
-import type { ModelCatalogInput, NoteListFilter } from '@meeting-notes/contracts'
+import type { ModelCatalogInput, NoteListFilter, StorageTestInput } from '@meeting-notes/contracts'
 import type { CreateCalendarInput, CreateUserInput, UpdateAdminSettingsInput, UpdateCalendarInput, UpdateUserRoleInput, CreateOrganizationInput, UpdateOrganizationInput, InviteOrganizationMemberInput, UpdateOrganizationMemberRoleInput } from '@meeting-notes/contracts'
 
 type Client = HttpApiClient.ForApi<typeof MeetingsApi>
@@ -87,6 +87,8 @@ export function createAdminClient(baseUrl: string, transport: typeof fetch = glo
     getSettings: (signal?: AbortSignal) => execute(c => c.owner.getAdminSettings(), signal),
     getModelCatalog: (payload: ModelCatalogInput, signal?: AbortSignal) => execute(c => c.owner.getModelCatalog({payload}), signal),
     updateSettings: (payload: UpdateAdminSettingsInput, signal?: AbortSignal) => execute(c => c.owner.updateAdminSettings({ payload }), signal),
+    /** Tries the storage settings with a draft laid over them: a small file is written, read back and deleted. Nothing is saved. */
+    testStorage: (payload: StorageTestInput, signal?: AbortSignal) => execute(c => c.owner.testStorage({ payload }), signal),
     listCalendars: (signal?: AbortSignal) => execute(c => c.owner.listCalendars(), signal),
     createCalendar: (payload: CreateCalendarInput, signal?: AbortSignal) => execute(c => c.owner.createCalendar({ payload }), signal),
     updateCalendar: (id: string, payload: UpdateCalendarInput, signal?: AbortSignal) => execute(c => c.owner.updateCalendar({ params: { id }, payload }), signal),

@@ -27,21 +27,17 @@ services:
   app:
     image: meeting-notes:local
     build: .
+    # The whole private .env is handed to the server, and the entries under `environment` win over it.
+    # Provider keys, models, sign-in, storage and the apps are set on the admin panel and kept in the
+    # database, so nothing here names them. A .env from an earlier version that still carries such values
+    # (OPENROUTER_API_KEY, OPENROUTER_MODEL and so on) is read once: the server takes them into its settings
+    # at start-up, says so in its log by name, and never reads them again.
+    env_file: .env
     environment:
       DATABASE_URL: postgresql://meeting_notes:${POSTGRES_PASSWORD}@db:5432/meeting_notes?schema=public
       ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:?Run ./scripts/setup.sh first}
-      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
-      ELEVENLABS_STT_MODEL: ${ELEVENLABS_STT_MODEL:-scribe_v3}
-      LIVE_MAX_SESSIONS: ${LIVE_MAX_SESSIONS:-20}
-      LIVE_HOLD_SECONDS: ${LIVE_HOLD_SECONDS:-300}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
-      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
-      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openai/gpt-6-sol}
-      OPENROUTER_TOOL_MODEL: ${OPENROUTER_TOOL_MODEL:-openai/gpt-6-sol}
       AUDIO_STORAGE_DIR: /data/audio
+      DOWNLOADS_DIR: /data/downloads
       SETTINGS_KEY_FILE: /data/state/settings.key
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
       AUTH_TRUSTED_ORIGINS: ${AUTH_TRUSTED_ORIGINS:-}
@@ -51,6 +47,11 @@ services:
     volumes:
       - audio-data:/data/audio
       - state-data:/data/state
+      # App builds this server hands out (GET /api/v1/downloads). scripts/release-macos.sh writes them to
+      # ./dist/release, so a build made on this machine is published by being there. Read-only: the server
+      # never writes here. Docker creates the directory if it does not exist yet (scripts/setup.sh makes it
+      # first, so that it belongs to you).
+      - ${DOWNLOADS_HOST_DIR:-./dist/release}:/data/downloads:ro
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-3000}:3000"
     depends_on:

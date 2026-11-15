@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/AppHandoffInput",
+  "$defs": {
+    "AppHandoffInput": {
+      "type": "object",
+      "properties": {
+        "challenge": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "challenge"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

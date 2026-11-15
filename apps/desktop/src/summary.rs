@@ -599,6 +599,21 @@ impl Cereal {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Div {
+        self.render_note_markdown(note, false, t, width, window, cx)
+    }
+
+    /// The generated notes of `note`, laid out block by block. `read_only`
+    /// is for a note that is not the user's to change (a shared snapshot):
+    /// the same blocks, with nothing that edits them.
+    pub fn render_note_markdown(
+        &self,
+        note: &Note,
+        read_only: bool,
+        t: Theme,
+        width: Pixels,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let dark = t.bg.l < 0.5;
         let highlight: Hsla = if dark {
             rgb(0x363635).into()
@@ -795,9 +810,11 @@ impl Cereal {
                         } else {
                             crate::chat::inline_text(title, t).into_any_element()
                         })
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.begin_enhanced_edit(note_id, editable_row, window, cx)
-                        }))
+                        .when(!read_only, |heading| {
+                            heading.on_click(cx.listener(move |this, _, window, cx| {
+                                this.begin_enhanced_edit(note_id, editable_row, window, cx)
+                            }))
+                        })
                         .into_any_element(),
                 );
             }
@@ -837,18 +854,19 @@ impl Cereal {
                     .id(("enhanced-text", row))
                     .flex_1()
                     .min_w_0()
-                    .cursor(CursorStyle::IBeam)
                     .child(if let Some(edit) = editing {
                         edit.input.clone().into_any_element()
                     } else {
                         crate::chat::inline_text(&text, t).into_any_element()
                     })
-                    .on_click(cx.listener({
-                        let note_id = note.id;
-                        move |this, _, window, cx| {
-                            this.begin_enhanced_edit(note_id, editable_row, window, cx)
-                        }
-                    })),
+                    .when(!read_only, |text| {
+                        text.cursor(CursorStyle::IBeam).on_click(cx.listener({
+                            let note_id = note.id;
+                            move |this, _, window, cx| {
+                                this.begin_enhanced_edit(note_id, editable_row, window, cx)
+                            }
+                        }))
+                    }),
             );
             if eligible {
                 let bounds: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));

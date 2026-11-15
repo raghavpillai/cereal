@@ -84,7 +84,15 @@ describe.skipIf(!enabled)("real Better Auth / PostgreSQL sessions, roles and pri
   expect((await(await request("/api/v1/notes","GET",undefined,bobToken)).json()).some((n:any)=>n.id===note.id)).toBe(false)
   // Admin role does not grant access to another user's content.
   expect((await request("/api/v1/notes/"+note.id,"GET",undefined,ownerSession)).status).toBe(404)
-  const share=await(await request("/api/v1/notes/"+note.id+"/shares","POST",{includeBody:true,includeEnhanced:false},aliceToken)).json();expect((await request("/api/v1/shared/"+share.token,"GET",undefined,"")).status).toBe(200)
+  const share=await(await request("/api/v1/notes/"+note.id+"/shares","POST",{includeBody:true,includeEnhanced:false},aliceToken)).json();
+  // A shared link needs an account on this server: nobody anonymous, and any signed-in holder of the link, including one who cannot see the note itself.
+  const sharedPath="/api/v1/shared/"+share.token
+  for(const path of[sharedPath,"/api/v1/shared/"+"a".repeat(43),"/api/v1/shared/not-a-token"]){const anonymous=await request(path,"GET",undefined,"");expect(anonymous.status).toBe(401);expect((await anonymous.json()).error).toBe("unauthorized")}
+  expect((await request(sharedPath,"GET",undefined,"not-a-real-session-token")).status).toBe(401)
+  expect((await request("/api/v1/notes/"+note.id,"GET",undefined,bobToken)).status).toBe(404)
+  for(const reader of[bobToken,aliceToken,ownerSession]){const read=await request(sharedPath,"GET",undefined,reader);expect(read.status).toBe(200);expect(Object.keys(await read.json()).sort()).toEqual(["body","date","duration","enhanced","expiresAt","shareId","sharedAt","title"])}
+  expect((await request(sharedPath,"GET",undefined,"",{Cookie:cookie})).status).toBe(200)
+  expect((await request("/api/v1/shared/"+"a".repeat(43),"GET",undefined,bobToken)).status).toBe(404)
   const c=await(await request("/api/v1/calendars","POST",{name:"Shared test source",url:"https://calendar.example.test/feed?token=private"})).json();calendarId=c.id;expect(c.lastSyncError).toBeNull();expect(c.eventCount).toBe(1)
   const events=await(await request("/api/v1/calendar/events?from=2026-11-12T00%3A00%3A00Z&to=2026-11-20T00%3A00%3A00Z","GET",undefined,aliceToken)).json();expect(events).toHaveLength(1)
   const [a,b]=await Promise.all([aliceToken,bobToken].map(t=>request("/api/v1/calendar/events/"+events[0].id+"/note","POST",undefined,t).then(r=>r.json())));aliceMeetingNoteId=a.id;bobMeetingNoteId=b.id;expect(a.id).not.toBe(b.id)

@@ -66,7 +66,12 @@ for (const [name, schema] of objects) {
   const swiftName = swiftSymbols.get(name.toLowerCase())
   if (!swiftName) throw new Error(`Missing generated Swift object for ${name}`)
   const keys = properties.map(([key]) => `        case ${key}`).join("\n")
-  const encode = properties.map(([key]) => `        try container.${required.has(key) ? "encode" : "encodeIfPresent"}(${key}, forKey: .${key})`).join("\n")
+  // Quicktype renames a property that would collide with a Swift name (`prefix` becomes
+  // `storageSettingsDTOPrefix`), so read the property each wire key maps to from the struct itself.
+  const start = swiftSource.search(new RegExp(`^public struct ${swiftName}:`, "m"))
+  const body = swiftSource.slice(start, swiftSource.indexOf("\n}\n", start))
+  const property = (key: string) => new RegExp(`case (\\w+) = "${key}"`).exec(body)?.[1] ?? key
+  const encode = properties.map(([key]) => `        try container.${required.has(key) ? "encode" : "encodeIfPresent"}(${property(key)}, forKey: .${key})`).join("\n")
   swiftSource += `\n\nextension ${swiftName} {\n    private enum ContractWireKeys: String, CodingKey {\n${keys}\n    }\n    public func encode(to encoder: Encoder) throws {\n        var container = encoder.container(keyedBy: ContractWireKeys.self)\n${encode}\n    }\n}\n`
 }
 let structName = ""

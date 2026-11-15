@@ -10,6 +10,20 @@ import {MCP_SCOPES} from "./mcp-tools"
 import {resolveNoteOrganization} from "./mcp-store"
 
 export const MCP_OAUTH_SCOPES=[...MCP_SCOPES,"offline_access"]
+/** Every programmatic endpoint lives under /api, the MCP endpoint included. It used to be at /mcp: that exact
+ * path still answers, so clients connected there keep working. Each address is its own OAuth resource with its
+ * own RFC 9728 metadata document (a client checks that the document names the address it is using), and an
+ * access token issued for either one is accepted at both. */
+export const MCP_PATH="/api/mcp",LEGACY_MCP_PATH="/mcp"
+const METADATA_PATH="/.well-known/oauth-protected-resource"
+const mcpResources=(baseURL:string)=>({canonical:baseURL+MCP_PATH,legacy:baseURL+LEGACY_MCP_PATH})
+/** The audience a bearer token claims, read without trusting it: it only chooses which of our two resources the
+ * token is then fully verified against. Anything else, or no readable claim, verifies against the address called. */
+function claimedAudience(headers:Headers):ReadonlyArray<string>{
+ const token=/^(?:Bearer|DPoP) +([A-Za-z0-9_-]+\.([A-Za-z0-9_-]+)\.[A-Za-z0-9_-]+)$/i.exec(headers.get("authorization")??"")?.[2]
+ if(!token||token.length>16384)return []
+ try{const audience=(JSON.parse(Buffer.from(token,"base64url").toString("utf8")) as {aud?:unknown}).aud;return typeof audience==="string"?[audience]:Array.isArray(audience)?audience.filter((entry):entry is string=>typeof entry==="string"):[]}catch{return []}
+}
 export interface McpGrant {principal:PrincipalData;workspaceId:string;scopes:ReadonlySet<string>;connectionId:string;clientId:string}
 const noStore={"Cache-Control":"no-store","Referrer-Policy":"no-referrer"}
 const invalid=(message="The connection is no longer authorized")=>Response.json({error:"invalid_token",error_description:message},{status:401,headers:noStore})
@@ -20,10 +34,11 @@ const role=(value:string|undefined|null):PrincipalData["role"]=>value==="owner"?
  * implemented by the official Better Auth plugins. The additional grant-id claim
  * enforces immediate disconnect and prevents an old JWT reviving on re-consent. */
 export function makeMcpAuthPlugins(db:Database,baseURL:string){
- const resource=baseURL+"/mcp"
+ const {canonical,legacy}=mcpResources(baseURL),policy={name:"Cereal MCP",allowedScopes:MCP_OAUTH_SCOPES,accessTokenTtl:900,refreshTokenTtl:30*86400}
  return [jwt({disableSettingJwtHeader:true}),mcp({
-  resource,loginPage:"/mcp/connect",consentPage:"/mcp/consent",scopes:MCP_OAUTH_SCOPES,
-  resources:[{identifier:resource,name:"Cereal MCP",allowedScopes:MCP_OAUTH_SCOPES,accessTokenTtl:900,refreshTokenTtl:30*86400}],
+  resource:canonical,loginPage:"/mcp/connect",consentPage:"/mcp/consent",scopes:MCP_OAUTH_SCOPES,
+  // A new client may ask for either address; a client registered before the move is linked to the new one by migration.
+  resources:[{identifier:canonical,...policy},{identifier:legacy,...policy}],clientRegistrationDefaultResources:[canonical,legacy],
   grantTypes:["authorization_code","refresh_token"],allowDynamicClientRegistration:true,allowUnauthenticatedClientRegistration:true,
   allowPublicClientPrelogin:true,refreshTokenReuseInterval:0,codeExpiresIn:300,
   rateLimit:{register:{window:60,max:5}},
@@ -39,8 +54,9 @@ export function makeMcpAuthPlugins(db:Database,baseURL:string){
 }
 
 export function makeMcpAuthentication(db:Database,auth:AuthenticationEngine,baseURL:string){
- const resource=baseURL+"/mcp"
- const invalidGrant=()=>{const response=invalid();response.headers.set("WWW-Authenticate",`Bearer resource_metadata="${baseURL}/.well-known/oauth-protected-resource/mcp", error="invalid_token", scope="${MCP_OAUTH_SCOPES.join(" ")}"`);return response}
+ const {canonical,legacy}=mcpResources(baseURL),resource=canonical
+ const metadataURL=(identifier:string)=>baseURL+METADATA_PATH+(identifier===legacy?LEGACY_MCP_PATH:MCP_PATH)
+ const invalidGrant=(called:string)=>{const response=invalid();response.headers.set("WWW-Authenticate",`Bearer resource_metadata="${metadataURL(called)}", error="invalid_token", scope="${MCP_OAUTH_SCOPES.join(" ")}"`);return response}
  async function selectedWorkspace(userId:string,sessionOrganizationId?:string|null){
   const state=await db.userWorkspaceState.findUnique({where:{userId}})
   if(!state?.activeOrganizationId){
@@ -76,26 +92,43 @@ export function makeMcpAuthentication(db:Database,auth:AuthenticationEngine,base
  }
  return {
   resource,
-  /** Called only for public well-known discovery by the HTTP transport. */
-  metadata:(request:Request)=>auth.handler(request),
+  /** Called only for public well-known discovery by the HTTP transport. The provider serves the document for
+   * /api/mcp; the previous address keeps the same document under its own name. */
+  async metadata(request:Request):Promise<Response>{
+   const url=new URL(request.url)
+   if(url.pathname!==METADATA_PATH+LEGACY_MCP_PATH)return auth.handler(request)
+   url.pathname=METADATA_PATH+MCP_PATH
+   const response=await auth.handler(new Request(url,{method:request.method,headers:request.headers}))
+   if(!response.ok||request.method!=="GET")return response
+   const headers=new Headers(response.headers);headers.delete("content-length")
+   return new Response(JSON.stringify({...await response.json() as Record<string,unknown>,resource:legacy}),{status:response.status,headers})
+  },
   async protect(request:Request,handler:(request:Request,grant:McpGrant)=>Promise<Response>){
-   return requireMcpAuth(auth,async(req,claims)=>{
+   // `called` is the address this request came to; `audience` is the one its token is verified against.
+   const called=new URL(request.url).pathname===LEGACY_MCP_PATH?legacy:canonical,claimed=claimedAudience(request.headers)
+   const audience=claimed.includes(called)?called:claimed.includes(canonical)?canonical:claimed.includes(legacy)?legacy:called
+   const response=await requireMcpAuth(auth,async(req,claims)=>{
     const userId=typeof claims.sub==="string"?claims.sub:null
     const clientId=typeof claims.azp==="string"?claims.azp:null
     const sessionId=typeof claims.sid==="string"?claims.sid:null
     const connectionId=typeof claims.mcp_grant_id==="string"?claims.mcp_grant_id:null
-    if(!userId||!clientId||!connectionId||claims.account_id!==userId||typeof claims.exp!=="number"||typeof claims.iat!=="number")return invalidGrant()
+    if(!userId||!clientId||!connectionId||claims.account_id!==userId||typeof claims.exp!=="number"||typeof claims.iat!=="number")return invalidGrant(called)
     const [user,session,client,consent]=await Promise.all([
      db.user.findUnique({where:{id:userId}}),sessionId?db.session.findUnique({where:{id:sessionId}}):Promise.resolve(null),
      db.oauthClient.findUnique({where:{clientId}}),db.oauthConsent.findUnique({where:{id:connectionId}}),
     ])
     const scopes=new Set(typeof claims.scope==="string"?claims.scope.split(/\s+/).filter(Boolean):[])
-    if(!user||user.banned||session&&session.userId!==userId||!client||client.disabled||!consent||consent.userId!==userId||consent.clientId!==clientId||consent.referenceId!==userId||![...scopes].every(scope=>MCP_OAUTH_SCOPES.includes(scope)&&consent.scopes.includes(scope)))return invalidGrant()
+    if(!user||user.banned||session&&session.userId!==userId||!client||client.disabled||!consent||consent.userId!==userId||consent.clientId!==clientId||consent.referenceId!==userId||![...scopes].every(scope=>MCP_OAUTH_SCOPES.includes(scope)&&consent.scopes.includes(scope)))return invalidGrant(called)
     const member=await selectedWorkspace(userId,session?.activeOrganizationId)
     if(!member)return deny("Select an accessible workspace before using this connection")
     const principal:PrincipalData={id:user.id,name:user.name,email:user.email,role:role(user.role),createdAt:user.createdAt.toISOString(),source:"session",...(sessionId?{sessionId}:{}),expiresAt:typeof claims.exp==="number"?new Date(claims.exp*1000).toISOString():null}
     return handler(req,{principal,workspaceId:member.organizationId,scopes,connectionId,clientId})
-   },{resource,challengeScopes:MCP_OAUTH_SCOPES})(request)
+   },{resource:audience,challengeScopes:MCP_OAUTH_SCOPES})(request)
+   // A refused token for the other address is still answered with this address's own metadata.
+   const challenge=response.headers.get("WWW-Authenticate")
+   if(audience===called||!challenge?.includes(metadataURL(audience)))return response
+   const headers=new Headers(response.headers);headers.set("WWW-Authenticate",challenge.replace(metadataURL(audience),metadataURL(called)))
+   return new Response(response.body,{status:response.status,statusText:response.statusText,headers})
   },
   revoke:(grant:McpGrant)=>revokeId(grant.principal.id,grant.connectionId).then(()=>undefined),
   /** Same-origin account settings APIs. Never accepts an operator bootstrap token
@@ -110,13 +143,14 @@ export function makeMcpAuthentication(db:Database,auth:AuthenticationEngine,base
     if(query.length>16384||!await verifyOAuthQueryParams(query,(await auth.$context).secret))return deny("Authorization request is invalid or expired",400)
     const params=new URLSearchParams(query),clientId=params.get("client_id")??"",redirectUri=params.get("redirect_uri")??""
     const scopes=(params.get("scope")??"").split(/\s+/).filter(Boolean)
-    if(params.getAll("resource").length!==1||params.get("resource")!==resource||!scopes.every(scope=>MCP_OAUTH_SCOPES.includes(scope)))return deny("Authorization resource or scopes are invalid",400)
+    const requested=params.get("resource")??""
+    if(params.getAll("resource").length!==1||requested!==canonical&&requested!==legacy||!scopes.every(scope=>MCP_OAUTH_SCOPES.includes(scope)))return deny("Authorization resource or scopes are invalid",400)
     // Signed query proves the provider already validated exact/native-loopback
     // redirect matching. Public client API rechecks registration and disabled state.
     const client=await auth.api.getOAuthClientPublic({headers:request.headers,query:{client_id:clientId}})
     if(!client||client.disabled)return deny("Client is unavailable",400)
     const member=await selectedWorkspace(session.user.id,session.session.activeOrganizationId)
-    return Response.json({clientId,clientName:client.client_name??clientId,redirectUri,scopes,resource,workspace:member?{id:member.organizationId,name:member.organization.name}:null,globalWorkspaceSwitch:true},{headers:noStore})
+    return Response.json({clientId,clientName:client.client_name??clientId,redirectUri,scopes,resource:requested,workspace:member?{id:member.organizationId,name:member.organization.name}:null,globalWorkspaceSwitch:true},{headers:noStore})
    }
    if(path==="/api/auth/mcp/connections"&&request.method==="GET"){
     const consents=await db.oauthConsent.findMany({where:{userId:session.user.id,referenceId:session.user.id},orderBy:{createdAt:"desc"},take:100,include:{client:true}})

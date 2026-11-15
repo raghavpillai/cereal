@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/StorageSettingsDTO",
+  "$defs": {
+    "StorageBackend": {
+      "type": "string",
+      "enum": [
+        "local",
+        "s3"
+      ]
+    },
+    "StorageSettingsDTO": {
+      "type": "object",
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/StorageBackend"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "stored",
+            "environment",
+            "default"
+          ]
+        },
+        "endpoint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "region": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bucket": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prefix": {
+          "type": "string"
+        },
+        "forcePathStyle": {
+          "type": "boolean"
+        },
+        "accessKeyId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "secretAccessKeySet": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "backend",
+        "source",
+        "endpoint",
+        "region",
+        "bucket",
+        "prefix",
+        "forcePathStyle",
+        "accessKeyId",
+        "secretAccessKeySet"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,191 +1,208 @@
-import { createElement, memo, type ReactNode } from 'react'
+import { memo, type ReactNode } from 'react'
 
-/** Links never execute document-supplied code or fetch embedded resources. */
-export function safeLink(raw: string): string | undefined {
-  const value = raw.trim()
-  if (!value || /[\u0000-\u001f\u007f]/.test(value)) return undefined
-  if (value.startsWith('#')) return value
-  try {
-    const url = new URL(value)
-    return ['https:', 'http:', 'mailto:'].includes(url.protocol) ? url.href : undefined
-  } catch { return undefined }
+/** Notes are Markdown on the wire and are read a line at a time, exactly as the
+ * desktop app reads them (apps/desktop/src/summary.rs): a line is a heading, a list
+ * item with a depth, a rule, a gap or a paragraph. Text is never HTML: React escapes
+ * every node, and nothing in a note becomes a link, an image or markup. */
+
+export type NoteLine =
+  | { kind: 'blank' }
+  | { kind: 'rule' }
+  | { kind: 'heading'; text: string }
+  | { kind: 'list'; text: string; indent: number; ordinal: number | null }
+  | { kind: 'paragraph'; text: string }
+
+/** Width of a line's leading whitespace, a tab counting as four. */
+function leading(line: string): number {
+  let width = 0
+  for (const character of line) {
+    if (!/\s/.test(character)) break
+    width += character === '\t' ? 4 : 1
+  }
+  return width
 }
 
-// code · image · link · bold · bold · strike · emphasis · emphasis · bare URL
-const INLINE = /`([^`\n]+)`|!\[([^\]\n]*)\]\(([^\s)]+)\)|\[([^\]\n]+)\]\(([^\s)]+)\)|\*\*([^\n]+?)\*\*|__([^\n]+?)__|~~([^\n]+?)~~|\*([^*\n]+)\*|_([^_\n]+)_|(https?:\/\/[^\s<>]+)/g
-const WORD = /[\p{L}\p{N}]/u
-/** Emphasis may nest (bold holding italics); public input may not nest without limit. */
-const MAX_INLINE_DEPTH = 6
+export function noteLine(line: string): NoteLine {
+  const text = line.trim()
+  if (!text) return { kind: 'blank' }
+  if (text === '---' || text === '***' || text === '___') return { kind: 'rule' }
+  const hashes = /^#{1,6}(?= )/.exec(text)?.[0].length ?? 0
+  if (hashes && text[hashes] === ' ' && !text.startsWith('#'.repeat(7))) return { kind: 'heading', text: text.slice(hashes).trim() }
+  const indent = leading(line)
+  for (const prefix of ['- ', '* ', '+ ', '• ']) if (text.startsWith(prefix)) return { kind: 'list', text: text.slice(prefix.length).trim(), indent, ordinal: null }
+  const space = text.indexOf(' ')
+  if (space >= 2) {
+    const marker = text.slice(0, space), digits = marker.slice(0, -1)
+    if ((marker.endsWith('.') || marker.endsWith(')')) && /^\d+$/.test(digits) && Number.isSafeInteger(Number(digits))) return { kind: 'list', text: text.slice(space + 1).trim(), indent, ordinal: Number(digits) }
+  }
+  return { kind: 'paragraph', text }
+}
 
-function inline(value: string, prefix: string, depth = 0): ReactNode[] {
-  if (depth > MAX_INLINE_DEPTH) return [value]
-  const pattern = new RegExp(INLINE.source, 'g'), output: ReactNode[] = []
-  const nested = (text: string, key: string) => inline(text, key, depth + 1)
-  let cursor = 0
-  for (let match = pattern.exec(value); match; match = pattern.exec(value)) {
-    const offset = match.index
-    let length = match[0].length
-    // Underscores inside a word (snake_case) are not emphasis.
-    if ((match[7] !== undefined || match[10] !== undefined) && (WORD.test(value[offset - 1] ?? '') || WORD.test(value[offset + length] ?? ''))) { pattern.lastIndex = offset + 1; continue }
-    const key = `${prefix}-${depth}-${offset}`
-    let node: ReactNode
-    if (match[1] !== undefined) node = <code key={key}>{match[1]}</code>
-    else if (match[3] !== undefined) {
-      // Images are never fetched: the description becomes a plain link.
-      const href = safeLink(match[3]), label = match[2] || 'image'
-      node = href ? <a key={key} href={href} target="_blank" rel="noopener noreferrer nofollow">{label}</a> : label
-    } else if (match[5] !== undefined) {
-      const href = safeLink(match[5])
-      node = href ? <a key={key} href={href} target={href.startsWith('#') ? undefined : '_blank'} rel="noopener noreferrer nofollow">{nested(match[4] ?? '', key)}</a> : match[4]
-    } else if (match[6] !== undefined || match[7] !== undefined) node = <strong key={key}>{nested(match[6] ?? match[7] ?? '', key)}</strong>
-    else if (match[8] !== undefined) node = <del key={key}>{nested(match[8], key)}</del>
-    else if (match[9] !== undefined || match[10] !== undefined) node = <em key={key}>{nested(match[9] ?? match[10] ?? '', key)}</em>
+/** How many columns one level of nesting is in this note: the smallest indent any list item has, at most four. */
+export function listIndentUnit(lines: readonly string[]): number {
+  let unit: number | null = null
+  for (const line of lines) {
+    const parsed = noteLine(line)
+    if (parsed.kind === 'list' && parsed.indent > 0) unit = Math.min(unit ?? 4, Math.min(parsed.indent, 4))
+  }
+  return Math.max(unit ?? 2, 1)
+}
+
+export type NoteBlock =
+  | { kind: 'blank'; row: number }
+  | { kind: 'rule'; row: number }
+  | { kind: 'heading'; row: number; text: string }
+  /** `number` is what an ordered item shows: numbering continues from the first item of its run. */
+  | { kind: 'list'; row: number; text: string; depth: number; number: number | null }
+  /** `level` indents a line that continues the list item above it; `continues` closes the gap to that item. */
+  | { kind: 'paragraph'; row: number; text: string; level: number; continues: boolean }
+
+const MAX_DEPTH = 8
+
+export function noteBlocks(source: string): NoteBlock[] {
+  const lines = source.split('\n').map(line => line.endsWith('\r') ? line.slice(0, -1) : line)
+  if (lines[lines.length - 1] === '') lines.pop()
+  const unit = listIndentUnit(lines), blocks: NoteBlock[] = []
+  const ordinals: (number | null)[] = Array.from({ length: MAX_DEPTH + 1 }, () => null)
+  let afterHeading = false
+  lines.forEach((line, row) => {
+    const parsed = noteLine(line)
+    if (parsed.kind === 'blank') {
+      // The blank line Markdown puts after a heading is not a gap of its own.
+      if (!afterHeading) blocks.push({ kind: 'blank', row })
+      return
+    }
+    afterHeading = parsed.kind === 'heading'
+    if (parsed.kind === 'list') {
+      const depth = Math.min(Math.floor(parsed.indent / unit), MAX_DEPTH)
+      let number: number | null = null
+      if (parsed.ordinal !== null) { number = ordinals[depth] === null ? parsed.ordinal : ordinals[depth]! + 1; ordinals[depth] = number }
+      else ordinals[depth] = null
+      for (let deeper = depth + 1; deeper <= MAX_DEPTH; deeper++) ordinals[deeper] = null
+      blocks.push({ kind: 'list', row, text: parsed.text, depth, number })
+      return
+    }
+    ordinals.fill(null)
+    if (parsed.kind === 'rule') blocks.push({ kind: 'rule', row })
+    else if (parsed.kind === 'heading') blocks.push({ kind: 'heading', row, text: parsed.text })
     else {
-      // A bare address: sentence punctuation after it is not part of it.
-      const address = (match[11] ?? '').replace(/[.,;:!?'")\]]+$/, ''), href = safeLink(address)
-      length = address.length
-      if (!href || !length) { pattern.lastIndex = offset + 1; continue }
-      pattern.lastIndex = offset + length
-      node = <a key={key} href={href} target="_blank" rel="noopener noreferrer nofollow">{address}</a>
+      const indent = leading(line)
+      blocks.push({ kind: 'paragraph', row, text: parsed.text, level: Math.min(Math.floor(indent / unit), MAX_DEPTH), continues: indent > 0 })
     }
-    if (offset > cursor) output.push(value.slice(cursor, offset))
-    output.push(node)
-    cursor = offset + length
-  }
-  if (cursor < value.length) output.push(value.slice(cursor))
-  return output
+  })
+  return blocks
 }
 
-/** A row of a pipe table, or null when the line is not one. */
-function tableCells(line: string): string[] | null {
-  if (!line.includes('|')) return null
-  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim())
-}
-/** The rule under a table header: at least two columns of dashes, optional colons for alignment. */
-function tableRule(line: string): ('left' | 'center' | 'right' | undefined)[] | null {
-  if (!/^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$/.test(line)) return null
-  return tableCells(line)!.map(cell => cell.startsWith(':') && cell.endsWith(':') ? 'center' : cell.endsWith(':') ? 'right' : cell.startsWith(':') ? 'left' : undefined)
-}
-const startsTable = (lines: string[], at: number) => tableCells(lines[at] ?? '') !== null && tableRule(lines[at + 1] ?? '') !== null
-const MAX_TABLE_COLUMNS = 24
+export interface InlinePart { text: string; style: 'plain' | 'strong' | 'code' | 'em' }
 
-function indentation(value: string): number {
-  return [...value].reduce((width, character) => width + (character === '\t' ? 4 : 1), 0)
-}
-
-function listItem(line: string) {
-  const match = /^([ \t]*)(?:([-*•])|(\d+)[.)])\s+(.+)$/.exec(line)
-  if (!match) return undefined
-  const ordinal = Number(match[3])
-  return {
-    indent: indentation(match[1] ?? ''),
-    ordered: !match[2],
-    start: Number.isSafeInteger(ordinal) && ordinal >= 0 ? ordinal : 1,
-    text: match[4] ?? '',
-  }
-}
-
-/** Keep each child list inside its owning item. Cap recursion for public input. */
-function listBlock(lines: string[], start: number, depth = 0): { node: ReactNode; next: number } {
-  const first = listItem(lines[start] ?? '')!
-  const items: ReactNode[] = []
-  let i = start
-  while (i < lines.length) {
-    const item = listItem(lines[i] ?? '')
-    if (!item || item.indent !== first.indent || item.ordered !== first.ordered) break
-    const itemIndex = i++
-    const task = /^\[( |x|X)\]\s+(.*)$/.exec(item.text)
-    const children: ReactNode[] = task
-      ? [<span key={`task-${itemIndex}`} className="task-box" data-checked={task[1] === ' ' ? undefined : ''} aria-hidden="true" />, <span key={`state-${itemIndex}`} className="sr-only">{task[1] === ' ' ? 'To do: ' : 'Done: '}</span>, ...inline(task[2] ?? '', `item-${itemIndex}`)]
-      : inline(item.text, `item-${itemIndex}`)
-    while (i < lines.length) {
-      const line = lines[i] ?? ''
-      const nested = listItem(line)
-      if (nested) {
-        if (nested.indent <= first.indent) break
-        if (depth >= 24) {
-          children.push(<br key={`break-${i}`} />, ...inline(line.trim(), `deep-${i}`))
-          i++
-        } else {
-          const child = listBlock(lines, i, depth + 1)
-          children.push(child.node)
-          i = child.next
-        }
-      } else if (!line.trim()) {
-        let afterBlank = i + 1
-        while (afterBlank < lines.length && !lines[afterBlank]?.trim()) afterBlank++
-        const following = listItem(lines[afterBlank] ?? '')
-        if (!following || following.indent < first.indent || (following.indent === first.indent && following.ordered !== first.ordered)) break
-        i = afterBlank
-      } else if (indentation(/^[ \t]*/.exec(line)?.[0] ?? '') > first.indent) {
-        children.push(<br key={`break-${i}`} />, ...inline(line.trim(), `continuation-${i}`))
-        i++
-      } else break
-    }
-    items.push(<li key={`item-${itemIndex}`} className={task ? 'task-item' : undefined}>{children}</li>)
-  }
-  const key = `list-${start}`
-  return { node: first.ordered ? <ol key={key} start={first.start === 1 ? undefined : first.start}>{items}</ol> : <ul key={key}>{items}</ul>, next: i }
-}
-
-/** Small Markdown reader. React escapes every text node; raw HTML is never used.
- * Memoised on its text, so an open note is parsed once however often the page around it renders. */
-export const Markdown = memo(function Markdown({ value }: { value: string }) {
-  const lines = value.replace(/\r\n?/g, '\n').split('\n')
-  const blocks: ReactNode[] = []
-  let i = 0
-  while (i < lines.length) {
-    const line = lines[i] ?? ''
-    const key = `block-${i}`
-    if (!line.trim()) { i++; continue }
-    if (line.trimStart().startsWith('```')) {
-      const language = line.trim().slice(3).trim()
-      const code: string[] = []
-      i++
-      while (i < lines.length && !(lines[i] ?? '').trimStart().startsWith('```')) code.push(lines[i++] ?? '')
-      i++
-      blocks.push(<figure className="code-block" key={key}>{language && <figcaption>{language}</figcaption>}<pre><code>{code.join('\n')}</code></pre></figure>)
+/** Bold, code and emphasis. A delimiter with no partner stays as typed; a backslash keeps the next character as it is. */
+export function inlineParts(source: string): InlinePart[] {
+  const parts: InlinePart[] = []
+  let plain = '', at = 0
+  const flush = () => { if (plain) { parts.push({ text: plain, style: 'plain' }); plain = '' } }
+  while (at < source.length) {
+    const rest = source.slice(at)
+    if (rest[0] === '\\' && rest.length > 1) {
+      const next = [...rest.slice(1)][0]!
+      plain += next; at += 1 + next.length
       continue
     }
-    const heading = /^(#{1,6})\s+(.+)$/.exec(line)
-    if (heading) {
-      const level = Math.min(4, Math.max(2, (heading[1]?.length ?? 1) + 1))
-      blocks.push(createElement(`h${level}`, { key }, inline(heading[2] ?? '', key)))
+    const marker = rest.startsWith('**') ? '**' : rest.startsWith('__') ? '__' : rest[0] === '`' ? '`' : rest[0] === '*' ? '*' : ''
+    const end = marker ? rest.indexOf(marker, marker.length) - marker.length : -1
+    if (marker && end > 0) {
+      flush()
+      parts.push({ text: rest.slice(marker.length, marker.length + end), style: marker.length === 2 ? 'strong' : marker === '`' ? 'code' : 'em' })
+      at += marker.length * 2 + end
+    } else {
+      const next = [...rest][0]!
+      plain += next; at += next.length
+    }
+  }
+  flush()
+  return parts
+}
+
+/** A word together with the spaces after it. The app breaks a line where a word *and the space
+ * after it* no longer fit; a browser lets that space hang past the edge and keeps the word. Kept
+ * together, and unbreakable, each word and its space make a browser break lines where the app does. */
+export function wordChunks(text: string): string[] {
+  return text.match(/[^ ]+ *| +/g) ?? []
+}
+/** Words too long to be worth keeping whole (an address, a hash) may still break anywhere. */
+const LONGEST_KEPT = 48
+
+/** Text laid out with the app's line breaks. `before` says whether the text before this run ended in a space. */
+function words(text: string, key: string, before: boolean): { nodes: ReactNode[]; spaced: boolean } {
+  const nodes: ReactNode[] = []
+  let spaced = before
+  wordChunks(text).forEach((chunk, at) => {
+    if (spaced) nodes.push(<wbr key={`${key}-b${at}`} />)
+    nodes.push(chunk.length > LONGEST_KEPT ? chunk : <span className="w" key={`${key}-${at}`}>{chunk}</span>)
+    spaced = chunk.endsWith(' ')
+  })
+  return { nodes, spaced }
+}
+
+/** Plain text (a transcript bubble) with the app's line breaks. */
+export function Words({ text }: { text: string }) {
+  return <>{words(text, 'w', false).nodes}</>
+}
+
+function Inline({ text }: { text: string }) {
+  let spaced = false
+  return <>{inlineParts(text).map((part, at) => {
+    const run = words(part.text, String(at), spaced)
+    spaced = run.spaced
+    // The break before a run belongs outside it, so that it never splits a bold or code run from its edge.
+    const lead = run.nodes.length > 1 && (run.nodes[0] as { type?: unknown }).type === 'wbr' ? run.nodes.shift() : null
+    const body = part.style === 'strong' ? <strong key={at}>{run.nodes}</strong> : part.style === 'code' ? <code key={at}>{run.nodes}</code> : part.style === 'em' ? <em key={at}>{run.nodes}</em> : run.nodes
+    return lead ? [lead, body] : body
+  })}</>
+}
+
+/** A line with words in it. In a note that has a transcript, the desktop app keeps room
+ * beside each such line for the control that shows its source; the line wraps at the same place here. */
+const hasWords = (text: string) => [...text].length > 1 && /[\p{L}\p{N}]/u.test(text)
+
+/** Generated notes, laid out as the desktop app lays them out. Memoised on its text,
+ * so an open note is parsed once however often the page around it renders. */
+export const NoteText = memo(function NoteText({ value, sourced = false }: { value: string; sourced?: boolean }) {
+  const blocks = noteBlocks(value), out: ReactNode[] = []
+  const text = (content: string) => sourced && hasWords(content) ? 'note-line has-source' : 'note-line'
+  for (let i = 0; i < blocks.length;) {
+    const block = blocks[i]!
+    if (block.kind === 'blank') { out.push(<div className="note-gap" key={block.row} aria-hidden="true" />); i++; continue }
+    if (block.kind === 'rule') { out.push(<hr key={block.row} />); i++; continue }
+    if (block.kind === 'heading') {
+      out.push(<h2 key={block.row} className={block.row === 0 ? 'is-first' : undefined}><span className="note-hash" aria-hidden="true">#</span><Inline text={block.text} /></h2>)
       i++; continue
     }
-    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { blocks.push(<hr key={key} />); i++; continue }
-    if (/^\s*>/.test(line)) {
-      const quote: string[] = []
-      while (i < lines.length && /^\s*>/.test(lines[i] ?? '')) quote.push((lines[i++] ?? '').replace(/^\s*>\s?/, ''))
-      blocks.push(<blockquote key={key}>{inline(quote.join('\n'), key)}</blockquote>)
-      continue
+    if (block.kind === 'paragraph') {
+      out.push(<p key={block.row} className={`${text(block.text)}${block.continues ? ' continues' : ''}`} style={block.level ? { marginLeft: block.level * 16 - 2 } : undefined}><Inline text={block.text} /></p>)
+      i++; continue
     }
-    if (startsTable(lines, i)) {
-      const head = tableCells(line)!.slice(0, MAX_TABLE_COLUMNS), align = tableRule(lines[i + 1] ?? '')!
-      const rows: string[][] = []
-      i += 2
-      while (i < lines.length && (lines[i] ?? '').trim() && tableCells(lines[i] ?? '')) rows.push(tableCells(lines[i++] ?? '')!)
-      // Wide tables scroll inside their own frame, never the page.
-      blocks.push(<figure className="table-wrap" key={key} role="region" aria-label="Table" tabIndex={0}><table>
-        <thead><tr>{head.map((cell, column) => <th key={column} scope="col" style={align[column] ? { textAlign: align[column] } : undefined}>{inline(cell, `${key}-h${column}`)}</th>)}</tr></thead>
-        <tbody>{rows.map((row, at) => <tr key={at}>{head.map((_, column) => <td key={column} style={align[column] ? { textAlign: align[column] } : undefined}>{inline(row[column] ?? '', `${key}-${at}-${column}`)}</td>)}</tr>)}</tbody>
-      </table></figure>)
-      continue
+    // A run of list items, with the lines that continue an item kept inside it.
+    const items: ReactNode[] = [], first = block.row
+    while (i < blocks.length && blocks[i]!.kind === 'list') {
+      const item = blocks[i++] as Extract<NoteBlock, { kind: 'list' }>, inset = 16 * (item.depth + 1)
+      const more: ReactNode[] = []
+      while (i < blocks.length) {
+        const next = blocks[i]!
+        if (next.kind !== 'paragraph' || !next.continues) break
+        more.push(<p key={next.row} className={`${text(next.text)} continues`} style={next.level ? { marginLeft: next.level * 16 - 2 } : undefined}><Inline text={next.text} /></p>)
+        i++
+      }
+      items.push(<li key={item.row} data-depth={Math.min(item.depth, 2)}>
+        <div className="note-item" style={{ paddingLeft: inset }}>
+          {item.number !== null
+            ? <span className="note-number" style={{ left: inset - 26 }}>{item.number}.</span>
+            : <span className="note-bullet" style={{ left: inset - 15 }} aria-hidden="true" />}
+          <p className={text(item.text)}><Inline text={item.text} /></p>
+        </div>
+        {more}
+      </li>)
     }
-    if (listItem(line)) {
-      const list = listBlock(lines, i)
-      blocks.push(list.node)
-      i = list.next
-      continue
-    }
-    const paragraph: string[] = [line]
-    i++
-    while (i < lines.length) {
-      const next = lines[i] ?? ''
-      if (!next.trim() || /^(#{1,6}\s|\s*>|\s*```|\s*(?:[-*•]|\d+[.)])\s)/.test(next) || startsTable(lines, i)) break
-      paragraph.push(next); i++
-    }
-    blocks.push(<p key={key}>{inline(paragraph.join('\n'), key)}</p>)
+    out.push(<ul key={`list-${first}`}>{items}</ul>)
   }
-  return <div className="markdown">{blocks}</div>
+  return <div className="note-text">{out}</div>
 })

@@ -51,10 +51,14 @@ enum NoteSearch {
 
     /// The server's results, in its order. The tile follows Home: audio still on
     /// this phone first, then the other party's initial, then a document.
-    static func server(_ hits: [ServerNoteSearchHit], onThisPhone: (String) -> Bool = { _ in false }) -> [SearchHit] {
+    /// `title` is the newest title known for a result: a note renamed, or given
+    /// a title by generating its notes, since the search ran is shown under that one.
+    static func server(_ hits: [ServerNoteSearchHit], onThisPhone: (String) -> Bool = { _ in false },
+                       title: (ServerNoteRow) -> String = { $0.title }) -> [SearchHit] {
         hits.map { hit in
-            SearchHit(route: .serverNote(hit.id), tile: onThisPhone(hit.id) ? .phone : ServerHomeGrouping.tile(for: hit.row),
-                      title: hit.row.title.isEmpty ? "Untitled note" : hit.row.title,
+            let title = title(hit.row)
+            return SearchHit(route: .serverNote(hit.id), tile: onThisPhone(hit.id) ? .phone : ServerHomeGrouping.tile(for: hit.row),
+                      title: title.isEmpty ? "Untitled note" : title,
                       subtitle: (Date.serverTimestamp(hit.row.createdAt) ?? .distantPast).formatted(date: .omitted, time: .shortened),
                       excerpt: hit.excerpt.map { $0.map(\.text).joined() }, excerptParts: hit.excerpt)
         }
@@ -87,7 +91,8 @@ struct SearchView: View {
     private var hits: [SearchHit] {
         mode.isDemo
             ? NoteSearch.local(store.activeNotes, query: query, currentUser: store.currentUser)
-            : NoteSearch.server(search?.hits ?? []) { recording.activeNoteID == $0 || recording.hasPendingAudio(noteID: $0) }
+            : NoteSearch.server(search?.hits ?? [], onThisPhone: { recording.activeNoteID == $0 || recording.hasPendingAudio(noteID: $0) },
+                                title: server.latestTitle(of:))
     }
 
     private var progress: SearchProgress {

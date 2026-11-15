@@ -18,12 +18,16 @@ struct CerealRecordingActivity: Widget {
                     .font(.system(size: 24, weight: .medium))
                     .frame(width: 36)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(status(context)).font(.headline)
-                    Text(context.attributes.isPreview ? "Preview · No audio" : "Cereal · On-device audio")
-                        .font(.caption).foregroundStyle(.secondary)
+                    // A titled note is named, with what the recording is doing beneath it.
+                    // A note with no title yet says what the recording is doing.
+                    // A title keeps to one line; what the recording is doing may take two
+                    // ("Open to check recording" does not fit beside the timer on one).
+                    Text(context.state.title ?? status(context)).font(.headline).lineLimit(context.state.title == nil ? 2 : 1)
+                    Text(context.state.title != nil ? status(context) : context.attributes.isPreview ? "Preview · No audio" : "Cereal · On-device audio")
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 8)
-                timer(context).font(.title3.monospacedDigit()).frame(maxWidth: 90)
+                timer(context).font(.title3.monospacedDigit()).frame(maxWidth: 90, alignment: .trailing)
             }
             .padding(20)
             // The host supplies its native material on the Lock Screen.
@@ -40,9 +44,13 @@ struct CerealRecordingActivity: Widget {
                     timer(context).monospacedDigit().frame(width: 80)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    HStack {
-                        Text(status(context)).font(.subheadline)
-                        Spacer()
+                    HStack(alignment: .lastTextBaseline) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            if let title = context.state.title { Text(title).font(.subheadline.weight(.semibold)).lineLimit(1) }
+                            Text(status(context)).font(context.state.title == nil ? .subheadline : .caption)
+                                .foregroundStyle(context.state.title == nil ? .primary : .secondary)
+                        }
+                        Spacer(minLength: 8)
                         Text(context.attributes.isPreview ? "Preview · No audio" : "Open recording").font(.caption).foregroundStyle(accent)
                     }
                 }
@@ -71,10 +79,12 @@ struct CerealRecordingActivity: Widget {
 
     @ViewBuilder
     private func timer(_ context: ActivityViewContext<RecordingActivityAttributes>) -> some View {
+        // The stopped time is written as the running one is, so pausing does not
+        // change how the number looks or where it sits.
         if context.state.runsTimer(isStale: context.isStale) {
-            Text(timerInterval: context.state.timerAnchor...Date.distantFuture, countsDown: false)
+            Text(timerInterval: context.state.timerAnchor...Date.distantFuture, countsDown: false).multilineTextAlignment(.trailing)
         } else {
-            Text(Duration.seconds(context.state.elapsed).formatted(.time(pattern: .minuteSecond(padMinuteToLength: 2))))
+            Text(Duration.seconds(context.state.elapsed).formatted(.time(pattern: context.state.elapsed >= 3600 ? .hourMinuteSecond : .minuteSecond)))
         }
     }
 }

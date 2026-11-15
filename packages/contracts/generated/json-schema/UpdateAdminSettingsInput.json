@@ -72,6 +72,153 @@
       ],
       "additionalProperties": true
     },
+    "UpdateSignInSettingsInput": {
+      "type": "object",
+      "properties": {
+        "password": {
+          "type": "boolean"
+        },
+        "google": {
+          "type": "boolean"
+        },
+        "allowedEmails": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 254
+          },
+          "maxItems": 500
+        },
+        "googleClientId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 5,
+              "maxLength": 255
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "googleClientSecret": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 4,
+              "maxLength": 512
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "StorageBackend": {
+      "type": "string",
+      "enum": [
+        "local",
+        "s3"
+      ]
+    },
+    "UpdateStorageSettingsInput": {
+      "type": "object",
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/StorageBackend"
+        },
+        "endpoint": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "region": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 40
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bucket": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 63
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prefix": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "forcePathStyle": {
+          "type": "boolean"
+        },
+        "accessKeyId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "secretAccessKey": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 512
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "UpdateAppsSettingsInput": {
+      "type": "object",
+      "properties": {
+        "iosAppIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "maxItems": 10
+        },
+        "iosAppStoreId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 20
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
     "UpdateAdminSettingsInput": {
       "type": "object",
       "properties": {
@@ -197,6 +344,45 @@
           ],
           "minimum": 1,
           "maximum": 90
+        },
+        "signIn": {
+          "$ref": "#/$defs/UpdateSignInSettingsInput"
+        },
+        "storage": {
+          "$ref": "#/$defs/UpdateStorageSettingsInput"
+        },
+        "liveMaxSessions": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 1,
+          "maximum": 200
+        },
+        "liveHoldSeconds": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0,
+          "maximum": 3600
+        },
+        "apps": {
+          "$ref": "#/$defs/UpdateAppsSettingsInput"
         }
       },
       "additionalProperties": true

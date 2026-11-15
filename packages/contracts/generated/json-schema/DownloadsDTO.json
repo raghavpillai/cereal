@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/DownloadsDTO",
+  "$defs": {
+    "DownloadFileDTO": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "file",
+        "url",
+        "size",
+        "sha256"
+      ],
+      "additionalProperties": true
+    },
+    "MacDownloadDTO": {
+      "type": "object",
+      "properties": {
+        "arch": {
+          "type": "string"
+        },
+        "minimumSystem": {
+          "type": "string"
+        },
+        "installer": {
+          "$ref": "#/$defs/DownloadFileDTO"
+        },
+        "update": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DownloadFileDTO"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "arch",
+        "minimumSystem",
+        "installer",
+        "update"
+      ],
+      "additionalProperties": true
+    },
+    "DownloadsDTO": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "mac": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MacDownloadDTO"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "iosAppStoreUrl": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "version",
+        "mac",
+        "iosAppStoreUrl"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

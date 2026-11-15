@@ -40,8 +40,9 @@ jobs:
         # Same grouping as scripts/test-postgres-isolated.ts: the sign-in suites share an in-memory
         # rate limiter, and the 500-note benchmark needs a process to itself.
         run: |
-          separate='/(auth|mcp-auth|organizations|note-summaries)-postgres\.test\.ts$'
+          separate='/(auth|sign-in|mcp-auth|organizations|note-summaries)-postgres\.test\.ts$'
           bun test --timeout 30000 ./apps/api/test/auth-postgres.test.ts
+          bun test --timeout 30000 ./apps/api/test/sign-in-postgres.test.ts
           bun test --timeout 30000 $(ls apps/api/test/*.test.ts | grep -v -E "$separate" | sed 's|^|./|')
           bun test --timeout 30000 ./apps/api/test/note-summaries-postgres.test.ts
           bun test --timeout 30000 ./apps/api/test/mcp-auth-postgres.test.ts

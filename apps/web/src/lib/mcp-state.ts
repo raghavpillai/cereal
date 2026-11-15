@@ -24,12 +24,13 @@ export function safeOAuthResume(value: unknown, origin: string): string | null {
   } catch { return null }
 }
 
+/** The address an AI client is given: every programmatic endpoint of an instance lives under `/api`. */
 export function mcpConnectionURL(origin: string): string | null {
   try {
     const url = new URL(origin)
     const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
     if ((url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) return null
-    return `${url.origin}/mcp`
+    return `${url.origin}/api/mcp`
   } catch { return null }
 }
 

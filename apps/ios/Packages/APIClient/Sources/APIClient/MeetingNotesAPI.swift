@@ -307,6 +307,24 @@ public struct MeetingNotesAPI: Sendable {
         return credentials.instance.endpoint(["s", created.token])
     }
 
+    /// A snapshot that someone with an account on this server shared. The
+    /// session goes to this server and to no other: a link that names any
+    /// other origin is refused here, before there is a request to carry it,
+    /// and the request is built on the signed-in instance, never on the link.
+    public func sharedNote(_ link: SharedNoteLink) async throws -> SharedNote {
+        try transportState.check()
+        try Task.checkCancellation()
+        guard link.origin.isInstance(credentials.instance) else { throw SharedNoteError.signInRequired }
+        var request = URLRequest(url: credentials.instance.endpoint(["api", "v1", "shared", link.token]))
+        request.httpMethod = "GET"
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(credentials.bearerToken)", forHTTPHeaderField: "Authorization")
+        let note = try await SharedNoteReader.read(request, session: session)
+        try transportState.check()
+        return note
+    }
+
     private func validate(_ id: String) throws {
         guard UUID(uuidString: id) != nil else { throw APIClientError.invalidIdentifier }
     }
@@ -352,7 +370,7 @@ public struct MeetingNotesAPI: Sendable {
 }
 
 
-private final class RejectRedirects: NSObject, URLSessionTaskDelegate, Sendable {
+final class RejectRedirects: NSObject, URLSessionTaskDelegate, Sendable {
     func urlSession(
         _ session: URLSession, task: URLSessionTask,
         willPerformHTTPRedirection response: HTTPURLResponse,

@@ -211,14 +211,71 @@ import Testing
         }
     }
 
-    @Test func activityPayloadAndDeepLinkExcludePrivateTitleAudioTranscriptAndCredentials() throws {
+    @Test func activityPayloadCarriesTheTitleAndNothingElseOfTheNote() throws {
         let note = UUID(), attributes = RecordingActivityAttributes(noteID: note)
-        let state = RecordingActivityAttributes.ContentState(phase: .recording, elapsed: 15, timerAnchor: .now, updatedAt: .now)
-        let encoded = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(state)) as? [String: Any])
+        let untitled = RecordingActivityAttributes.ContentState(phase: .recording, elapsed: 15, timerAnchor: .now, updatedAt: .now)
+        let encoded = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(untitled)) as? [String: Any])
         #expect(Set(encoded.keys) == ["phase", "elapsed", "timerAnchor", "updatedAt"])
+        let titled = RecordingActivityAttributes.ContentState(phase: .recording, elapsed: 15, timerAnchor: .now, updatedAt: .now, title: "Weekly planning")
+        let withTitle = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(titled)) as? [String: Any])
+        #expect(Set(withTitle.keys) == ["phase", "elapsed", "timerAnchor", "updatedAt", "title"])
+        // An activity from before titles were shown still decodes.
+        let old = try JSONDecoder().decode(RecordingActivityAttributes.ContentState.self, from: JSONEncoder().encode(untitled))
+        #expect(old.title == nil)
+        // The link names the note by its identifier only.
         #expect(attributes.recordingURL.scheme == "cereal" && attributes.recordingURL.host == "recording")
         #expect(attributes.recordingURL.lastPathComponent == note.uuidString)
         #expect(attributes.recordingURL.query == nil && attributes.recordingURL.user == nil && attributes.recordingURL.password == nil)
+    }
+
+    @Test func theActivityIsNamedAfterItsNoteAndFollowsANewTitleWithoutTouchingTheTimer() async throws {
+        let backend = ActivityTestBackend(), clock = ActivityTestClock()
+        let controller = backend.controller(clock: clock), note = UUID()
+        controller.start(noteID: note, title: "", elapsed: 0)
+        let session = try #require(backend.sessions.first)
+        // An impromptu note has no title yet: the activity says what the recording is doing.
+        #expect(session.state.title == nil)
+        let anchor = session.state.timerAnchor
+
+        clock.advance(40)
+        // Its notes were generated and the server named it, or the person typed a title.
+        controller.setTitle("  Launch readiness\nreview  ")
+        await controller.finishPendingUpdates()
+        #expect(session.state.title == "Launch readiness review")
+        #expect(session.state.phase == .recording && session.state.timerAnchor == anchor)
+        #expect(session.operations == ["update-recording"])
+        #expect(session.staleDates.last == clock.date.addingTimeInterval(75))
+        // The same title again is not another update.
+        controller.setTitle("Launch readiness review")
+        await controller.finishPendingUpdates()
+        #expect(session.operations.count == 1)
+
+        // Pause, resume and the next part of the recording keep the name.
+        controller.pause(elapsed: 40); controller.resume(elapsed: 40)
+        controller.start(noteID: note, title: "", elapsed: 41)
+        await controller.finishPendingUpdates()
+        #expect(session.state.title == "Launch readiness review")
+        #expect(backend.requests == 1)
+        // A title that is cleared goes from the activity too.
+        controller.setTitle("   ")
+        await controller.finishPendingUpdates()
+        #expect(session.state.title == nil)
+
+        // A long title is cut to what a Lock Screen line can hold.
+        #expect(RecordingActivityAttributes.ContentState.shownTitle(String(repeating: "t", count: 300))?.count == 80)
+        #expect(RecordingActivityAttributes.ContentState.shownTitle("") == nil)
+    }
+
+    @Test func aTitleSetBeforeTheActivityExistsIsUsedWhenItStarts() async throws {
+        let backend = ActivityTestBackend(), clock = ActivityTestClock()
+        let controller = backend.controller(clock: clock), note = UUID()
+        controller.start(noteID: note, title: "Weekly planning", elapsed: 3)
+        #expect(backend.sessions[0].state.title == "Weekly planning")
+        controller.end(elapsed: 9)
+        await controller.finishPendingUpdates()
+        // Another note's recording does not inherit it.
+        controller.start(noteID: UUID(), title: "", elapsed: 0)
+        #expect(backend.sessions[1].state.title == nil)
     }
 
     @Test func malformedElapsedDoesNotPoisonSystemTimerOrJSONPayload() throws {

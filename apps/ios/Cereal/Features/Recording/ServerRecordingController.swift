@@ -184,7 +184,8 @@ final class ServerRecordingController {
             let stored = LiveTranscript(noteID: note.id)
             stored.merge(note: freshNote)
             transcript = stored
-            recorder.startSegment(noteID: uuid, title: note.title)
+            recorder.startSegment(noteID: uuid, title: freshNote.title)
+            followTitle(of: note.id)
             if case .failed(let message) = recorder.state {
                 scheduleDelivery(noteID: note.id, stopServer: true)
                 error = message
@@ -196,6 +197,17 @@ final class ServerRecordingController {
             }
         } catch is CancellationError { }
         catch { self.error = error.localizedDescription }
+    }
+
+    /// Keeps the recording's Live Activity named after its note: a title typed
+    /// during the meeting, or one the server gave the note, reaches the Lock
+    /// Screen without anyone asking for it. Ends with the recording.
+    private func followTitle(of noteID: String) {
+        guard activeNoteID == noteID, let server else { return }
+        let title = withObservationTracking { server.title(ofNote: noteID) } onChange: { [weak self] in
+            Task { @MainActor in self?.followTitle(of: noteID) }
+        }
+        if let title { recorder.setActivityTitle(title) }
     }
 
     func stop() {
@@ -575,7 +587,8 @@ final class ServerRecordingController {
                     scheduleDelivery(noteID: noteID, stopServer: true)
                     return
                 }
-                recorder.startSegment(noteID: uuid, title: title)
+                // The next part of the same recording: its Live Activity keeps the title it has.
+                recorder.startSegment(noteID: uuid, title: "")
                 Signpost.ui.endInterval("Capture.Rotate", interval)
                 noteRotationPause(ProcessInfo.processInfo.systemUptime - began)
                 if case .failed(let message) = recorder.state {

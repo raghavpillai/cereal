@@ -1,7 +1,8 @@
 import ActivityKit
 import Foundation
 
-/// Shared by the app and widget extension. No audio, transcript, or credentials enter ActivityKit.
+/// Shared by the app and widget extension. The note's title is the only thing
+/// of the note's that enters ActivityKit: no audio, transcript, or credentials.
 struct RecordingActivityAttributes: ActivityAttributes {
     enum Presentation: String, Codable { case preview }
     struct ContentState: Codable, Hashable {
@@ -10,6 +11,15 @@ struct RecordingActivityAttributes: ActivityAttributes {
         var elapsed: TimeInterval
         var timerAnchor: Date
         var updatedAt: Date
+        /// The note's title, shown where the activity has room for it. Nil for a
+        /// note that has none yet, and in activities from before titles were shown.
+        var title: String? = nil
+
+        /// The title as it is shown: trimmed, on one line, and not at all when empty.
+        static func shownTitle(_ text: String) -> String? {
+            let line = text.split(whereSeparator: \.isNewline).joined(separator: " ").trimmingCharacters(in: .whitespaces)
+            return line.isEmpty ? nil : String(line.prefix(80))
+        }
 
         func status(isStale: Bool, isPreview: Bool = false) -> String {
             if isStale { return isPreview ? "Open to check preview" : "Open to check recording" }

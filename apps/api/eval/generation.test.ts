@@ -8,6 +8,9 @@ import {generationFormatLines,generationStyle,isTitleCase,maxHeadingsFor,noManuf
 import {day} from "./lib/generation-patterns"
 import {selectScenarios} from "./run"
 import type {Fixture} from "./lib/types"
+import {titleChecks} from "./lib/title-checks"
+import {fixtureMeetings,runTitle} from "./titles"
+import {stubTransport} from "./lib/instrument"
 
 test("hard-case fixtures compile, and the long ones really are long",()=>{
   const rows=validateGenerationFixtures()
@@ -167,4 +170,41 @@ test("the long scripts contain every hand-written line of their skeleton, verbat
     }
     expect(new Set(turns.map(turn=>turn.speaker))).toEqual(new Set(Object.keys(spec.cast)))
   }
+})
+
+test("title checks: length, word count, cleanliness, dates, attendee lists, and capitals that are not names",()=>{
+  const source="Thanks for joining. Let's walk the launch checklist and decide whether Thursday still holds. I talked to Priya about the iPhone build and the Northwind pilot."
+  const failing=(title:string,people:string[]=[])=>titleChecks(title,{source,people}).filter(check=>!check.pass).map(check=>check.id)
+  expect(failing("Launch checklist and iPhone build")).toEqual([])
+  expect(failing("Northwind pilot launch checklist")).toEqual([])
+  expect(failing("")).toEqual(["title-present"])
+  expect(failing("Launch checklist")).toEqual(["title-words"])
+  expect(failing("Launch checklist and the iPhone build for the Northwind pilot")).toEqual(["title-length","title-words","title-clean"])
+  expect(failing("\"Launch checklist and iPhone build\"")).toEqual(["title-clean"])
+  expect(failing("Launch checklist and iPhone build.")).toEqual(["title-clean"])
+  expect(failing("Launch checklist build Thursday")).toEqual(["title-no-date"])
+  expect(failing("Launch checklist 2026-11-19 build")).toEqual(["title-no-date","title-names-grounded"])
+  expect(failing("Launch checklist with Priya and Sam",["Priya","Sam","Dana"])).toEqual(["title-not-attendees"])
+  expect(failing("Launch checklist with Priya",["Priya","Sam"])).toEqual([])
+  // Title Case is noticed (softly); names and acronyms the meeting itself capitalises are not.
+  expect(failing("Launch Checklist And iPhone Build")).toEqual(["title-sentence-case"])
+  expect(titleChecks("Launch Checklist And iPhone Build",{source}).find(check=>check.id==="title-sentence-case")!.soft).toBe(true)
+  // A name or a number the meeting never mentioned is noticed; ordinary summary words are not.
+  expect(failing("Kubernetes migration launch checklist")).toEqual([])
+  expect(failing("Launch checklist for Kubernetes")).toEqual(["title-sentence-case","title-names-grounded"])
+  expect(failing("Launch checklist for 40 seats")).toEqual(["title-names-grounded"])
+  expect(failing("Self-hosted launch readiness review")).toEqual([])
+  // A script without spaces has no word count to check.
+  expect(titleChecks("发布清单与手机版本",{source:"发布清单与手机版本"}).every(check=>check.pass)).toBe(true)
+})
+test("the title run completes against the stub: an untitled note comes back with the stub's answer as its title",async()=>{
+  const now=new Date("2026-11-13T12:00:00Z"),meetings=fixtureMeetings(false,now)
+  expect(meetings.map(meeting=>meeting.id).sort()).toEqual(["discovery","numbers","standup"])
+  expect(fixtureMeetings(true,now).length).toBe(FIXTURES.length)
+  const result=await runTitle({provider:"openrouter",model:"openai/gpt-6-sol",transport:stubTransport,stub:true},meetings[0]!,now)
+  expect(result.error).toBeUndefined()
+  expect(result.title).toBe("Stub notes")
+  expect(result.notes).toContain("offline stub")
+  expect(result.titleMs).not.toBeNull()
+  expect(result.checks.find(check=>check.id==="title-words")!.pass).toBe(false)
 })

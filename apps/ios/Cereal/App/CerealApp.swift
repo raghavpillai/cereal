@@ -8,6 +8,7 @@ struct CerealApp: App {
     @State private var server = ServerNotesModel()
     @State private var connectionMode = ConnectionMode()
     @State private var serverRecording = ServerRecordingController()
+    @State private var sharedHistory = SharedNoteHistory()
 
     var body: some Scene {
         WindowGroup {
@@ -17,6 +18,7 @@ struct CerealApp: App {
                 .environment(server)
                 .environment(connectionMode)
                 .environment(serverRecording)
+                .environment(sharedHistory)
                 .preferredColorScheme(.dark)
                 .tint(Theme.accent)
         }
@@ -31,6 +33,12 @@ enum Route: Hashable {
     case serverChat(String?)
     /// Search across the notes of the current mode (local demo or signed-in account).
     case search
+    /// A read-only note someone shared. It is read with an account on its own server.
+    case sharedNote(SharedNoteLink)
+    /// The shared notes opened on this device.
+    case sharedWithMe
+    /// A link to a note on a server this app is not signed in to.
+    case noteElsewhere(NoteLink)
 }
 
 /// Sources for zoom transitions. Only modal surfaces zoom; see RootView.
@@ -68,6 +76,12 @@ final class Router {
     var serverCapture: ServerCaptureTarget?
     var showMicSheet = false
     var showConnection = false
+    /// The server address the connection sheet opens with, when a page asked
+    /// for a sign-in to a particular server.
+    @ObservationIgnored var signInAddress: String?
+    /// The account a link has just opened a note in, until that account's
+    /// arrival has been handled: its own reset of the stack must not close the note.
+    @ObservationIgnored var linkOpenedIn: String??
 }
 
 struct RootView: View {
@@ -76,6 +90,14 @@ struct RootView: View {
     @Environment(ServerNotesModel.self) private var server
     @Environment(ConnectionMode.self) private var connectionMode
     @Environment(ServerRecordingController.self) private var serverRecording
+    @Environment(\.openURL) private var openURL
+    /// A link to a note of one's own that arrived before the saved session was
+    /// restored. Where it leads depends on which server that session is for.
+    @State private var pendingLink: AppLink?
+    /// A tap on a recording's Live Activity that started the app. The note it
+    /// leads to is opened once the session is back, so that the account's
+    /// arrival does not close it again.
+    @State private var pendingRecording: URL?
     #if DEBUG
     @State private var showLiveActivityQA = false
     @State private var debugScreenOpened = false
@@ -103,6 +125,9 @@ struct RootView: View {
                     case .serverNoteSource(let id, let raw): ServerNoteView(noteID: id, showMineInitially: raw)
                     case .serverChat(let id): ServerChatView(noteID: id)
                     case .search: SearchView()
+                    case .sharedNote(let link): SharedNoteView(link: link)
+                    case .sharedWithMe: SharedWithMeView()
+                    case .noteElsewhere(let link): NoteElsewhereView(link: link)
                     }
                 }
                 .toolbarVisibility(.visible, for: .navigationBar)
@@ -119,11 +144,18 @@ struct RootView: View {
         .task {
             // Clearing stale Live Activities must not hold up restoring the session.
             async let orphans: Void = RecordingLiveActivityController.endOrphanedActivities()
-            if await configureQAIfRequested() { restoring = false; await orphans; return }
+            #if DEBUG
+            // QA only: `-qa.openURL <url>` hands the app a URL as the system does when a
+            // link starts it, before the saved session is back. For a simulator in which
+            // another app answers to the same scheme.
+            if let url = UserDefaults.standard.string(forKey: "qa.openURL").flatMap(URL.init(string:)) { receive(url) }
+            #endif
+            if await configureQAIfRequested() { restoring = false; openPendingLink(); await orphans; return }
             let interval = Signpost.ui.beginInterval("Launch.Restore")
             await server.restore()
             Signpost.ui.endInterval("Launch.Restore", interval)
             restoring = false
+            openPendingLink()
             await orphans
         }
         .fullScreenCover(item: $router.serverCapture) { target in
@@ -132,7 +164,10 @@ struct RootView: View {
                 .environment(\.zoomNamespace, zoom)
         }
         .task(id: server.accountIdentity) {
-            router.path = []; router.newNoteID = nil; router.serverCapture = nil
+            // A shared note's page stays across a sign-in or sign-out and shows what the account may see.
+            router.path = LinkNavigation.pathAfterAccountChange(router.path, linkOpenedIn: router.linkOpenedIn, account: server.accountIdentity)
+            router.linkOpenedIn = nil
+            router.newNoteID = nil; router.serverCapture = nil
             // Answers still arriving for an account that is no longer signed in end here.
             ServerChatSessions.shared.accountChanged(to: server.accountIdentity)
             #if DEBUG
@@ -146,35 +181,12 @@ struct RootView: View {
             await runQARecordingFlowIfRequested()
             #endif
         }
-        .onOpenURL { url in
-            #if DEBUG
-            if url.scheme == AppIdentity.urlScheme, url.host == "live-activity-preview" {
-                showLiveActivityQA = true
-                return
-            }
-            #endif
-            guard url.scheme == AppIdentity.urlScheme, url.host == "recording" else { return }
-            // A server recording can stay active while the user browses the
-            // local demo. Its Live Activity must return to its own account/note.
-            if let id = RecordingActivityLinkPolicy.activeServerNoteID(url: url,
-                activeNoteID: serverRecording.activeNoteID,
-                recordingIdentity: serverRecording.instanceIdentity,
-                accountIdentity: server.accountIdentity) {
-                connectionMode.isDemo = false
-                router.path = [.serverNote(id.uuidString.lowercased())]
-                return
-            }
-            if !connectionMode.isDemo, let id = UUID(uuidString: url.lastPathComponent) {
-                router.path = [.serverNote(id.uuidString.lowercased())]
-                return
-            }
-            guard connectionMode.isDemo,
-                  let id = UUID(uuidString: url.lastPathComponent), store.note(id) != nil else { return }
-            guard router.newNoteID != id else { return }
-            // A Live Activity opens the existing note without starting or
-            // resuming capture. An already presented capture stays intact.
-            guard router.newNoteID == nil else { return }
-            router.path = [.note(id)]
+        .onOpenURL { receive($0) }
+        // A universal link is the web form of the same links; one this app
+        // cannot read goes on to the browser it was meant for.
+        .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
+            guard let url = activity.webpageURL else { return }
+            if !open(url) { openURL(url) }
         }
         #if DEBUG
         .fullScreenCover(isPresented: $showLiveActivityQA) { LiveActivityQAHarness() }
@@ -244,6 +256,63 @@ enum CaptureNavigation {
 }
 
 extension RootView {
+    /// A `cereal://` URL from the system: a note or shared-note link, or the
+    /// Live Activity's link back to the note being recorded.
+    fileprivate func receive(_ url: URL) {
+        #if DEBUG
+        if url.scheme == AppIdentity.urlScheme, url.host == "live-activity-preview" {
+            showLiveActivityQA = true
+            return
+        }
+        #endif
+        if open(url) { return }
+        guard url.scheme == AppIdentity.urlScheme, url.host == "recording" else { return }
+        if restoring { pendingRecording = url; return }
+        // A server recording can stay active while the user browses the
+        // local demo. Its Live Activity must return to its own account/note.
+        if let id = RecordingActivityLinkPolicy.activeServerNoteID(url: url,
+            activeNoteID: serverRecording.activeNoteID,
+            recordingIdentity: serverRecording.instanceIdentity,
+            accountIdentity: server.accountIdentity) {
+            connectionMode.isDemo = false
+            router.path = [.serverNote(id.uuidString.lowercased())]
+            router.linkOpenedIn = .some(server.accountIdentity)
+            return
+        }
+        if !connectionMode.isDemo, let id = UUID(uuidString: url.lastPathComponent) {
+            router.path = [.serverNote(id.uuidString.lowercased())]
+            router.linkOpenedIn = .some(server.accountIdentity)
+            return
+        }
+        guard connectionMode.isDemo,
+              let id = UUID(uuidString: url.lastPathComponent), store.note(id) != nil else { return }
+        guard router.newNoteID != id else { return }
+        // A Live Activity opens the existing note without starting or
+        // resuming capture. An already presented capture stays intact.
+        guard router.newNoteID == nil else { return }
+        router.path = [.note(id)]
+    }
+
+    /// Follows a shared-note or note link, in its web or `cereal://` form.
+    /// False for any other URL, which is left to whoever handles it.
+    fileprivate func open(_ url: URL) -> Bool {
+        guard let link = AppLink(url) else { return false }
+        switch link {
+        // An answer to a sign-in goes to the sheet that asked; one arriving here has nobody waiting.
+        case .auth: break
+        case .note where restoring: pendingLink = link
+        case .note, .shared: router.open(link, server: server, mode: connectionMode)
+        }
+        return true
+    }
+
+    fileprivate func openPendingLink() {
+        if let url = pendingRecording { pendingRecording = nil; receive(url) }
+        guard let link = pendingLink else { return }
+        pendingLink = nil
+        router.open(link, server: server, mode: connectionMode)
+    }
+
     /// Explicit Debug-only QA opt-in. Values are never logged, placed in
     /// arguments, or written to a provisioning file. Successful connection
     /// follows the normal Keychain flow used by the settings screen.

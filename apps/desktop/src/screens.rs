@@ -53,7 +53,7 @@ impl Cereal {
         match self.screen {
             Screen::Chat => self.render_chat_screen(window, cx),
             Screen::SearchResults => self.render_search_results(window, cx),
-            Screen::Shared => self.render_shared_screen(),
+            Screen::Shared => self.render_shared_screen(window, cx),
             Screen::Connect => self.render_connect_screen(cx),
             Screen::Settings => self.render_settings_screen(cx),
             Screen::Trash => self.render_trash_screen(window, cx),
@@ -189,65 +189,138 @@ impl Cereal {
             .into_any_element()
     }
 
-    fn render_shared_screen(&self) -> AnyElement {
+    /// "Shared with me": the shared notes opened on this Mac, newest first,
+    /// under a field for opening one from a link in hand. The list is this
+    /// Mac's own and is the same whoever is signed in; a note on a server
+    /// the app is not signed in to opens as a request to sign in there.
+    fn render_shared_screen(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme();
-        let connected = crate::server::enabled();
-        screen_scroller("shared-screen")
+        let visits = self.links.history.visits();
+        let focused = self.links.paste.read(cx).focus_handle.is_focused(window);
+        let typed = !self.links.paste.read(cx).content().trim().is_empty();
+        // The field is a row of the list below it: the same height, corner
+        // and insets, so its icon and text stand over the rows' tiles and
+        // titles.
+        let paste = div()
+            .mt(px(20.))
+            .h(px(44.))
+            .px(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(16.))
+            .rounded(px(12.))
+            .border_1()
+            .border_color(if self.links.problem.is_some() {
+                t.danger
+            } else if focused {
+                t.accent
+            } else {
+                t.border
+            })
+            .bg(t.card)
             .child(
-                screen_column().child(page_title("Shared with me", t)).child(
-                    div()
-                        .mt(px(78.))
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .gap(px(14.))
-                        .child(empty_illustration("person-outline", t))
-                        .child(
-                            div()
-                                .mt(px(8.))
-                                .font_family(DISPLAY)
-                                .text_size(px(24.))
-                                .child(if connected {
-                                    "Read notes shared with you"
-                                } else {
-                                    "Better notes, together"
-                                }),
-                        )
-                        .child(
-                            div()
-                                .max_w(px(350.))
-                                .text_center()
-                                .text_size(px(14.))
-                                .line_height(px(22.))
-                                .text_color(t.muted)
-                                .child(if connected {
-                                    "Open a shared link to view its read-only snapshot in your browser. A shared-notes inbox is not available yet."
-                                } else {
-                                    "Shared notes are available when you connect to your server."
-                                }),
-                        )
-                        .child(
-                            div()
-                                .mt(px(10.))
-                                .px(px(13.))
-                                .py(px(8.))
-                                .rounded_full()
-                                .bg(t.fill)
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .child(icon("lock", 12., t.muted))
-                                .child(small(
-                                    if connected {
-                                        "Shared links are read-only"
-                                    } else {
-                                        "This workspace is stored on your Mac"
-                                    },
-                                    t,
-                                )),
-                        ),
-                ),
+                div()
+                    .size(px(28.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon("link-chain", 17., t.muted)),
             )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(14.))
+                    .line_height(px(20.))
+                    .child(self.links.paste.clone()),
+            )
+            .when(typed, |field| {
+                field.child(
+                    pill("shared-paste-open", "Open", "", t)
+                        .on_click(cx.listener(|this, _, _, cx| this.open_pasted_link(cx))),
+                )
+            });
+        let mut column = screen_column()
+            .child(page_title("Shared with me", t))
+            .child(paste)
+            .when_some(self.links.problem.clone(), |column, problem| {
+                column.child(
+                    div()
+                        .id("shared-paste-problem")
+                        .mt(px(6.))
+                        .px(px(8.))
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .text_color(t.danger)
+                        .child(problem),
+                )
+            });
+        if visits.is_empty() {
+            column = column.child(
+                div()
+                    .mt(px(58.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(14.))
+                    .child(empty_illustration("person-outline", t))
+                    .child(
+                        div()
+                            .mt(px(8.))
+                            .font_family(DISPLAY)
+                            .text_size(px(24.))
+                            .child("Nothing shared with you yet"),
+                    )
+                    .child(
+                        div()
+                            .max_w(px(350.))
+                            .text_center()
+                            .text_size(px(14.))
+                            .line_height(px(22.))
+                            .text_color(t.muted)
+                            .child("Shared notes you open are kept here."),
+                    ),
+            );
+        }
+        // Home's list: a day caption, then that day's rows.
+        let mut last_day = String::new();
+        for visit in visits {
+            let opened = visit.opened_at.with_timezone(&chrono::Local);
+            let day = opened.format("%Y-%m-%d").to_string();
+            if day != last_day {
+                column = column.child(
+                    caption(crate::home::date_label(&day), t)
+                        .px(px(8.))
+                        .pt(px(25.))
+                        .pb(px(2.)),
+                );
+                last_day = day;
+            }
+            let key = crate::lazy::key(visit.link.web_url());
+            let hovered = crate::motion::reveal_key(("shared-visit", key));
+            let (open, remove) = (visit.link.clone(), visit.link.clone());
+            column = column.child(
+                self.list_row_frame(
+                    ("shared-visit", key),
+                    hovered,
+                    visit.title.clone().into(),
+                    visit.link.origin.display_host(),
+                    &opened.format("%-I:%M %p").to_string(),
+                    tool_tip(("shared-visit-remove", key), "close", "Remove from list", t)
+                        .size(px(24.))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.remove_shared_visit(&remove, cx);
+                        })),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.open_link(crate::link::AppLink::Shared(open.clone()), cx)
+                })),
+            );
+        }
+        screen_scroller("shared-screen")
+            .child(column)
             .into_any_element()
     }
 
@@ -931,10 +1004,7 @@ impl Cereal {
                     .child(section_label("This app", t))
                     .child(
                         settings_card(t)
-                            .child(
-                                settings_row("cereal", "Version", "Native GPUI build.", t)
-                                    .child(small("0.1.0", t)),
-                            )
+                            .child(self.render_version_row(cx))
                             .child(
                                 settings_row(
                                     "lock",
@@ -1280,7 +1350,7 @@ fn section_label(label: &'static str, t: Theme) -> Div {
 /// One setting: a 32 px icon tile, a 13 px title over a 12 px description,
 /// and whatever control the caller appends at the trailing edge. Rows sit on
 /// a 64 px pitch with no dividers between them.
-fn settings_row(
+pub(crate) fn settings_row(
     symbol: &str,
     title: impl Into<SharedString>,
     description: impl Into<SharedString>,
@@ -1339,7 +1409,7 @@ fn settings_row(
         )
 }
 
-fn empty_illustration(symbol: &str, t: Theme) -> Div {
+pub(crate) fn empty_illustration(symbol: &str, t: Theme) -> Div {
     div()
         .relative()
         .size(px(90.))

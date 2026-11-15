@@ -146,8 +146,8 @@ private func note(revision: Int, _ segments: [TranscriptSegmentDTO]) -> NoteDTO 
     }
 
     @Test func interimCaptionLeavesOutASpeakerItDoesNotHave() {
-        #expect(TranscriptPresentation.interimCaption(channel: .mic, startMs: 72_000, speakerLabel: nil) == "Microphone · 1:12 · Interim")
-        #expect(TranscriptPresentation.interimCaption(channel: .system, startMs: 0, speakerLabel: " Speaker 3 ") == "Speaker 3 · System audio · 0:00 · Interim")
+        #expect(TranscriptPresentation.interimCaption(channel: .mic, startMs: 72_000, speakerLabel: nil) == "1:12 · Interim")
+        #expect(TranscriptPresentation.interimCaption(channel: .system, startMs: 0, speakerLabel: " Speaker 3 ") == "Speaker 3 · 0:00 · Interim")
     }
 }
 

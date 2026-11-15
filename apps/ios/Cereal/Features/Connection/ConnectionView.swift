@@ -1,6 +1,65 @@
 import SwiftUI
 import APIClient
 
+/// What the sign-in form knows about the server whose address is in the field.
+enum SignInDiscovery: Equatable {
+    /// No address yet, or one that is still being typed.
+    case idle
+    case checking
+    case ready(SignInMethods)
+    case failed(String)
+}
+
+/// Asks the server whose address is in the field how people sign in to it,
+/// once typing has paused. Only the answer for the address now in the field is
+/// ever shown: each change starts a new question, and an answer to an earlier
+/// one, however late it arrives, is dropped.
+@MainActor @Observable
+final class SignInDiscoveryModel {
+    private(set) var state: SignInDiscovery = .idle
+    @ObservationIgnored private var address = ""
+    @ObservationIgnored private var question = 0
+    @ObservationIgnored private var task: Task<Void, Never>?
+    @ObservationIgnored private let pause: Duration
+    @ObservationIgnored private let methods: @Sendable (InstanceURL) async throws -> SignInMethods
+
+    init(pause: Duration = .milliseconds(500),
+         methods: @escaping @Sendable (InstanceURL) async throws -> SignInMethods = { try await MeetingNotesAPI.signInMethods(instance: $0) }) {
+        self.pause = pause
+        self.methods = methods
+    }
+
+    /// The address in the field is now `text`. `again` asks about the same address once more.
+    func check(_ text: String, again: Bool = false) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard again || text != address else { return }
+        address = text
+        question += 1
+        let asked = question
+        task?.cancel()
+        // What was offered for the old address is withdrawn at once.
+        state = .idle
+        guard !text.isEmpty else { task = nil; return }
+        task = Task { [weak self, pause, methods] in
+            try? await Task.sleep(for: pause)
+            guard let self, asked == self.question else { return }
+            let target: InstanceURL
+            do { target = try InstanceURL(text) }
+            catch { self.state = .failed(error.localizedDescription); return }
+            self.state = .checking
+            do {
+                let found = try await methods(target)
+                guard asked == self.question else { return }
+                self.state = .ready(found)
+            } catch {
+                // A question that was replaced ends here too, cancelled or not.
+                guard asked == self.question else { return }
+                self.state = .failed(error.localizedDescription)
+            }
+        }
+    }
+}
+
 struct ConnectionView: View {
     @Environment(ServerNotesModel.self) private var server
     @Environment(ConnectionMode.self) private var mode
@@ -13,12 +72,41 @@ struct ConnectionView: View {
     @State private var advanced = false
     @State private var busy = false
     @State private var error: String?
+    @State private var discovery = SignInDiscoveryModel()
+    @State private var browser = BrowserSignInSession()
+    /// True while the sign-in in progress is the one in the browser, so its own button shows it.
+    @State private var inBrowser = false
     @Environment(\.motion) private var motion
+
+    private var address: String { instance.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     private func completeConnection() {
         if case .loaded = server.state {
-            mode.isDemo = false; router.path = []; dismiss()
+            mode.isDemo = false
+            // A note that was waiting for this sign-in opens; otherwise Home.
+            router.path = LinkNavigation.pathAfterSignIn(router.path, instance: server.instance)
+            if !router.path.isEmpty { router.linkOpenedIn = .some(server.accountIdentity) }
+            dismiss()
         } else if case .failed(let failure, _) = server.state { error = failure.localizedDescription }
+    }
+
+    /// Signs in on the server's own page, in the system browser, by whichever
+    /// method the server offers there. The session that comes back is kept
+    /// exactly as one from the password form is.
+    private func continueInBrowser() {
+        busy = true; inBrowser = true; error = nil
+        Task {
+            defer { busy = false; inBrowser = false }
+            do {
+                let attempt = try BrowserSignIn(instance: InstanceURL(instance))
+                let answer = try await browser.answer(from: attempt.loginURL)
+                try await server.signIn(browser: attempt, callback: answer)
+                password = ""; token = ""
+                completeConnection()
+            } catch BrowserSignInError.cancelled {
+            } catch is CancellationError {
+            } catch { self.error = error.localizedDescription }
+        }
     }
 
     var body: some View {
@@ -29,21 +117,46 @@ struct ConnectionView: View {
                         .textContentType(.URL).keyboardType(.URL)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                         .accessibilityLabel("Instance URL")
-                    TextField("Email", text: $email)
-                        .textContentType(.username).keyboardType(.emailAddress)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    SecureField("Password", text: $password).textContentType(.password)
-                    Button {
-                        busy = true; error = nil
-                        Task {
-                            await server.signIn(instance: instance, email: email.trimmingCharacters(in: .whitespacesAndNewlines), password: password)
-                            password = ""; token = ""; busy = false
-                            completeConnection()
+                        .accessibilityIdentifier("connection-instance")
+                    switch discovery.state {
+                    case .idle: EmptyView()
+                    case .checking:
+                        HStack { Text("Checking how this server signs in…").foregroundStyle(Theme.textSecondary); Spacer(); ProgressView() }
+                    case .failed(let message):
+                        Text(message).foregroundStyle(Theme.danger)
+                        Button("Try again") { discovery.check(address, again: true) }
+                    case .ready(let methods):
+                        if methods.password {
+                            TextField("Email", text: $email)
+                                .textContentType(.username).keyboardType(.emailAddress)
+                                .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            SecureField("Password", text: $password).textContentType(.password)
+                            Button {
+                                busy = true; error = nil
+                                Task {
+                                    await server.signIn(instance: instance, email: email.trimmingCharacters(in: .whitespacesAndNewlines), password: password)
+                                    password = ""; token = ""; busy = false
+                                    completeConnection()
+                                }
+                            } label: {
+                                HStack { Text("Sign in"); Spacer(); if busy && !inBrowser { ProgressView() } }
+                            }.buttonStyle(.glassProminent).tint(Theme.accent)
+                                .disabled(busy || email.isEmpty || password.isEmpty || address.isEmpty)
                         }
-                    } label: {
-                        HStack { Text("Sign in"); Spacer(); if busy { ProgressView() } }
-                    }.buttonStyle(.glassProminent).tint(Theme.accent)
-                        .disabled(busy || email.isEmpty || password.isEmpty || instance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        if let label = methods.browserLabel {
+                            if methods.password {
+                                // Beside the password form the browser is the other way in.
+                                Button(action: continueInBrowser) {
+                                    HStack { Text(label); Spacer(); if inBrowser { ProgressView() } }
+                                }.accessibilityIdentifier("connection-browser")
+                            } else {
+                                Button(action: continueInBrowser) {
+                                    HStack { Text(label); Spacer(); if busy { ProgressView() } }
+                                }.buttonStyle(.glassProminent).tint(Theme.accent)
+                                    .accessibilityIdentifier("connection-browser")
+                            }
+                        }
+                    }
                 } header: { Text("Your server") } footer: {
                     Text("Sign in to your account on your self-hosted server. Your session is kept in this device’s Keychain. Passwords are never saved. HTTPS is required except for localhost development.")
                 }
@@ -93,13 +206,15 @@ struct ConnectionView: View {
             .disabled(busy)
             .animation(motion.snappy, value: busy)
             .animation(motion.snappy, value: error)
+            .animation(motion.snappy, value: discovery.state)
+            .onChange(of: address, initial: true) { _, text in discovery.check(text) }
             .animation(motion.settle, value: server.instance?.description)
             .navigationTitle("Connection")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() }.disabled(busy) } }
             .interactiveDismissDisabled(busy)
-            .onAppear { instance = server.instance?.description ?? "" }
-            .onDisappear { password = ""; token = "" }
+            .onAppear { instance = router.signInAddress ?? server.instance?.description ?? "" }
+            .onDisappear { password = ""; token = ""; router.signInAddress = nil }
         }
         .glassSheet()
     }

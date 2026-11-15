@@ -15,6 +15,9 @@ pub enum Screen {
     Folder(u64),
     Favorites,
     Shared,
+    /// The page a link opened: a shared note, read-only, or where a note
+    /// is when the app is not signed in to its server (see `shared_view`).
+    Link,
     Chat,
     Connect,
     Settings,
@@ -161,6 +164,10 @@ pub struct Cereal {
     pub calendars: crate::calendar::CalendarState,
     pub home_scroll: ScrollHandle,
     pub meeting: crate::meeting::MeetingState,
+    /// Links into the app and "Shared with me" (see `shared_view.rs`).
+    pub links: crate::shared_view::Links,
+    /// "Check for updates" (see `update_view.rs`).
+    pub updates: crate::update_view::Updates,
     pub focus: FocusHandle,
     pub _subscriptions: Vec<Subscription>,
     /// Registered with the window on the first frame: see `render`.
@@ -180,6 +187,7 @@ actions!(
         Hide,
         Quit,
         OpenSettings,
+        CheckForUpdates,
         FocusNext,
         FocusPrevious
     ]
@@ -208,12 +216,17 @@ impl Cereal {
             }
         });
         let menu_key_subscription = cx.intercept_keystrokes(menu_key_listener);
-        let subscriptions = vec![
+        let (links, link_subscriptions) = crate::shared_view::Links::new(cx);
+        let mut subscriptions = vec![
             menu_key_subscription,
             cx.subscribe(
                 &account,
                 |this, _, event: &crate::account::AccountEvent, cx| match event {
-                    crate::account::AccountEvent::Back => this.navigate(Screen::Home, cx),
+                    crate::account::AccountEvent::Back => {
+                        // The sign-in a link asked for was given up.
+                        this.links.after_sign_in = None;
+                        this.navigate(Screen::Home, cx)
+                    }
                     crate::account::AccountEvent::SignedIn(account) => {
                         this.accept_account(account.clone(), cx)
                     }
@@ -341,6 +354,7 @@ impl Cereal {
                 this.create_folder(cx)
             }),
         ];
+        subscriptions.extend(link_subscriptions);
         let mut this = Self {
             workspace: Workspace::load(),
             login,
@@ -435,6 +449,8 @@ impl Cereal {
             calendars: Default::default(),
             home_scroll: ScrollHandle::new(),
             meeting: Default::default(),
+            links,
+            updates: Default::default(),
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
             focus_lost: None,
@@ -446,9 +462,11 @@ impl Cereal {
         Theme::new(self.workspace.settings.dark_mode)
     }
     pub fn navigate(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        // A link's page is shown to anyone: it says where the note is and
+        // reads nothing without a session on that server.
         let screen = if crate::server::enabled()
             && crate::account::identity().is_none()
-            && screen != Screen::Login
+            && !matches!(screen, Screen::Login | Screen::Link)
         {
             Screen::Account
         } else {
@@ -847,6 +865,8 @@ impl Cereal {
             self.close_chat_surface(cx);
         } else if self.current_note.is_some() {
             self.navigate(Screen::Home, cx);
+        } else if self.screen == Screen::Link {
+            self.go_back(cx);
         }
         self.focus.focus(window);
         cx.notify();
@@ -945,6 +965,8 @@ impl Render for Cereal {
             self.render_context_chat(window, cx)
         } else if self.current_note.is_some() {
             self.render_note(window, cx)
+        } else if self.screen == Screen::Link {
+            self.render_link_page(window, cx)
         } else {
             match self.screen {
                 Screen::Home | Screen::MyNotes | Screen::Folder(_) | Screen::Favorites => {
@@ -955,7 +977,11 @@ impl Render for Cereal {
         };
         let sidebar = self.stage.presence(
             ("sidebar", 0),
-            self.sidebar_open && !login && (self.current_note.is_none() || self.chat_maximized),
+            // A link's page is a note page: it has the window to itself.
+            self.sidebar_open
+                && !login
+                && self.screen != Screen::Link
+                && (self.current_note.is_none() || self.chat_maximized),
             SETTLE,
         );
         self.sidebar_level = if sidebar.visible {
@@ -967,6 +993,9 @@ impl Render for Cereal {
         let toast_pose = self
             .stage
             .presence(("toast", 0), self.toast.is_some(), GOOEY);
+        let update_pose =
+            self.stage
+                .presence(("update-notice", 0), self.updates.notice_open(), GOOEY);
         let recipe_pose = self.stage.presence(
             ("recipe-editor", 0),
             self.chat_recipe_editor.is_some(),
@@ -987,6 +1016,9 @@ impl Render for Cereal {
             std::mem::discriminant(&self.screen).hash(&mut hasher);
             if let Screen::Folder(folder) = self.screen {
                 folder.hash(&mut hasher);
+            }
+            if self.screen == Screen::Link {
+                self.links.epoch.hash(&mut hasher);
             }
             (self.current_note, self.chat_maximized).hash(&mut hasher);
             hasher.finish()
@@ -1042,6 +1074,7 @@ impl Render for Cereal {
                 }
             }))
             .on_action(cx.listener(|this, _: &Quit, _, cx| this.quit_after_audio_stop(cx)))
+            .on_action(cx.listener(|this, _: &CheckForUpdates, _, cx| this.check_for_updates(cx)))
             .on_action(cx.listener(|_, _: &CloseWindow, window, cx| {
                 crate::pill::hide_main_window(window, cx)
             }))
@@ -1134,6 +1167,9 @@ impl Render for Cereal {
             .when(recipe_pose.visible, |s| {
                 s.child(self.render_chat_recipe_editor(recipe_pose, window, cx))
             })
+            .when(update_pose.visible, |s| {
+                s.child(self.render_update_notice(update_pose, window, cx))
+            })
             .when(toast_pose.visible, |s| {
                 let toast = self
                     .toast
@@ -1143,12 +1179,20 @@ impl Render for Cereal {
                     .split_once('\n')
                     .map(|(title, description)| (title, Some(description)))
                     .unwrap_or((&toast, None));
-                let success = title == "Note copied to clipboard" || title == "All changes saved";
+                let success = title == "Note copied to clipboard"
+                    || title == "Link copied to clipboard"
+                    || title == "All changes saved"
+                    || title.starts_with("Cereal is up to date");
                 s.child(crate::motion::pop(
                     div()
                         .id("toast-notification")
                         .absolute()
-                        .bottom(px(16.))
+                        // A toast sits above the update notice while that is up.
+                        .bottom(px(if update_pose.visible {
+                            16. + crate::update_view::NOTICE_HEIGHT + 8.
+                        } else {
+                            16.
+                        }))
                         .right(px(16.))
                         .w(px(384.))
                         .max_w(window.viewport_size().width - px(32.))

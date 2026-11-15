@@ -72,7 +72,23 @@ final class Recorder {
     @ObservationIgnored private var inputRetries = 0
     static let inputRetryLimit = 12
     /// Only audio from the device's own input is shown as a system recording.
-    private var advertisesCapture: Bool { backend?.usesMicrophone == true }
+    private var advertisesCapture: Bool {
+        #if DEBUG
+        // QA only: `-capture.advertise YES` shows the Live Activity for a recording
+        // of a file (`-capture.inputFile`), so it can be checked without the microphone.
+        if backend != nil, UserDefaults.standard.bool(forKey: "capture.advertise") { return true }
+        #endif
+        return backend?.usesMicrophone == true
+    }
+
+    /// The title of the note this recorder records, for its Live Activity.
+    @ObservationIgnored private var activityTitle = ""
+
+    /// The note being recorded has a new title. Its Live Activity follows.
+    func setActivityTitle(_ title: String) {
+        activityTitle = title
+        activity.setTitle(title)
+    }
 
     init(simulateCapture: Bool = Recorder.allowsSimulatedCapture, recordingRoot: URL? = nil,
          backend: (@MainActor () -> any CaptureBackend)? = nil) {
@@ -94,7 +110,7 @@ final class Recorder {
         state = segments.isEmpty ? .idle : .stopped
     }
 
-    func startSegment(noteID: UUID, title: String = "Untitled note") {
+    func startSegment(noteID: UUID, title: String = "") {
         guard !isCapturing else { return }
         var created: URL?
         do {
@@ -135,7 +151,9 @@ final class Recorder {
             segmentStartedAt = startedAt
             state = .recording
             // Simulated timing is never advertised as genuine system recording.
-            if advertisesCapture { activity.start(noteID: noteID, title: title.isEmpty ? "Untitled note" : title, elapsed: elapsed) }
+            // A later part of the same recording does not bring the title again.
+            if !title.isEmpty { activityTitle = title }
+            if advertisesCapture { activity.start(noteID: noteID, title: activityTitle, elapsed: elapsed) }
             startMetering()
         } catch {
             let continuous = backend is any ContinuousCaptureBackend
@@ -175,7 +193,7 @@ final class Recorder {
             }
             clock.resume(at: ProcessInfo.processInfo.systemUptime)
             state = .recording
-            if advertisesCapture, let noteID = activityNoteID { activity.start(noteID: noteID, title: "", elapsed: elapsed) }
+            if advertisesCapture, let noteID = activityNoteID { activity.start(noteID: noteID, title: activityTitle, elapsed: elapsed) }
             startMetering()
             onPauseChanged?(false)
         } catch {
@@ -287,7 +305,7 @@ final class Recorder {
             if advertisesCapture, state == .recording, let noteID = activityNoteID {
                 // Initial Activity.request can fail if server setup finishes after
                 // backgrounding. Retrying the indicator never restarts audio.
-                activity.start(noteID: noteID, title: "", elapsed: elapsed)
+                activity.start(noteID: noteID, title: activityTitle, elapsed: elapsed)
             }
         }
         observe(UIApplication.willTerminateNotification) { [weak self] _ in self?.stopSegment() }
