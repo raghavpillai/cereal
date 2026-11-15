@@ -35,7 +35,8 @@ describe('notes grouped by day', () => {
     expect(dayLabel('2026-11-13', now)).toBe('Today')
     expect(dayLabel('2026-11-12', now)).toBe('Yesterday')
     expect(dayLabel('2026-11-14', now)).toBe('Tomorrow')
-    expect(dayLabel('2026-11-11', now, 'en-GB')).toBe('Wed 11 Nov')
+    // Older ICU data (Bun on Linux) writes "Wed, 11 Nov"; current browsers and macOS write "Wed 11 Nov".
+    expect(dayLabel('2026-11-11', now, 'en-GB')).toMatch(/^Wed,? 11 Nov$/)
     expect(dayLabel('2025-12-04', now, 'en-GB')).toBe('Thu, 4 Dec 2025')
     expect(dayLabel('not-a-date', now)).toBe('Undated')
     expect(dayLabel('2026-02-30', now)).toBe('Undated')

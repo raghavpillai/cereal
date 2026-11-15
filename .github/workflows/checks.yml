@@ -11,14 +11,14 @@ jobs:
         env:
           POSTGRES_USER: meeting_notes
           POSTGRES_PASSWORD: ci-only
-          POSTGRES_DB: meeting_notes
+          POSTGRES_DB: mn_test_c1
         ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U meeting_notes -d meeting_notes"
+          --health-cmd "pg_isready -U meeting_notes -d mn_test_c1"
           --health-interval 5s --health-timeout 5s --health-retries 20
     env:
-      DATABASE_URL: postgresql://meeting_notes:ci-only@127.0.0.1:5432/meeting_notes?schema=public
-      RUN_PG_TESTS: "1"
+      # The PostgreSQL suites only run against a database named mn_test_<hex>, so they can never touch a real one.
+      DATABASE_URL: postgresql://meeting_notes:ci-only@127.0.0.1:5432/mn_test_c1?schema=public
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -33,6 +33,19 @@ jobs:
       - run: bun run db:migrate
       - run: bun run check
       - run: bun test
+      - name: PostgreSQL suites
+        env:
+          RUN_PG_TESTS: "1"
+          RUN_AUTH_PG_TESTS: "1"
+        # Same grouping as scripts/test-postgres-isolated.ts: the sign-in suites share an in-memory
+        # rate limiter, and the 500-note benchmark needs a process to itself.
+        run: |
+          separate='/(auth|mcp-auth|organizations|note-summaries)-postgres\.test\.ts$'
+          bun test --timeout 30000 ./apps/api/test/auth-postgres.test.ts
+          bun test --timeout 30000 $(ls apps/api/test/*.test.ts | grep -v -E "$separate" | sed 's|^|./|')
+          bun test --timeout 30000 ./apps/api/test/note-summaries-postgres.test.ts
+          bun test --timeout 30000 ./apps/api/test/mcp-auth-postgres.test.ts
+          bun test --timeout 30000 ./apps/api/test/organizations-postgres.test.ts
       - run: bun run build
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test -p meeting-notes-api-types --locked
@@ -59,13 +72,13 @@ jobs:
           echo "id=$SIMULATOR_ID" >> "$GITHUB_OUTPUT"
       - name: Test signed simulator app and build recording widget
         run: >-
-          xcodebuild -project apps/ios/Minutes.xcodeproj -scheme Minutes
+          xcodebuild -project apps/ios/Cereal.xcodeproj -scheme Cereal
           -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.id }}"
-          -derivedDataPath "$RUNNER_TEMP/MinutesDerivedData"
-          -resultBundlePath "$RUNNER_TEMP/MinutesTests.xcresult"
+          -derivedDataPath "$RUNNER_TEMP/CerealDerivedData"
+          -resultBundlePath "$RUNNER_TEMP/CerealTests.xcresult"
           test
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: ios-test-results
-          path: ${{ runner.temp }}/MinutesTests.xcresult
+          path: ${{ runner.temp }}/CerealTests.xcresult
