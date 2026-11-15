@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/OnboardingStepInput",
+  "$defs": {
+    "OnboardingStep": {
+      "type": "string",
+      "enum": [
+        "owner",
+        "name",
+        "language",
+        "speech",
+        "models",
+        "signIn",
+        "storage"
+      ]
+    },
+    "OnboardingStepInput": {
+      "type": "object",
+      "properties": {
+        "step": {
+          "$ref": "#/$defs/OnboardingStep"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "done",
+            "skipped"
+          ]
+        }
+      },
+      "required": [
+        "step",
+        "state"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

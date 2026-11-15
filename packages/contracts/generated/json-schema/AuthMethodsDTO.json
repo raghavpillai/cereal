@@ -13,6 +13,9 @@
         },
         "instanceName": {
           "type": "string"
+        },
+        "setupRequired": {
+          "type": "boolean"
         }
       },
       "required": [

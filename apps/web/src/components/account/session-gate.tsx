@@ -7,7 +7,9 @@ import { Loading, Notice } from '../admin/shared'
 type State = { kind: 'loading' } | { kind: 'anonymous' } | { kind: 'error' } | { kind: 'signingOut' }
   | { kind: 'closed'; error: boolean } | { kind: 'ready'; session: AuthSessionDTO; client: AdminClient }
 
-export function SessionGate({ children, fallback, onClient }: {
+export function SessionGate({ children, fallback, onClient, frame = content => content }: {
+  /** Wraps what the gate itself shows (checking, signing out, errors), for a page whose own content is not always inside one frame. */
+  frame?: (content: ReactNode) => ReactNode
   children: (session: AuthSessionDTO, client: AdminClient, expired: () => void, signOut: () => Promise<void>) => ReactNode
   /** Shown while the session is being checked, in place of the spinner: usually the skeleton of the page behind the gate. */
   fallback?: ReactNode
@@ -50,13 +52,13 @@ export function SessionGate({ children, fallback, onClient }: {
     const timer = window.setInterval(revalidate, 60_000)
     return () => { request.current?.abort(); window.removeEventListener('focus', revalidate); window.clearInterval(timer) }
   }, [refresh])
-  if (state.kind === 'loading') return fallback ?? <div className="account-loading"><Loading label="Checking your session…" /></div>
-  if (state.kind === 'signingOut') return <div className="account-loading"><Loading label="Signing out…" /></div>
-  if (state.kind === 'error') return <section className="admin-login"><h1>Unable to check your session.</h1><p>Your private notes and settings are hidden until the connection returns.</p><button type="button" className="button" onClick={() => void refresh()}>Try again</button></section>
+  if (state.kind === 'loading') return fallback ?? frame(<div className="account-loading"><Loading label="Checking your session…" /></div>)
+  if (state.kind === 'signingOut') return frame(<div className="account-loading"><Loading label="Signing out…" /></div>)
+  if (state.kind === 'error') return frame(<section className="admin-login"><h1>Unable to check your session.</h1><p>Your private notes and settings are hidden until the connection returns.</p><button type="button" className="button" onClick={() => void refresh()}>Try again</button></section>)
   if (state.kind === 'ready') return <>{children(state.session, state.client, expired, signOut)}</>
-  if (state.kind === 'closed' && state.error) return <section className="admin-login"><h1>Your private view is closed.</h1><Notice error>The server could not finish signing out. Retry to end this browser session.</Notice><button type="button" className="button" onClick={() => void signOut()}>Retry sign out</button></section>
+  if (state.kind === 'closed' && state.error) return frame(<section className="admin-login"><h1>Your private view is closed.</h1><Notice error>The server could not finish signing out. Retry to end this browser session.</Notice><button type="button" className="button" onClick={() => void signOut()}>Retry sign out</button></section>)
   // Signed out: the sign-in page, which offers every way of signing in this server has turned on, and comes back here.
-  return <ToSignIn />
+  return frame(<ToSignIn />)
 }
 
 /** The sign-in page's address for someone who was on `location`, so that signing in brings them back to

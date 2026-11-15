@@ -169,6 +169,10 @@ model InstanceSettings {
   iosAppStoreId          String?  @db.VarChar(20)
   /// Names of environment variables whose values were taken into these settings once; they are not read again.
   importedEnvironment    Json?
+  /// First-run setup on the admin panel: when it was finished (null: not yet), and which steps were confirmed
+  /// or skipped there, such as {"signIn":"done","storage":"skipped"}.
+  onboardingCompletedAt  DateTime? @db.Timestamptz(3)
+  onboardingSteps        Json?
   updatedAt              DateTime @updatedAt @db.Timestamptz(3)
 }
 

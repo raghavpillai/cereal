@@ -153,6 +153,8 @@ export function makeAuthenticationService(db:Database,bootstrapToken:string,opti
    response.headers.set("Cache-Control","no-store");response.headers.set("Referrer-Policy","no-referrer");return response
   },
   isTrustedOrigin(origin:string){return origins.includes(origin)},
+  /** Whether the server has been claimed: the owner account has a password. Until then only the bootstrap token gets in. */
+  async ownerReady(){return!!await db.account.findFirst({where:{userId:BOOTSTRAP_OWNER_ID,providerId:"credential"},select:{id:true}})},
   listUsers:(headers?:Headers)=>boundary(async()=>({users:(headers?(await auth.api.listUsers({headers,query:{limit:1000,sortBy:"createdAt",sortDirection:"asc"}})).users:await db.user.findMany({orderBy:{createdAt:"asc"},take:1000})).map(userDTO)})),
   createUser:(input:CreateUserInput,headers?:Headers)=>boundary(async()=>{
    try{const result=await auth.api.createUser({...(headers?{headers}:{}),body:{name:input.name.trim(),email:input.email.trim().toLowerCase(),password:input.password}});const user=await db.user.findUnique({where:{id:result.user.id}});if(!user)throw new Error("Account creation failed");await db.member.upsert({where:{organizationId_userId:{organizationId:DEFAULT_ORGANIZATION_ID,userId:user.id}},create:{id:crypto.randomUUID(),organizationId:DEFAULT_ORGANIZATION_ID,userId:user.id,role:"member"},update:{}});return userDTO(user)}catch(e){if(e instanceof AuthFailure)throw e;const status=(e as{statusCode?:number}).statusCode;if(status===400||status===422||status===409)throw fail("invalid_request","Account could not be created. Check the email and password requirements.");throw e}

@@ -1036,6 +1036,21 @@ impl Cereal {
                                         }),
                                     ),
                                 ),
+                            )
+                            .child(
+                                settings_row(
+                                    "sparkles",
+                                    "Welcome",
+                                    "Go through setting up Cereal on this Mac once more.",
+                                    t,
+                                )
+                                .child(
+                                    pill("settings-show-welcome", "Show welcome again", "", t)
+                                        .flex_shrink_0()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.show_welcome_again(cx)
+                                        })),
+                                ),
                             ),
                     )
                     .child(div().mt(px(20.)).px(px(8.)).child(small("Your notes stay yours.", t)));

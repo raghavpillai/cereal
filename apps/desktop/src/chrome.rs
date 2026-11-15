@@ -2268,7 +2268,7 @@ pub fn screen_icon(screen: Screen) -> &'static str {
         Screen::Trash => "trash",
         Screen::Settings => "settings",
         Screen::SearchResults => "search",
-        Screen::Home | Screen::Login | Screen::Account => "home",
+        Screen::Home | Screen::Login | Screen::Account | Screen::Welcome => "home",
     }
 }
 
@@ -2276,7 +2276,7 @@ pub fn screen_icon(screen: Screen) -> &'static str {
 /// none; space pages say "Back".
 pub fn back_label(screen: Screen, target: Screen) -> Option<BackLabel> {
     match screen {
-        Screen::Home | Screen::Login | Screen::Account => None,
+        Screen::Home | Screen::Login | Screen::Account | Screen::Welcome => None,
         Screen::MyNotes | Screen::Folder(_) | Screen::Favorites => Some(BackLabel::Text),
         _ => Some(BackLabel::Icon(screen_icon(target))),
     }
@@ -2291,7 +2291,12 @@ pub fn record_navigation(history: &mut Vec<Screen>, from: Screen, to: Screen) {
     }
     // A link's page is passed through, not returned to: what it may show
     // depends on the account, and following the link again shows it afresh.
-    if from == to || matches!(from, Screen::Login | Screen::Account | Screen::Link) {
+    if from == to
+        || matches!(
+            from,
+            Screen::Login | Screen::Account | Screen::Link | Screen::Welcome
+        )
+    {
         return;
     }
     // Returning to a page already on the trail unwinds to it instead of

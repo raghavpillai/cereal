@@ -25,14 +25,14 @@ export function signInProblem(status?: number): string {
 }
 
 /** What this server lets people sign in with. Public: it is read before anyone is signed in. */
-export interface AuthMethods { password: boolean; google: boolean; instanceName: string }
+export interface AuthMethods { password: boolean; google: boolean; instanceName: string; /** Nobody has claimed this server yet: the admin panel shows "Claim this server" in place of sign-in. */ setupRequired: boolean }
 /** A server from before sign-in settings answers 404: it only ever had email and password. */
 export async function fetchAuthMethods(signal?: AbortSignal, transport: typeof fetch = globalThis.fetch): Promise<AuthMethods> {
   const response = await transport('/api/v1/auth/methods', { signal, credentials: 'omit', cache: 'no-store', redirect: 'error', referrerPolicy: 'no-referrer' })
-  if (response.status === 404) return { password: true, google: false, instanceName: 'Cereal' }
+  if (response.status === 404) return { password: true, google: false, instanceName: 'Cereal', setupRequired: false }
   if (!response.ok) throw new Error('Sign-in methods are unavailable')
   const body = await response.json() as Partial<AuthMethods>
-  return { password: body.password !== false, google: body.google === true, instanceName: typeof body.instanceName === 'string' && body.instanceName.trim() ? body.instanceName : 'Cereal' }
+  return { password: body.password !== false, google: body.google === true, instanceName: typeof body.instanceName === 'string' && body.instanceName.trim() ? body.instanceName : 'Cereal', setupRequired: body.setupRequired === true }
 }
 
 /** The `?error=` codes the server sends back to the sign-in page after a refused Google sign-in. */

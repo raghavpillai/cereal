@@ -780,6 +780,9 @@ pub struct AuthMethodsDTO {
     pub instance_name: String,
 
     pub password: bool,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup_required: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -837,6 +840,9 @@ pub struct AdminSettingsDTO {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live_transcription_model: Option<LiveTranscriptionModelSelection>,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onboarding: Option<OnboardingDTO>,
+
     pub open_router_configured: bool,
 
     pub open_router_source: ElevenLabsSourceEnum,
@@ -887,6 +893,32 @@ pub struct LiveTranscriptionModelSelection {
 #[serde(rename_all = "snake_case")]
 pub enum LiveTranscriptionModelSelectionProvider {
     Elevenlabs,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardingDTO {
+    pub completed_at: Option<String>,
+
+    pub steps: OnboardingStepsDTO,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnboardingStepsDTO {
+    pub language: bool,
+
+    pub models: bool,
+
+    pub name: bool,
+
+    pub owner: bool,
+
+    pub sign_in: bool,
+
+    pub speech: bool,
+
+    pub storage: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1718,6 +1750,40 @@ pub enum Step {
     Read,
 
     Write,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OnboardingStepInput {
+    pub state: State,
+
+    pub step: OnboardingStep,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum State {
+    Done,
+
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OnboardingStep {
+    Language,
+
+    Models,
+
+    Name,
+
+    Owner,
+
+    #[serde(rename = "signIn")]
+    SignIn,
+
+    Speech,
+
+    Storage,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

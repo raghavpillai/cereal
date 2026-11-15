@@ -11,7 +11,7 @@ import {makeModelCatalog,CatalogFailure} from "./model-catalog"
 import {normalizeAllowedEmail,type SignInPolicy} from "./sign-in"
 import {normalizeS3Endpoint,normalizeS3Prefix,validBucketName,validS3Region,validAccessKeyId,validSecretAccessKey,S3SettingsError,type S3Config} from "./s3"
 import type {StorageConfiguration} from "./storage"
-import type {StorageSettingsDTO,UpdateStorageSettingsInput} from "@meeting-notes/contracts"
+import type {StorageSettingsDTO,UpdateStorageSettingsInput,OnboardingDTO,OnboardingStepInput} from "@meeting-notes/contracts"
 
 /** Settings that used to come from the environment and are now made on the admin panel. */
 export const MOVED_VARIABLES=["OPENROUTER_API_KEY","OPENAI_API_KEY","ANTHROPIC_API_KEY","ELEVENLABS_API_KEY","OPENROUTER_MODEL","OPENROUTER_TOOL_MODEL","ELEVENLABS_STT_MODEL","LIVE_MAX_SESSIONS","LIVE_HOLD_SECONDS","IOS_APP_IDS","IOS_APP_STORE_ID"] as const
@@ -26,6 +26,15 @@ const invalid=(message:string)=>new AdminFailure({error:"invalid_request",messag
 /** What a new instance uses until an administrator chooses models. */
 export const DEFAULT_LANGUAGE_MODEL="openai/gpt-6-sol",DEFAULT_TRANSCRIPTION_MODEL="scribe_v3"
 export const defaultLiveTranscriptionModel={provider:"elevenlabs",model:"scribe_v3_live"} as const
+/** The name an instance has until someone gives it one. */
+export const DEFAULT_INSTANCE_NAME="Cereal"
+/** Setup cannot be finished without these; the other steps can be skipped. */
+export const REQUIRED_ONBOARDING_STEPS=["owner","language","speech"] as const
+/** Steps that are finished because someone confirmed or skipped them, not because of what is stored. */
+const RECORDED_ONBOARDING_STEPS:ReadonlyArray<string>=["name","models","signIn","storage"]
+/** Whether the owner account has a password. Without an account service (tests) there is nothing to claim. */
+export type OwnerReady=()=>Promise<boolean>
+const ownerAlwaysReady:OwnerReady=async()=>true
 export function makeAdministrationService(store:CalendarStore,box:SecretBox=secretBoxFromKey(randomBytes(32)),options:{clock?:()=>Date;fetchFeed?:(url:string)=>Promise<string>;worker?:boolean;environment?:NodeJS.ProcessEnv;fetch?:typeof fetch;/** The public origin, for the redirect URIs shown on the admin panel. */baseURL?:string}={}) {
  const now=options.clock??(()=>new Date()),env=options.environment??process.env,fetchFeed=options.fetchFeed??fetchCalendarFeed
  const origin=new URL(options.baseURL??env.PUBLIC_BASE_URL??"http://localhost:"+(env.PORT??"3000")).origin
@@ -62,9 +71,48 @@ export function makeAdministrationService(store:CalendarStore,box:SecretBox=secr
   take("LIVE_HOLD_SECONDS",s?.liveHoldSeconds,value=>{const n=Number(value);return Number.isInteger(n)&&n>=0&&n<=3600?{liveHoldSeconds:n}:null})
   take("IOS_APP_IDS",s?.iosAppIds?.length?s.iosAppIds:null,value=>{const ids=value.split(",").map(id=>id.trim()).filter(id=>IOS_APP_ID.test(id));return ids.length?{iosAppIds:[...new Set(ids)].slice(0,10)}:null})
   take("IOS_APP_STORE_ID",s?.iosAppStoreId,value=>/^\d{1,20}$/.test(value)?{iosAppStoreId:value}:null)
-  if(seen.size!==(s?.importedEnvironment??[]).length)await store.saveSettings({...changes,importedEnvironment:[...seen]})
+  // A server whose provider keys came from its environment was set up before the setup flow existed: it is finished.
+  const configuredBefore=!s?.onboardingCompletedAt&&imported.some(name=>(Object.values(envFields) as string[]).includes(name))
+  if(seen.size!==(s?.importedEnvironment??[]).length)await store.saveSettings({...changes,importedEnvironment:[...seen],...(configuredBefore?{onboardingCompletedAt:now().toISOString()}:{})})
   return imported
  }
+ /** First-run setup as it stands. Every step but sign-in and storage is read from what is really stored, so a
+  * step finished some other way (the panel, the environment) counts, and nothing here can be made true by asking. */
+ function onboardingOf(s:Stored,ownerReady:boolean):OnboardingDTO{
+  const recorded=s?.onboardingSteps??{},configured=(id:AIProvider)=>!!(s?.[secretFields[id]]||fromEnv(s,envFields[id]))
+  return{completedAt:s?.onboardingCompletedAt??null,steps:{
+   owner:ownerReady,
+   name:!!recorded.name||(s?.instanceName??DEFAULT_INSTANCE_NAME)!==DEFAULT_INSTANCE_NAME,
+   language:configured("openrouter")||configured("openai")||configured("anthropic"),
+   // ElevenLabs, or OpenAI when it is the provider chosen for speech-to-text.
+   speech:configured("elevenlabs")||(s?.transcriptionModel?.provider==="openai"&&configured("openai")),
+   models:!!recorded.models||!!(s?.chatModels&&s.generationModel&&s.transcriptionModel),
+   signIn:!!recorded.signIn,storage:!!recorded.storage,
+  }}
+ }
+ /** The settings with the setup state: what the admin endpoints answer with. */
+ async function adminSettings(owner:OwnerReady=ownerAlwaysReady):Promise<AdminSettingsDTO>{
+  const[dto,stored,ownerReady]=await Promise.all([settings(),store.getSettings(),owner()])
+  return{...dto,onboarding:onboardingOf(stored,ownerReady)}
+ }
+ async function recordOnboardingStep(input:OnboardingStepInput,owner?:OwnerReady){
+  const required=(REQUIRED_ONBOARDING_STEPS as ReadonlyArray<string>).includes(input.step)
+  if(required&&input.state==="skipped")throw invalid("This step is needed before Cereal can work and cannot be skipped")
+  const s=await store.getSettings()
+  // A required step is finished by what is stored, never by saying so.
+  if(required&&!(await adminSettings(owner)).onboarding!.steps[input.step])throw new AdminFailure({error:"conflict",message:"This step is not finished yet"})
+  if(RECORDED_ONBOARDING_STEPS.includes(input.step))await store.saveSettings({onboardingSteps:{...(s?.onboardingSteps??{}),[input.step]:input.state}})
+  return adminSettings(owner)
+ }
+ async function completeOnboarding(owner?:OwnerReady){
+  const current=await adminSettings(owner),missing=REQUIRED_ONBOARDING_STEPS.filter(step=>!current.onboarding!.steps[step])
+  if(missing.length)throw new AdminFailure({error:"conflict",message:"Finish the required setup steps first: "+missing.join(", ")})
+  // Finishing twice keeps the first time.
+  if(!current.onboarding!.completedAt)await store.saveSettings({onboardingCompletedAt:now().toISOString()})
+  return adminSettings(owner)
+ }
+ /** Shows the setup flow again. Nothing that was configured is touched: only the record of having finished. */
+ async function restartOnboarding(owner?:OwnerReady){await store.saveSettings({onboardingCompletedAt:null,onboardingSteps:{}});return adminSettings(owner)}
  /** Moved variables that are still set in the environment after they were taken in: ignored, safe to delete. */
  const unusedEnvironment=(s:Stored)=>MOVED_VARIABLES.filter(name=>env[name]?.trim()&&s?.importedEnvironment?.includes(name))
  const liveLimits=(s:Stored)=>({maxSessions:s?.liveMaxSessions??(Number.isInteger(Number(fromEnv(s,"LIVE_MAX_SESSIONS")))&&Number(fromEnv(s,"LIVE_MAX_SESSIONS"))>=1?Math.min(200,Number(fromEnv(s,"LIVE_MAX_SESSIONS"))):20),
@@ -82,7 +130,7 @@ export function makeAdministrationService(store:CalendarStore,box:SecretBox=secr
  async function signInPolicy():Promise<SignInPolicy>{const s=await store.getSettings(),client=storedGoogleClient(s),dto=signInDTO(s);return{password:dto.password,google:dto.google&&!!client,allowedEmails:dto.allowedEmails,googleCredentials:client,instanceName:s?.instanceName??"Cereal"}}
  async function settings():Promise<AdminSettingsDTO>{
   const s=await store.getSettings(),legacyModel=s?.languageModel??fromEnv(s,"OPENROUTER_MODEL")??DEFAULT_LANGUAGE_MODEL,limits=liveLimits(s)
-  return{instanceName:s?.instanceName??"Cereal",instanceLogo:s?.instanceLogo??null,languageModel:legacyModel,
+  return{instanceName:s?.instanceName??DEFAULT_INSTANCE_NAME,instanceLogo:s?.instanceLogo??null,languageModel:legacyModel,
    providers:(["openrouter","openai","anthropic","elevenlabs"] as const).map(id=>({id,configured:!!(s?.[secretFields[id]]||fromEnv(s,envFields[id])),source:s?.[secretFields[id]]?"stored":fromEnv(s,envFields[id])?"environment":"none"})),
    chatModels:s?.chatModels??[{provider:"openrouter",model:legacyModel}],generationModel:s?.generationModel??{provider:"openrouter",model:legacyModel},transcriptionModel:s?.transcriptionModel??{provider:"elevenlabs",model:fromEnv(s,"ELEVENLABS_STT_MODEL")??DEFAULT_TRANSCRIPTION_MODEL},
    // Chosen on the admin panel and kept in the database; on by default, and null once an administrator turns it off.
@@ -188,10 +236,14 @@ export function makeAdministrationService(store:CalendarStore,box:SecretBox=secr
  eventContext:(id:string)=>boundary(()=>store.getEventContext(id)),
  noteContext:(userId:string,noteId:string)=>boundary(()=>store.getNoteContext(userId,noteId)),
  eventRange:(query:{from?:string;to?:string})=>boundary(()=>eventRange(query)),
- getSettings:()=>boundary(settings),
+ /** With `owner`, the answer for the admin endpoints: `onboarding.steps.owner` is read through it. */
+ getSettings:(owner?:OwnerReady)=>boundary(()=>adminSettings(owner)),
+ recordOnboardingStep:(input:OnboardingStepInput,owner?:OwnerReady)=>boundary(()=>recordOnboardingStep(input,owner)),
+ completeOnboarding:(owner?:OwnerReady)=>boundary(()=>completeOnboarding(owner)),
+ restartOnboarding:(owner?:OwnerReady)=>boundary(()=>restartOnboarding(owner)),
  getChatModels:()=>boundary(async()=>({models:(await settings()).chatModels})),
  getModelCatalog:(input:ModelCatalogInput)=>boundary(()=>modelCatalog(input)),
- updateSettings:(input:UpdateAdminSettingsInput)=>boundary(async()=>{
+ updateSettings:(input:UpdateAdminSettingsInput,owner?:OwnerReady)=>boundary(async()=>{
   const{openRouterApiKey,elevenLabsApiKey,openAiApiKey,anthropicApiKey,signIn,storage,apps,...fields}=input
   const appChanges:{iosAppIds?:string[];iosAppStoreId?:string|null}={}
   if(apps?.iosAppIds!==undefined){const ids=[...new Set(apps.iosAppIds.map(id=>id.trim()).filter(Boolean))];if(ids.some(id=>!IOS_APP_ID.test(id)))throw invalid("An app ID is the team ID, a dot and the bundle ID, such as LZWN2FF7YB.dev.cereal.mobile");appChanges.iosAppIds=ids}
@@ -214,7 +266,7 @@ export function makeAdministrationService(store:CalendarStore,box:SecretBox=secr
   }
   const secrets:Record<string,string|null>={};for(const[id,key]of Object.entries(keys))if(key!==undefined)secrets[secretFields[id as AIProvider]]=key===null?null:box.seal(key)
   await store.saveSettings({...fields,...(fields.instanceName!==undefined?{instanceName:fields.instanceName.trim()}:{}),...secrets,...signInChanges,...storageChanges,...appChanges})
-  return settings()
+  return adminSettings(owner)
  }),
  listCalendars:()=>boundary(async()=>(await store.listCalendars()).map(safe)),
  createCalendar:(input:CreateCalendarInput)=>boundary(async()=>{const url=validatedURL(input.url);const c=await store.createCalendar({name:input.name,color:input.color??"#87e5e8",enabled:input.enabled??true,provider:"ics",encryptedURL:box.seal(url.href),sourceHost:url.hostname});return(await sync(c.id))??safe(c)}),

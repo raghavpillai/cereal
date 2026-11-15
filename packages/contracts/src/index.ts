@@ -311,7 +311,12 @@ export const UpdateSignInSettingsInput = Schema.Struct({
 }).annotate({ identifier: "UpdateSignInSettingsInput" })
 export type UpdateSignInSettingsInput = typeof UpdateSignInSettingsInput.Type
 /** What the sign-in page and the apps offer. Public: it says nothing about accounts. */
-export const AuthMethodsDTO = Schema.Struct({ password: Schema.Boolean, google: Schema.Boolean, instanceName: Schema.String }).annotate({ identifier: "AuthMethodsDTO" })
+export const AuthMethodsDTO = Schema.Struct({
+  password: Schema.Boolean, google: Schema.Boolean, instanceName: Schema.String,
+  /** True while nobody has claimed this server: no owner account with a password exists yet. The web and the apps
+   * then show "Claim this server" in place of sign-in. Always sent by this server; optional so answers from older servers stay valid. */
+  setupRequired: Schema.optionalKey(Schema.Boolean),
+}).annotate({ identifier: "AuthMethodsDTO" })
 export type AuthMethodsDTO = typeof AuthMethodsDTO.Type
 /** Browser-to-app sign-in. The app keeps a random verifier and sends base64url(SHA-256(verifier)) as the challenge. */
 export const AppHandoffInput = Schema.Struct({ challenge: Schema.String.check(Schema.isMaxLength(128)) }).annotate({ identifier: "AppHandoffInput" })
@@ -376,6 +381,24 @@ export const UpdateAppsSettingsInput = Schema.Struct({
   iosAppStoreId: Schema.optionalKey(Schema.NullOr(Schema.String.check(Schema.isMaxLength(20)))),
 }).annotate({ identifier: "UpdateAppsSettingsInput" })
 export type UpdateAppsSettingsInput = typeof UpdateAppsSettingsInput.Type
+/** First-run setup. The steps, in the order the admin panel walks them. `owner`, `language` and `speech` are
+ * required before setup can be finished; the others can be skipped. */
+export const OnboardingStep = Schema.Literals(["owner", "name", "language", "speech", "models", "signIn", "storage"]).annotate({ identifier: "OnboardingStep" })
+export type OnboardingStep = typeof OnboardingStep.Type
+/** Which steps are finished, read from the server's real state: an owner account with a password exists; a team
+ * name was saved; a key for a chat and notes provider is stored; a key for the speech-to-text provider is stored;
+ * models were chosen; and, for sign-in and storage, the step was confirmed or skipped during setup. */
+export const OnboardingStepsDTO = Schema.Struct({
+  owner: Schema.Boolean, name: Schema.Boolean, language: Schema.Boolean, speech: Schema.Boolean,
+  models: Schema.Boolean, signIn: Schema.Boolean, storage: Schema.Boolean,
+}).annotate({ identifier: "OnboardingStepsDTO" })
+export type OnboardingStepsDTO = typeof OnboardingStepsDTO.Type
+/** `completedAt` is null until setup has been finished; while it is null the admin panel shows only the setup flow. */
+export const OnboardingDTO = Schema.Struct({ completedAt: Schema.NullOr(Timestamp), steps: OnboardingStepsDTO }).annotate({ identifier: "OnboardingDTO" })
+export type OnboardingDTO = typeof OnboardingDTO.Type
+/** Records that a step was confirmed ("done") or passed over ("skipped"). A required step cannot be skipped. */
+export const OnboardingStepInput = Schema.Struct({ step: OnboardingStep, state: Schema.Literals(["done", "skipped"]) }).annotate({ identifier: "OnboardingStepInput" })
+export type OnboardingStepInput = typeof OnboardingStepInput.Type
 export const AdminSettingsDTO = Schema.Struct({
   instanceName: Schema.String, languageModel: Schema.String,
   instanceLogo: Schema.NullOr(InstanceLogo),
@@ -400,6 +423,8 @@ export const AdminSettingsDTO = Schema.Struct({
   apps: Schema.optionalKey(AppsSettingsDTO),
   /** Variables still set in the server's environment whose settings now live here: they are ignored and can be deleted. */
   unusedEnvironment: Schema.optionalKey(Schema.Array(Schema.String)),
+  /** First-run setup: whether it has been finished and which steps are done. Always sent by this server; optional so older fixtures stay valid. */
+  onboarding: Schema.optionalKey(OnboardingDTO),
   updatedAt: Schema.NullOr(Timestamp),
 }).annotate({ identifier: "AdminSettingsDTO" })
 export type AdminSettingsDTO = typeof AdminSettingsDTO.Type
@@ -598,6 +623,7 @@ export const WireSchemas = {
   DownloadFileDTO, MacDownloadDTO, DownloadsDTO,
   StorageSettingsDTO, UpdateStorageSettingsInput, StorageTestInput, StorageTestDTO,
   AppsSettingsDTO, UpdateAppsSettingsInput,
+  OnboardingStepsDTO, OnboardingDTO, OnboardingStepInput,
 } as const
 
 export interface NoteGenerationProvider {

@@ -12,11 +12,13 @@ describe('sign-in page helpers', () => {
   test('sign-in methods come from the public endpoint without credentials; a server from before them means password only', async () => {
     let credentials = ''
     const methods = await fetchAuthMethods(undefined, transport((request, init) => { credentials = init.credentials ?? ''; expect(new URL(request.url).pathname).toBe('/api/v1/auth/methods'); return Response.json({ password: false, google: true, instanceName: 'Product studio' }) }))
-    expect(methods).toEqual({ password: false, google: true, instanceName: 'Product studio' })
+    expect(methods).toEqual({ password: false, google: true, instanceName: 'Product studio', setupRequired: false })
     expect(credentials).toBe('omit')
-    expect(await fetchAuthMethods(undefined, transport(() => Response.json({ error: 'not_found' }, { status: 404 })))).toEqual({ password: true, google: false, instanceName: 'Cereal' })
+    expect(await fetchAuthMethods(undefined, transport(() => Response.json({ error: 'not_found' }, { status: 404 })))).toEqual({ password: true, google: false, instanceName: 'Cereal', setupRequired: false })
     // Anything unexpected in the answer never turns a method on by accident.
-    expect(await fetchAuthMethods(undefined, transport(() => Response.json({ google: 'yes', instanceName: '' })))).toEqual({ password: true, google: false, instanceName: 'Cereal' })
+    expect(await fetchAuthMethods(undefined, transport(() => Response.json({ google: 'yes', instanceName: '', setupRequired: 'yes' })))).toEqual({ password: true, google: false, instanceName: 'Cereal', setupRequired: false })
+    // A server nobody has claimed says so, and only a plain `true` counts.
+    expect((await fetchAuthMethods(undefined, transport(() => Response.json({ password: true, google: false, instanceName: 'Cereal', setupRequired: true })))).setupRequired).toBe(true)
     expect(fetchAuthMethods(undefined, transport(() => Response.json({}, { status: 503 })))).rejects.toThrow()
   })
 

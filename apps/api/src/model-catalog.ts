@@ -18,6 +18,14 @@ export function makeModelCatalog(transport:typeof fetch=globalThis.fetch,clock:(
     if(!key&&provider!=='openrouter')throw new CatalogFailure('not_configured')
     let url=provider==='openrouter'?'https://openrouter.ai/api/v1/models':provider==='openai'?'https://api.openai.com/v1/models':provider==='anthropic'?'https://api.anthropic.com/v1/models?limit=1000':'https://api.elevenlabs.io/v1/models'
     const headers:Record<string,string>=provider==='elevenlabs'?{'xi-api-key':key}:provider==='anthropic'?{'x-api-key':key,'anthropic-version':'2023-06-01'}:key?{Authorization:'Bearer '+key}:{}
+    // OpenRouter's model list is public: it answers the same with a wrong key as with none. Its key endpoint is
+    // what tells a real key from a mistyped one, so a key someone has just pasted is checked there first. Only a
+    // clear refusal counts; if the check itself cannot be made, the list below decides as before.
+    if(provider==='openrouter'&&key){
+      const check=await transport('https://openrouter.ai/api/v1/key',{headers,redirect:'error',signal:AbortSignal.timeout(15_000)}).catch(()=>null)
+      await check?.body?.cancel().catch(()=>{})
+      if(check&&(check.status===401||check.status===403))throw new CatalogFailure()
+    }
     const models:AIModelDTO[]=[];let notice:string|null=null
     for(let page=0;page<10;page++){
       const response=await transport(url,{headers,redirect:'error',signal:AbortSignal.timeout(15_000)})

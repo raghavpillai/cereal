@@ -261,6 +261,65 @@
     "Timestamp": {
       "type": "string"
     },
+    "OnboardingStepsDTO": {
+      "type": "object",
+      "properties": {
+        "owner": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "boolean"
+        },
+        "language": {
+          "type": "boolean"
+        },
+        "speech": {
+          "type": "boolean"
+        },
+        "models": {
+          "type": "boolean"
+        },
+        "signIn": {
+          "type": "boolean"
+        },
+        "storage": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "owner",
+        "name",
+        "language",
+        "speech",
+        "models",
+        "signIn",
+        "storage"
+      ],
+      "additionalProperties": true
+    },
+    "OnboardingDTO": {
+      "type": "object",
+      "properties": {
+        "completedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "steps": {
+          "$ref": "#/$defs/OnboardingStepsDTO"
+        }
+      },
+      "required": [
+        "completedAt",
+        "steps"
+      ],
+      "additionalProperties": true
+    },
     "AdminSettingsDTO": {
       "type": "object",
       "properties": {
@@ -397,6 +456,9 @@
           "items": {
             "type": "string"
           }
+        },
+        "onboarding": {
+          "$ref": "#/$defs/OnboardingDTO"
         },
         "updatedAt": {
           "anyOf": [

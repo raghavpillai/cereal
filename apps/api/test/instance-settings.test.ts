@@ -38,12 +38,29 @@ test('instance settings encrypt every provider key, preserve partial edits and r
 test('catalogs are capability-filtered, key-scoped, cached, refreshable and disclose the Scribe fallback',async()=>{
  const f=fixture(),catalog=makeModelCatalog(f.transport)
  const first=await catalog('openrouter','key-one');expect(first.models.map(m=>m.id)).toEqual(['vendor/chat-a','vendor/chat-b'])
- await catalog('openrouter','key-one');expect(f.requests).toHaveLength(1)
- await catalog('openrouter','key-two');await catalog('openrouter','key-one',true);expect(f.requests).toHaveLength(3)
+ // A key is checked at OpenRouter's key endpoint before its (public) model list is read: two requests per load.
+ await catalog('openrouter','key-one');expect(f.requests.map(r=>r.url)).toEqual(['https://openrouter.ai/api/v1/key','https://openrouter.ai/api/v1/models'])
+ await catalog('openrouter','key-two');await catalog('openrouter','key-one',true);expect(f.requests).toHaveLength(6)
  const openai=await catalog('openai','key');expect(openai.models).toHaveLength(2);expect(openai.models.find(m=>m.id==='gpt-transcribe')?.capabilities).toEqual(['transcription'])
  const fallback=makeModelCatalog(Object.assign(async()=>Response.json([{model_id:'eleven_voice',can_do_text_to_speech:true}]),{preconnect:()=>{}}) as typeof fetch)
  expect((await fallback('elevenlabs','key')).notice).toContain('does not list Scribe')
  expect((await fallback('elevenlabs','key')).models.some(m=>m.id==='scribe_v3')).toBe(true)
+})
+test('a wrong OpenRouter key is refused even though its model list is public; an unreachable key check does not block',async()=>{
+ const models={data:[{id:'vendor/chat-a',name:'Chat A',architecture:{input_modalities:['text'],output_modalities:['text']}}]}
+ const seen:Array<{url:string;authorization:string|null}>=[]
+ const answering=(key:(authorization:string|null)=>Response|Promise<Response>)=>Object.assign(async(input:any,init?:RequestInit)=>{const url=String(input),authorization=new Headers(init?.headers).get('authorization');seen.push({url,authorization});return url.endsWith('/key')?key(authorization):Response.json(models)},{preconnect:()=>{}}) as typeof fetch
+ const strict=makeModelCatalog(answering(authorization=>authorization==='Bearer real-router-key'?Response.json({data:{label:'key'}}):Response.json({error:{message:'No auth credentials found'}},{status:401})))
+ await expect(strict('openrouter','mistyped-router-key')).rejects.toThrow('The provider model list could not be loaded')
+ // Refused before the list was asked for, and the key went to OpenRouter and nowhere else.
+ expect(seen).toEqual([{url:'https://openrouter.ai/api/v1/key',authorization:'Bearer mistyped-router-key'}])
+ expect((await strict('openrouter','real-router-key')).models.map(m=>m.id)).toEqual(['vendor/chat-a'])
+ // Without a key there is nothing to check: the public list is read as before.
+ seen.length=0;expect((await strict('openrouter','')).models).toHaveLength(1);expect(seen.map(r=>r.url)).toEqual(['https://openrouter.ai/api/v1/models'])
+ for(const unsure of [()=>Response.json({},{status:503}),()=>Response.json({},{status:404}),()=>{throw new Error('offline')}])expect((await makeModelCatalog(answering(unsure))('openrouter','some-router-key')).models).toHaveLength(1)
+ // Through the admin endpoint's service: the answer the settings page and the setup flow show as "not accepted".
+ const refusing=makeAdministrationService(makeMemoryCalendarStore(makeMemoryRepository()),undefined,{fetch:answering(()=>new Response(null,{status:403})),environment:{}})
+ await expect(run(refusing.getModelCatalog({provider:'openrouter',apiKey:'mistyped-router-key'}))).rejects.toBeDefined()
 })
 test('model discovery and settings writes enforce admin access; authenticated clients only receive enabled chat choices',async()=>{
  const f=fixture(),api=makeApiHandler(f.repository,token,{administration:f.admin,principalResolver:async headers=>headers.has('authorization')?{...bootstrapPrincipal,role:'user'}:null})

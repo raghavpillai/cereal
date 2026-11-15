@@ -62,7 +62,7 @@ const alreadyGone = (error: unknown) => { if ((error as { code?: string })?.code
 const STATE_MINUTES = 10, HANDOFF_SECONDS = 120, DEFAULT_RETURN = "/notes"
 
 /** A fixed window per key. Old windows are dropped once the table grows, so it stays bounded. */
-function rateLimiter(limit: number, windowMs: number, clock: () => Date) {
+export function rateLimiter(limit: number, windowMs: number, clock: () => Date) {
   const windows = new Map<string, { count: number; reset: number }>()
   return (key: string) => {
     const now = clock().getTime()

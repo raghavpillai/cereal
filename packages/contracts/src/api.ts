@@ -5,6 +5,7 @@ import {NoteListFilter,NoteSummariesPageDTO,NoteSearchPageDTO} from "./index"
 import {AuthMethodsDTO,AppHandoffInput,AppHandoffDTO,AppHandoffExchangeInput,AppHandoffTokenDTO} from "./index"
 import {DownloadsDTO} from "./index"
 import {StorageTestInput,StorageTestDTO} from "./index"
+import {OnboardingStepInput} from "./index"
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, HttpApiSecurity, OpenApi } from "effect/http-api"
 import { OrganizationDTO, OrganizationsDTO, OrganizationMemberDTO, OrganizationInvitationDTO, OrganizationDetailsDTO, OrganizationInvitationsDTO, CreateOrganizationInput, UpdateOrganizationInput, SetActiveOrganizationInput, InviteOrganizationMemberInput, UpdateOrganizationMemberRoleInput, ManualParticipantInput, GoogleStatusDTO, GoogleConnectInput, GoogleConnectDTO, GoogleCalendarsDTO, GoogleCalendarDTO, UpdateGoogleCalendarInput, NoteContextDTO, UpdateNoteContextInput, AuthSessionDTO, UsersDTO, UserDTO, CreateUserInput, UpdateUserRoleInput, CalendarPreferencesDTO, CalendarEventsDTO, CalendarsDTO, CalendarDTO, CreateCalendarInput, UpdateCalendarInput, AdminSettingsDTO, UpdateAdminSettingsInput, Timestamp, ChatStreamEventDTO, EvidenceRequestDTO, EvidenceDTO, AudioChunkDTO, AudioChunksDTO, UploadAudioChunkInput, RecordingCommandDTO, GenerateNotesCommandDTO, ChatInput, ChatAnswerDTO, CreateNoteInput, CreateShareInput, CreatedShareDTO, DeletedDTO, HealthDTO, NoteDTO, NotesDTO, SharedNoteDTO, ShareDTO, SharesDTO, UUID, UpdateNoteInput } from "./index"
 
@@ -77,10 +78,17 @@ export const MeetingsApi = HttpApi.make("MeetingNotesApi")
     .add(HttpApiEndpoint.post("createUser", "/api/v1/admin/users", {payload:CreateUserInput,success:UserDTO,error:errors}))
     .add(HttpApiEndpoint.post("createAdministrator", "/api/v1/admin/administrators", {payload:CreateUserInput,success:UserDTO,error:errors}))
     .add(HttpApiEndpoint.patch("updateUserRole", "/api/v1/admin/users/:id/role", {params:{id:UUID},payload:UpdateUserRoleInput,success:UserDTO,error:errors}))
-    .add(HttpApiEndpoint.post("setupOwner", "/api/v1/admin/owner/setup", {payload:CreateUserInput,success:UserDTO,error:errors}))
+    // Claims a fresh server: only the bootstrap token (ADMIN_API_TOKEN) is accepted. Attempts are limited per client; 429 carries Retry-After.
+    .add(HttpApiEndpoint.post("setupOwner", "/api/v1/admin/owner/setup", {payload:CreateUserInput,success:UserDTO,error:[...errors,RateLimited]}))
     .add(HttpApiEndpoint.get("getCalendarPreferences", "/api/v1/calendar/preferences", {success:CalendarPreferencesDTO,error:errors}))
     .add(HttpApiEndpoint.get("getAdminSettings", "/api/v1/admin/settings", { success: AdminSettingsDTO, error: errors }))
     .add(HttpApiEndpoint.patch("updateAdminSettings", "/api/v1/admin/settings", { payload: UpdateAdminSettingsInput, success: AdminSettingsDTO, error: errors }))
+    // First-run setup. Each answers with the settings as they now stand, so `onboarding` is always current.
+    // Recording a step and finishing are for the owner and administrators; finishing is refused (409) until the
+    // required steps (owner, language, speech) are done. Starting over is the owner's alone.
+    .add(HttpApiEndpoint.post("recordOnboardingStep", "/api/v1/admin/onboarding", { payload: OnboardingStepInput, success: AdminSettingsDTO, error: errors }))
+    .add(HttpApiEndpoint.post("completeOnboarding", "/api/v1/admin/onboarding/complete", { success: AdminSettingsDTO, error: errors }))
+    .add(HttpApiEndpoint.post("restartOnboarding", "/api/v1/admin/onboarding/restart", { success: AdminSettingsDTO, error: errors }))
     .add(HttpApiEndpoint.post("getModelCatalog", "/api/v1/admin/models", {payload: ModelCatalogInput, success: ModelCatalogDTO, error: errors}))
     .add(HttpApiEndpoint.post("testStorage", "/api/v1/admin/storage/test", {payload: StorageTestInput, success: StorageTestDTO, error: errors}))
     .add(HttpApiEndpoint.get("getChatModels", "/api/v1/models/chat", {success: ChatModelsDTO, error: errors}))

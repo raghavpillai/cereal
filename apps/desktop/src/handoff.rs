@@ -15,6 +15,8 @@ pub struct SignInMethods {
     /// The server can finish a sign-in in the browser and hand it to this
     /// app. False on a server from before it said which methods it offers.
     pub browser: bool,
+    /// What the server calls itself, when it says.
+    pub instance_name: Option<String>,
 }
 
 impl SignInMethods {
@@ -24,6 +26,7 @@ impl SignInMethods {
         password: true,
         google: false,
         browser: false,
+        instance_name: None,
     };
 
     /// The browser button's label, or `None` when there is no such button.
@@ -43,6 +46,8 @@ impl SignInMethods {
         struct Wire {
             password: bool,
             google: bool,
+            #[serde(default, rename = "instanceName")]
+            instance_name: Option<String>,
         }
         match status {
             200 => serde_json::from_slice::<Wire>(body)
@@ -50,6 +55,7 @@ impl SignInMethods {
                     password: wire.password,
                     google: wire.google,
                     browser: true,
+                    instance_name: wire.instance_name,
                 })
                 .map_err(|_| "The server returned an unexpected response.".into()),
             // An older server: it has no such page, and signs in as before.

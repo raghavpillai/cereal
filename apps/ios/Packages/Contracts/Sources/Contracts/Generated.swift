@@ -104,6 +104,9 @@
 //   let storageTestDTO = try? JSONDecoder().decode(StorageTestDTO.self, from: jsonData)
 //   let appsSettingsDTO = try? JSONDecoder().decode(AppsSettingsDTO.self, from: jsonData)
 //   let updateAppsSettingsInput = try? JSONDecoder().decode(UpdateAppsSettingsInput.self, from: jsonData)
+//   let onboardingStepsDTO = try? JSONDecoder().decode(OnboardingStepsDTO.self, from: jsonData)
+//   let onboardingDTO = try? JSONDecoder().decode(OnboardingDTO.self, from: jsonData)
+//   let onboardingStepInput = try? JSONDecoder().decode(OnboardingStepInput.self, from: jsonData)
 //   let liveHelloMessage = try? JSONDecoder().decode(LiveHelloMessage.self, from: jsonData)
 //   let liveMarkMessage = try? JSONDecoder().decode(LiveMarkMessage.self, from: jsonData)
 //   let liveReadyMessage = try? JSONDecoder().decode(LiveReadyMessage.self, from: jsonData)
@@ -1309,17 +1312,20 @@ public struct AuthMethodsDTO: Codable, Sendable {
     public let google: Bool
     public let instanceName: String
     public let password: Bool
+    public let setupRequired: Bool?
 
     public enum CodingKeys: String, CodingKey {
         case google = "google"
         case instanceName = "instanceName"
         case password = "password"
+        case setupRequired = "setupRequired"
     }
 
-    public init(google: Bool, instanceName: String, password: Bool) {
+    public init(google: Bool, instanceName: String, password: Bool, setupRequired: Bool?) {
         self.google = google
         self.instanceName = instanceName
         self.password = password
+        self.setupRequired = setupRequired
     }
 }
 
@@ -1393,6 +1399,7 @@ public struct AdminSettingsDTO: Codable, Sendable {
     public let liveHoldSeconds: Int?
     public let liveMaxSessions: Int?
     public let liveTranscriptionModel: LiveTranscriptionModelSelection?
+    public let onboarding: OnboardingDTO?
     public let openRouterConfigured: Bool
     public let openRouterSource: ElevenLabsSourceEnum
     public let providers: [ProviderStatusDTO]
@@ -1416,6 +1423,7 @@ public struct AdminSettingsDTO: Codable, Sendable {
         case liveHoldSeconds = "liveHoldSeconds"
         case liveMaxSessions = "liveMaxSessions"
         case liveTranscriptionModel = "liveTranscriptionModel"
+        case onboarding = "onboarding"
         case openRouterConfigured = "openRouterConfigured"
         case openRouterSource = "openRouterSource"
         case providers = "providers"
@@ -1426,7 +1434,7 @@ public struct AdminSettingsDTO: Codable, Sendable {
         case updatedAt = "updatedAt"
     }
 
-    public init(apps: AppsSettingsDTO?, calendarLookAheadDays: Int, calendarRefreshMinutes: Int, chatModels: [LanguageModelSelection], elevenLabsConfigured: Bool, elevenLabsSource: ElevenLabsSourceEnum, generationModel: LanguageModelSelection, instanceLogo: String?, instanceName: String, languageModel: String, liveHoldSeconds: Int?, liveMaxSessions: Int?, liveTranscriptionModel: LiveTranscriptionModelSelection?, openRouterConfigured: Bool, openRouterSource: ElevenLabsSourceEnum, providers: [ProviderStatusDTO], signIn: SignInSettingsDTO?, storage: StorageSettingsDTO?, transcriptionModel: TranscriptionModelSelection, unusedEnvironment: [String]?, updatedAt: String?) {
+    public init(apps: AppsSettingsDTO?, calendarLookAheadDays: Int, calendarRefreshMinutes: Int, chatModels: [LanguageModelSelection], elevenLabsConfigured: Bool, elevenLabsSource: ElevenLabsSourceEnum, generationModel: LanguageModelSelection, instanceLogo: String?, instanceName: String, languageModel: String, liveHoldSeconds: Int?, liveMaxSessions: Int?, liveTranscriptionModel: LiveTranscriptionModelSelection?, onboarding: OnboardingDTO?, openRouterConfigured: Bool, openRouterSource: ElevenLabsSourceEnum, providers: [ProviderStatusDTO], signIn: SignInSettingsDTO?, storage: StorageSettingsDTO?, transcriptionModel: TranscriptionModelSelection, unusedEnvironment: [String]?, updatedAt: String?) {
         self.apps = apps
         self.calendarLookAheadDays = calendarLookAheadDays
         self.calendarRefreshMinutes = calendarRefreshMinutes
@@ -1440,6 +1448,7 @@ public struct AdminSettingsDTO: Codable, Sendable {
         self.liveHoldSeconds = liveHoldSeconds
         self.liveMaxSessions = liveMaxSessions
         self.liveTranscriptionModel = liveTranscriptionModel
+        self.onboarding = onboarding
         self.openRouterConfigured = openRouterConfigured
         self.openRouterSource = openRouterSource
         self.providers = providers
@@ -1491,6 +1500,53 @@ public struct LiveTranscriptionModelSelection: Codable, Sendable {
 
 public enum LiveTranscriptionModelSelectionProvider: String, Codable, Sendable {
     case elevenlabs = "elevenlabs"
+}
+
+// MARK: - OnboardingDTO
+public struct OnboardingDTO: Codable, Sendable {
+    public let completedAt: String?
+    public let steps: OnboardingStepsDTO
+
+    public enum CodingKeys: String, CodingKey {
+        case completedAt = "completedAt"
+        case steps = "steps"
+    }
+
+    public init(completedAt: String?, steps: OnboardingStepsDTO) {
+        self.completedAt = completedAt
+        self.steps = steps
+    }
+}
+
+// MARK: - OnboardingStepsDTO
+public struct OnboardingStepsDTO: Codable, Sendable {
+    public let language: Bool
+    public let models: Bool
+    public let name: Bool
+    public let owner: Bool
+    public let signIn: Bool
+    public let speech: Bool
+    public let storage: Bool
+
+    public enum CodingKeys: String, CodingKey {
+        case language = "language"
+        case models = "models"
+        case name = "name"
+        case owner = "owner"
+        case signIn = "signIn"
+        case speech = "speech"
+        case storage = "storage"
+    }
+
+    public init(language: Bool, models: Bool, name: Bool, owner: Bool, signIn: Bool, speech: Bool, storage: Bool) {
+        self.language = language
+        self.models = models
+        self.name = name
+        self.owner = owner
+        self.signIn = signIn
+        self.speech = speech
+        self.storage = storage
+    }
 }
 
 // MARK: - ProviderStatusDTO
@@ -2679,6 +2735,37 @@ public enum Step: String, Codable, Sendable {
     case write = "write"
 }
 
+// MARK: - OnboardingStepInput
+public struct OnboardingStepInput: Codable, Sendable {
+    public let state: State
+    public let step: OnboardingStep
+
+    public enum CodingKeys: String, CodingKey {
+        case state = "state"
+        case step = "step"
+    }
+
+    public init(state: State, step: OnboardingStep) {
+        self.state = state
+        self.step = step
+    }
+}
+
+public enum State: String, Codable, Sendable {
+    case done = "done"
+    case skipped = "skipped"
+}
+
+public enum OnboardingStep: String, Codable, Sendable {
+    case language = "language"
+    case models = "models"
+    case name = "name"
+    case owner = "owner"
+    case signIn = "signIn"
+    case speech = "speech"
+    case storage = "storage"
+}
+
 // MARK: - LiveHelloMessage
 public struct LiveHelloMessage: Codable, Sendable {
     public let captureId: String
@@ -3438,6 +3525,7 @@ extension AdminSettingsDTO {
         case liveHoldSeconds
         case apps
         case unusedEnvironment
+        case onboarding
         case updatedAt
     }
     public func encode(to encoder: Encoder) throws {
@@ -3462,6 +3550,7 @@ extension AdminSettingsDTO {
         try container.encodeIfPresent(liveHoldSeconds, forKey: .liveHoldSeconds)
         try container.encodeIfPresent(apps, forKey: .apps)
         try container.encodeIfPresent(unusedEnvironment, forKey: .unusedEnvironment)
+        try container.encodeIfPresent(onboarding, forKey: .onboarding)
         try container.encode(updatedAt, forKey: .updatedAt)
     }
 }
@@ -3789,5 +3878,18 @@ extension AppsSettingsDTO {
         var container = encoder.container(keyedBy: ContractWireKeys.self)
         try container.encode(iosAppIds, forKey: .iosAppIds)
         try container.encode(iosAppStoreId, forKey: .iosAppStoreId)
+    }
+}
+
+
+extension OnboardingDTO {
+    private enum ContractWireKeys: String, CodingKey {
+        case completedAt
+        case steps
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: ContractWireKeys.self)
+        try container.encode(completedAt, forKey: .completedAt)
+        try container.encode(steps, forKey: .steps)
     }
 }

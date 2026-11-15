@@ -7,6 +7,8 @@ use gpui::{prelude::*, *};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Screen {
+    /// The first-run welcome (see `onboarding_view.rs`).
+    Welcome,
     Login,
     Account,
     Home,
@@ -168,6 +170,8 @@ pub struct Cereal {
     pub links: crate::shared_view::Links,
     /// "Check for updates" (see `update_view.rs`).
     pub updates: crate::update_view::Updates,
+    /// The first-run welcome: its step, and what this Mac has allowed.
+    pub onboarding: crate::onboarding_view::Onboarding,
     pub focus: FocusHandle,
     pub _subscriptions: Vec<Subscription>,
     /// Registered with the window on the first frame: see `render`.
@@ -217,8 +221,28 @@ impl Cereal {
         });
         let menu_key_subscription = cx.intercept_keystrokes(menu_key_listener);
         let (links, link_subscriptions) = crate::shared_view::Links::new(cx);
+        // The welcome draws the account form's fields in its own layout.
+        let (account_address, account_email) = {
+            let account = account.read(cx);
+            (account.url.clone(), account.email.clone())
+        };
+        let welcome = crate::onboarding::at_launch();
+        if let Some(flow) = welcome {
+            crate::onboarding::remember(flow, false);
+        }
         let mut subscriptions = vec![
             menu_key_subscription,
+            cx.observe(&account, |this, _, cx| {
+                if this.screen == Screen::Welcome {
+                    cx.notify();
+                }
+            }),
+            cx.subscribe(&account_address, |this, _, _: &InputSubmitted, cx| {
+                this.onboarding_address_entered(cx)
+            }),
+            cx.subscribe(&account_email, |this, _, _: &InputSubmitted, cx| {
+                this.onboarding_email_entered(cx)
+            }),
             cx.subscribe(
                 &account,
                 |this, _, event: &crate::account::AccountEvent, cx| match event {
@@ -359,7 +383,11 @@ impl Cereal {
             workspace: Workspace::load(),
             login,
             account,
-            screen: Screen::Home,
+            screen: if welcome.is_some() {
+                Screen::Welcome
+            } else {
+                Screen::Home
+            },
             current_note: None,
             sidebar_open: true,
             folders_open: false,
@@ -451,6 +479,7 @@ impl Cereal {
             meeting: Default::default(),
             links,
             updates: Default::default(),
+            onboarding: crate::onboarding_view::Onboarding::new(welcome, cx),
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
             focus_lost: None,
@@ -466,7 +495,7 @@ impl Cereal {
         // reads nothing without a session on that server.
         let screen = if crate::server::enabled()
             && crate::account::identity().is_none()
-            && !matches!(screen, Screen::Login | Screen::Link)
+            && !matches!(screen, Screen::Login | Screen::Link | Screen::Welcome)
         {
             Screen::Account
         } else {
@@ -833,6 +862,11 @@ impl Cereal {
     }
 
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        // In the welcome, Escape is Back.
+        if self.screen == Screen::Welcome && self.toast.is_none() && self.menu.is_none() {
+            self.onboarding_back(cx);
+            return;
+        }
         if self.summary.edit.is_some() {
             self.finish_enhanced_edit(cx);
             self.focus.focus(window);
@@ -949,10 +983,15 @@ impl Render for Cereal {
         crate::ui::set_popover_open(self.visible_menu.is_some() || self.search_open);
         self.drain_chat_history(cx);
         let t = self.theme();
-        let login = matches!(self.screen, Screen::Login | Screen::Account);
+        let login = matches!(
+            self.screen,
+            Screen::Login | Screen::Account | Screen::Welcome
+        );
         let full_chat =
             self.chat_maximized || (self.screen == Screen::Chat && self.current_note.is_none());
-        let content = if self.screen == Screen::Account {
+        let content = if self.screen == Screen::Welcome {
+            self.render_onboarding(window, cx)
+        } else if self.screen == Screen::Account {
             self.account.clone().into_any_element()
         } else if login {
             // The sign-in screen follows the app's theme.
@@ -1041,8 +1080,18 @@ impl Render for Cereal {
             .id("cereal-root")
             .key_context("Cereal")
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &NewNote, w, cx| this.new_note(w, cx)))
-            .on_action(cx.listener(|this, _: &Search, w, cx| this.open_search(w, cx)))
+            // The app's own shortcuts wait until the welcome is over: a new
+            // note would start recording behind it.
+            .on_action(cx.listener(|this, _: &NewNote, w, cx| {
+                if this.screen != Screen::Welcome {
+                    this.new_note(w, cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Search, w, cx| {
+                if this.screen != Screen::Welcome {
+                    this.open_search(w, cx)
+                }
+            }))
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(|this, _: &FocusNext, w, cx| this.focus_step(false, w, cx)))
             .on_action(cx.listener(|this, _: &FocusPrevious, w, cx| this.focus_step(true, w, cx)))
@@ -1053,10 +1102,16 @@ impl Render for Cereal {
                     cx.notify();
                 }
             }))
-            .on_action(cx.listener(|this, _: &GoHome, _, cx| this.navigate(Screen::Home, cx)))
-            .on_action(
-                cx.listener(|this, _: &OpenSettings, _, cx| this.navigate(Screen::Settings, cx)),
-            )
+            .on_action(cx.listener(|this, _: &GoHome, _, cx| {
+                if this.screen != Screen::Welcome {
+                    this.navigate(Screen::Home, cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
+                if this.screen != Screen::Welcome {
+                    this.navigate(Screen::Settings, cx)
+                }
+            }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
                 this.sidebar_open = !this.sidebar_open;
                 cx.notify();

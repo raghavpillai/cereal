@@ -19,6 +19,9 @@ mod meeting;
 mod model;
 mod motion;
 mod note;
+mod onboarding;
+mod onboarding_scene;
+mod onboarding_view;
 mod pill;
 mod recording;
 mod recording_view;
@@ -75,6 +78,7 @@ fn main() {
         }
         input::init(cx);
         app::init(cx);
+        onboarding_view::init(cx);
         cx.set_menus(vec![Menu {
             name: "Cereal".into(),
             items: vec![
@@ -234,6 +238,16 @@ fn main() {
                 "The functional log requires an isolated CEREAL_DATA_DIR"
             );
             tour::functional_log(handle, cx);
+        }
+        // `CEREAL_WELCOME_TOUR=<name>` walks the first-run welcome by itself
+        // (see `tour::welcome`), for captures. Debug builds only.
+        #[cfg(debug_assertions)]
+        if let Ok(name) = crate::environment::var("CEREAL_WELCOME_TOUR") {
+            assert!(
+                crate::environment::var_os("CEREAL_DATA_DIR").is_some(),
+                "The welcome tour requires an isolated CEREAL_DATA_DIR"
+            );
+            tour::welcome(handle, name, cx);
         }
         if std::env::args().any(|a| a == "--motion-tour") {
             assert!(

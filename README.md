@@ -16,20 +16,24 @@ Install Docker with Compose, then:
 docker compose up --build -d
 ```
 
-Open `http://localhost:3000`. `setup.sh` creates a private `.env` with random database and owner credentials and never overwrites an existing one.
+`setup.sh` creates a private `.env` with random database and owner credentials, never overwrites an existing one, and prints the address to open and a **setup code**. Show the code again with `grep ADMIN_API_TOKEN .env`.
 
-Sign in as the owner and open `/admin` to finish setup:
+Open `http://localhost:3000`. A new server has no accounts yet, so every page leads to setup, which walks through these steps one at a time:
 
-1. **AI providers**: add an API key for ElevenLabs (speech-to-text) and for OpenRouter, OpenAI or Anthropic (chat and notes). Keys are encrypted and stored on your server.
-2. **Models**: choose the model for chat, for meeting notes, for speech-to-text and for live transcription, and how many recordings may be transcribed live at once. These choices are stored in the database.
-3. **Sign-in**: choose how people sign in (email and password, Google, or both) and which addresses or domains may create an account by signing in with Google. To use Google, create an OAuth web client in Google Cloud, enter its client ID and secret here, and add the two redirect URIs the panel shows. The same client is used for the Google Calendar connection. The secret is encrypted and stored on your server.
+1. **Claim this server**: paste the setup code and create the owner account (your name, email, and a password of at least 12 characters).
+2. **Name your space**: the team name and, if you like, a logo.
+3. **Notes and chat**: pick OpenRouter, OpenAI or Anthropic and paste its API key. The key is checked as you paste it.
+4. **Speech to text**: paste an ElevenLabs API key.
+5. **Models**: the models for chat, meeting notes, speech-to-text and live transcription, already chosen for the keys you added.
+6. **Who can sign in** (optional): email and password, Google, or both, and which addresses or domains may create an account by signing in with Google. To use Google, create an OAuth web client in Google Cloud, enter its client ID and secret, and add the two redirect URIs the step shows. The same client is used for the Google Calendar connection.
+7. **Where files live** (optional): recorded audio and the app builds this server offers are kept on the server's disk, or in an S3-compatible bucket (Amazon S3, Cloudflare R2, MinIO, Backblaze B2). **Test connection** tries the bucket before anything is saved. New files go to the storage you choose; files already stored stay where they are and keep working, and nothing is moved.
+8. **Get the apps**: the Mac download and the address to type into the apps.
 
-4. **Storage** (optional): recorded audio and the app builds this server offers are kept on the server's disk, or in an S3-compatible bucket (Amazon S3, Cloudflare R2, MinIO, Backblaze B2). Enter the bucket and its keys, press **Test connection**, then save. New files go to the storage you choose; files already stored stay where they are and keep working, and nothing is moved.
-5. **Apps** (optional): the iPhone app IDs that may open note links, and the App Store ID once the app is published.
+Setup can be left and picked up again: it resumes at the first unfinished step. Until it is finished, `/admin` shows only setup; afterwards it is the admin panel, where every one of these settings can be changed, along with live transcription limits and the iPhone app's identifiers. The owner can go through setup again from the link at the bottom of the panel; nothing that was configured is lost. Keys and secrets are encrypted and stored on your server.
 
 All of this is kept in the database, and a change applies without a restart. `.env` holds only what the server needs before it can read its settings: the database password, the owner token, the port and the public address (`PUBLIC_BASE_URL`). If sign-in is ever misconfigured, `ADMIN_API_TOKEN` from `.env` still works as a bearer token for `PATCH /api/v1/admin/settings`.
 
-Upgrading from a version that kept provider keys or model names in `.env`: start the new version once. It takes those values into the database, logs each one by name, and never reads them again; the admin page then lists the variables you can delete.
+Upgrading from a version that kept provider keys or model names in `.env`: start the new version once. It takes those values into the database, logs each one by name, and never reads them again; the admin page then lists the variables you can delete. A server that already had a provider key, stored or in `.env`, counts as set up and opens on the admin panel as before.
 
 ```sh
 docker compose logs --tail=100 app

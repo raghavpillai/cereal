@@ -144,11 +144,12 @@ private final class PCMSink: @unchecked Sendable {
     private let buffer: UnsafeMutablePointer<Float>
     private var closed = false
 
-    init(url: URL, sampleRate: Double) throws {
+    /// `discard` keeps levels and counters only: no file is created or written.
+    init(url: URL, sampleRate: Double, discard: Bool = false) throws {
         guard sampleRate.isFinite, sampleRate >= 8_000, sampleRate <= 384_000 else {
             throw CaptureFailure(code: "invalid_format", message: "The audio device returned an unsupported sample rate.")
         }
-        self.file = try CheckpointedWAV(url: url, sampleRate: sampleRate)
+        if !discard { self.file = try CheckpointedWAV(url: url, sampleRate: sampleRate) }
         guard let ring = mn_pcm_create(64, 8_192) else {
             throw CaptureFailure(code: "allocation", message: "Audio buffer storage could not be allocated.")
         }
@@ -227,6 +228,8 @@ private final class NativeAudioSession: @unchecked Sendable {
     private let lock = NSLock()
     private let output: URL
     private let flags: UInt32
+    /// A listening check: levels only, nothing written to disk.
+    private let discard: Bool
     private var channels = [ChannelState(), ChannelState()]
     private var cancelled = false
     private var stopped = false
@@ -249,7 +252,8 @@ private final class NativeAudioSession: @unchecked Sendable {
 
     init(output: URL, flags: UInt32) {
         self.output = output
-        self.flags = flags
+        self.flags = flags & 3
+        self.discard = flags & 4 != 0
         for index in 0..<2 where flags & (1 << index) != 0 { channels[index].state = "starting" }
     }
 
@@ -257,11 +261,13 @@ private final class NativeAudioSession: @unchecked Sendable {
         control.async { [self] in
             guard !isCancelled else { return }
             do {
-                try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true,
-                    attributes: [.posixPermissions: 0o700])
-                let attributes = try output.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-                guard attributes.isDirectory == true, attributes.isSymbolicLink != true else {
-                    throw CaptureFailure(code: "output_directory", message: "The session output must be a real directory.")
+                if !discard {
+                    try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true,
+                        attributes: [.posixPermissions: 0o700])
+                    let attributes = try output.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+                    guard attributes.isDirectory == true, attributes.isSymbolicLink != true else {
+                        throw CaptureFailure(code: "output_directory", message: "The session output must be a real directory.")
+                    }
                 }
             } catch {
                 for index in 0..<2 where flags & (1 << index) != 0 {
@@ -381,7 +387,7 @@ private final class NativeAudioSession: @unchecked Sendable {
             }
             // OpenOats prefers a standard Float32 format, falling back to the hardware format.
             let format = AVAudioFormat(standardFormatWithSampleRate: native.sampleRate, channels: native.channelCount) ?? native
-            let sink = try PCMSink(url: output.appendingPathComponent("mic.wav"), sampleRate: format.sampleRate)
+            let sink = try PCMSink(url: output.appendingPathComponent("mic.wav"), sampleRate: format.sampleRate, discard: discard)
             register(sink, for: 0)
             let description = format.streamDescription.pointee
             input.installTap(onBus: 0, bufferSize: 4_096, format: format) { buffer, _ in
@@ -470,7 +476,7 @@ private final class NativeAudioSession: @unchecked Sendable {
                 let sequence = systemSinkSequence
                 systemSinkSequence += 1
                 let name = sequence == 0 ? "system.wav" : "system-retry-\(sequence).wav"
-                let sink = try PCMSink(url: output.appendingPathComponent(name), sampleRate: description.mSampleRate)
+                let sink = try PCMSink(url: output.appendingPathComponent(name), sampleRate: description.mSampleRate, discard: discard)
                 register(sink, for: 1, selfExcluded: true)
                 status = AudioDeviceCreateIOProcIDWithBlock(&ioProc, aggregateID, systemCallbacks) { _, input, _, _, _ in
                     let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
@@ -712,7 +718,7 @@ public func mn_audio_start(_ path: UnsafePointer<CChar>?, _ flags: UInt32,
         return nil
     }
     guard let path, let directory = String(validatingCString: path), !directory.isEmpty,
-          directory.utf8.count <= 4_096, flags > 0, flags & ~UInt32(3) == 0 else {
+          directory.utf8.count <= 4_096, flags & 3 != 0, flags & ~UInt32(7) == 0 else {
         _ = copyCString("A valid output directory and microphone/system channel flags are required.", to: error, capacity: errorCapacity)
         return nil
     }
@@ -744,4 +750,20 @@ public func mn_audio_destroy(_ handle: UnsafeMutableRawPointer?) {
     let reference = Unmanaged<NativeAudioSession>.fromOpaque(handle)
     reference.takeUnretainedValue().stop()
     reference.release()
+}
+
+/// What macOS says about a capture permission, without asking for it.
+/// Channel 0, the microphone: the `AVAuthorizationStatus` (0 not determined,
+/// 1 restricted, 2 denied, 3 authorised). Channel 1, system audio: 0 granted,
+/// 1 denied, 2 not asked. macOS has no public call for the second, so its
+/// own preflight is looked up at run time and only ever read; -1 when it is
+/// not there, and the caller then goes by what a listening check hears.
+@_cdecl("mn_permission_status")
+public func mn_permission_status(_ channel: UInt32) -> Int32 {
+    if channel == 0 { return Int32(AVCaptureDevice.authorizationStatus(for: .audio).rawValue) }
+    typealias Preflight = @convention(c) (CFString, CFDictionary?) -> Int
+    guard let library = dlopen("/System/Library/PrivateFrameworks/TCC.framework/Versions/A/TCC", RTLD_NOW),
+          let symbol = dlsym(library, "TCCAccessPreflight") else { return -1 }
+    let status = unsafeBitCast(symbol, to: Preflight.self)("kTCCServiceAudioCapture" as CFString, nil)
+    return (0...2).contains(status) ? Int32(status) : 2
 }

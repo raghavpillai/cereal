@@ -13,7 +13,7 @@ import { makeAdministrationService, type AdministrationService } from "./adminis
 import { makeMemoryCalendarStore } from "./calendar-store"
 import { NotesRepository, type NotesRepositoryService, type RepositoryError } from "./repository"
 import {McpStoreError,type McpStore} from "./mcp-store"
-import {SignInFailure} from "./sign-in"
+import {SignInFailure,rateLimiter} from "./sign-in"
 import {DOWNLOAD_FILES_PATH,makeDownloads,type DownloadsService} from "./downloads"
 import {readAppVersion} from "./version"
 import type {StorageService} from "./storage"
@@ -107,11 +107,15 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
     const principal=yield* AuthPrincipal
     return yield* options.google.getNoteContext(principal.id,summary.id).pipe(Effect.map(context=>withMeeting(summary,context.meeting)),Effect.catch(()=>Effect.succeed(summary)))
   })
+  // Whether the server has been claimed. Without an account service there is no owner account to wait for.
+  const ownerReady=()=>options.authentication?options.authentication.ownerReady():Promise.resolve(true)
+  // Claiming a server is tried with a code someone pastes: a handful of attempts a minute per client is plenty.
+  const setupByClient=rateLimiter(10,60_000,clock),setupOverall=rateLimiter(120,60_000,clock)
   const signInFailure=(error:unknown)=>error instanceof SignInFailure?{error:error.code,message:error.message}:{error:"unavailable" as const,message:"Sign-in is temporarily unavailable"}
   const publicHandlers = HttpApiBuilder.group(MeetingsApi, "public", (handlers) => handlers
     .handle("health", () => Effect.succeed({ status: "ok", version: "v1" } as const))
     // What the sign-in page and the apps offer. Nothing here depends on who is asking.
-    .handle("getAuthMethods", () => Effect.tryPromise({try:async()=>{const policy=await administration.signInPolicy();return{password:policy.password,google:policy.google&&!!options.authentication,instanceName:policy.instanceName}},catch:()=>({error:"unavailable",message:"Sign-in is temporarily unavailable"} as const)}))
+    .handle("getAuthMethods", () => Effect.tryPromise({try:async()=>{const[policy,claimed]=await Promise.all([administration.signInPolicy(),ownerReady()]);return{password:policy.password,google:policy.google&&!!options.authentication,instanceName:policy.instanceName,setupRequired:!claimed}},catch:()=>({error:"unavailable",message:"Sign-in is temporarily unavailable"} as const)}))
     .handle("getDownloads", () => Effect.tryPromise({try:()=>downloads.manifest(),catch:()=>({error:"unavailable",message:"Downloads are temporarily unavailable"} as const)}))
     // The files are answered in `handler` below, before the typed routes, because they need byte ranges and
     // HEAD. This is only reached if that ever stops matching, and then says what a missing file says.
@@ -169,8 +173,11 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
     .handle("getCalendarPreferences", () => Effect.map(administration.getSettings(),settings=>({lookAheadDays:settings.calendarLookAheadDays})))
     .handle("getChatModels", () => administration.getChatModels())
     .handle("getModelCatalog", ({payload}) => adminOnly(administration.getModelCatalog(payload)))
-    .handle("getAdminSettings", () => adminOnly(administration.getSettings()))
-    .handle("updateAdminSettings", ({payload}) => adminOnly(administration.updateSettings(payload)))
+    .handle("getAdminSettings", () => adminOnly(administration.getSettings(ownerReady)))
+    .handle("updateAdminSettings", ({payload}) => adminOnly(administration.updateSettings(payload,ownerReady)))
+    .handle("recordOnboardingStep", ({payload}) => adminOnly(administration.recordOnboardingStep(payload,ownerReady)))
+    .handle("completeOnboarding", () => adminOnly(administration.completeOnboarding(ownerReady)))
+    .handle("restartOnboarding", () => ownerOnly(administration.restartOnboarding(ownerReady)))
     // "Test connection": the stored storage settings with the draft laid over them. Nothing is saved.
     .handle("testStorage", ({payload}) => adminOnly(Effect.flatMap(administration.storageDraft(payload),configuration=>options.storage?Effect.promise(()=>options.storage!.test(configuration)):Effect.fail(unavailable))))
     .handle("listCalendars", () => administration.listCalendars())
@@ -246,8 +253,13 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
         if(request.method!=="GET")return new Response(null,{status:405,headers:{Allow:"GET"}})
         try{if(!options.google||!options.authentication||request.headers.has("authorization"))throw new Error("Browser sign-in required");const principal=await options.authentication.resolve(request.headers);if(!principal||principal.source!=="session"||!principal.sessionId)throw new Error("Browser sign-in required");const response=await options.google.callback(request,principal);response.headers.set("Cache-Control","no-store");response.headers.set("Referrer-Policy","no-referrer");return response}catch{return new Response(null,{status:303,headers:{Location:"/account?google=failed","Cache-Control":"no-store","Referrer-Policy":"no-referrer"}})}
       }
-      // A published app file: public, cacheable for a few minutes, with byte ranges. Its headers are its own.
       const pathname=new URL(request.url).pathname
+      // Claiming the server: counted before the code is looked at, so guesses are slowed whatever they are.
+      if(pathname==="/api/v1/admin/owner/setup"&&request.method==="POST"){
+        const client=request.headers.get("x-forwarded-for")?.split(",")[0]?.trim().slice(0,64)||"direct"
+        if(!setupOverall("all")||!setupByClient(client))return Response.json({error:"rate_limited",message:"Too many attempts. Wait a minute and try again."},{status:429,headers:{"Retry-After":"60","Cache-Control":"no-store","Referrer-Policy":"no-referrer","X-Content-Type-Options":"nosniff"}})
+      }
+      // A published app file: public, cacheable for a few minutes, with byte ranges. Its headers are its own.
       if(pathname.startsWith(DOWNLOAD_FILES_PATH)&&!pathname.slice(DOWNLOAD_FILES_PATH.length).includes("/")&&pathname.length>DOWNLOAD_FILES_PATH.length)
         return downloads.file(request,pathname.slice(DOWNLOAD_FILES_PATH.length))
       // Google sign-in is two browser navigations that answer with redirects, so it sits outside the JSON API.

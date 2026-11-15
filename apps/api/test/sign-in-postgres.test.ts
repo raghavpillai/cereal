@@ -79,7 +79,7 @@ describe.skipIf(!enabled)("sign-in settings, Google sign-in and the app handoff 
   test("sign-in settings: defaults, validation, and a client secret that is sealed and never returned", async () => {
     const initial = await (await request("/api/v1/admin/settings", "GET", undefined, asOwner)).json()
     expect(initial.signIn).toEqual({ password: true, google: false, allowedEmails: [], googleClientId: null, googleClientSecretSet: false, googleRedirectUris: [baseURL + "/api/v1/auth/google/callback", baseURL + "/api/integrations/google/callback"] })
-    expect(await (await request("/api/v1/auth/methods")).json()).toEqual({ password: true, google: false, instanceName: initial.instanceName })
+    expect(await (await request("/api/v1/auth/methods")).json()).toEqual({ password: true, google: false, instanceName: initial.instanceName, setupRequired: expect.any(Boolean) })
 
     expect((await settings({ password: false })).status).toBe(400) // at least one method stays on
     expect((await settings({ google: true })).status).toBe(400) // no client stored yet

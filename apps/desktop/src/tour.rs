@@ -2108,3 +2108,575 @@ pub fn live_probe(handle: WindowHandle<Cereal>, seconds: u64, cx: &mut App) {
     })
     .detach();
 }
+
+/// `CEREAL_WELCOME_TOUR=<name>` (debug builds, with an isolated
+/// `CEREAL_DATA_DIR`): the first-run welcome walks itself, for captures. It
+/// presses the welcome's own buttons through the window's event listeners
+/// and types into its fields, so the real pointer and keyboard are never
+/// touched; nothing outside the welcome is driven.
+///
+/// * `flow`: Welcome to Home against `CEREAL_WELCOME_SERVER`, signing in
+///   with the `email` and `password` of the JSON file `CEREAL_WELCOME_LOGIN`
+///   names (never printed), at the pace of a person.
+/// * `stills`: every state of every step, each held until
+///   `CEREAL_WELCOME_SHOTS/<name>.png` exists (an outside tool takes the
+///   picture when it sees `welcome … shot <name>` on stderr).
+/// * `local`: the same walk without a server ("Try it on this Mac only").
+/// * `leave-at-audio`: walks to the audio step and quits there, to check
+///   that the next launch resumes on it.
+/// * `report`: says which screen and step the app opened on, then quits.
+/// * `signed-in`: signs in and shows the server step at rest afterwards.
+/// * `audio-asking`: the audio step alone, held between pressing Allow
+///   and the answer.
+/// * `audio-real`: the audio step alone, with macOS's own answers (run it
+///   without `CEREAL_SIMULATE_PERMISSIONS`); it presses nothing.
+/// * `again`: from Home, Settings → About → "Show welcome again".
+///
+/// Permissions are never asked of macOS here: run it with
+/// `CEREAL_SIMULATE_PERMISSIONS`. `CEREAL_WELCOME_SIZE=760x580` resizes the
+/// window first. `CEREAL_WELCOME_CALENDAR=1` stands a made-up calendar in
+/// for one connected in the browser, which a capture cannot do.
+#[cfg(debug_assertions)]
+pub fn welcome(handle: WindowHandle<Cereal>, name: String, cx: &mut App) {
+    use crate::onboarding::{Channel, Permission, ServerOffer, Step};
+    use crate::onboarding_view::placed;
+
+    fn say(what: &str) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis());
+        eprintln!("welcome {stamp} {what}");
+    }
+    async fn pause(cx: &mut AsyncApp, millis: u64) {
+        cx.background_executor()
+            .timer(slow(Duration::from_millis(millis)))
+            .await;
+    }
+    /// Move over the control called `name`, press it and let go.
+    async fn press(handle: WindowHandle<Cereal>, cx: &mut AsyncApp, name: &'static str) -> bool {
+        let Some(at) = placed(name).map(|bounds| bounds.center()) else {
+            say(&format!("missing {name}"));
+            return false;
+        };
+        let send = |cx: &mut AsyncApp, event: PlatformInput| {
+            let _ = cx.update_window(handle.into(), |_, window, cx| {
+                window.dispatch_event(event, cx);
+            });
+        };
+        send(cx, PlatformInput::MouseMove(MouseMoveEvent { position: at, ..Default::default() }));
+        pause(cx, 260).await;
+        send(
+            cx,
+            PlatformInput::MouseDown(MouseDownEvent {
+                button: MouseButton::Left,
+                position: at,
+                click_count: 1,
+                ..Default::default()
+            }),
+        );
+        pause(cx, 130).await;
+        send(
+            cx,
+            PlatformInput::MouseUp(MouseUpEvent {
+                button: MouseButton::Left,
+                position: at,
+                click_count: 1,
+                ..Default::default()
+            }),
+        );
+        say(&format!("pressed {name}"));
+        pause(cx, 120).await;
+        // The pointer goes away again, so no hover is left behind.
+        send(
+            cx,
+            PlatformInput::MouseMove(MouseMoveEvent {
+                position: point(px(-40.), px(-40.)),
+                ..Default::default()
+            }),
+        );
+        true
+    }
+    /// Type `text` into one of the account form's fields (0 address,
+    /// 1 email, 2 password), a character at a time.
+    async fn type_into(handle: WindowHandle<Cereal>, cx: &mut AsyncApp, field: usize, text: &str, pace: u64) {
+        let mut typed = String::new();
+        for character in text.chars() {
+            typed.push(character);
+            let so_far = typed.clone();
+            let _ = handle.update(cx, |view, window, cx| {
+                let input = {
+                    let account = view.account.read(cx);
+                    [account.url.clone(), account.email.clone(), account.password.clone()][field].clone()
+                };
+                input.read(cx).focus_handle.focus(window);
+                input.update(cx, |input, cx| input.set_content(so_far, cx));
+                cx.notify();
+            });
+            pause(cx, pace).await;
+        }
+    }
+    /// Wait until `ready` says so, or `seconds` have passed.
+    async fn until(
+        handle: WindowHandle<Cereal>,
+        cx: &mut AsyncApp,
+        seconds: u64,
+        ready: impl Fn(&mut Cereal, &mut Context<Cereal>) -> bool,
+    ) -> bool {
+        for _ in 0..seconds * 20 {
+            if handle.update(cx, |view, _, cx| ready(view, cx)).unwrap_or(false) {
+                return true;
+            }
+            cx.background_executor().timer(Duration::from_millis(50)).await;
+        }
+        false
+    }
+    /// Hold still for a picture called `name`, and say where things are.
+    async fn shot(cx: &mut AsyncApp, name: &str) {
+        pause(cx, 700).await;
+        let rect = |name: &str| {
+            placed(name).map_or("none".to_string(), |b| {
+                format!(
+                    "{:.1},{:.1} {:.1}x{:.1}",
+                    f32::from(b.origin.x),
+                    f32::from(b.origin.y),
+                    f32::from(b.size.width),
+                    f32::from(b.size.height)
+                )
+            })
+        };
+        say(&format!(
+            "layout {name}: left {}; right {}; screen {}; continue {}",
+            rect("welcome-left"),
+            rect("welcome-right"),
+            rect("welcome-screen"),
+            rect("welcome-continue")
+        ));
+        say(&format!("shot {name}"));
+        let Some(directory) = crate::environment::var_os("CEREAL_WELCOME_SHOTS") else {
+            pause(cx, 900).await;
+            return;
+        };
+        let picture = std::path::PathBuf::from(directory).join(format!("{name}.png"));
+        for _ in 0..400 {
+            if picture.exists() {
+                break;
+            }
+            cx.background_executor().timer(Duration::from_millis(50)).await;
+        }
+        cx.background_executor().timer(Duration::from_millis(150)).await;
+    }
+    fn made_up_calendar(view: &mut Cereal) {
+        let at = |hours: i64| (chrono::Local::now() + chrono::Duration::hours(hours)).to_rfc3339();
+        let event = |id: &str, title: &str, color: &str, from: i64| {
+            serde_json::json!({"id":id,"calendarId":"work","calendarName":"Work","color":color,"title":title,"startAt":at(from),"endAt":at(from + 1),"allDay":false,"startDate":"2026-11-26","endDate":"2026-11-26","timeZone":null,"location":null,"meetingUrl":null,"noteId":null})
+        };
+        view.calendars.sources = serde_json::from_value(serde_json::json!([{"id":"work","name":"Work","provider":"google","color":"#e0af2f","enabled":true,"sourceHost":"calendar.google.com","lastSyncedAt":null,"lastSyncError":null,"eventCount":3,"createdAt":"2026-11-12T00:00:00Z"}])).unwrap_or_default();
+        view.calendars.events = serde_json::from_value(serde_json::json!([
+            event("a", "Design review", "#e0af2f", 1),
+            event("b", "Weekly team standup", "#87b6e8", 3),
+            event("c", "Catch-up with Maya", "#9bd18a", 5),
+            event("d", "Planning", "#e89b87", 24),
+        ]))
+        .unwrap_or_default();
+        view.calendars.personal_linked = true;
+        view.calendars.loaded = true;
+        view.calendars.loading = false;
+    }
+    /// The account already has a calendar, so the step would open on it.
+    /// Put it out of sight, and keep the step from looking, until the
+    /// capture has shown what comes before.
+    fn hide_calendar(view: &mut Cereal) {
+        view.onboarding.calendar_hold = true;
+        view.calendars.sources.clear();
+        view.calendars.events.clear();
+        view.calendars.personal_linked = false;
+        view.calendars.loaded = true;
+    }
+
+    cx.spawn(async move |cx| {
+        let setting = |name: &str| crate::environment::var(name).ok().filter(|value| !value.is_empty());
+        let server = setting("CEREAL_WELCOME_SERVER").unwrap_or_else(|| "http://127.0.0.1:3000".into());
+        let login: Option<(String, String)> = setting("CEREAL_WELCOME_LOGIN")
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|value| Some((value.get("email")?.as_str()?.to_owned(), value.get("password")?.as_str()?.to_owned())));
+        let made_up = setting("CEREAL_WELCOME_CALENDAR").is_some();
+        if let Some((width, height)) = setting("CEREAL_WELCOME_SIZE").and_then(|size| {
+            let (width, height) = size.split_once('x')?;
+            Some((width.parse::<f32>().ok()?, height.parse::<f32>().ok()?))
+        }) {
+            let _ = handle.update(cx, |_, window, _| window.resize(size(px(width), px(height))));
+        }
+        let step = |wanted: Step| move |view: &mut Cereal, _: &mut Context<Cereal>| view.onboarding.step() == Some(wanted);
+        let offered = |view: &mut Cereal, cx: &mut Context<Cereal>| matches!(view.onboarding_offer(cx), ServerOffer::Password { .. });
+        let where_now = |view: &mut Cereal, _: &mut Window, _: &mut Context<Cereal>| format!("screen {:?}, step {:?}", view.screen, view.onboarding.step());
+        let finish = async |cx: &mut AsyncApp| {
+            crate::motion::stats::report("welcome");
+            say("done");
+            let _ = cx.update(|cx| cx.quit());
+        };
+        pause(cx, 900).await;
+        say(&format!("opened on {}", handle.update(cx, where_now).unwrap_or_default()));
+        crate::motion::stats::report("launch");
+        match name.as_str() {
+            "report" => {
+                // What macOS says about each permission, read without asking.
+                say(&format!(
+                    "macOS says: microphone {:?}, system audio {:?}",
+                    crate::audio::permission_status(0),
+                    crate::audio::permission_status(1)
+                ));
+                pause(cx, 2500).await;
+                shot(cx, "report").await;
+            }
+            "leave-at-audio" | "flow" | "local" => {
+                let local = name == "local";
+                // `CEREAL_WELCOME_RESTART=<ms>`: a recorder can only start once
+                // the window exists, so the welcome is begun again from the
+                // top when it has had time to, exactly as it begins at launch.
+                if let Some(wait) = setting("CEREAL_WELCOME_RESTART") {
+                    pause(cx, wait.parse::<u64>().unwrap_or(2600)).await;
+                    let _ = handle.update(cx, |view, _, cx| {
+                        view.begin_onboarding(crate::onboarding::Flow::START, false, cx)
+                    });
+                    say("restart");
+                }
+                pause(cx, 3600).await;
+                crate::motion::stats::report("welcome");
+                press(handle, cx, "welcome-continue").await;
+                until(handle, cx, 5, step(Step::Server)).await;
+                pause(cx, 1300).await;
+                crate::motion::stats::report("to-server");
+                if local {
+                    // Tab walks the step's controls in the order they read.
+                    for stop in 1..=3 {
+                        let _ = cx.update_window(handle.into(), |_, window, cx| key(window, cx, "tab"));
+                        pause(cx, 500).await;
+                        shot(cx, ["", "tab-1", "tab-2", "tab-3"][stop]).await;
+                    }
+                    press(handle, cx, "welcome-local").await;
+                } else {
+                    type_into(handle, cx, 0, &server, 45).await;
+                    let found = until(handle, cx, 30, offered).await;
+                    say(&format!("server answered: {found}"));
+                    pause(cx, 1500).await;
+                    crate::motion::stats::report("discovery");
+                    if let Some((email, password)) = &login {
+                        type_into(handle, cx, 1, email, 40).await;
+                        pause(cx, 300).await;
+                        type_into(handle, cx, 2, password, 40).await;
+                        pause(cx, 500).await;
+                        press(handle, cx, "welcome-continue").await;
+                    }
+                    let signed_in = until(handle, cx, 40, |view, _| view.onboarding_facts().signed_in).await;
+                    say(&format!("signed in: {signed_in}"));
+                    if !signed_in {
+                        // Nothing after this would be what it claims to be.
+                        say(&format!(
+                            "stopping: the server did not sign in ({:?})",
+                            handle.update(cx, |view, _, cx| view.account.read(cx).error().map(str::to_owned)).ok().flatten()
+                        ));
+                        finish(cx).await;
+                        return;
+                    }
+                }
+                until(handle, cx, 10, step(Step::Audio)).await;
+                say(&format!("now on {}", handle.update(cx, where_now).unwrap_or_default()));
+                pause(cx, 1500).await;
+                crate::motion::stats::report("to-audio");
+                if name == "leave-at-audio" {
+                    finish(cx).await;
+                    return;
+                }
+                press(handle, cx, "welcome-allow-microphone").await;
+                until(handle, cx, 5, |view, _| view.onboarding_facts().microphone == Permission::Allowed).await;
+                pause(cx, 2600).await;
+                crate::motion::stats::report("microphone");
+                if local {
+                    // On this Mac only, with the microphone alone.
+                    shot(cx, "local-audio").await;
+                    press(handle, cx, "welcome-continue").await;
+                } else {
+                    press(handle, cx, "welcome-allow-system").await;
+                    pause(cx, 3400).await;
+                    crate::motion::stats::report("system-audio");
+                    press(handle, cx, "welcome-continue").await;
+                    let _ = handle.update(cx, |view, _, _| hide_calendar(view));
+                    until(handle, cx, 5, step(Step::Calendar)).await;
+                    until(handle, cx, 15, |view, _| !view.calendars.loading).await;
+                    let _ = handle.update(cx, |view, _, cx| {
+                        hide_calendar(view);
+                        cx.notify();
+                    });
+                    pause(cx, 2000).await;
+                    press(handle, cx, "welcome-connect-calendar").await;
+                    pause(cx, 2400).await;
+                    // Now the step may look: what it finds is the account's
+                    // own calendar, read from the server.
+                    let _ = handle.update(cx, |view, _, cx| {
+                        view.onboarding.calendar_hold = false;
+                        cx.notify();
+                    });
+                    let mut found = until(handle, cx, 12, |view, _| view.onboarding_facts().calendar).await;
+                    say(&format!("calendar found on the server: {found}"));
+                    if !found && made_up {
+                        let _ = handle.update(cx, |view, _, cx| {
+                            made_up_calendar(view);
+                            cx.notify();
+                        });
+                        say("calendar: made up for the capture");
+                        found = true;
+                    }
+                    pause(cx, 3000).await;
+                    crate::motion::stats::report("calendar");
+                    press(handle, cx, if found { "welcome-continue" } else { "welcome-skip" }).await;
+                }
+                until(handle, cx, 5, step(Step::Pill)).await;
+                pause(cx, 1900).await;
+                crate::motion::stats::report("to-pill");
+                press(handle, cx, "welcome-try-pill").await;
+                pause(cx, 5200).await;
+                crate::motion::stats::report("try-pill");
+                press(handle, cx, "welcome-continue").await;
+                until(handle, cx, 5, step(Step::Done)).await;
+                pause(cx, 2800).await;
+                crate::motion::stats::report("done");
+                press(handle, cx, "welcome-continue").await;
+                until(handle, cx, 5, |view, _| view.screen == Screen::Home).await;
+                pause(cx, 3200).await;
+                say(&format!("ended on {}", handle.update(cx, where_now).unwrap_or_default()));
+                crate::motion::stats::report("home");
+                if local {
+                    shot(cx, "local-home").await;
+                }
+            }
+            "stills" => {
+                let permission = |channel: Channel, state: Permission| {
+                    move |view: &mut Cereal, _: &mut Window, cx: &mut Context<Cereal>| {
+                        view.onboarding.permissions.simulate(channel, state);
+                        cx.notify();
+                    }
+                };
+                pause(cx, 3400).await;
+                shot(cx, "1-welcome").await;
+                press(handle, cx, "welcome-continue").await;
+                until(handle, cx, 5, step(Step::Server)).await;
+                pause(cx, 900).await;
+                shot(cx, "2-server-address").await;
+                // An address nothing answers at: looking, then not found.
+                type_into(handle, cx, 0, "http://127.0.0.1:9", 12).await;
+                until(handle, cx, 20, |view, cx| matches!(view.onboarding_offer(cx), ServerOffer::Unreachable(_))).await;
+                pause(cx, 900).await;
+                shot(cx, "2-server-unreachable").await;
+                type_into(handle, cx, 0, &server, 12).await;
+                until(handle, cx, 4, |view, cx| view.onboarding_offer(cx) == ServerOffer::Checking).await;
+                say("shot 2-server-looking");
+                until(handle, cx, 30, offered).await;
+                pause(cx, 1200).await;
+                shot(cx, "2-server-found").await;
+                if let Some((email, _)) = &login {
+                    // One wrong password, to show how a refusal reads.
+                    type_into(handle, cx, 1, email, 8).await;
+                    type_into(handle, cx, 2, "not-the-password", 8).await;
+                    pause(cx, 300).await;
+                    shot(cx, "2-server-typed").await;
+                    press(handle, cx, "welcome-continue").await;
+                    until(handle, cx, 30, |view, cx| view.account.read(cx).error().is_some()).await;
+                    pause(cx, 900).await;
+                    shot(cx, "2-server-refused").await;
+                }
+                if press(handle, cx, "welcome-browser").await {
+                    until(handle, cx, 5, |view, cx| view.onboarding_offer(cx) == ServerOffer::WaitingForBrowser).await;
+                    pause(cx, 600).await;
+                    shot(cx, "2-server-browser-waiting").await;
+                    press(handle, cx, "welcome-browser-cancel").await;
+                    pause(cx, 600).await;
+                }
+                if let Some((email, password)) = &login {
+                    type_into(handle, cx, 1, email, 8).await;
+                    type_into(handle, cx, 2, password, 8).await;
+                    press(handle, cx, "welcome-continue").await;
+                    let signed_in = until(handle, cx, 40, |view, _| view.onboarding_facts().signed_in).await;
+                    say(&format!("signed in: {signed_in}"));
+                    if !signed_in {
+                        // Nothing after this would be what it claims to be.
+                        say(&format!(
+                            "stopping: the server did not sign in ({:?})",
+                            handle.update(cx, |view, _, cx| view.account.read(cx).error().map(str::to_owned)).ok().flatten()
+                        ));
+                        finish(cx).await;
+                        return;
+                    }
+                    // The step moves on by itself a moment after signing
+                    // in; Back shows it at rest, signed in.
+                    until(handle, cx, 10, step(Step::Audio)).await;
+                    pause(cx, 900).await;
+                    let _ = cx.update_window(handle.into(), |_, window, cx| key(window, cx, "escape"));
+                    until(handle, cx, 5, step(Step::Server)).await;
+                    pause(cx, 900).await;
+                    shot(cx, "2-server-signed-in").await;
+                    press(handle, cx, "welcome-continue").await;
+                } else {
+                    press(handle, cx, "welcome-local").await;
+                }
+                until(handle, cx, 10, step(Step::Audio)).await;
+                pause(cx, 1200).await;
+                shot(cx, "3-audio-not-yet").await;
+                press(handle, cx, "welcome-allow-microphone").await;
+                until(handle, cx, 5, |view, _| view.onboarding_facts().microphone == Permission::Allowed).await;
+                pause(cx, 1500).await;
+                shot(cx, "3-audio-microphone").await;
+                let _ = handle.update(cx, permission(Channel::SystemAudio, Permission::Allowed));
+                pause(cx, 1500).await;
+                shot(cx, "3-audio-both").await;
+                let _ = handle.update(cx, permission(Channel::SystemAudio, Permission::Denied));
+                pause(cx, 1200).await;
+                shot(cx, "3-audio-system-denied").await;
+                let _ = handle.update(cx, permission(Channel::Microphone, Permission::Denied));
+                pause(cx, 1200).await;
+                shot(cx, "3-audio-denied").await;
+                let _ = handle.update(cx, permission(Channel::Microphone, Permission::Allowed));
+                let _ = handle.update(cx, permission(Channel::SystemAudio, Permission::Allowed));
+                pause(cx, 900).await;
+                press(handle, cx, "welcome-continue").await;
+                let _ = handle.update(cx, |view, _, _| hide_calendar(view));
+                let calendar = until(handle, cx, 5, step(Step::Calendar)).await;
+                if calendar {
+                    until(handle, cx, 15, |view, _| !view.calendars.loading).await;
+                    let _ = handle.update(cx, |view, _, cx| {
+                        hide_calendar(view);
+                        cx.notify();
+                    });
+                    pause(cx, 1500).await;
+                    shot(cx, "4-calendar-none").await;
+                    press(handle, cx, "welcome-connect-calendar").await;
+                    pause(cx, 900).await;
+                    shot(cx, "4-calendar-waiting").await;
+                    let _ = handle.update(cx, |view, _, cx| {
+                        view.onboarding.calendar_hold = false;
+                        cx.notify();
+                    });
+                    let mut found = until(handle, cx, 12, |view, _| view.onboarding_facts().calendar).await;
+                    say(&format!("calendar found on the server: {found}"));
+                    if !found && made_up {
+                        let _ = handle.update(cx, |view, _, cx| {
+                            made_up_calendar(view);
+                            cx.notify();
+                        });
+                        say("calendar: made up for the capture");
+                        found = true;
+                    }
+                    pause(cx, 1800).await;
+                    shot(cx, if found { "4-calendar-connected" } else { "4-calendar-still-none" }).await;
+                    press(handle, cx, if found { "welcome-continue" } else { "welcome-skip" }).await;
+                }
+                until(handle, cx, 5, step(Step::Pill)).await;
+                pause(cx, 1500).await;
+                shot(cx, "5-pill").await;
+                press(handle, cx, "welcome-try-pill").await;
+                pause(cx, 1300).await;
+                say("shot 5-pill-trying");
+                pause(cx, 4200).await;
+                press(handle, cx, "welcome-continue").await;
+                until(handle, cx, 5, step(Step::Done)).await;
+                pause(cx, 1800).await;
+                shot(cx, "6-done").await;
+                // Back and forward with the keyboard: Escape, then Return.
+                let _ = cx.update_window(handle.into(), |_, window, cx| key(window, cx, "escape"));
+                pause(cx, 900).await;
+                say(&format!("after Escape: {}", handle.update(cx, where_now).unwrap_or_default()));
+                let _ = cx.update_window(handle.into(), |_, window, cx| key(window, cx, "enter"));
+                pause(cx, 1500).await;
+                say(&format!("after Return: {}", handle.update(cx, where_now).unwrap_or_default()));
+                let _ = cx.update_window(handle.into(), |_, window, cx| key(window, cx, "enter"));
+                until(handle, cx, 5, |view, _| view.screen == Screen::Home).await;
+                pause(cx, 2500).await;
+                say(&format!("ended on {}", handle.update(cx, where_now).unwrap_or_default()));
+                shot(cx, "7-home").await;
+            }
+            "signed-in" => {
+                // The server step at rest after signing in, and nothing else.
+                pause(cx, 1200).await;
+                press(handle, cx, "welcome-continue").await;
+                until(handle, cx, 5, step(Step::Server)).await;
+                type_into(handle, cx, 0, &server, 12).await;
+                until(handle, cx, 30, offered).await;
+                if let Some((email, password)) = &login {
+                    type_into(handle, cx, 1, email, 8).await;
+                    type_into(handle, cx, 2, password, 8).await;
+                    press(handle, cx, "welcome-continue").await;
+                }
+                let signed_in = until(handle, cx, 40, |view, _| view.onboarding_facts().signed_in).await;
+                say(&format!("signed in: {signed_in}"));
+                if signed_in {
+                    until(handle, cx, 10, step(Step::Audio)).await;
+                    pause(cx, 900).await;
+                    let _ = cx.update_window(handle.into(), |_, window, cx| key(window, cx, "escape"));
+                    until(handle, cx, 5, step(Step::Server)).await;
+                    pause(cx, 900).await;
+                    shot(cx, "2-server-signed-in").await;
+                }
+            }
+            "audio-asking" => {
+                // Straight to the audio step, to hold the moment between
+                // pressing Allow and the answer.
+                let _ = handle.update(cx, |view, _, cx| {
+                    view.begin_onboarding(crate::onboarding::Flow { step: Step::Audio, local: true }, true, cx);
+                    view.onboarding.permissions.hold_answer = true;
+                });
+                pause(cx, 1500).await;
+                press(handle, cx, "welcome-allow-microphone").await;
+                pause(cx, 600).await;
+                shot(cx, "3-audio-asking").await;
+                let _ = handle.update(cx, |view, _, cx| {
+                    view.onboarding.permissions.hold_answer = false;
+                    cx.notify();
+                });
+                pause(cx, 1800).await;
+            }
+            "audio-real" => {
+                // Without the stand-in: what macOS itself says, and what is
+                // heard on whatever is already allowed. Nothing is asked for.
+                let _ = handle.update(cx, |view, _, cx| {
+                    view.begin_onboarding(crate::onboarding::Flow { step: Step::Audio, local: true }, true, cx);
+                });
+                for _ in 0..8 {
+                    pause(cx, 1000).await;
+                    let heard = handle
+                        .update(cx, |view, _, _| {
+                            let permissions = &view.onboarding.permissions;
+                            format!(
+                                "microphone {:?} level {:.3}; system audio {:?} level {:.3}",
+                                permissions.of(Channel::Microphone),
+                                permissions.level(Channel::Microphone),
+                                permissions.of(Channel::SystemAudio),
+                                permissions.level(Channel::SystemAudio)
+                            )
+                        })
+                        .unwrap_or_default();
+                    say(&format!("heard: {heard}"));
+                }
+                shot(cx, "3-audio-real").await;
+            }
+            "again" => {
+                pause(cx, 1500).await;
+                let _ = handle.update(cx, |view, _, cx| {
+                    view.settings_tab = crate::screens::SettingsTab::About;
+                    view.navigate(Screen::Settings, cx);
+                });
+                pause(cx, 1200).await;
+                shot(cx, "8-settings-about").await;
+                let _ = handle.update(cx, |view, _, cx| view.show_welcome_again(cx));
+                pause(cx, 3200).await;
+                say(&format!("after Show welcome again: {}", handle.update(cx, where_now).unwrap_or_default()));
+                shot(cx, "8-welcome-again").await;
+                let _ = cx.update_window(handle.into(), |_, window, cx| key(window, cx, "escape"));
+                pause(cx, 1500).await;
+                say(&format!("after Escape: {}", handle.update(cx, where_now).unwrap_or_default()));
+            }
+            other => say(&format!("unknown tour {other}")),
+        }
+        finish(cx).await;
+    })
+    .detach();
+}

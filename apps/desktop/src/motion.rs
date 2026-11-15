@@ -590,6 +590,12 @@ impl Stage {
         self.glides.borrow_mut().entry(name).or_default().clone()
     }
 
+    /// Something timed by the view itself is still moving: ask for the next
+    /// frame when this one is flushed.
+    pub fn keep_alive(&self) {
+        self.live.set(true);
+    }
+
     /// Call first thing in the owning view's render.
     pub fn begin(&self) {
         self.frame_started.set(Some(Instant::now()));
@@ -1251,7 +1257,8 @@ pub fn pop<E: Styled + IntoElement + 'static>(element: E, pop: Pop, pose: Pose) 
     Morph::new(element).posed(pop, pose).into_any_element()
 }
 
-fn mount_pose(spring: Spring, progress: f32, reduced: bool) -> Pose {
+/// The pose of something `progress` of the way through arriving on `spring`.
+pub fn mount_pose(spring: Spring, progress: f32, reduced: bool) -> Pose {
     if reduced {
         let fade = fade_curve(progress * spring.millis as f32 / REDUCED_FADE.as_millis() as f32);
         return Pose {

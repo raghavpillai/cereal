@@ -621,6 +621,128 @@ impl NativeCapture {
     }
 }
 
+/// What a listening check hears on one channel.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CheckChannel {
+    /// Input level right now, 0..=1.
+    pub level: f32,
+    /// Audio frames that have arrived since the check began.
+    pub frames: u64,
+    /// macOS refused the channel (the permission was denied).
+    pub refused: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CheckLevels {
+    /// Microphone, then system audio.
+    pub channels: [CheckChannel; 2],
+}
+
+/// Listening without recording: the same native capture a recording uses,
+/// started with nothing to write to, so the welcome can show that the
+/// microphone and system audio really are heard. Starting it is also how
+/// macOS is asked for each permission, exactly as starting a recording is.
+/// Dropping it lets go of the devices.
+pub struct LevelCheck {
+    levels: Arc<Mutex<CheckLevels>>,
+    stop: mpsc::Sender<()>,
+}
+
+/// Channel flag for the native capture: keep levels, write no files.
+const LEVELS_ONLY: u32 = 4;
+
+impl LevelCheck {
+    pub fn start(microphone: bool, system: bool) -> Option<Self> {
+        let flags = u32::from(microphone) | (u32::from(system) << 1);
+        // Never from a test or a review fixture: those open no devices.
+        if flags == 0 || preview_mode() {
+            return None;
+        }
+        let levels = Arc::new(Mutex::new(CheckLevels::default()));
+        let shared = levels.clone();
+        let (stop, receiver) = mpsc::channel();
+        thread::Builder::new()
+            .name("audio-level-check".into())
+            .spawn(move || {
+                let _owner = NATIVE_OWNER.lock().unwrap_or_else(|e| e.into_inner());
+                if receiver.try_recv().is_ok() {
+                    return;
+                }
+                // The directory is never created: nothing is written.
+                let nowhere = std::env::temp_dir().join("cereal-level-check");
+                let Ok(mut native) = NativeCapture::start(&nowhere, flags | LEVELS_ONLY) else {
+                    return;
+                };
+                loop {
+                    if let Ok(stats) = native.poll(false) {
+                        *shared.lock().unwrap_or_else(|e| e.into_inner()) = check_levels(&stats);
+                    }
+                    match receiver.recv_timeout(Duration::from_millis(40)) {
+                        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+                }
+                let _ = native.poll(true);
+            })
+            .ok()?;
+        Some(Self { levels, stop })
+    }
+
+    pub fn levels(&self) -> CheckLevels {
+        *self.levels.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl Drop for LevelCheck {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+    }
+}
+
+/// What the native capture's statistics mean for a listening check.
+pub fn check_levels(stats: &NativeStats) -> CheckLevels {
+    let channel = |stats: &ChannelStats| CheckChannel {
+        level: if stats.level.is_finite() {
+            stats.level.clamp(0., 1.)
+        } else {
+            0.
+        },
+        frames: stats.frames_received,
+        refused: stats
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == "permission_denied"),
+    };
+    CheckLevels {
+        channels: [channel(&stats.mic), channel(&stats.system)],
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn mn_permission_status(channel: u32) -> i32;
+}
+
+/// What macOS says about a capture permission, without asking for it:
+/// channel 0 is the microphone (an `AVAuthorizationStatus`), channel 1 is
+/// system audio (0 granted, 1 denied, 2 not asked). `None` when macOS has no
+/// answer to give, and always in tests and review fixtures.
+pub fn permission_status(channel: u32) -> Option<i32> {
+    if preview_mode() {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let status = unsafe { mn_permission_status(channel) };
+        (status >= 0).then_some(status)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = channel;
+        None
+    }
+}
+
 pub fn preview_mode() -> bool {
     // Asked dozens of times per render; the arguments never change.
     static PREVIEW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -731,6 +853,21 @@ pub fn probe_from_args(args: &[String]) -> Option<Result<bool, String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_listening_check_reads_levels_arrivals_and_refusals() {
+        let stats: NativeStats = serde_json::from_value(serde_json::json!({"version":1,"phase":"partial","requested_channels":3,"mic":{"state":"recording","level":0.42,"frames_received":4800},"system":{"state":"failed","error":{"code":"permission_denied","message":"Denied","os_status":0}}})).unwrap();
+        let levels = check_levels(&stats);
+        assert_eq!(levels.channels[0], CheckChannel { level: 0.42, frames: 4800, refused: false });
+        assert_eq!(levels.channels[1], CheckChannel { level: 0., frames: 0, refused: true });
+        // A device problem is not a refusal, and a wild level is kept in range.
+        let stats: NativeStats = serde_json::from_value(serde_json::json!({"mic":{"state":"failed","level":7.0,"error":{"code":"no_input","message":"None","os_status":0}}})).unwrap();
+        let levels = check_levels(&stats);
+        assert!(!levels.channels[0].refused);
+        assert_eq!(levels.channels[0].level, 1.);
+        // Tests never open a device or ask macOS anything.
+        assert!(LevelCheck::start(true, true).is_none());
+        assert_eq!(permission_status(0), None);
+    }
     #[test]
     fn live_manifest_checkpoint_preserves_actual_paths_and_counters_before_stop() {
         let directory = std::env::temp_dir().join(format!(

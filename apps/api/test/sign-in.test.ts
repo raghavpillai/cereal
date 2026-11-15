@@ -125,12 +125,12 @@ test("the public sign-in methods need no credentials and say nothing about the G
   try {
     const methods = await api.handler(new Request("http://localhost/api/v1/auth/methods"))
     expect(methods.status).toBe(200)
-    expect(await methods.json()).toEqual({ password: true, google: false, instanceName: "Cereal" })
+    expect(await methods.json()).toEqual({ password: true, google: false, instanceName: "Cereal", setupRequired: false })
     await run(f.admin.updateSettings({ instanceName: "Product studio", signIn: { google: true, googleClientId: clientId, googleClientSecret: clientSecret } }))
     const text = await (await api.handler(new Request("http://localhost/api/v1/auth/methods"))).text()
     expect(text).not.toContain(clientId); expect(text).not.toContain(clientSecret)
     // Without an account service nobody can finish a Google sign-in, so it is not offered.
-    expect(JSON.parse(text)).toEqual({ password: true, google: false, instanceName: "Product studio" })
+    expect(JSON.parse(text)).toEqual({ password: true, google: false, instanceName: "Product studio", setupRequired: false })
     expect((await api.handler(new Request("http://localhost/api/v1/auth/google/start"))).headers.get("location")).toBe("/login?error=google_unavailable")
     expect((await api.handler(new Request("http://localhost/api/v1/auth/app-handoff/exchange", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: "a".repeat(43), verifier: "b".repeat(43) }) }))).status).toBe(503)
   } finally { await api.dispose() }

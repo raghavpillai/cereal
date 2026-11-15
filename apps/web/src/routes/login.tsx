@@ -3,6 +3,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import type { AuthSessionDTO } from '@meeting-notes/contracts'
 import { AdminClientError, createAdminClient } from '../lib/admin-client'
 import { AppHandoffError, appCallbackURL, appSignInPath, appSignInRequest, authClient, fetchAuthMethods, googleStartURL, requestAppHandoff, safeReturnPath, signInErrorMessage, signInProblem, type AppSignInRequest, type AuthMethods } from '../lib/auth-client'
+import { setupLanding } from '../lib/onboarding'
 import { Loading, Notice } from '../components/admin/shared'
 import appIcon from '../assets/app-icon.svg?url'
 import '../styles/login.css'
@@ -53,7 +54,18 @@ function SignInPage() {
     } finally { if (!controller.signal.aborted) setBusy(false) }
   }, [])
 
-  const leave = useCallback(() => { setStage({ kind: 'leaving' }); window.location.replace(query.returnPath ?? '/notes') }, [query.returnPath])
+  /** On to where the person was going. With nowhere in particular to go, an owner or administrator of a server
+   * whose setup is unfinished goes to setup; everyone else goes to their notes. */
+  const leave = useCallback(async (session?: AuthSessionDTO | null) => {
+    setStage({ kind: 'leaving' })
+    let to = query.returnPath
+    if (!to) {
+      const client = createAdminClient(window.location.origin)
+      const known = session ?? await client.getSession().catch(() => null)
+      to = known ? await setupLanding(known, () => client.getSettings()) : null
+    }
+    window.location.replace(to ?? '/notes')
+  }, [query.returnPath])
 
   const load = useCallback(async () => {
     request.current?.abort()
@@ -65,12 +77,16 @@ function SignInPage() {
         createAdminClient(window.location.origin).getSession(controller.signal).catch(error => { if (error instanceof AdminClientError && error.status === 401) return null; throw error }),
       ])
       if (controller.signal.aborted) return
+      // Nobody can sign in to a server that has not been claimed: its sign-in page is the first step of setup.
+      // …unless they asked for sign-in by name: a server set up before there was a claim step has accounts
+      // whose owner never made a password, and those people must still be able to get in.
+      if (methods.setupRequired && !session && !new URLSearchParams(window.location.search).has('signin')) { setStage({ kind: 'leaving' }); window.location.replace('/admin'); return }
       if (!session || (query.wantsApp && !app)) {
         // Nothing is in progress any more: a later visit with a session asks before handing it to an app.
         try { sessionStorage.removeItem(APP_SIGN_IN_FLAG) } catch { /* nothing to clear */ }
         setStage({ kind: 'form', methods }); return
       }
-      if (!app) { leave(); return }
+      if (!app) { void leave(session); return }
       // Back from Google in the sign-in this page started: that was the confirmation.
       let fresh = false
       try { fresh = sessionStorage.getItem(APP_SIGN_IN_FLAG) === app.state; sessionStorage.removeItem(APP_SIGN_IN_FLAG) } catch { /* then the person confirms */ }
@@ -83,7 +99,7 @@ function SignInPage() {
     if (app) {
       const session = await createAdminClient(window.location.origin).getSession().catch(() => null)
       await openApp(app, session)
-    } else leave()
+    } else await leave()
   }
   async function useAnotherAccount(methods: AuthMethods) {
     setBusy(true); setProblem(null)
@@ -92,7 +108,7 @@ function SignInPage() {
     finally { setBusy(false) }
   }
 
-  if (stage.kind === 'loading' || stage.kind === 'leaving') return <div className="account-loading"><Loading label={stage.kind === 'leaving' ? 'Opening your notes…' : 'Checking your session…'} /></div>
+  if (stage.kind === 'loading' || stage.kind === 'leaving') return <div className="account-loading"><Loading label={stage.kind === 'leaving' ? 'Opening Cereal…' : 'Checking your session…'} /></div>
   if (stage.kind === 'unreachable') return <Shell title="Unable to reach the server." lead="Check your connection and try again."><button type="button" className="button is-large" onClick={() => void load()}>Try again</button></Shell>
   if (query.wantsApp && !app) return <Shell title="This sign-in link is not valid." lead="Go back to the Cereal app and start signing in again." />
 

@@ -13,8 +13,8 @@ import {StorageSettings} from './storage-panel'
 import {Check,ChevronRight,ImagePlus,Loader2,Plus,RefreshCw,Trash2,X} from 'lucide-react'
 
 export function ProviderLogo({provider}:{provider:AIProvider}){return <img className="provider-logo" src={`/providers/${provider}.svg`} width="20" height="20" alt=""/>}
-const modelLogo=(provider:AIProvider,model:string):AIProvider=>provider==='openrouter'&&/^(openai|anthropic)\//.test(model)?model.split('/')[0] as AIProvider:provider
-type CatalogState={data?:ModelCatalogDTO;busy?:boolean;error?:string}
+export const modelLogo=(provider:AIProvider,model:string):AIProvider=>provider==='openrouter'&&/^(openai|anthropic)\//.test(model)?model.split('/')[0] as AIProvider:provider
+export type CatalogState={data?:ModelCatalogDTO;busy?:boolean;error?:string}
 const providers=Object.keys(providerNames) as AIProvider[]
 export function SettingsPanel({settings,client,expired,busy,save,children}:{children?:ReactNode;settings:AdminSettingsDTO;client:AdminClient;expired:()=>void;busy:boolean;save:(patch:UpdateAdminSettingsInput)=>Promise<void>}){
  const formId=useId()
@@ -91,7 +91,7 @@ export function SettingsPanel({settings,client,expired,busy,save,children}:{chil
   <div className="instance-save"><span aria-live="polite">{busy?<><Loader2 size={14} className="animate-spin"/>Saving changes…</>:problem??(dirty?'You have unsaved changes.':<><Check size={14}/>All changes saved</>)}</span><Button form={formId} type="submit" disabled={busy||!!problem||!dirty}>Save changes</Button></div>
  </>
 }
-function ModelPicker({value,kind,catalogs,available,load,label,change,excluded=[]}:{value?:LanguageModelSelection|TranscriptionModelSelection;kind:'language'|'transcription'|'live_transcription';catalogs:Partial<Record<AIProvider,CatalogState>>;available:(id:AIProvider)=>boolean;load:(id:AIProvider,refresh?:boolean)=>Promise<void>;label:string;change:(m:LanguageModelSelection|TranscriptionModelSelection)=>void;excluded?:string[]}){
+export function ModelPicker({value,kind,catalogs,available,load,label,change,excluded=[]}:{value?:LanguageModelSelection|TranscriptionModelSelection;kind:'language'|'transcription'|'live_transcription';catalogs:Partial<Record<AIProvider,CatalogState>>;available:(id:AIProvider)=>boolean;load:(id:AIProvider,refresh?:boolean)=>Promise<void>;label:string;change:(m:LanguageModelSelection|TranscriptionModelSelection)=>void;excluded?:string[]}){
  const[query,setQuery]=useState(''),id=useId(),supported:readonly AIProvider[]=kind==='language'?['openrouter','openai','anthropic']:kind==='live_transcription'?['elevenlabs']:['elevenlabs','openai']
  const all=supported.flatMap(provider=>(catalogs[provider]?.data?.models??[]).filter(m=>m.capabilities.includes(kind)&&!excluded.includes(modelKey({provider,model:m.id}))).map(m=>({...m,provider})))
  const matches=all.filter(m=>(m.name+' '+m.id+' '+providerNames[m.provider]).toLowerCase().includes(query.toLowerCase())).slice(0,100)

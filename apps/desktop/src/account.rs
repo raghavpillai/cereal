@@ -157,6 +157,11 @@ pub fn identity() -> Option<String> {
         .as_ref()
         .map(|s| format!("{}|{}", state.url, s.user.id.to_lowercase()))
 }
+/// A session is saved for the server this app is set up to use (or one was
+/// given for this run), whether or not it has been checked yet.
+pub fn has_saved_session() -> bool {
+    runtime().lock().unwrap().credentials.is_some()
+}
 pub fn configured_url() -> String {
     runtime().lock().unwrap().url.clone()
 }
@@ -373,7 +378,7 @@ pub enum AccountEvent {
 
 /// What the sign-in form knows about the server whose address is in the field.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Discovery {
+pub enum Discovery {
     /// No address yet, or one that is still being typed.
     Idle,
     Checking,
@@ -430,8 +435,8 @@ fn exchange(attempt: &BrowserSignIn, code: &str) -> Result<VerifiedAccount, Stri
 
 pub struct AccountView {
     pub url: Entity<TextInput>,
-    email: Entity<TextInput>,
-    password: Entity<TextInput>,
+    pub email: Entity<TextInput>,
+    pub password: Entity<TextInput>,
     busy: bool,
     error: Option<String>,
     discovery: Discovery,
@@ -487,7 +492,7 @@ impl AccountView {
     /// Ask the server whose address is in the field how people sign in to
     /// it, once typing has paused. Each change starts a new question, and an
     /// answer to an earlier one, however late it arrives, is dropped.
-    fn follow_address(&mut self, cx: &mut Context<Self>) {
+    pub fn follow_address(&mut self, cx: &mut Context<Self>) {
         let address = self.url.read(cx).content().trim().to_owned();
         if self.asked.as_deref() == Some(address.as_str()) {
             return;
@@ -547,6 +552,33 @@ impl AccountView {
         .detach();
     }
 
+    /// What the form knows about the server whose address is in the field.
+    pub fn discovery(&self) -> &Discovery {
+        &self.discovery
+    }
+
+    /// A password sign-in or a browser exchange is on its way.
+    pub fn busy(&self) -> bool {
+        self.busy
+    }
+
+    /// A sign-in in the browser has been started and not yet answered.
+    pub fn waiting(&self) -> bool {
+        self.waiting.is_some()
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// Ask the server in the field again, now.
+    pub fn check_again(&mut self, cx: &mut Context<Self>) {
+        let address = self.url.read(cx).content().trim().to_owned();
+        self.error = None;
+        self.ask(address, Duration::ZERO, cx);
+        cx.notify();
+    }
+
     /// The end of a sign-in, by password or through the browser: the session
     /// is saved and announced, or the reason it failed is shown.
     fn finish(
@@ -570,7 +602,7 @@ impl AccountView {
         cx.notify();
     }
 
-    fn submit(&mut self, cx: &mut Context<Self>) {
+    pub fn submit(&mut self, cx: &mut Context<Self>) {
         if self.busy || self.waiting.is_some() {
             return;
         }
@@ -614,7 +646,7 @@ impl AccountView {
     /// Sign in on the server's own page, in the default browser, by
     /// whichever method the server offers there. The session that comes back
     /// is kept exactly as one from the password form is.
-    fn continue_in_browser(&mut self, cx: &mut Context<Self>) {
+    pub fn continue_in_browser(&mut self, cx: &mut Context<Self>) {
         if self.busy || self.waiting.is_some() {
             return;
         }
@@ -647,7 +679,7 @@ impl AccountView {
         cx.notify();
     }
 
-    fn cancel_browser(&mut self, cx: &mut Context<Self>) {
+    pub fn cancel_browser(&mut self, cx: &mut Context<Self>) {
         self.waiting = None;
         cx.notify();
     }
@@ -891,7 +923,12 @@ impl Cereal {
         }
         self.chat_archives = crate::chat::load_history();
         self.chat_recipes = crate::chat::load_recipes();
-        self.screen = Screen::Home;
+        // A sign-in made in the welcome carries on there: its next step.
+        if self.screen == Screen::Welcome && self.onboarding.flow.is_some() {
+            self.onboarding_signed_in(cx);
+        } else {
+            self.screen = Screen::Home;
+        }
         self.connect_server(cx);
         // A link that was waiting for this session, or the note this
         // sign-in was started for.
@@ -915,7 +952,11 @@ impl Cereal {
             return;
         }
         self.server_pending = 1;
-        self.screen = Screen::Account;
+        // The welcome has its own server step and stays where it is.
+        let welcoming = self.screen == Screen::Welcome;
+        if !welcoming {
+            self.screen = Screen::Account;
+        }
         let started = epoch();
         let request_attempt = attempt();
         let (send, receive) = mpsc::channel();
@@ -945,7 +986,9 @@ impl Cereal {
                     Ok(a) => this.accept_account(a, cx),
                     Err(e) => {
                         this.server_status = Some(e.clone());
-                        this.show_toast(&e, cx);
+                        if !welcoming {
+                            this.show_toast(&e, cx);
+                        }
                         // Nobody is signed in: a link that was waiting to
                         // find that out says where its note is.
                         this.resume_links(cx);
