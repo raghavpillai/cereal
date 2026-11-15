@@ -3,21 +3,30 @@ import SwiftUI
 extension ToolbarContent {
     /// Custom glass controls still participate in Duo's native vertical toolbar.
     @ToolbarContentBuilder func cerealAdaptiveAxis() -> some ToolbarContent {
+        // The vertical toolbar APIs are in the iOS 27.1 SDK (Xcode 27.1, Swift 6.4). Older Xcodes build without them.
+        #if compiler(>=6.4)
         if #available(iOS 27.1, *) {
             self.axisBehavior(.verticalPreferred)
         } else {
             self
         }
+        #else
+        self
+        #endif
     }
 }
 
 private struct AdaptiveToolbarPlacement: ViewModifier {
     @ViewBuilder func body(content: Content) -> some View {
+        #if compiler(>=6.4)
         if #available(iOS 27.1, *) {
             content.toolbarVerticalBehavior(.automatic)
         } else {
             content
         }
+        #else
+        content
+        #endif
     }
 }
 
