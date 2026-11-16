@@ -1875,7 +1875,7 @@ fn summary_side(top: f32, bottom: f32, viewport: f32, wants: f32, was_above: boo
 /// say on stderr what it shows as the summary streams in, so captures of the
 /// window can be lined up with it. Pointer input goes through the window's
 /// own listeners; the real cursor is never moved.
-#[cfg(debug_assertions)]
+#[allow(dead_code)]
 pub mod probe {
     use crate::app::{Cereal, NoteTab};
     use gpui::*;

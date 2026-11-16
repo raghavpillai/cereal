@@ -1571,7 +1571,7 @@ impl Cereal {
 
 /// Made-up people and notes for the layout stills (`CEREAL_TOUR=p-fix-team`):
 /// nobody here exists.
-#[cfg(debug_assertions)]
+#[allow(dead_code)]
 pub fn tour_page(empty: bool) -> TeamSpaceDTO {
     use meeting_notes_api_types::{
         NoteAttendeeDTO, NoteAttendeesDTO, NoteMeetingTimeDTO, Organization, OrganizationDtoRole, PeopleSource,
