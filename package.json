@@ -18,7 +18,6 @@
     "db:migrate": "bun run --cwd packages/database migrate",
     "compose:up": "docker compose up --build -d",
     "verify:deployment": "bun scripts/check-deployment.ts",
-    "verify:pipeline": "bun scripts/check-pipeline.ts",
     "check:generated": "bun scripts/check-generated.ts"
   },
   "devDependencies": {

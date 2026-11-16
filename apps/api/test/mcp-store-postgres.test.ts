@@ -7,7 +7,7 @@ describe.skipIf(!enabled)("private MCP domain in PostgreSQL",()=>{
  const db=enabled?createDatabase(process.env.DATABASE_URL!):null,store=db?createMcpStore(db):null
  const alice=crypto.randomUUID(),bob=crypto.randomUUID(),one=crypto.randomUUID(),two=crypto.randomUUID()
  const scope={userId:alice,workspaceId:one},other={userId:bob,workspaceId:one}
- let own="",foreign="",elsewhere="",transcript="",longText="",longSegment="",folder="",image=""
+ let own="",foreign="",elsewhere="",transcript="",longText="",longSegment="",image=""
  beforeAll(async()=>{
   await db!.user.createMany({data:[{id:alice,name:"Alice MCP",email:`mcp-${alice}@example.invalid`},{id:bob,name:"Bob MCP",email:`mcp-${bob}@example.invalid`}]})
   await db!.organization.createMany({data:[{id:one,name:"One",slug:`one-${one}`},{id:two,name:"Two",slug:`two-${two}`}]})
@@ -51,18 +51,6 @@ describe.skipIf(!enabled)("private MCP domain in PostgreSQL",()=>{
   const page=await store!.transcript(scope,transcript,{limit:1,maxCharacters:256})
   await db!.note.update({where:{id:transcript},data:{title:"Long transcript changed"}})
   await expect(store!.transcript(scope,transcript,{limit:1,maxCharacters:256,cursor:page.nextCursor!})).rejects.toBeInstanceOf(McpStoreError)
- })
- test("private folders are persistent and never share membership across owners or workspaces",async()=>{
-  const created=await store!.createFolder(scope,"Hiring","Explicit folder description");folder=created.id
-  await store!.updateFolder(scope,folder,{name:"Hiring 2027"})
-  await store!.folderNote(scope,folder,own,true);await store!.folderNote(scope,folder,own,true)
-  expect((await store!.listFolders(scope)).folders.find(row=>row.id===folder)?.noteCount).toBe(1)
-  await expect(store!.folderNote(scope,folder,foreign,true)).rejects.toBeInstanceOf(McpStoreError)
-  await expect(store!.folderNote(scope,folder,elsewhere,true)).rejects.toBeInstanceOf(McpStoreError)
-  await expect(store!.updateFolder(other,folder,{name:"Not ours"})).rejects.toBeInstanceOf(McpStoreError)
-  expect((await store!.listMeetings(scope,{folderId:folder,limit:20})).meetings.map(note=>note.id)).toEqual([own])
-  await store!.folderNote(scope,folder,own,false)
-  expect((await store!.listFolders(scope)).folders.find(row=>row.id===folder)?.noteCount).toBe(0)
  })
  test("simultaneous private-note appends preserve every write and UTF16 limits",async()=>{
   await Promise.all(Array.from({length:8},(_,index)=>store!.updatePrivateNotes(scope,own,`Append ${index} 🦊`,"append")))

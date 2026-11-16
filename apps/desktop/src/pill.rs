@@ -868,6 +868,7 @@ impl Render for Nub {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         use crate::motion::SNAPPY;
         self.stage.begin();
+        let rim = nub_rim(window);
         let pointer_events = nub_pointer_events(cx.weak_entity());
         let (phase, attention, hovered, level) = self
             .host
@@ -910,7 +911,7 @@ impl Render for Nub {
                     .w(px(34. - 1.4 * held))
                     .h(px(62. - 2.5 * held))
                     .rounded_full()
-                    .border_1()
+                    .border(px(rim))
                     .border_color(rgba(0x72726ef2))
                     .bg(Rgba {
                         r: grey,
@@ -918,20 +919,9 @@ impl Render for Nub {
                         b: grey,
                         a: 242. / 255.,
                     })
-                    .shadow(vec![
-                        BoxShadow {
-                            color: rgba(0x000000cc).into(),
-                            offset: point(px(0.), px(0.)),
-                            blur_radius: px(0.),
-                            spread_radius: px(0.75),
-                        },
-                        BoxShadow {
-                            color: rgba(0x000000b3).into(),
-                            offset: point(px(0.), px(2.)),
-                            blur_radius: px(4.),
-                            spread_radius: px(-1.),
-                        },
-                    ])
+                    // No drop shadow: the dark outline outside the rim is
+                    // the edge on light backgrounds, the rim on dark ones.
+                    .child(outline(None, rim))
                     .flex()
                     .flex_col()
                     .items_center()
@@ -1051,6 +1041,38 @@ fn nub_pointer_events(entity: WeakEntity<Nub>) -> AnyElement {
     .into_any_element()
 }
 
+/// The capsule's and the popup's rim, as the reference draws it: half a point
+/// of `#72726e` at 95%, which is one device pixel on Retina. At 1x it is a
+/// whole pixel, as a browser would draw it, so it shows on every side.
+fn nub_rim(window: &Window) -> f32 {
+    crate::ui::hairline_at(0.5, window.scale_factor())
+}
+/// The popup's corner radius.
+const BUBBLE_RADIUS: f32 = 16.;
+
+/// The dark outline around the capsule and the popup: 0.75 pt of black at
+/// 80% just outside the rim. Drawn as its own outline rather than a shadow,
+/// because a shadow is painted under the whole shape and would darken the
+/// translucent fill. `radius` is the shape's (fully rounded when `None`);
+/// `border` is the width of the shape's own border, which absolute children
+/// are placed inside of.
+fn outline(radius: Option<f32>, border: f32) -> Div {
+    const WIDTH: f32 = 0.75;
+    let out = -(WIDTH + border);
+    div()
+        .absolute()
+        .top(px(out))
+        .left(px(out))
+        .right(px(out))
+        .bottom(px(out))
+        .border(px(WIDTH))
+        .border_color(rgba(0x000000cc))
+        .map(|ring| match radius {
+            Some(radius) => ring.rounded(px(radius + WIDTH)),
+            None => ring.rounded_full(),
+        })
+}
+
 fn nub_indicator(phase: Phase, attention: TranscriptionAttention, heights: [f32; 3]) -> AnyElement {
     // Spinner and voice bars hand over with a soft rise rather than a swap.
     if phase == Phase::Starting || attention == TranscriptionAttention::Warning {
@@ -1084,7 +1106,7 @@ fn nub_indicator(phase: Phase, attention: TranscriptionAttention, heights: [f32;
         div()
             .w(px(12.))
             .h(px(20.))
-            // 2px bars on a 5px pitch. They follow the level on springs and
+            // 2px bars on a 5px pitch. They ease to each new level and
             // stop redrawing once the input is steady: no perpetual timer.
             .child(crate::motion::bars(
                 "nub-voice-waveform",
@@ -1092,7 +1114,7 @@ fn nub_indicator(phase: Phase, attention: TranscriptionAttention, heights: [f32;
                 2.,
                 3.,
                 20.,
-                rgb(0xce9d00).into(),
+                crate::recording_view::WAVEFORM.into(),
             )),
     )
 }
@@ -1100,12 +1122,8 @@ fn nub_indicator(phase: Phase, attention: TranscriptionAttention, heights: [f32;
 /// The installed Nub uses 7px mirrored halves and a 3px quiet floor. Real
 /// level changes drive the visualizer; quiet does not invent speech.
 pub(crate) fn voice_bar_targets(level: f32) -> [f32; 3] {
-    let level = if level.is_finite() {
-        level.clamp(0., 1.)
-    } else {
-        0.
-    };
-    [2., 1., 2.].map(|multiplier| 2. * ((7. * level / (0.8 * multiplier)).floor() + 1.5).min(7.))
+    // The capsule's halves are 7 pt: up to 14 pt bars.
+    crate::recording_view::level_bars(level, 7.)
 }
 
 struct TranscriptBubble {
@@ -1124,6 +1142,7 @@ struct TranscriptBubble {
 impl Render for TranscriptBubble {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.stage.begin();
+        let rim = nub_rim(window);
         let pose = self
             .stage
             .presence(("bubble", 0), !self.leaving, crate::motion::GOOEY);
@@ -1250,7 +1269,7 @@ impl Render for TranscriptBubble {
                 } else if listening {
                     "Listening…"
                 } else {
-                    "Recording audio locally"
+                    "Recording…"
                 }
             } else if attention == TranscriptionAttention::Warning {
                 "Transcript Paused"
@@ -1263,13 +1282,11 @@ impl Render for TranscriptBubble {
             });
             if !crate::audio::preview_mode() {
                 if !listening {
-                    content = content.child(div().text_size(px(12.)).child(
-                        if crate::server::enabled() {
-                            "Stop recording to transcribe this segment"
-                        } else {
-                            "Transcription is not connected"
-                        },
-                    ));
+                    content = content.child(
+                        div()
+                            .text_size(px(12.))
+                            .child("Stop recording to transcribe this segment"),
+                    );
                 }
             } else if phase == Phase::Live && attention == TranscriptionAttention::None {
                 content =
@@ -1304,7 +1321,11 @@ impl Render for TranscriptBubble {
             // with), so hovering the pill an hour into a meeting builds one
             // popup's worth of bubbles, not the meeting.
             let mut counter = crate::ui::LineCounter::new(13., cx);
-            let text_width = f32::from(width) - 42. - 16.;
+            // The popup's 4 pt inset each side, its rim, and a row's 8 pt margins
+            // and 16 pt indent leave the stack's width.
+            let stack_width = f32::from(width) - 8. - 2. * rim - 32.;
+            let text_width = stack_width - 16.;
+            let texts = window.text_system().clone();
             content = content.child(crate::lazy::estimated(
                 "nub-transcript",
                 &ids,
@@ -1332,6 +1353,8 @@ impl Render for TranscriptBubble {
                     let same_before = i > 0 && same(i - 1, i);
                     let same_after = same(i, i + 1);
                     let own = segment.own;
+                    // The reference tints the speaker's own words faintly green.
+                    let ink: Hsla = if own { rgb(0xf2f6e1) } else { rgb(0xfcfcf8) }.into();
                     let mut paragraph = div()
                         .max_w_full()
                         .min_w_0()
@@ -1355,13 +1378,19 @@ impl Render for TranscriptBubble {
                         .text_size(px(13.))
                         .line_height(px(17.875))
                         .bg(if own { rgb(0x363635) } else { rgb(0x4e4d4b) })
-                        .text_color(rgb(0xfcfcf8))
-                        .child(transcript_text(&segment.text, segment.is_final));
+                        .text_color(ink)
+                        .child(transcript_text(
+                            &segment.text,
+                            segment.is_final,
+                            text_width,
+                            ink,
+                            &texts,
+                        ));
                     if !segment.is_final {
                         paragraph = paragraph.opacity(0.5);
                     }
                     let mut stack = div()
-                        .w((width - px(42.)).max(px(1.)))
+                        .w(px(stack_width.max(1.)))
                         .min_w_0()
                         .max_w_full()
                         .flex()
@@ -1429,32 +1458,27 @@ impl Render for TranscriptBubble {
                 div()
                     .id("nub-transcript-bubble")
                     .size_full()
-                    .rounded(px(16.))
-                    .border_1()
-                    .border_color(rgba(0x72726ef2))
-                    .bg(rgba(0x262626f2))
+                    .relative()
                     .text_color(rgb(0xeeeeeb))
                     .font_family(FONT)
                     .text_size(px(14.))
                     .line_height(px(20.))
-                    .shadow(vec![
-                        BoxShadow {
-                            color: rgba(0x000000cc).into(),
-                            offset: point(px(0.), px(0.)),
-                            blur_radius: px(0.),
-                            spread_radius: px(0.75),
-                        },
-                        BoxShadow {
-                            color: rgba(0x000000b3).into(),
-                            offset: point(px(0.), px(2.)),
-                            blur_radius: px(4.),
-                            spread_radius: px(-1.),
-                        },
-                    ])
-                    .flex()
-                    .flex_col()
-                    .overflow_hidden()
-                    .child(content)
+                    // The panel clips its rows to its rounded shape; the dark
+                    // outline sits outside it, so it is a sibling of the
+                    // clipped panel rather than its child.
+                    .child(
+                        div()
+                            .size_full()
+                            .rounded(px(BUBBLE_RADIUS))
+                            .border(px(rim))
+                            .border_color(rgba(0x72726ef2))
+                            .bg(rgba(0x262626f2))
+                            .flex()
+                            .flex_col()
+                            .overflow_hidden()
+                            .child(content),
+                    )
+                    .child(outline(Some(BUBBLE_RADIUS), 0.))
                     // Rather than fading in place, the bubble grows out of
                     // the side the capsule sits on, and folds back into it.
                     .map(|bubble| {
@@ -1573,37 +1597,133 @@ fn transcript_speaker_heading(segments: &[TranscriptSegment], index: usize) -> O
     let before = index.checked_sub(1).map(|before| &segments[before]);
     speaker_heading(segment, before, several_voices(segments.iter(), segment.own))
 }
-fn transcript_text(text: &str, is_final: bool) -> AnyElement {
+/// Line height of a transcript row: 13 pt text, `leading-snug`.
+const ROW_LINE: f32 = 17.875;
+/// The typing dots after a row still being heard: three 4 pt dots 4 pt apart,
+/// 4 pt after the text, as one unbreakable piece that moves to a line of its
+/// own when the last line has no room for it.
+const DOT: f32 = 4.;
+const DOTS_GAP: f32 = 4.;
+const DOTS_WIDTH: f32 = 3. * DOT + 2. * DOTS_GAP;
+
+fn transcript_text(
+    text: &str,
+    is_final: bool,
+    wrap: f32,
+    ink: Hsla,
+    texts: &std::sync::Arc<WindowTextSystem>,
+) -> AnyElement {
     if is_final {
         return StyledText::new(text.to_owned()).into_any_element();
     }
-    let start = text.len() + 1;
-    let content: SharedString = format!("{text} •••").into();
-    // Waiting dots: a slow pulse, stepped at 30 Hz rather than every frame.
-    crate::motion::slow_loop(
+    // Where the text's last line ends decides where the dots go, as inline
+    // content would place them.
+    let run = TextRun {
+        len: text.len(),
+        font: font(FONT),
+        color: ink,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let shaped = texts
+        .shape_text(
+            text.to_owned().into(),
+            px(13.),
+            &[run],
+            Some(px(wrap.max(1.))),
+            None,
+        )
+        .ok();
+    let (lines, last, baseline) = shaped
+        .as_ref()
+        .and_then(|lines| {
+            let count: usize = lines
+                .iter()
+                .map(|line| line.wrap_boundaries().len() + 1)
+                .sum();
+            let line = lines.last()?;
+            let start = line.wrap_boundaries().last().map_or(px(0.), |boundary| {
+                line.runs()
+                    .get(boundary.run_ix)
+                    .and_then(|run| run.glyphs.get(boundary.glyph_ix))
+                    .map_or(px(0.), |glyph| glyph.position.x)
+            });
+            let width = line.unwrapped_layout.width - start;
+            let glyphs = line.ascent() + line.descent();
+            let baseline = (px(ROW_LINE) - glyphs) / 2. + line.ascent();
+            Some((count, f32::from(width), f32::from(baseline)))
+        })
+        .unwrap_or((1, 0., 13.6));
+    let inline = text.is_empty() || last + DOTS_GAP + DOTS_WIDTH <= wrap;
+    let (left, top) = if text.is_empty() {
+        (0., 0.)
+    } else if inline {
+        (last + DOTS_GAP, (lines - 1) as f32 * ROW_LINE)
+    } else {
+        (DOTS_GAP, lines as f32 * ROW_LINE)
+    };
+    // At rest the dots' centres are 4 pt above the text's baseline (as
+    // measured on the reference); each jumps 2 pt higher at its peak.
+    let dots_top = top + baseline - 4. - DOT / 2.;
+    let still = crate::motion::reduce_motion();
+    let dots = crate::motion::slow_loop(
         "nub-interim-dots",
-        Duration::from_millis(1200),
-        StyledText::new(content),
-        move |element, turns| {
-            let p = turns.fract();
-            let highlights = (0..3)
-                .map(|i| {
-                    let phase = (p * std::f32::consts::TAU - i as f32 * 0.7).sin().max(0.);
-                    let opacity = (100. + phase * 155.) as u32;
-                    (
-                        start + i * 3..start + (i + 1) * 3,
-                        HighlightStyle {
-                            color: Some(rgba(0xfcfcf800 | opacity).into()),
-                            ..Default::default()
-                        },
-                    )
-                })
-                .collect::<Vec<_>>();
-            element.with_highlights(highlights)
+        Duration::from_millis(1000),
+        div()
+            .absolute()
+            .left(px(left))
+            .top(px(dots_top))
+            .h(px(DOT))
+            .flex()
+            .gap(px(DOTS_GAP)),
+        move |row, turns| {
+            row.children((0..3).map(|index| {
+                // With reduced motion the three rest level, at the loop's
+                // middle opacity, rather than frozen mid-jump.
+                let (opacity, lift) = if still {
+                    (0.65, 0.)
+                } else {
+                    jumping_dot(turns - index as f32 * 0.25)
+                };
+                div()
+                    .size(px(DOT))
+                    .mt(px(-lift))
+                    .rounded_full()
+                    .bg(ink.opacity(opacity))
+            }))
         },
-    )
-    .into_any_element()
+    );
+    div()
+        .relative()
+        .min_w_0()
+        // A single line grows by the dots; wrapped text already spans the
+        // row, and dots that moved down add a line.
+        .when(lines == 1 && inline && !text.is_empty(), |d| {
+            d.pr(px(DOTS_GAP + DOTS_WIDTH))
+        })
+        .when(text.is_empty(), |d| d.w(px(DOTS_WIDTH)).h(px(ROW_LINE)))
+        .when(!inline, |d| d.pb(px(ROW_LINE)))
+        .child(StyledText::new(text.to_owned()))
+        .child(dots)
+        .into_any_element()
 }
+
+/// One dot of the reference's `oats-jumping-dots`: a one-second loop that
+/// fades from 30% to full and rises 2 pt at its middle, eased both ways.
+/// `turns` is the loop position; returns the opacity and the rise.
+fn jumping_dot(turns: f32) -> (f32, f32) {
+    let t = turns.rem_euclid(1.);
+    let half = if t < 0.5 { t * 2. } else { (1. - t) * 2. };
+    // CSS `ease` on each half of the keyframes.
+    let eased = if t < 0.5 {
+        crate::motion::cubic_bezier(half, 0.25, 0.1, 0.25, 1.)
+    } else {
+        1. - crate::motion::cubic_bezier(1. - half, 0.25, 0.1, 0.25, 1.)
+    };
+    (0.3 + 0.7 * eased, 2. * eased)
+}
+
 fn clamp_nub(bounds: Bounds<Pixels>, screen: Bounds<Pixels>) -> Bounds<Pixels> {
     Bounds::new(
         point(

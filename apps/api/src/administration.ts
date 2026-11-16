@@ -7,9 +7,12 @@ import { fetchCalendarFeed,normalizedFeedURL,parseCalendarFeed } from "./calenda
 import { CalendarLimitError, type CalendarStore, type StoredCalendar } from "./calendar-store"
 import { makeProviderServices,ProviderFailure,type ProviderServices } from "./providers"
 
-import {makeModelCatalog,CatalogFailure} from "./model-catalog"
+import {makeModelCatalog,CatalogFailure,isRedirectError} from "./model-catalog"
+import {ELEVENLABS_LIVE_MODELS} from "./live/providers/elevenlabs-realtime"
 import {normalizeAllowedEmail,type SignInPolicy} from "./sign-in"
+import {personalMailDomain} from "@meeting-notes/contracts/mail-domains"
 import {classifyOrigin,googleNeedsHttps,GOOGLE_NEEDS_HTTPS} from "@meeting-notes/contracts/transport"
+import {compatibleHost,CompatibleUrlError,normalizeCompatibleBaseUrl} from "@meeting-notes/contracts/compatible"
 import {normalizeS3Endpoint,normalizeS3Prefix,validBucketName,validS3Region,validAccessKeyId,validSecretAccessKey,S3SettingsError,type S3Config} from "./s3"
 import type {StorageConfiguration} from "./storage"
 import type {StorageSettingsDTO,UpdateStorageSettingsInput,OnboardingDTO,OnboardingStepInput} from "@meeting-notes/contracts"
@@ -24,9 +27,38 @@ class AdminFailure extends Error {constructor(readonly payload:ApiError){super(p
 const missing=()=>new AdminFailure({error:"not_found",message:"Calendar or event not found"})
 const invalid=(message:string)=>new AdminFailure({error:"invalid_request",message})
 /** What a new instance streams with until an administrator chooses otherwise. It only runs once ElevenLabs has a key. */
+/** Public prefixes a provider puts on its keys, longest first. */
+const KEY_PREFIXES=["sk-or-v1-","sk-proj-","sk-ant-","GOCSPX-","sk_","sk-"]
+/** A saved key, masked so the administrator can tell which one it is: a known prefix, "…", the last four characters
+ * ("sk-or-v1-…a1b2"). A key shorter than 16 characters shows only "…" and its last two, and one of six or fewer
+ * shows nothing of itself, so a short key is never given away whole. */
+export function keyHint(key:string,options:{prefix?:boolean}={}):string{
+ const value=key.trim()
+ if(value.length<=6)return "…"
+ if(value.length<16)return "…"+value.slice(-2)
+ return (options.prefix===false?"":KEY_PREFIXES.find(prefix=>value.startsWith(prefix))??"")+"…"+value.slice(-4)
+}
+/** A server that answered with a redirect: said as such, since redirects are never followed (a key must not travel on). */
+const redirectedMessage=(host:string)=>`${host} answered with a redirect, and Cereal doesn’t follow redirects. Enter the address it redirects to, where its API starts.`
+/** A test request that proves an OpenAI-compatible server answers chat with a model whose name was typed by hand
+ * (one its /models list did not show, or a server without that list). Any well-formed answer counts. */
+async function probeCompatibleModel(transport:typeof fetch,base:string,key:string,model:string):Promise<"ok"|"unreachable"|"redirected"|number|"invalid">{
+ let response:Response
+ try{response=await transport(base+"/chat/completions",{method:"POST",redirect:"error",signal:AbortSignal.timeout(45_000),headers:{...(key?{Authorization:"Bearer "+key}:{}),"Content-Type":"application/json"},body:JSON.stringify({model,messages:[{role:"user",content:"Reply with the word OK."}],max_tokens:16,stream:false})})}catch(error){return isRedirectError(error)?"redirected":"unreachable"}
+ // A transport that hands back the redirect itself (a 3xx) instead of failing on it.
+ if(response.status>=300&&response.status<400){await response.body?.cancel().catch(()=>{});return "redirected"}
+ if(!response.ok){await response.body?.cancel().catch(()=>{});return response.status}
+ const reader=response.body?.getReader();if(!reader)return "invalid"
+ let text="",size=0;const decoder=new TextDecoder()
+ try{while(true){const next=await reader.read();if(next.done)break;size+=next.value.byteLength;if(size>1_000_000)return "invalid";text+=decoder.decode(next.value,{stream:true})}}catch{return "unreachable"}finally{await reader.cancel().catch(()=>{})}
+ try{const raw=JSON.parse(text);return raw&&typeof raw==="object"&&Array.isArray(raw.choices)?"ok":"invalid"}catch{return "invalid"}
+}
 /** What a new instance uses until an administrator chooses models. */
-export const DEFAULT_LANGUAGE_MODEL="openai/gpt-6-sol",DEFAULT_TRANSCRIPTION_MODEL="scribe_v3"
+export const DEFAULT_LANGUAGE_MODEL="openai/gpt-6-sol"
 export const defaultLiveTranscriptionModel={provider:"elevenlabs",model:"scribe_v3_live"} as const
+/** Speech is transcribed live only: a speech model is accepted only if it streams. */
+export const isLiveSpeechModel=(model:{provider:string;model:string}|null|undefined)=>!!model&&model.provider==="elevenlabs"&&(ELEVENLABS_LIVE_MODELS as ReadonlyArray<string>).includes(model.model)
+const NOT_LIVE="Only live transcription models can be used for speech. Choose Scribe v3 Live or Scribe v2 Realtime"
 /** The name an instance has until someone gives it one. */
 export const DEFAULT_INSTANCE_NAME="Cereal"
 /** Setup cannot be finished without these; the other steps can be skipped. */
@@ -46,13 +78,30 @@ export function makeAdministrationService(store:CalendarStore,box:SecretBox=secr
  const safe=(c:StoredCalendar):CalendarDTO=>{const{encryptedURL,...dto}=c;return dto}
  const boundary=<A>(task:()=>Promise<A>)=>Effect.tryPromise({try:task,catch:(error):ApiError=>error instanceof AdminFailure?error.payload:error instanceof CalendarLimitError?{error:"invalid_request",message:"A maximum of 20 calendars can be linked"}:{error:"unavailable",message:"Settings or calendar service is temporarily unavailable"}})
  const catalog=makeModelCatalog(options.fetch,now)
- const secretFields={openrouter:"openRouterSecret",openai:"openAiSecret",anthropic:"anthropicSecret",elevenlabs:"elevenLabsSecret"} as const
+ const secretFields={openrouter:"openRouterSecret",openai:"openAiSecret",anthropic:"anthropicSecret",elevenlabs:"elevenLabsSecret",openai_compatible:"openAiCompatibleSecret"} as const
  const envFields={openrouter:"OPENROUTER_API_KEY",openai:"OPENAI_API_KEY",anthropic:"ANTHROPIC_API_KEY",elevenlabs:"ELEVENLABS_API_KEY"} as const
  type Stored=Awaited<ReturnType<CalendarStore["getSettings"]>>
  /** A moved setting's value in the environment, until it has been taken into the settings at start-up
   * (`importEnvironment`). After that the environment is never read for it again: what is stored decides. */
  const fromEnv=(s:Stored,name:MovedVariable)=>s?.importedEnvironment?.includes(name)?undefined:env[name]?.trim()||undefined
- async function providerKey(provider:AIProvider){const s=await store.getSettings(),secret=s?.[secretFields[provider]];return secret?box.open(secret):fromEnv(s,envFields[provider])??""}
+ /** A provider's key in the environment. The OpenAI-compatible server has none: it is only set on the admin panel. */
+ const envKey=(s:Stored,provider:AIProvider)=>provider==="openai_compatible"?undefined:fromEnv(s,envFields[provider])
+ /** A provider's key from one read of the settings, so it can be paired with other values from the same row. */
+ function keyFrom(s:Stored,provider:AIProvider){const secret=s?.[secretFields[provider]];return secret?box.open(secret):envKey(s,provider)??""}
+ async function providerKey(provider:AIProvider){return keyFrom(await store.getSettings(),provider)}
+ /** Whether a provider can be used: a key (stored or in the environment), or for the OpenAI-compatible server its address. */
+ const isConfigured=(s:Stored,id:AIProvider)=>id==="openai_compatible"?!!s?.openAiCompatibleBaseUrl:!!(s?.[secretFields[id]]||envKey(s,id))
+ /** The masked key, or for the OpenAI-compatible server its address. Null when there is nothing, or the stored secret
+  * cannot be opened (a replaced settings key). Worked out here; the key itself never leaves the server. */
+ function hintOf(s:Stored,id:AIProvider):string|null{
+  if(id==="openai_compatible")return s?.openAiCompatibleBaseUrl??null
+  const secret=s?.[secretFields[id]]
+  if(secret){try{return keyHint(box.open(secret))}catch{return null}}
+  const env=envKey(s,id);return env?keyHint(env):null
+ }
+ /** A sealed secret, masked; null when there is none or it cannot be opened. */
+ function sealedHint(sealed:string|null|undefined){if(!sealed)return null;try{return keyHint(box.open(sealed))}catch{return null}}
+ const compatibleKeyHint=(s:Stored)=>sealedHint(s?.openAiCompatibleSecret)
  /** Takes each moved setting that has a value in the environment and nothing stored into the settings, once.
   * Every variable seen is remembered, imported or not: a stored value is never replaced, and a setting that is
   * cleared later is not brought back by the next start. Returns the names that were imported (never a value). */
@@ -65,9 +114,10 @@ export function makeAdministrationService(store:CalendarStore,box:SecretBox=secr
    const change=stored===null||stored===undefined||stored===""?read(value):null
    if(change){Object.assign(changes,change);imported.push(name)}
   }
-  for(const provider of Object.keys(envFields) as AIProvider[])take(envFields[provider],s?.[secretFields[provider]],value=>value.length>=10&&value.length<=1000&&!/\s/.test(value)?{[secretFields[provider]]:box.seal(value)}:null)
+  for(const provider of Object.keys(envFields) as Array<keyof typeof envFields>)take(envFields[provider],s?.[secretFields[provider]],value=>value.length>=10&&value.length<=1000&&!/\s/.test(value)?{[secretFields[provider]]:box.seal(value)}:null)
   take("OPENROUTER_MODEL",s?.languageModel,value=>/^[A-Za-z0-9_.:/-]{1,150}$/.test(value)?{languageModel:value}:null)
-  take("ELEVENLABS_STT_MODEL",s?.transcriptionModel,value=>/^[A-Za-z0-9_.:/-]{1,150}$/.test(value)?{transcriptionModel:{provider:"elevenlabs",model:value}}:null)
+  // The batch speech model variable is not taken: speech is transcribed live, and the live model is chosen on the panel.
+  take("ELEVENLABS_STT_MODEL","unused",()=>null)
   // The tool planner uses the chat model that was chosen; there is nothing to import, only to stop reading.
   take("OPENROUTER_TOOL_MODEL","unused",()=>null)
   take("LIVE_MAX_SESSIONS",s?.liveMaxSessions,value=>{const n=Number(value);return Number.isInteger(n)&&n>=1&&n<=200?{liveMaxSessions:n}:null})
@@ -82,14 +132,14 @@ export function makeAdministrationService(store:CalendarStore,box:SecretBox=secr
  /** First-run setup as it stands. Every step but sign-in and storage is read from what is really stored, so a
   * step finished some other way (the panel, the environment) counts, and nothing here can be made true by asking. */
  function onboardingOf(s:Stored,ownerReady:boolean):OnboardingDTO{
-  const recorded=s?.onboardingSteps??{},configured=(id:AIProvider)=>!!(s?.[secretFields[id]]||fromEnv(s,envFields[id]))
+  const recorded=s?.onboardingSteps??{},configured=(id:AIProvider)=>isConfigured(s,id)
   return{completedAt:s?.onboardingCompletedAt??null,steps:{
    owner:ownerReady,
    name:!!recorded.name||(s?.instanceName??DEFAULT_INSTANCE_NAME)!==DEFAULT_INSTANCE_NAME,
-   language:configured("openrouter")||configured("openai")||configured("anthropic"),
-   // ElevenLabs, or OpenAI when it is the provider chosen for speech-to-text.
-   speech:configured("elevenlabs")||(s?.transcriptionModel?.provider==="openai"&&configured("openai")),
-   models:!!recorded.models||!!(s?.chatModels&&s.generationModel&&s.transcriptionModel),
+   language:configured("openrouter")||configured("openai")||configured("anthropic")||configured("openai_compatible"),
+   // Transcription is live, and live transcription is ElevenLabs.
+   speech:configured("elevenlabs"),
+   models:!!recorded.models||!!(s?.chatModels&&s.generationModel),
    // "Who may join" only exists for Google; with email and password an administrator adds people, so there is no step.
    signIn:!!recorded.signIn||!googleOn(s),storage:!!recorded.storage,
   }}
@@ -135,15 +185,17 @@ export function makeAdministrationService(store:CalendarStore,box:SecretBox=secr
  // and Google can be used at this address; in every other case (a new server, an older one that had both on, plain
  // HTTP) it is email and password.
  const googleOn=(s:Stored)=>(s?.signInGoogle??false)&&s?.signInPassword===false&&!noGoogle
- const signInDTO=(s:Stored)=>({password:!googleOn(s),google:googleOn(s),allowedEmails:[...(s?.signInAllowedEmails??[])],googleClientId:s?.googleClientId??null,googleClientSecretSet:!!s?.googleClientSecret,googleRedirectUris,googleNeedsHttps:noGoogle})
+ const signInDTO=(s:Stored)=>({password:!googleOn(s),google:googleOn(s),allowedEmails:[...(s?.signInAllowedEmails??[])],googleClientId:s?.googleClientId??null,googleClientSecretSet:!!s?.googleClientSecret,googleClientSecretHint:sealedHint(s?.googleClientSecret),googleRedirectUris,googleNeedsHttps:noGoogle})
  async function signInPolicy():Promise<SignInPolicy>{const s=await store.getSettings(),client=storedGoogleClient(s),dto=signInDTO(s);return{password:dto.password,google:dto.google&&!!client&&!noGoogle,allowedEmails:dto.allowedEmails,googleCredentials:client,instanceName:s?.instanceName??"Cereal"}}
  async function settings():Promise<AdminSettingsDTO>{
   const s=await store.getSettings(),legacyModel=s?.languageModel??fromEnv(s,"OPENROUTER_MODEL")??DEFAULT_LANGUAGE_MODEL,limits=liveLimits(s)
   return{instanceName:s?.instanceName??DEFAULT_INSTANCE_NAME,instanceLogo:s?.instanceLogo??null,languageModel:legacyModel,
-   providers:(["openrouter","openai","anthropic","elevenlabs"] as const).map(id=>({id,configured:!!(s?.[secretFields[id]]||fromEnv(s,envFields[id])),source:s?.[secretFields[id]]?"stored":fromEnv(s,envFields[id])?"environment":"none"})),
-   chatModels:s?.chatModels??[{provider:"openrouter",model:legacyModel}],generationModel:s?.generationModel??{provider:"openrouter",model:legacyModel},transcriptionModel:s?.transcriptionModel??{provider:"elevenlabs",model:fromEnv(s,"ELEVENLABS_STT_MODEL")??DEFAULT_TRANSCRIPTION_MODEL},
-   // Chosen on the admin panel and kept in the database; on by default, and null once an administrator turns it off.
-   liveTranscriptionModel:s?.liveTranscriptionModel===undefined?defaultLiveTranscriptionModel:s.liveTranscriptionModel,
+   providers:(["openrouter","openai","anthropic","elevenlabs","openai_compatible"] as const).map(id=>({id,configured:isConfigured(s,id),source:(id==="openai_compatible"?s?.openAiCompatibleBaseUrl:s?.[secretFields[id]])?"stored":envKey(s,id)?"environment":"none",hint:hintOf(s,id)})),
+   openAiCompatible:{baseUrl:s?.openAiCompatibleBaseUrl??null,apiKeySet:!!s?.openAiCompatibleSecret,apiKeyHint:compatibleKeyHint(s)},
+   chatModels:s?.chatModels??[{provider:"openrouter",model:legacyModel}],generationModel:s?.generationModel??{provider:"openrouter",model:legacyModel},
+   // Always on. A server where an administrator once turned it off (stored as "off", read as null) has it on again,
+   // and one that holds a model that does not stream (saved by an older version) uses the default live model.
+   liveTranscriptionModel:s?.liveTranscriptionModel??defaultLiveTranscriptionModel,
    openRouterConfigured:!!(s?.openRouterSecret||fromEnv(s,"OPENROUTER_API_KEY")),elevenLabsConfigured:!!(s?.elevenLabsSecret||fromEnv(s,"ELEVENLABS_API_KEY")),openRouterSource:s?.openRouterSecret?"stored":fromEnv(s,"OPENROUTER_API_KEY")?"environment":"none",elevenLabsSource:s?.elevenLabsSecret?"stored":fromEnv(s,"ELEVENLABS_API_KEY")?"environment":"none",calendarRefreshMinutes:s?.calendarRefreshMinutes??15,calendarLookAheadDays:s?.calendarLookAheadDays??30,signIn:signInDTO(s),storage:storageDTO(storageState(s)),liveMaxSessions:limits.maxSessions,liveHoldSeconds:limits.holdSeconds,apps:appsOf(s),unusedEnvironment:unusedEnvironment(s),updatedAt:s?.updatedAt??null}
  }
  /** The storage settings in force, with the secret in the clear for the server's own use: what was saved on the admin
@@ -164,7 +216,7 @@ export function makeAdministrationService(store:CalendarStore,box:SecretBox=secr
   return{backend:env.STORAGE_BACKEND?.trim().toLowerCase()==="s3"?"s3":"local",source:"environment",endpoint:env.S3_ENDPOINT?.trim()?attempt(()=>normalizeS3Endpoint(env.S3_ENDPOINT!),null):null,region:validS3Region(region)?region:"us-east-1",bucket:validBucketName(bucket)?bucket:"",
    prefix:attempt(()=>normalizeS3Prefix(env.S3_PREFIX??""),""),forcePathStyle:/^(?:1|true|yes|on)$/i.test(env.S3_FORCE_PATH_STYLE?.trim()??""),accessKeyId:validAccessKeyId(accessKeyId)?accessKeyId:"",secret:env.S3_SECRET_ACCESS_KEY?.trim()||null}
  }
- const storageDTO=(state:StorageState):StorageSettingsDTO=>({backend:state.backend,source:state.source,endpoint:state.endpoint,region:state.region,bucket:state.bucket||null,prefix:state.prefix,forcePathStyle:state.forcePathStyle,accessKeyId:state.accessKeyId||null,secretAccessKeySet:!!state.secret})
+ const storageDTO=(state:StorageState):StorageSettingsDTO=>({backend:state.backend,source:state.source,endpoint:state.endpoint,region:state.region,bucket:state.bucket||null,prefix:state.prefix,forcePathStyle:state.forcePathStyle,accessKeyId:state.accessKeyId||null,secretAccessKeySet:!!state.secret,secretAccessKeyHint:state.secret?keyHint(state.secret,{prefix:false}):null})
  /** The bucket as the storage layer uses it, or null while something it needs is missing. */
  const bucketOf=(state:StorageState):S3Config|null=>state.bucket&&state.accessKeyId&&state.secret?{endpoint:state.endpoint,region:state.region,bucket:state.bucket,prefix:state.prefix,forcePathStyle:state.forcePathStyle,accessKeyId:state.accessKeyId,secretAccessKey:state.secret}:null
  const storageOf=(state:StorageState):StorageConfiguration=>({backend:state.backend,s3:bucketOf(state)})
@@ -201,7 +253,7 @@ export function makeAdministrationService(store:CalendarStore,box:SecretBox=secr
   if(wantsGoogle!==undefined){changes.signInGoogle=wantsGoogle;changes.signInPassword=!wantsGoogle}
   if(input.allowedEmails!==undefined){
    const entries:string[]=[]
-   for(const raw of input.allowedEmails){const entry=normalizeAllowedEmail(raw);if(!entry)throw invalid("Allowed entries are a full email address or a domain such as @example.com");if(!entries.includes(entry))entries.push(entry)}
+   for(const raw of input.allowedEmails){const entry=normalizeAllowedEmail(raw);if(!entry)throw invalid("Allowed entries are a full email address or a domain such as @example.com");if(entry.startsWith("@")&&personalMailDomain(entry))throw invalid(`Anyone can sign up for an address at ${entry.slice(1)}, so the whole domain cannot be allowed. Add people’s full addresses instead`);if(!entries.includes(entry))entries.push(entry)}
    if(entries.length>500)throw invalid("Keep the allowed list to 500 entries or fewer")
    changes.signInAllowedEmails=entries
   }
@@ -215,11 +267,50 @@ export function makeAdministrationService(store:CalendarStore,box:SecretBox=secr
  async function configuration(purpose:"chat"|"generation"="chat",requested?:string){
   const s=await settings();let selected=purpose==="generation"?s.generationModel:s.chatModels[0]!
   if(requested){const found=s.chatModels.find(m=>`${m.provider}:${m.model}`===requested);if(!found)throw invalid("Choose an enabled chat model");selected=found}
-  const keys=await Promise.all((["openrouter","openai","anthropic","elevenlabs"] as const).map(providerKey))
-  return{openRouterKey:keys[0]!,openAiKey:keys[1]!,anthropicKey:keys[2]!,elevenLabsKey:keys[3]!,languageProvider:selected.provider,languageModel:selected.model,toolModel:selected.model,transcriptionProvider:s.transcriptionModel.provider,transcriptionModel:s.transcriptionModel.model}
+  // One read for the keys and the compatible address, so a key is never paired with an address saved a moment later.
+  const stored=await store.getSettings(),keys=(["openrouter","openai","anthropic","elevenlabs","openai_compatible"] as const).map(provider=>keyFrom(stored,provider))
+  return{openRouterKey:keys[0]!,openAiKey:keys[1]!,anthropicKey:keys[2]!,elevenLabsKey:keys[3]!,openAiCompatibleKey:keys[4]!,openAiCompatibleBaseUrl:stored?.openAiCompatibleBaseUrl??"",languageProvider:selected.provider,languageModel:selected.model,toolModel:selected.model}
+ }
+ /** A typed address, tidied, or the saved one. Throws a sentence about what to change. */
+ function compatibleBase(raw:string|null|undefined,s:Stored):string{
+  if(raw===undefined)return s?.openAiCompatibleBaseUrl??""
+  if(raw===null)return ""
+  try{return normalizeCompatibleBaseUrl(raw)}catch(error){throw invalid(error instanceof CompatibleUrlError?error.message:"Enter the server’s address")}
+ }
+ /** The saved OpenAI-compatible key, but only for the saved address: it is never sent anywhere else. A draft address
+  * gets only a key typed in the same request, otherwise none, so a stored key cannot be pointed at another server. */
+ function compatibleSavedKey(base:string,s:Stored){return base&&base===s?.openAiCompatibleBaseUrl?keyFrom(s,"openai_compatible"):""}
+ /** What to say when an OpenAI-compatible server's model list could not be read, naming the server. */
+ function compatibleFailure(error:CatalogFailure,base:string){
+  const host=compatibleHost(base)
+  return new AdminFailure({error:"unavailable",message:error.reason==="redirected"?redirectedMessage(host)
+   :error.reason==="unreachable"?`Couldn’t reach ${host}. Check the address and that the server is running.`
+   :error.status===401||error.status===403?`${host} refused the request (HTTP ${error.status}). Check the API key.`
+   :error.status?`${host} answered HTTP ${error.status} for ${new URL(base).pathname.replace(/\/$/,"")}/models. Check that the address ends where its API starts, often /v1.`
+   :`${host} did not answer with a list of models.`})
  }
  async function modelCatalog(input:ModelCatalogInput){
+  if(input.provider==="openai_compatible"){
+   const s=await store.getSettings(),base=compatibleBase(input.baseUrl,s)
+   if(!base)throw invalid("Enter the server’s address to load its models")
+   const key=input.apiKey??await compatibleSavedKey(base,s)
+   try{return await catalog("openai_compatible",key,input.refresh,base)}catch(error){throw error instanceof CatalogFailure?compatibleFailure(error,base):error}
+  }
+  if(input.apiKey!==undefined&&input.apiKey.trim().length<10)throw invalid("Provider keys are at least 10 characters")
   try{return await catalog(input.provider,input.apiKey??await providerKey(input.provider),input.refresh)}catch(error){throw error instanceof CatalogFailure?new AdminFailure({error:error.reason==="not_configured"?"invalid_request":"unavailable",message:error.reason==="not_configured"?"Add a provider API key to load its models":"The provider model list is unavailable. Check the key and retry."}):error}
+ }
+ /** Checks an OpenAI-compatible model before it is selected: listed by the server, or else answering a test request
+  * (a server without a list, or one that lists only some of what it serves). */
+ async function checkCompatibleModel(base:string,key:string,model:string){
+  let listed:Awaited<ReturnType<typeof catalog>>|null=null
+  try{listed=await catalog("openai_compatible",key,false,base)}catch{listed=null}
+  if(listed?.models.some(m=>m.id===model))return
+  const host=compatibleHost(base),answer=await probeCompatibleModel(options.fetch??globalThis.fetch,base,key,model)
+  if(answer==="ok")return
+  throw invalid(answer==="redirected"?redirectedMessage(host):answer==="unreachable"?`Couldn’t reach ${host}. Check the address and that the server is running.`
+   :answer===401||answer===403?`${host} refused the request (HTTP ${answer}). Check the API key.`
+   :typeof answer==="number"?`${host} did not accept the model “${model}” (HTTP ${answer}). Check the model name.`
+   :`${host} did not answer a test request with the model “${model}” as an OpenAI-compatible server would.`)
  }
  function validatedURL(raw:string){try{return normalizedFeedURL(raw)}catch{throw invalid("Use a public HTTPS or webcal subscription URL; private network feeds and embedded credentials are not supported")}}
  async function sync(id:string):Promise<CalendarDTO|null>{
@@ -267,7 +358,14 @@ export function makeAdministrationService(store:CalendarStore,box:SecretBox=secr
  getChatModels:()=>boundary(async()=>({models:(await settings()).chatModels})),
  getModelCatalog:(input:ModelCatalogInput)=>boundary(()=>modelCatalog(input)),
  updateSettings:(input:UpdateAdminSettingsInput,owner?:OwnerReady)=>boundary(async()=>{
-  const{openRouterApiKey,elevenLabsApiKey,openAiApiKey,anthropicApiKey,signIn,storage,apps,...fields}=input
+  const{openRouterApiKey,elevenLabsApiKey,openAiApiKey,anthropicApiKey,openAiCompatibleApiKey,openAiCompatibleBaseUrl,signIn,storage,apps,...fields}=input
+  // Transcription is live only and always on: it cannot be turned off. The contract already refuses a null live
+  // model; this holds for any caller.
+  if((fields as {liveTranscriptionModel?:unknown}).liveTranscriptionModel===null)throw invalid("Live transcription is always on. Choose which live model to use.")
+  // A speech model must stream: speech is transcribed live only.
+  const live=fields.liveTranscriptionModel
+  if(live&&!isLiveSpeechModel(live))throw invalid(NOT_LIVE)
+  const before=await store.getSettings(),compatibleChange=openAiCompatibleBaseUrl===undefined?undefined:compatibleBase(openAiCompatibleBaseUrl,before)
   const appChanges:{iosAppIds?:string[];iosAppStoreId?:string|null}={}
   if(apps?.iosAppIds!==undefined){const ids=[...new Set(apps.iosAppIds.map(id=>id.trim()).filter(Boolean))];if(ids.some(id=>!IOS_APP_ID.test(id)))throw invalid("An app ID is the team ID, a dot and the bundle ID, such as LZWN2FF7YB.dev.cereal.mobile");appChanges.iosAppIds=ids}
   if(apps?.iosAppStoreId!==undefined){const id=apps.iosAppStoreId?.trim()||null;if(id&&!/^\d{1,20}$/.test(id))throw invalid("The App Store ID is the number in the app's App Store address");appChanges.iosAppStoreId=id}
@@ -276,19 +374,38 @@ export function makeAdministrationService(store:CalendarStore,box:SecretBox=secr
   if(fields.chatModels&&new Set(fields.chatModels.map(m=>m.provider+":"+m.model)).size!==fields.chatModels.length)throw invalid("Chat models must be unique")
   // Verify newly selected models against their provider's catalog, using a draft
   // key when included. Unrelated edits do not depend on provider availability.
-  const current=await settings(),keys={openrouter:openRouterApiKey,elevenlabs:elevenLabsApiKey,openai:openAiApiKey,anthropic:anthropicApiKey}
-  const selections=[...(fields.chatModels??[]).map(model=>({model,capability:"language"})),...(fields.generationModel?[{model:fields.generationModel,capability:"language"}]:[]),...(fields.transcriptionModel?[{model:fields.transcriptionModel,capability:"transcription"}]:[]),...(fields.liveTranscriptionModel?[{model:fields.liveTranscriptionModel,capability:"live_transcription"}]:[])]
-  const old=[...current.chatModels,current.generationModel,current.transcriptionModel]
+  const current=await settings(),keys={openrouter:openRouterApiKey,elevenlabs:elevenLabsApiKey,openai:openAiApiKey,anthropic:anthropicApiKey,openai_compatible:openAiCompatibleApiKey}
+  // The address cannot be removed while chat or notes still use the server: they would fail at the next request.
+  if(compatibleChange===""){
+   const using=[...((fields.chatModels??current.chatModels).some(m=>m.provider==="openai_compatible")?["chat"]:[]),...((fields.generationModel??current.generationModel).provider==="openai_compatible"?["meeting notes"]:[])]
+   if(using.length)throw invalid(`The OpenAI-compatible server is still used for ${using.join(" and ")}. Choose other models there before removing its address.`)
+  }
+  const selections=[...(fields.chatModels??[]).map(model=>({model,capability:"language"})),...(fields.generationModel?[{model:fields.generationModel,capability:"language"}]:[]),...(live?[{model:live,capability:"live_transcription"}]:[])]
+  const old=[...current.chatModels,current.generationModel]
+  const checkedCompatible=new Set<string>()
   for(const{model,capability}of selections){
    // A streaming model is only "already selected" as the streaming model: a batch model must not pass as one.
    if(capability==="live_transcription"?current.liveTranscriptionModel?.provider===model.provider&&current.liveTranscriptionModel.model===model.model:old.some(m=>m.provider===model.provider&&m.model===model.model))continue
-   const key=keys[model.provider]===null?(fromEnv(await store.getSettings(),envFields[model.provider])??""):keys[model.provider]??await providerKey(model.provider)
+   if(model.provider==="openai_compatible"){
+    // The address and key in this same change, else the saved ones.
+    const base=compatibleChange??before?.openAiCompatibleBaseUrl??""
+    if(!base)throw invalid("Enter the OpenAI-compatible server’s address before choosing its model")
+    // The same model chosen for chat and for notes is checked once.
+    // A key typed in this change, else the saved one, which only ever goes to the saved address.
+    if(!checkedCompatible.has(model.model))await checkCompatibleModel(base,keys.openai_compatible===null?"":keys.openai_compatible??await compatibleSavedKey(base,before),model.model)
+    checkedCompatible.add(model.model)
+    continue
+   }
+   const key=keys[model.provider]===null?(envKey(await store.getSettings(),model.provider)??""):keys[model.provider]??await providerKey(model.provider)
    if(!key&&model.provider!=="openrouter")throw invalid("Connect the provider before selecting its model")
    const available=await modelCatalog({provider:model.provider,...(key?{apiKey:key}:{})})
-   if(!available.models.some(m=>m.id===model.model&&m.capabilities.includes(capability as "language"|"transcription"|"live_transcription")))throw invalid("Choose an available model for this task")
+   if(!available.models.some(m=>m.id===model.model&&m.capabilities.includes(capability as "language"|"live_transcription")))throw invalid("Choose an available model for this task")
   }
   const secrets:Record<string,string|null>={};for(const[id,key]of Object.entries(keys))if(key!==undefined)secrets[secretFields[id as AIProvider]]=key===null?null:box.seal(key)
-  await store.saveSettings({...fields,...(fields.instanceName!==undefined?{instanceName:fields.instanceName.trim()}:{}),...secrets,...signInChanges,...storageChanges,...appChanges})
+  // A saved key belongs to the address it was saved with. A new address without a key typed with it drops the old key,
+  // so chat and notes never send it to a server it was not given for.
+  if(compatibleChange!==undefined&&compatibleChange!==(before?.openAiCompatibleBaseUrl??"")&&openAiCompatibleApiKey===undefined&&before?.openAiCompatibleSecret)secrets.openAiCompatibleSecret=null
+  await store.saveSettings({...fields,...(fields.instanceName!==undefined?{instanceName:fields.instanceName.trim()}:{}),...secrets,...(compatibleChange!==undefined?{openAiCompatibleBaseUrl:compatibleChange||null}:{}),...signInChanges,...storageChanges,...appChanges})
   return adminSettings(owner)
  }),
  listCalendars:()=>boundary(async()=>(await store.listCalendars()).map(safe)),
@@ -305,6 +422,8 @@ export type AdministrationService=ReturnType<typeof makeAdministrationService>
 /** Load configuration for each operation, so encrypted admin overrides take effect
  * immediately. Calendar data is never attached to language-provider context. */
 export function settingsAwareProviders(admin:AdministrationService,transport?:typeof fetch):ProviderServices {
- const provider=(service:"language"|"transcription",purpose:"chat"|"generation"="chat",requested?:string)=>Effect.tryPromise({try:async()=>makeProviderServices({...await admin.configuration(purpose,requested),fetch:transport}),catch:()=>new ProviderFailure(service)})
- return {chatToolStep:async(messages,tools,signal,model)=>{const p=makeProviderServices({...await admin.configuration("chat",model),fetch:transport});return p.chatToolStep!(messages,tools,signal)},transcribe:input=>Effect.flatMap(provider("transcription"),p=>p.transcribe(input)),generate:note=>Effect.flatMap(provider("language","generation"),p=>p.generate(note)),title:(note,notes)=>Effect.flatMap(provider("language","generation"),p=>p.title!(note,notes)),chat:(note,input)=>Effect.flatMap(provider("language","chat",input.model),p=>p.chat(note,input)),evidence:(note,paragraph)=>Effect.flatMap(provider("language","generation"),p=>p.evidence!(note,paragraph)),async *chatStream(note,input,signal){let p:ProviderServices;try{p=makeProviderServices({...await admin.configuration("chat",input.model),fetch:transport})}catch{throw new ProviderFailure("language")}yield* p.chatStream!(note,input,signal)}}
+ const provider=(service:"language",purpose:"chat"|"generation"="chat",requested?:string)=>Effect.tryPromise({try:async()=>makeProviderServices({...await admin.configuration(purpose,requested),fetch:transport}),catch:()=>new ProviderFailure(service)})
+ // The streamed source summary asks the provider the buffered one uses: the generation configuration.
+ const evidenceStream:ProviderServices["evidenceStream"]=async function*(note,paragraph,signal){let p:ProviderServices;try{p=makeProviderServices({...await admin.configuration("generation"),fetch:transport})}catch{throw new ProviderFailure("language")}yield* p.evidenceStream!(note,paragraph,signal)}
+ return {evidenceStream,chatToolStep:async(messages,tools,signal,model)=>{const p=makeProviderServices({...await admin.configuration("chat",model),fetch:transport});return p.chatToolStep!(messages,tools,signal)},generate:note=>Effect.flatMap(provider("language","generation"),p=>p.generate(note)),title:(note,notes)=>Effect.flatMap(provider("language","generation"),p=>p.title!(note,notes)),chat:(note,input)=>Effect.flatMap(provider("language","chat",input.model),p=>p.chat(note,input)),evidence:(note,paragraph)=>Effect.flatMap(provider("language","generation"),p=>p.evidence!(note,paragraph)),async *chatStream(note,input,signal){let p:ProviderServices;try{p=makeProviderServices({...await admin.configuration("chat",input.model),fetch:transport})}catch{throw new ProviderFailure("language")}yield* p.chatStream!(note,input,signal)}}
 }

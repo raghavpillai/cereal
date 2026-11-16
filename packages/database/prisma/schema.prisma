@@ -36,16 +36,19 @@ model Note {
   /// Set once, by POST /api/v1/notes/import: when the note arrived, and the SHA-256 of the request that made it.
   importedAt         DateTime?           @db.Timestamptz(3)
   importDigest       String?             @db.Char(64)
+  /// The "Chat with meeting transcript" line last added to the generated notes, as written; null when none ever was.
+  /// A regeneration replaces it only while it is still in the notes unchanged (apps/api/src/transcript-link.ts).
+  transcriptLink     String?
   transcriptSegments TranscriptSegment[]
   shares             SharedNote[]
-  audioChunks        AudioChunk[]
   calendarMeeting    CalendarMeeting?
   meetingContext     NoteMeetingContext?
   googleMeeting      GoogleMeeting?
-  folderLinks MeetingFolderNote[]
   attachments NoteAttachment[]
   liveCoverage       LiveCoverage[]
+  liveGaps           LiveGap[]
   speakers           NoteSpeaker[]
+  chatThreads        ChatThread[]
 
   @@index([updatedAt(sort: Desc)])
 }
@@ -60,25 +63,38 @@ model TranscriptSegment {
   isFinal      Boolean      @default(false)
   startMs      Int
   endMs        Int?
-  /// "batch" (an uploaded part) or "live" (the streaming session). Client-supplied segments are "batch".
+  /// "live" (the streaming session) or "batch": a segment a client wrote or imported, or one transcribed from an
+  /// uploaded part by an older version.
   origin       String       @default("batch") @db.VarChar(16)
   note         Note         @relation(fields: [noteId], references: [id], onDelete: Cascade)
 
   @@index([noteId, startMs])
 }
 
-/// Ledger of note-timeline audio that has been accounted for, so each piece is transcribed once.
-/// source "live": the streaming session stored final text for it (or heard silence).
-/// source "batch": an uploaded part claimed it for batch transcription (chunkId says which).
+/// Ledger of note-timeline audio the live session has accounted for (stored final text for it, or heard
+/// silence), so a reconnect resumes where it ended and nothing is transcribed twice.
+/// Stretches of a recording that were captured but will never have a transcript: the client skipped a backlog
+/// longer than the resume window, or the recogniser could not take them. Shown in the transcript as "missing".
+model LiveGap {
+  id        String       @id @default(uuid()) @db.Uuid
+  noteId    String       @db.Uuid
+  channel   AudioChannel
+  fromMs    Int
+  toMs      Int
+  reason    String       @db.VarChar(32)
+  createdAt DateTime     @default(now()) @db.Timestamptz(3)
+  note      Note         @relation(fields: [noteId], references: [id], onDelete: Cascade)
+
+  @@index([noteId, fromMs])
+}
+
 model LiveCoverage {
   id        String       @id @default(uuid()) @db.Uuid
   noteId    String       @db.Uuid
   channel   AudioChannel
   fromMs    Int
   toMs      Int
-  source    String       @default("live") @db.VarChar(16)
   sessionId String?      @db.Uuid
-  chunkId   String?      @db.Uuid
   updatedAt DateTime     @updatedAt @db.Timestamptz(3)
   note      Note         @relation(fields: [noteId], references: [id], onDelete: Cascade)
 
@@ -113,28 +129,6 @@ model SharedNote {
   @@index([noteId, createdAt(sort: Desc)])
 }
 
-model AudioChunk {
-  id        String @id @db.Uuid
-  noteId    String @db.Uuid
-  channel   AudioChannel
-  sequence  Int
-  startMs   Int
-  durationMs Int
-  hash      String @db.Char(64)
-  state     String @default("queued") @db.VarChar(32)
-  error     String?
-  lease     String? @db.Uuid
-  leaseUntil DateTime? @db.Timestamptz(3)
-  /// How a ready part was accounted for: "batch", "live" (no provider call) or "mixed". Null until ready.
-  resolution String? @db.VarChar(16)
-  createdAt DateTime @default(now()) @db.Timestamptz(3)
-  updatedAt DateTime @updatedAt @db.Timestamptz(3)
-  note      Note @relation(fields: [noteId], references: [id], onDelete: Cascade)
-
-  @@unique([noteId, channel, sequence])
-  @@index([state, leaseUntil])
-}
-
 model InstanceSettings {
   id                     String   @id @default("instance")
   instanceName           String   @default("Cereal") @db.VarChar(100)
@@ -142,13 +136,17 @@ model InstanceSettings {
   instanceLogo           String?
   chatModels             Json?
   generationModel        Json?
-  transcriptionModel     Json?
-  /// {provider, model} of the streaming speech-to-text model; null means live transcription is off.
+  /// {provider, model} of the speech-to-text model, which always streams (speech is transcribed live only). Live
+  /// transcription is always on: null reads as the default live model.
   liveTranscriptionModel Json?
   openAiSecret           String?
   anthropicSecret        String?
   openRouterSecret       String?
   elevenLabsSecret       String?
+  /// Where an OpenAI-compatible server's API starts (http or https, tidied, no credentials); null: not connected.
+  openAiCompatibleBaseUrl String? @db.VarChar(2048)
+  /// Its optional API key, sealed like the others.
+  openAiCompatibleSecret String?
   calendarRefreshMinutes Int      @default(15)
   calendarLookAheadDays   Int      @default(30)
   /// Which ways of signing in are offered. At least one stays on; the bootstrap owner token always works.
@@ -235,7 +233,6 @@ model User {
  oauthAccessTokenUserIdChildren OauthAccessToken[] @relation("mcpOauthAccessTokenUserId")
  oauthConsentUserIdChildren OauthConsent[] @relation("mcpOauthConsentUserId")
  workspaceState UserWorkspaceState?
- meetingFolders MeetingFolder[]
  agentBriefs AgentBrief[]
  id String @id @db.Uuid
  name String
@@ -259,6 +256,7 @@ model User {
  googleStates GoogleOAuthState[]
  meetingContexts NoteMeetingContext[]
  googleMeetings GoogleMeeting[]
+ chatThreads ChatThread[]
 }
 model Session {
  oauthRefreshTokenSessionIdChildren OauthRefreshToken[] @relation("mcpOauthRefreshTokenSessionId")
@@ -428,7 +426,6 @@ model NoteMeetingContext {
 // Better Auth Organization plugin. Membership never changes Note.ownerId.
 model Organization {
  notes Note[]
- meetingFolders MeetingFolder[]
  workspaceSelections UserWorkspaceState[]
  agentBriefs AgentBrief[]
  id String @id @db.Uuid
@@ -467,35 +464,13 @@ model Invitation {
  @@index([email,status])
 }
 
-// Workspace navigation never expands private-note ownership or folder access.
+// Workspace navigation never expands private-note ownership.
 model UserWorkspaceState {
  userId String @id @db.Uuid
  user User @relation(fields:[userId],references:[id],onDelete:Cascade)
  activeOrganizationId String? @db.Uuid
  activeOrganization Organization? @relation(fields:[activeOrganizationId],references:[id],onDelete:SetNull)
  updatedAt DateTime @updatedAt @db.Timestamptz(3)
-}
-model MeetingFolder {
- id String @id @default(uuid()) @db.Uuid
- ownerId String @db.Uuid
- owner User @relation(fields:[ownerId],references:[id],onDelete:Cascade)
- organizationId String @db.Uuid
- organization Organization @relation(fields:[organizationId],references:[id],onDelete:Cascade)
- name String @db.VarChar(200)
- description String @default("") @db.VarChar(2000)
- createdAt DateTime @default(now()) @db.Timestamptz(3)
- updatedAt DateTime @updatedAt @db.Timestamptz(3)
- notes MeetingFolderNote[]
- @@index([ownerId,organizationId,createdAt])
-}
-model MeetingFolderNote {
- folderId String @db.Uuid
- folder MeetingFolder @relation(fields:[folderId],references:[id],onDelete:Cascade)
- noteId String @db.Uuid
- note Note @relation(fields:[noteId],references:[id],onDelete:Cascade)
- createdAt DateTime @default(now()) @db.Timestamptz(3)
- @@id([folderId,noteId])
- @@index([noteId])
 }
 model NoteAttachment {
  id String @id @default(uuid()) @db.Uuid
@@ -515,6 +490,50 @@ model AgentBrief {
  body String @default("")
  updatedAt DateTime @updatedAt @db.Timestamptz(3)
  @@id([userId,organizationId])
+}
+
+/// A chat conversation. It is one person's for life (`userId`) and nobody else's, administrators included:
+/// every query names its owner. A thread about a note (`noteId`) is deleted with the note, because its
+/// answers quote what the note held; one across all notes has no `noteId`. `title` is null until the first
+/// exchange has been answered and named (the apps show "Untitled thread").
+model ChatThread {
+ id String @id @db.Uuid
+ userId String @db.Uuid
+ user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+ noteId String? @db.Uuid
+ note Note? @relation(fields:[noteId],references:[id],onDelete:Cascade)
+ title String? @db.VarChar(200)
+ /// Who named it: "generated" (the model, after the first exchange), "question" (its first question, when
+ /// the model could not), "user" (renamed). A thread a person renamed is never renamed for them.
+ titleSource String? @db.VarChar(16)
+ /// Exchanges (a question and its answer) in the thread; positions run from 0 to 2 * turnCount - 1.
+ turnCount Int @default(0)
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ updatedAt DateTime @db.Timestamptz(3)
+ messages ChatMessage[]
+ @@index([userId, updatedAt(sort: Desc), id(sort: Desc)])
+ @@index([userId, noteId, updatedAt(sort: Desc)])
+ @@index([noteId])
+}
+/// One message of a thread. Exchange `n` is the question at position 2n and its answer at 2n + 1. An answer
+/// is written while it streams ("streaming") and settles as "complete", "interrupted" (stopped or cut off,
+/// with what had arrived) or "failed" (with `error`).
+model ChatMessage {
+ id String @id @db.Uuid
+ threadId String @db.Uuid
+ thread ChatThread @relation(fields:[threadId],references:[id],onDelete:Cascade)
+ position Int
+ role String @db.VarChar(16)
+ content String @default("")
+ status String @default("complete") @db.VarChar(16)
+ error String? @db.VarChar(2000)
+ model String? @db.VarChar(200)
+ citations Json @default("[]")
+ tools Json @default("[]")
+ elapsedMs Int?
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ updatedAt DateTime @db.Timestamptz(3)
+ @@unique([threadId, position])
 }
 
 // Exact installed Better Auth MCP/OAuth-provider and JWT plugin tables.

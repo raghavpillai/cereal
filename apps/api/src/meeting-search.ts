@@ -1,4 +1,5 @@
 import type {NoteDTO} from "@meeting-notes/contracts"
+import {withoutTranscriptLink} from "./transcript-link"
 
 export interface MeetingSearchInput {query:string;from?:string;to?:string;limit:number}
 export interface TranscriptSearchInput extends MeetingSearchInput {noteId?:string}
@@ -13,7 +14,7 @@ export function selectMeetings(notes:ReadonlyArray<NoteDTO>,input:MeetingSearchI
   const terms=meetingSearchTerms(input.query)
   return notes.filter(note=>(!input.from||note.date>=input.from)&&(!input.to||note.date<=input.to))
     .map(note=>{
-      const title=note.title.toLowerCase(),summary=note.enhanced.toLowerCase(),body=note.body.toLowerCase(),transcript=note.transcriptSegments.map(s=>s.text).join("\n").toLowerCase()
+      const title=note.title.toLowerCase(),summary=withoutTranscriptLink(note.id,note.enhanced).toLowerCase(),body=note.body.toLowerCase(),transcript=note.transcriptSegments.map(s=>s.text).join("\n").toLowerCase()
       return {note,score:terms.reduce((score,term)=>score+(title.includes(term)?4:0)+(summary.includes(term)?2:0)+(body.includes(term)?1:0)+(transcript.includes(term)?1:0),0)}
     }).filter(result=>!terms.length||result.score>0)
     .sort((a,b)=>b.score-a.score||b.note.date.localeCompare(a.note.date)||b.note.updatedAt.localeCompare(a.note.updatedAt))

@@ -32,7 +32,9 @@
   --app-sidebar: #f2f2ec;
   --app-card: #ffffff;
   --app-text: #292929;
-  --app-muted: #72726e;
+  /* Muted text is two steps darker than the desktop's #72726e, which measures 4.49:1 on the page colour:
+     this reaches WCAG AA (4.76:1 on the page, 5.12:1 on a card) and is indistinguishable beside it. */
+  --app-muted: #6e6e6a;
   --app-secondary: #4e4d4b;
   --app-border: #e6e6de;
   --app-hairline: #47432a33;
@@ -42,7 +44,7 @@
   --app-danger: #cf3527;
   --app-focus: #a5790099;
   /* Text of generated notes, a list tile and its edge, a bullet, the two transcript bubbles. */
-  --app-prose: #72726e;
+  --app-prose: #6e6e6a;
   --app-tile: #d8d9d3;
   --app-tile-edge: #cdc9c0;
   --app-marker: #71717a;
@@ -189,8 +191,10 @@
     --app-sidebar: #212121;
     --app-card: #363635;
     --app-text: #fcfcf8;
-    --app-muted: #9e9e99;
-    --app-secondary: #acada8;
+    /* A little lighter than the desktop's #9e9e99 and #acada8, so muted text on a card (4.95:1) and secondary
+       text on a tinted badge or row (4.69:1) pass WCAG AA. */
+    --app-muted: #a6a6a1;
+    --app-secondary: #b0b1ac;
     --app-border: #ffffff26;
     --app-hairline: #ffffff26;
     --app-hover: #ffffff0f;
@@ -198,7 +202,7 @@
     --app-accent: #e0af2f;
     --app-danger: #f0806e;
     --app-focus: #e0af2f99;
-    --app-prose: #acada8;
+    --app-prose: #b0b1ac;
     --app-tile: #515150;
     --app-tile-edge: #ffffff26;
     --app-bubble-own: #292929;
@@ -238,8 +242,8 @@
   --app-sidebar: #212121;
   --app-card: #363635;
   --app-text: #fcfcf8;
-  --app-muted: #9e9e99;
-  --app-secondary: #acada8;
+  --app-muted: #a6a6a1;
+  --app-secondary: #b0b1ac;
   --app-border: #ffffff26;
   --app-hairline: #ffffff26;
   --app-hover: #ffffff0f;
@@ -247,7 +251,7 @@
   --app-accent: #e0af2f;
   --app-danger: #f0806e;
   --app-focus: #e0af2f99;
-  --app-prose: #acada8;
+  --app-prose: #b0b1ac;
   --app-tile: #515150;
   --app-tile-edge: #ffffff26;
   --app-bubble-own: #292929;

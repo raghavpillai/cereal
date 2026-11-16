@@ -12,8 +12,8 @@ async function fixture(extra: Partial<ProviderServices> = {}) {
   const repo = makeMemoryRepository()
   const segment = { id: crypto.randomUUID(), channel: "system" as const, speakerId: "speaker-0", speakerLabel: "Speaker 0", text: "Cedar launches Monday after accessibility review.", startMs: 1000, endMs: 3000, isFinal: true }
   const note = await Effect.runPromise(repo.createNote({ title: "Synthetic chat fixture", transcriptSegments: [segment] }))
-  const providers: ProviderServices = { transcribe: () => Effect.succeed([]), generate: () => Effect.succeed("Notes"), chat: () => Effect.succeed("Monday"), ...extra }
-  const api = makeApiHandler(repo, owner, { processing: makeProcessingService(repo, { providers, worker: false }) })
+  const providers: ProviderServices = { generate: () => Effect.succeed("Notes"), chat: () => Effect.succeed("Monday"), ...extra }
+  const api = makeApiHandler(repo, owner, { processing: makeProcessingService(repo, { providers }) })
   cleanup.push(api.dispose)
   const call = (route: string, payload: unknown, authenticated = true) => api.handler(new Request(`http://localhost/api/v1/notes/${note.id}/${route}`, { method: "POST", headers: { "Content-Type": "application/json", ...(authenticated ? { Authorization: `Bearer ${owner}` } : {}) }, body: JSON.stringify(payload) }))
   return { repo, note, segment, call }
@@ -25,7 +25,7 @@ test("stream and evidence retain owner authentication and validate input", async
   expect((await f.call("chat/stream", { message: "", history: [] })).status).toBe(400)
   expect((await f.call("evidence", { paragraph: "Monday", expectedTranscriptRevision: -1 })).status).toBe(400)
   const empty = await Effect.runPromise(f.repo.createNote({ title: "No transcript fixture" }))
-  const processing = makeProcessingService(f.repo, { worker: false })
+  const processing = makeProcessingService(f.repo, {})
   cleanup.push(processing.dispose)
   const explanation = await Effect.runPromise(processing.evidence(empty.id, { paragraph: "Typed notes", expectedTranscriptRevision: 0 }))
   expect(explanation.quotes).toEqual([])
@@ -125,8 +125,8 @@ test("workspace chat is owner-only and receives bounded real note context", asyn
   let context = ""
   const f = await fixture({ async *chatStream(note) { context = note.body; yield "Cedar launches Monday." } })
   const repo = f.repo
-  const api = makeApiHandler(repo, owner, { processing: makeProcessingService(repo, { worker: false, providers: {
-    transcribe: () => Effect.succeed([]), generate: () => Effect.succeed(""), chat: () => Effect.succeed(""),
+  const api = makeApiHandler(repo, owner, { processing: makeProcessingService(repo, { providers: {
+    generate: () => Effect.succeed(""), chat: () => Effect.succeed(""),
     async *chatStream(note) { context = note.body; yield "Cedar launches Monday." },
   } }) })
   cleanup.push(api.dispose)

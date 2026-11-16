@@ -7,7 +7,7 @@
  *   bun scripts/replay-live.ts --fixture /tmp/meeting                          fake recogniser: mechanics only
  *   RUN_LIVE_PROVIDER_TESTS=1 bun --env-file=.env scripts/replay-live.ts --fixture /tmp/meeting --provider elevenlabs
  *
- * Options: --model <id>  --speed <n>  --no-chat  --parts <seconds> | --no-parts  --drop <at seconds>:<for seconds>
+ * Options: --model <id>  --speed <n>  --no-chat  --drop <at seconds>:<for seconds>
  *          --vad <seconds>  --out <file.json>
  *
  * The server runs in this process on the in-memory repository (scripts/live/stack.ts) with the real
@@ -28,10 +28,10 @@ const args = process.argv.slice(2)
 const flag = (name: string) => args.includes(`--${name}`)
 const value = (name: string) => { const index = args.indexOf(`--${name}`); return index >= 0 ? args[index + 1] : undefined }
 const directory = value("fixture")
-if (!directory) { console.error("usage: bun scripts/replay-live.ts --fixture <directory> [--provider fake|elevenlabs] [--speed n] [--no-chat] [--parts seconds|--no-parts] [--drop at:for] [--out file]"); process.exit(2) }
+if (!directory) { console.error("usage: bun scripts/replay-live.ts --fixture <directory> [--provider fake|elevenlabs] [--speed n] [--no-chat] [--drop at:for] [--out file]"); process.exit(2) }
 const provider = value("provider") === "elevenlabs" ? "elevenlabs" : "fake"
 if (provider === "elevenlabs" && process.env.RUN_LIVE_PROVIDER_TESTS !== "1") { console.error("The real provider costs money. Set RUN_LIVE_PROVIDER_TESTS=1 to run it."); process.exit(2) }
-const speed = Number(value("speed") ?? 1), partSeconds = flag("no-parts") ? 0 : Number(value("parts") ?? 30), withChat = !flag("no-chat")
+const speed = Number(value("speed") ?? 1), withChat = !flag("no-chat")
 const drop = value("drop")?.split(":").map(Number) as [number, number] | undefined
 
 const manifest: FixtureManifest = JSON.parse(await readFile(join(directory, "manifest.json"), "utf8"))
@@ -102,24 +102,12 @@ const chatLoop = withChat ? (async () => {
   }
 })() : Promise.resolve()
 
-// ---------------------------------------------------------------- durable parts, uploaded as the capture passes them
-const partSamples = partSeconds * rate, uploads: Promise<unknown>[] = []
-let nextPart = 0
-function uploadDue(captured: number) {
-  while (partSamples && (nextPart + 1) * partSamples <= captured || partSamples && captured >= totalSamples && nextPart * partSamples < totalSamples) {
-    const from = nextPart * partSamples, to = Math.min(totalSamples, from + partSamples), sequence = nextPart++
-    for (const channel of channels) uploads.push(api(`/notes/${note.id}/audio/chunks/${crypto.randomUUID()}`, "PUT", { channel, sequence, startMs: Math.round(from * 1000 / rate), audioBase64: Buffer.from(wavFile(pcm[channel].slice(from * 2, to * 2), rate)).toString("base64") }))
-    if (to >= totalSamples) break
-  }
-}
-
 // ---------------------------------------------------------------- streaming
 const origin = performance.now()
 let dropped = false, captured = 0
 while (cursor < totalSamples) {
   // The capture keeps growing whether or not the connection is up; the stream reads from the file.
   captured = Math.min(totalSamples, Math.floor((performance.now() - origin) * speed * rate / 1000))
-  uploadDue(captured)
   if (drop && !dropped && captured >= drop[0] * rate) {
     dropped = true
     console.log(`  ${now().toFixed(0)} ms: dropping the connection`)
@@ -148,11 +136,7 @@ polling = false
 await chatLoop
 socket.send(JSON.stringify({ type: "mark", kind: "end", atSample: Object.fromEntries(channels.map(channel => [channel, totalSamples])) }))
 await new Promise<void>(resolve => { const timer = setInterval(() => { if (socket.readyState === WebSocket.CLOSED) { clearInterval(timer); resolve() } }, 20); setTimeout(() => { clearInterval(timer); resolve() }, 8000) })
-uploadDue(totalSamples)
-await Promise.all(uploads)
 await api(`/notes/${note.id}/recording`, "POST", { command: "stop" })
-let chunks = await Effect.runPromise(stack.repository.listAudioChunks(note.id))
-for (const deadline = performance.now() + 180_000; chunks.some(chunk => chunk.state !== "ready" && chunk.state !== "failed") && performance.now() < deadline;) { await Bun.sleep(500); chunks = await Effect.runPromise(stack.repository.listAudioChunks(note.id)) }
 
 // ---------------------------------------------------------------- results
 for (const { at, message } of received) {
@@ -200,17 +184,15 @@ const issued = new Map(stack.chats.flatMap(chat => chat.citations.filter(citatio
 const citations = await checkChatCitations([...issued.values()], stack.repository, new AbortController().signal)
 const ledger = await Effect.runPromise(stack.repository.live!.ledger(note.id))
 const gaps = received.flatMap(({ message }) => message.type === "gap" ? [message] : [])
-const upstreamSeconds = stack.upstream.seconds, cost = provider === "elevenlabs" ? upstreamSeconds / 3600 * 0.22 + stack.batch.seconds / 3600 * 0.20 : 0
+const upstreamSeconds = stack.upstream.seconds, cost = provider === "elevenlabs" ? upstreamSeconds / 3600 * 0.22 : 0
 const report = {
   fixture: { seconds: totalSamples / rate, channels, lines: manifest.lines.length }, provider: stack.provider, model: stack.model, speed, chatPolling: withChat, chatRequests, drop: drop ?? null, connections,
   delayMs: { speechEndToInterim: stats(delays(probe => probe.interimAt)), speechEndToFinal: stats(delays(probe => probe.finalAt)), speechEndToAnswerable: stats(delays(probe => probe.answerableAt)), speechEndToCitable: stats(delays(probe => probe.citableAt)) },
   messages: Object.fromEntries([...new Set(received.map(item => item.message.type))].map(type => [type, received.filter(item => item.message.type === type).length])),
   gaps, transcript: { segments: stored.transcriptSegments.length, revision: stored.transcriptRevision, wordErrorRate: accuracy, probeCounts: probeCounts.filter(item => item.expected !== item.found), probesChecked: probeCounts.length, inventedNamesHeard: `${names.filter(name => name.heard).length}/${names.length}`, inventedNamesMissed: names.filter(name => !name.heard).map(name => name.token), diarisation },
-  parts: { uploaded: chunks.length, states: Object.fromEntries([...new Set(chunks.map(chunk => chunk.state))].map(state => [state, chunks.filter(chunk => chunk.state === state).length])), resolutions: Object.fromEntries([...new Set(chunks.map(chunk => String(chunk.resolution)))].map(resolution => [resolution, chunks.filter(chunk => String(chunk.resolution) === resolution).length])), batchCalls: stack.batch.calls, batchSeconds: Math.round(stack.batch.seconds),
-    notLive: chunks.filter(chunk => chunk.resolution !== "live").map(chunk => ({ channel: chunk.channel, startMs: chunk.startMs, durationMs: chunk.durationMs, state: chunk.state, resolution: chunk.resolution ?? null })),
-    ledger: ledger.map(row => `${row.channel} ${row.source} ${row.fromMs}-${row.toMs}`) },
+  ledger: ledger.map(row => `${row.channel} ${row.fromMs}-${row.toMs}`),
   citations: { issued: issued.size, stillValid: citations.valid.length },
-  cost: { upstreamSessions: stack.upstream.sessions, upstreamAudioSeconds: Math.round(upstreamSeconds), usd: Number(cost.toFixed(4)), basis: "list price: $0.22 per hour of audio per stream, $0.20 per hour of batch audio" },
+  cost: { upstreamSessions: stack.upstream.sessions, upstreamAudioSeconds: Math.round(upstreamSeconds), usd: Number(cost.toFixed(4)), basis: "list price: $0.22 per hour of audio per stream" },
   perLine: probes.map(probe => ({ channel: probe.line.channel, voice: probe.line.voice, probe: probe.line.probe, interimMs: probe.interimAt === undefined ? null : Math.round(probe.interimAt - probe.endAt!), finalMs: probe.finalAt === undefined ? null : Math.round(probe.finalAt - probe.endAt!), answerableMs: probe.answerableAt === undefined ? null : Math.round(probe.answerableAt - probe.endAt!), citableMs: probe.citableAt === undefined ? null : Math.round(probe.citableAt - probe.endAt!) })),
   storedTranscript: stored.transcriptSegments.map(segment => `${segment.channel} ${segment.speakerLabel} ${Math.round(segment.startMs / 100) / 10}s: ${segment.text}`),
 }

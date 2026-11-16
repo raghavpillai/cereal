@@ -2,7 +2,7 @@ import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { Effect } from "effect"
 import type { ChatCitationDTO } from "@meeting-notes/contracts"
 import { encodeLiveAudioFrame, LiveCloseCode, type LiveServerMessage } from "@meeting-notes/contracts/live"
-import { mergeIntervals, subtractIntervals, uncoveredByLive } from "../src/live/coverage"
+import { mergeIntervals } from "../src/live/coverage"
 import { encodeFakeSpeech, type FakeScript } from "../src/live/providers/fake"
 import type { LiveSession } from "../src/live/session"
 import { Timeline } from "../src/live/timeline"
@@ -40,15 +40,8 @@ describe("timeline and coverage arithmetic", () => {
     expect(timeline.captureSample(4)).toBe(9500)
     expect(timeline.anchorCount).toBe(1)
   })
-  test("a part is covered, uncovered or partly covered within the tolerance", () => {
-    const part = { fromMs: 60_000, toMs: 120_000 }
-    expect(uncoveredByLive(part, [{ fromMs: 0, toMs: 119_900 }])).toEqual([])
-    expect(uncoveredByLive(part, [{ fromMs: 0, toMs: 59_900 }])).toEqual([part])
-    expect(uncoveredByLive(part, [{ fromMs: 0, toMs: 80_000 }, { fromMs: 100_000, toMs: 130_000 }])).toEqual([{ fromMs: 80_000, toMs: 100_000 }])
-    // Holes shorter than the tolerance between live intervals do not make a part "partly covered".
-    expect(uncoveredByLive(part, [{ fromMs: 0, toMs: 90_000 }, { fromMs: 90_200, toMs: 120_000 }])).toEqual([])
+  test("interval arithmetic merges and joins", () => {
     expect(mergeIntervals([{ fromMs: 5, toMs: 9 }, { fromMs: 0, toMs: 5 }, { fromMs: 20, toMs: 20 }])).toEqual([{ fromMs: 0, toMs: 9 }])
-    expect(subtractIntervals([{ fromMs: 0, toMs: 100 }], [{ fromMs: 10, toMs: 20 }, { fromMs: 90, toMs: 200 }])).toEqual([{ fromMs: 0, toMs: 10 }, { fromMs: 20, toMs: 90 }])
   })
 })
 
@@ -89,7 +82,7 @@ describe("the socket refuses what it must", () => {
     const f = await fixture({ script: meeting() })
     const noteId = await f.recordingNote()
     const client = f.connect(noteId, "alice", { Origin: "https://cereal.example.test" })
-    expect(await client.hello(stream())).toMatchObject({ type: "ready", provider: "fake", streams: [{ channel: "system", acceptFromSample: 0 }], resumeWindowMs: 30_000, transcriptRevision: 0 })
+    expect(await client.hello(stream())).toMatchObject({ type: "ready", provider: "fake", streams: [{ channel: "system", acceptFromSample: 0 }], resumeWindowMs: 900_000, transcriptRevision: 0 })
     client.socket.send(new Uint8Array([9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2]))
     await client.until(() => client.closed, "close")
     expect(client.closed!.code).toBe(LiveCloseCode.malformed)
@@ -279,24 +272,32 @@ describe("a stream that ends in the middle of a word", () => {
   const twoLines = () => encodeFakeSpeech([{ atMs: 200, text: "the kestrel migration moved to march", speaker: "a" }, { atMs: 3000, text: "halvorsen renewal is four hundred thousand", speaker: "b" }], { durationMs: 7000 })
   // 700 ms into the second line: inside its third word.
   const cut = (script: FakeScript) => script.lines[1]!.firstSample + samples(700)
-  test("the connection dies while the capture goes on: the unfinished utterance is left to the durable part, whole", async () => {
+  test("a client killed mid-sentence: everything it sent is on the server once the session times out, and a return replays only the rest", async () => {
     const script = twoLines(), f = await fixture({ script, config: { detachMs: 150, endWaitMs: 200 } })
     const noteId = await f.recordingNote()
     const client = f.connect(noteId)
     await client.hello(stream())
     await client.audio(script.pcm, 0, cut(script), { speed: 10 })
     await client.until(() => client.finals()[0] && client.of("interim").some(message => message.text.startsWith("halvorsen")), "first final and the start of the second line")
+    // The process dies: no mark, no close handshake, and it may never come back.
     client.drop()
     await client.until(() => !f.hub.active(noteId), "session end")
-    // No clipped word was stored, and the second line is not counted as transcribed.
-    expect((await f.note(noteId)).transcriptSegments.map(segment => segment.text)).toEqual(["the kestrel migration moved to march"])
-    await f.uploadPart(noteId, script.pcm, 0, 0)
-    await f.settleParts(noteId)
-    expect((await f.note(noteId)).transcriptSegments.map(segment => segment.text)).toEqual(script.lines.map(line => line.text))
-    expect(f.batchCalls[0]!.keep![0]!.fromMs).toBeLessThanOrEqual(3000)
-    expect((await f.chunks(noteId))[0]).toMatchObject({ resolution: "mixed" })
+    // Nothing it sent is lost: the sentence it was in the middle of is stored up to the cut.
+    expect((await f.note(noteId)).transcriptSegments.map(segment => segment.text)).toEqual(["the kestrel migration moved to march", "halvorsen renewal is-"])
+    // It comes back after all and replays from where the server's coverage ends: the rest of the sentence, once.
+    const again = f.connect(noteId)
+    const ready = await again.hello(stream(cut(script)))
+    if (ready === "closed") throw new Error("refused")
+    const accept = ready.streams[0]!.acceptFromSample
+    expect(accept).toBeGreaterThanOrEqual(cut(script) - samples(50))
+    await again.audio(script.pcm, accept, script.pcm.byteLength / 2, { speed: 10 })
+    again.mark("end", { system: script.pcm.byteLength / 2 })
+    await again.until(() => again.closed, "close")
+    const text = transcriptText(await f.note(noteId))
+    expect(text.split("the kestrel migration moved to march").length - 1).toBe(1)
+    expect(text.split("four hundred thousand").length - 1).toBe(1)
   })
-  test("mark end says the capture holds more than was sent: the same, and the socket still closes cleanly", async () => {
+  test("Stop while the client still holds unsent audio: what was heard is stored, clipped word and all, rather than lost", async () => {
     const script = twoLines(), f = await fixture({ script, config: { endWaitMs: 200 } })
     const noteId = await f.recordingNote()
     const client = f.connect(noteId)
@@ -306,10 +307,7 @@ describe("a stream that ends in the middle of a word", () => {
     client.mark("end", { system: script.pcm.byteLength / 2 })
     await client.until(() => client.closed, "close")
     expect(client.closed!.code).toBe(1000)
-    expect((await f.note(noteId)).transcriptSegments.map(segment => segment.text)).toEqual(["the kestrel migration moved to march"])
-    await f.uploadPart(noteId, script.pcm, 0, 0)
-    await f.settleParts(noteId)
-    expect((await f.note(noteId)).transcriptSegments.map(segment => segment.text)).toEqual(script.lines.map(line => line.text))
+    expect((await f.note(noteId)).transcriptSegments.map(segment => segment.text)).toEqual(["the kestrel migration moved to march", "halvorsen renewal is-"])
   })
   test("the capture itself ends there: what was heard is stored, clipped word and all", async () => {
     const script = twoLines(), f = await fixture({ script, config: { endWaitMs: 200 } })
@@ -321,10 +319,6 @@ describe("a stream that ends in the middle of a word", () => {
     client.mark("end", { system: cut(script) })
     await client.until(() => client.closed, "close")
     expect((await f.note(noteId)).transcriptSegments.map(segment => segment.text)).toEqual(["the kestrel migration moved to march", "halvorsen renewal is-"])
-    // The part ends where the capture did, and is covered: no batch call.
-    await f.uploadPart(noteId, script.pcm.subarray(0, cut(script) * 2), 0, 0)
-    await f.settleParts(noteId)
-    expect(f.batchCalls).toEqual([])
   })
 })
 
@@ -417,7 +411,7 @@ describe("reconnection", () => {
     const delivered = new Set([...first.finals(), ...second.finals()].map(message => message.segment.id))
     expect(stored.transcriptSegments.every(segment => delivered.has(segment.id)) || ready.transcriptRevision > first.finals().length).toBe(true)
   })
-  test("a backlog beyond the resume window is skipped, declared as a gap, and filled from the durable part", async () => {
+  test("a backlog beyond the resume window is skipped and declared as a gap; the skipped stretch has no text", async () => {
     const script = encodeFakeSpeech([
       { atMs: 200, text: "the kestrel migration moved to march", speaker: "a" },
       { atMs: 3000, text: "halvorsen renewal is four hundred thousand", speaker: "b" },
@@ -455,17 +449,13 @@ describe("reconnection", () => {
     second.mark("end", { system: script.pcm.byteLength / 2 })
     await second.until(() => second.closed, "close")
 
-    // The durable part covering the whole capture arrives and fills exactly the hole.
-    await f.uploadPart(noteId, script.pcm, 0, 0)
-    await f.settleParts(noteId)
-    const after = await f.note(noteId)
-    for (const line of script.lines) expect(occurrences(after, line.text), line.text).toBe(1)
-    expect(after.transcriptSegments.map(segment => segment.text)).toEqual(script.lines.map(line => line.text))
-    expect(f.batchCalls).toHaveLength(1)
-    expect(f.batchCalls[0]!.keep).toBeDefined()
-    expect((await f.chunks(noteId))[0]).toMatchObject({ state: "ready", resolution: "mixed" })
-    // Text that was sent as final is untouched by the fill.
-    for (const message of [...first.finals(), ...second.finals()]) expect(after.transcriptSegments.find(segment => segment.id === message.segment.id)).toEqual(message.segment)
+    // Nothing transcribes the skipped stretch later: the live transcript is the only one.
+    expect((await f.note(noteId)).transcriptSegments.map(segment => segment.text)).toEqual(["the kestrel migration moved to march", "castellane wants evidence this month"])
+    // The note says what is missing, so the transcript shows it.
+    const gaps = (await f.note(noteId)).transcriptGaps ?? []
+    expect(gaps).toHaveLength(1)
+    expect(gaps[0]).toMatchObject({ channel: "system", toMs: 11_500 })
+    expect(gaps[0]!.fromMs).toBeLessThanOrEqual(2800)
   })
   test("after the server loses its sessions the client resumes from stored coverage", async () => {
     const script = meeting(), f = await fixture({ script })
@@ -493,35 +483,31 @@ describe("reconnection", () => {
 })
 
 describe("the provider", () => {
-  test("a provider failure is reported, retried, declared as a gap and filled by the batch path", async () => {
-    const script = meeting(), f = await fixture({ script, config: { reopenDelaysMs: [400], endWaitMs: 300 } })
+  test("a lost provider session hands the recording back to the client, whose replay leaves nothing out", async () => {
+    const script = meeting(), f = await fixture({ script, config: { endWaitMs: 300 } })
     const noteId = await f.recordingNote()
     const client = f.connect(noteId)
     await client.hello(stream())
-    await client.audio(script.pcm, 0, samples(2900), { speed: 10 })
+    await client.audio(script.pcm, 0, samples(4500), { speed: 10 })
     await client.until(() => client.finals()[0], "first final")
     f.fake.control.fail()
-    await client.until(() => client.of("status").some(status => status.state === "provider_unavailable"), "status")
-    expect(client.of("error").at(-1)).toMatchObject({ code: "provider_unavailable", retryable: true, retryAfterMs: 400 })
-    // Audio keeps being acknowledged while the provider is away.
-    await client.audio(script.pcm, samples(2900), samples(5800), { speed: 20 })
-    await client.until(() => client.of("gap")[0], "gap")
-    expect(client.of("gap")[0]).toMatchObject({ reason: "provider_unavailable" })
-    await client.until(() => client.of("status").at(-1)!.state !== "provider_unavailable", "status after the provider returned")
-    expect(client.closed).toBeUndefined()
-    await client.audio(script.pcm, samples(5800), script.pcm.byteLength / 2, { speed: 10 })
-    await client.until(() => client.finals().some(message => message.segment.text === "ostrava pricing lands on thursday"), "final on the new provider session")
-    // The second line was spoken while no provider session existed: only the batch path has it.
-    expect(client.finals().some(message => message.segment.text.includes("halvorsen"))).toBe(false)
-    client.mark("end")
+    // Told to reconnect (1012, which clients retry), not left with a stretch that would have no text.
     await client.until(() => client.closed, "close")
-    await f.uploadPart(noteId, script.pcm, 0, 0)
-    await f.settleParts(noteId)
+    expect(client.closed!.code).toBe(1012)
+    expect(client.of("error").at(-1)).toMatchObject({ code: "provider_unavailable", retryable: true })
+    const again = f.connect(noteId)
+    const ready = await again.hello(stream(samples(4500)))
+    if (ready === "closed") throw new Error("reconnect refused")
+    const accept = ready.streams[0]!.acceptFromSample
+    expect(accept).toBeLessThanOrEqual(script.lines[1]!.firstSample)
+    await again.audio(script.pcm, accept, script.pcm.byteLength / 2, { speed: 10 })
+    again.mark("end")
+    await again.until(() => again.closed, "close")
     const stored = await f.note(noteId)
     for (const line of script.lines) expect(occurrences(stored, line.text), line.text).toBe(1)
-    expect((await f.chunks(noteId))[0]).toMatchObject({ resolution: "mixed" })
+    expect(stored.transcriptSegments.map(segment => segment.text)).toEqual(script.lines.map(line => line.text))
   })
-  test("a provider that cannot be reached at hello sends the client back to parts", async () => {
+  test("a provider that cannot be reached at hello is refused as unavailable, and nothing is left open", async () => {
     const f = await fixture({ script: meeting() })
     f.fake.control.failOpens = 1
     const client = f.connect(await f.recordingNote())
@@ -530,121 +516,40 @@ describe("the provider", () => {
     expect(client.of("error")[0]).toMatchObject({ code: "provider_unavailable" })
     expect(f.hub.size).toBe(0)
   })
-  test("a provider that stops reading is dropped once ten seconds of audio are waiting", async () => {
+  test("a provider that stops reading is dropped once ten seconds of audio are waiting, and the client is told to reconnect", async () => {
     const script = encodeFakeSpeech([{ atMs: 100, text: "one two three" }], { durationMs: 16_000 }), f = await fixture({ script, config: { reopenDelaysMs: [5000] } })
     const client = f.connect(await f.recordingNote())
     await client.hello(stream())
     f.fake.control.stalled = true
     await client.audio(script.pcm, 0, script.pcm.byteLength / 2, { speed: 60 })
-    await client.until(() => client.of("status").some(status => status.state === "provider_unavailable"), "status")
-    // The audio is still taken and acknowledged; the durable parts will supply its text.
-    await client.until(() => client.lastAck() === script.pcm.byteLength / 2, "the last ack")
+    // The client still has that audio; its reconnect replays it to a provider session that reads.
+    await client.until(() => client.closed, "close")
+    expect(client.closed!.code).toBe(1012)
   })
+
 })
 
-describe("coverage and the batch worker", () => {
-  test("a fully covered durable part costs no batch call", async () => {
+describe("coverage and notes", () => {
+  test("Stop leaves the live transcript complete, and notes can be generated from it at once", async () => {
     const script = meeting(), f = await fixture({ script })
     const noteId = await f.recordingNote()
     const client = f.connect(noteId)
     await client.hello(stream())
     await client.audio(script.pcm, 0, script.pcm.byteLength / 2, { speed: 10 })
     await client.until(() => client.finals().length === 3, "three finals")
-    // The part is uploaded while the session is still open, as the clients do during a meeting. Its last
-    // two seconds are silence the provider has not confirmed yet, so the worker waits for the session.
-    const part = await f.uploadPart(noteId, script.pcm, 0, 0)
-    await f.processing.runPending()
-    expect((await f.chunks(noteId))[0]!.state).toBe("processing")
-    client.mark("end")
-    await client.until(() => client.closed, "close")
-    await f.settleParts(noteId)
-    expect(f.batchCalls).toEqual([])
-    expect((await f.chunks(noteId))[0]).toMatchObject({ id: part.id, state: "ready", resolution: "live" })
-    const stored = await f.note(noteId)
-    expect(stored.transcriptSegments.map(segment => segment.text)).toEqual(script.lines.map(line => line.text))
-    expect(stored.transcriptRevision).toBe(3)
-    // Every part ready and the transcript revision unchanged by resolving it: notes can be generated.
-    await Effect.runPromise(f.repository.recording(noteId, "stop"))
-    expect(await Effect.runPromise(f.repository.beginGeneration(noteId, 3, crypto.randomUUID()))).not.toBeNull()
+    const stopped = await Effect.runPromise(f.processing.forRepository(f.repository.forUser(users.alice)).recording(noteId, "stop"))
+    expect(stopped.transcriptSegments.map(segment => segment.text)).toEqual(script.lines.map(line => line.text))
+    expect(await Effect.runPromise(f.repository.beginGeneration(noteId, stopped.transcriptRevision, crypto.randomUUID()))).not.toBeNull()
   })
-  test("silence is confirmed with the provider, so a silent part is covered too", async () => {
+  test("silence is confirmed with the provider, so coverage (where a reconnect resumes) moves through it", async () => {
     const script = encodeFakeSpeech([{ atMs: 200, text: "only this was said" }], { durationMs: 9000 }), f = await fixture({ script, config: { checkpointMs: 1000 } })
     const noteId = await f.recordingNote()
     const client = f.connect(noteId)
     await client.hello(stream())
     await client.audio(script.pcm, 0, script.pcm.byteLength / 2, { speed: 4 })
     await client.until(() => client.of("ack").some(ack => ack.transcribedThroughMs >= 7000), "coverage moving through silence")
-    // Seconds 3 to 6 contain no speech at all.
-    await f.uploadPart(noteId, script.pcm.subarray(samples(3000) * 2, samples(6000) * 2), 3000, 0)
-    await f.settleParts(noteId)
-    expect(f.batchCalls).toEqual([])
-    expect((await f.chunks(noteId))[0]).toMatchObject({ resolution: "live" })
-  })
-  test("a short quiet tail the provider never confirms is still covered; a tail with speech is not", async () => {
-    const script = encodeFakeSpeech([{ atMs: 200, text: "the marlowe invoice is overdue" }, { atMs: 3200, text: "escalate it" }], { durationMs: 4000 })
-    for (const [label, until, resolution, calls] of [["quiet tail", samples(2500), "live", 0], ["speech in the tail", samples(3500), "mixed", 1]] as const) {
-      const f = await fixture({ script, config: { endWaitMs: 200 } })
-      const noteId = await f.recordingNote()
-      const client = f.connect(noteId)
-      await client.hello(stream())
-      // The first sentence is committed by its pause; what follows it is 0.7 s of silence, or the start of the next sentence.
-      await client.audio(script.pcm, 0, until, { speed: 10 })
-      await client.until(() => client.finals()[0], "final")
-      f.fake.control.ignoreFlushes = true
-      client.mark("end", { system: until })
-      await client.until(() => client.closed, "close")
-      await f.uploadPart(noteId, script.pcm.subarray(0, until * 2), 0, 0)
-      await f.settleParts(noteId)
-      expect((await f.chunks(noteId))[0]!.resolution, label).toBe(resolution)
-      expect(f.batchCalls.length, label).toBe(calls)
-    }
-  })
-  test("a note that never had a live session is transcribed exactly as before", async () => {
-    const script = meeting(), f = await fixture({ script })
-    const noteId = await f.recordingNote()
-    await f.uploadPart(noteId, script.pcm, 0, 0)
-    await f.settleParts(noteId)
-    expect(f.batchCalls).toEqual([{ chunkId: (await f.chunks(noteId))[0]!.id, startMs: 0 }])
-    expect((await f.chunks(noteId))[0]).toMatchObject({ state: "ready", resolution: "batch" })
-    expect(await Effect.runPromise(f.repository.live!.ledger(noteId))).toEqual([])
-    expect((await f.note(noteId)).transcriptSegments.map(segment => segment.speakerId.split(":")[2])).toEqual(["a", "b", "a"])
-  })
-  test("live text arriving after a part was batch-transcribed does not duplicate it", async () => {
-    // The worker gave up waiting (or the server restarted) and transcribed audio that the client then replays.
-    const script = meeting(), f = await fixture({ script, livePendingWaitMs: 0 })
-    const noteId = await f.recordingNote()
-    const client = f.connect(noteId)
-    await client.hello(stream())
-    await client.audio(script.pcm, 0, samples(2900), { speed: 10 })
-    await client.until(() => client.finals()[0], "first final")
-    // Seconds 0 to 6 arrive as a durable part before the stream has reached them.
-    await f.uploadPart(noteId, script.pcm.subarray(0, samples(6000) * 2), 0, 0)
-    await f.settleParts(noteId)
-    expect(f.batchCalls[0]!.keep).toBeDefined()
-    await client.audio(script.pcm, samples(2900), script.pcm.byteLength / 2, { speed: 10 })
-    await client.until(() => client.finals().some(message => message.segment.text.includes("ostrava")), "the third line")
-    client.mark("end")
-    await client.until(() => client.closed, "close")
-    const stored = await f.note(noteId)
-    for (const line of script.lines) expect(occurrences(stored, line.text), line.text).toBe(1)
-    // The second line came from the batch path only: the stream's copy of it was dropped, not stored.
-    expect(client.finals().some(message => message.segment.text.includes("halvorsen"))).toBe(false)
-  })
-  test("a batch provider without word times replaces the live text inside a partly covered part", async () => {
-    const script = meeting(), f = await fixture({ script, batchWordTimes: false, config: { detachMs: 100, endWaitMs: 200 } })
-    const noteId = await f.recordingNote()
-    const client = f.connect(noteId)
-    await client.hello(stream())
-    await client.audio(script.pcm, 0, samples(2900), { speed: 10 })
-    await client.until(() => client.finals()[0], "first final")
-    client.mark("end")
-    await client.until(() => client.closed, "close")
-    await f.uploadPart(noteId, script.pcm, 0, 0)
-    await f.settleParts(noteId)
-    const stored = await f.note(noteId)
-    for (const line of script.lines) expect(occurrences(stored, line.text), line.text).toBe(1)
-    expect((await f.chunks(noteId))[0]).toMatchObject({ resolution: "batch" })
-    expect(stored.transcriptSegments.some(segment => segment.id === client.finals()[0]!.segment.id)).toBe(false)
+    const ledger = await Effect.runPromise(f.repository.live!.ledger(noteId))
+    expect(Math.max(...ledger.map(row => row.toMs))).toBeGreaterThanOrEqual(7000)
   })
 })
 
@@ -752,7 +657,7 @@ describe("chat during a recording", () => {
     expect(median(citable)).toBeLessThanOrEqual(6000)
     expect(interim).toHaveLength(lines.length)
   }, 90_000)
-  test("a citation issued during the recording still validates after more speech and after the parts resolve", async () => {
+  test("a citation issued during the recording still validates after more speech and after Stop", async () => {
     const script = meeting(), f = await fixture({ script })
     const noteId = await f.recordingNote()
     const client = f.connect(noteId)
@@ -766,8 +671,6 @@ describe("chat during a recording", () => {
     await client.until(() => client.finals().length === 3, "three finals")
     client.mark("end")
     await client.until(() => client.closed, "close")
-    await f.uploadPart(noteId, script.pcm, 0, 0)
-    await f.settleParts(noteId)
     const { checkChatCitations } = await import("../src/ai/citations")
     const check = await checkChatCitations(cited, f.repository.forUser(users.alice), new AbortController().signal)
     expect(check.valid).toHaveLength(1)

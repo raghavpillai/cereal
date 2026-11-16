@@ -24,7 +24,7 @@ describe.skipIf(!enabled)("sign-in settings, Google sign-in and the app handoff 
   const clock = () => new Date(Date.now() + skew)
 
   // The stand-in for Google: codes it has issued, and what its token endpoint was sent.
-  interface Identity { sub: string; email: string; email_verified: boolean; name?: string }
+  interface Identity { sub: string; email: string; email_verified: boolean; name?: string; hd?: string }
   const issued = new Map<string, { identity: Identity; challenge: string }>(), tokens = new Map<string, Identity>()
   const tokenRequests: URLSearchParams[] = []
   const fakeGoogle = Object.assign(async (...[input, init]: Parameters<typeof fetch>) => {
@@ -78,7 +78,7 @@ describe.skipIf(!enabled)("sign-in settings, Google sign-in and the app handoff 
 
   test("sign-in settings: defaults, validation, and a client secret that is sealed and never returned", async () => {
     const initial = await (await request("/api/v1/admin/settings", "GET", undefined, asOwner)).json()
-    expect(initial.signIn).toEqual({ password: true, google: false, allowedEmails: [], googleClientId: null, googleClientSecretSet: false, googleRedirectUris: [baseURL + "/api/v1/auth/google/callback", baseURL + "/api/integrations/google/callback"], googleNeedsHttps: false })
+    expect(initial.signIn).toEqual({ password: true, google: false, allowedEmails: [], googleClientId: null, googleClientSecretSet: false, googleClientSecretHint: null, googleRedirectUris: [baseURL + "/api/v1/auth/google/callback", baseURL + "/api/integrations/google/callback"], googleNeedsHttps: false })
     expect(await (await request("/api/v1/auth/methods")).json()).toEqual({ password: true, google: false, instanceName: initial.instanceName, setupRequired: expect.any(Boolean), transport: "secure" })
 
     expect((await settings({ password: false })).status).toBe(400) // turning password off is choosing Google, which has no client yet
@@ -100,7 +100,7 @@ describe.skipIf(!enabled)("sign-in settings, Google sign-in and the app handoff 
     const savedText = await saved.text()
     expect(saved.status).toBe(200)
     expect(savedText).not.toContain(clientSecret)
-    expect(JSON.parse(savedText).signIn).toMatchObject({ google: true, googleClientId: clientId, googleClientSecretSet: true })
+    expect(JSON.parse(savedText).signIn).toMatchObject({ google: true, googleClientId: clientId, googleClientSecretSet: true, googleClientSecretHint: expect.stringMatching(/^(?:GOCSPX-)?….{2,4}$/) })
     expect(await (await request("/api/v1/admin/settings", "GET", undefined, asOwner)).text()).not.toContain(clientSecret)
     const row = await db!.instanceSettings.findUniqueOrThrow({ where: { id: "sign-in-test" } })
     expect(row.googleClientSecret).toStartWith("v1.")
@@ -182,12 +182,23 @@ describe.skipIf(!enabled)("sign-in settings, Google sign-in and the app handoff 
     expect(set).toContain("session_token="); expect(set).toContain("HttpOnly"); expect(set).toContain("SameSite=Lax")
     expect(await whoAmI({ Cookie: cookiesOf(carol) })).toMatchObject({ id: carolUser.id, role: "user" })
 
-    const dana = await googleSignIn({ sub: "g-dana", email: "dana@team.example", email_verified: true })
+    // A domain entry needs Google's hd (the Workspace domain) to match.
+    const dana = await googleSignIn({ sub: "g-dana", email: "dana@team.example", email_verified: true, hd: "team.example" })
     expect(dana.headers.get("location")).toBe("/notes")
     expect(await whoAmI({ Cookie: cookiesOf(dana) })).toMatchObject({ email: "dana@team.example", role: "user" })
     // A domain entry is the whole domain, not a suffix of another one.
     expect((await googleSignIn({ sub: "g-eve", email: "eve@notteam.example", email_verified: true })).headers.get("location")).toBe("/login?error=not_allowed")
     expect((await googleSignIn({ sub: "g-eve2", email: "eve@team.example.evil.test", email_verified: true })).headers.get("location")).toBe("/login?error=not_allowed")
+    // A consumer Google account opened with a team address (no hd), or one claiming another Workspace, is refused
+    // through the domain entry and no account is made...
+    expect((await googleSignIn({ sub: "g-gina", email: "gina@team.example", email_verified: true })).headers.get("location")).toBe("/login?error=not_allowed")
+    expect((await googleSignIn({ sub: "g-gina2", email: "gina@team.example", email_verified: true, hd: "elsewhere.example" })).headers.get("location")).toBe("/login?error=not_allowed")
+    expect(await db!.user.findUnique({ where: { email: "gina@team.example" } })).toBeNull()
+    // ...but the same account gets in once its address is listed exactly.
+    expect((await settings({ allowedEmails: ["carol@signin.test", "@team.example", "gina@team.example"] })).status).toBe(200)
+    const gina = await googleSignIn({ sub: "g-gina", email: "gina@team.example", email_verified: true })
+    expect(gina.headers.get("location")).toBe("/notes")
+    expect(await whoAmI({ Cookie: cookiesOf(gina) })).toMatchObject({ email: "gina@team.example", role: "user" })
 
     // Taking an address off the list stops new accounts; the account that exists keeps signing in.
     expect((await settings({ allowedEmails: [] })).status).toBe(200)

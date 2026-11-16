@@ -138,7 +138,9 @@ const Line = ({ width, at }: { width: number; at: number }) => <span className="
 function NoteScene({ view }: { view: ScreenView }) {
   const { provider, state } = view.language
   return <div className="sc sc-note" data-on={state === 'connected' ? '' : undefined}>
-    <Status provider={provider} state={state} labels={{ waiting: 'Waiting for a key', checking: 'Checking the key…', connected: 'Connected', failed: 'Waiting for a key' }} />
+    <Status provider={provider} state={state} labels={provider === 'openai_compatible'
+      ? { waiting: 'Waiting for an address', checking: 'Asking the server…', connected: 'Connected', failed: 'Waiting for the server' }
+      : { waiting: 'Waiting for a key', checking: 'Checking the key…', connected: 'Connected', failed: 'Waiting for a key' }} />
     <p className="sc-note-title">Weekly sync<span className="sc-caret" /></p>
     <div className="sc-note-body">
       <p className="sc-heading" style={var_({ '--i': 0 })}>Decisions</p>

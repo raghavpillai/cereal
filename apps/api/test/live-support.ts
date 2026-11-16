@@ -1,16 +1,13 @@
 /** Shared fixture for the live transcription tests: a real `Bun.serve` with the live route, the in-memory
- * repository, the fake streaming recogniser and a batch transcriber that reads the same scripted audio. */
-import { mkdtemp, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
+ * repository and the fake streaming recogniser. The live transcript is the only transcript: there is no
+ * batch recogniser. */
 import { Effect } from "effect"
 import type { PrincipalData } from "@meeting-notes/contracts/api"
-import type { ChatInput, NoteDTO, TranscriptSegmentDTO } from "@meeting-notes/contracts"
+import type { ChatInput, NoteDTO } from "@meeting-notes/contracts"
 import { encodeLiveAudioFrame, type LiveHelloMessage, type LiveServerMessage, type LiveTranscriber } from "@meeting-notes/contracts/live"
 import { makeLiveHub } from "../src/live/hub"
 import { makeLiveEndpoint, type LiveConnection } from "../src/live/route"
-import { makeVoiceMatcher } from "../src/live/voices"
-import { decodeFakeSpeech, makeFakeTranscriber, type FakeScript, type FakeTranscriberOptions } from "../src/live/providers/fake"
+import { makeFakeTranscriber, type FakeScript, type FakeTranscriberOptions } from "../src/live/providers/fake"
 import type { LiveConfig } from "../src/live/session"
 import { makeProcessingService } from "../src/processing"
 import type { ProviderNote, ProviderServices } from "../src/providers"
@@ -35,12 +32,7 @@ export interface LiveFixtureOptions {
   maxSessions?: number
   /** Null: live transcription is not configured. */
   transcriber?: LiveTranscriber | null
-  /** False imitates a batch provider that returns no word times. */
-  batchWordTimes?: boolean
   repository?: NotesRepositoryService
-  livePendingWaitMs?: number
-  /** False: no comparison of voices across provider sessions (as with no batch recogniser configured). */
-  voices?: boolean
   /** Account IDs to use instead of the fixture's own (PostgreSQL needs rows that exist). */
   accounts?: Partial<Record<User, string>>
 }
@@ -48,31 +40,9 @@ export async function liveFixture(options: LiveFixtureOptions = {}) {
   const repository = options.repository ?? makeMemoryRepository()
   const users = { ...defaultUsers, ...options.accounts }
   const fake = makeFakeTranscriber({ ...(options.script ? { vocabulary: options.script.vocabulary } : {}), interimDelayMs: 30, finalDelayMs: 60, ...options.fake })
-  const storageDir = await mkdtemp(join(tmpdir(), "live-test-"))
-  // The comparison of voices across provider sessions reads the same durable parts and the same batch recogniser as the worker.
-  const voiceCalls: number[] = []
-  const voices = makeVoiceMatcher({ storageDir, segments: async noteId => (await Effect.runPromise(repository.getNote(noteId)))?.transcriptSegments ?? [], parts: noteId => Effect.runPromise(repository.listAudioChunks(noteId)),
-    transcribe: input => { voiceCalls.push(input.durationMs); return Effect.runPromise(providers.transcribe(input)) } })
-  const hub = makeLiveHub(repository, { config: { tickMs: 50, ackIntervalMs: 100, ...options.config }, ...(options.maxSessions ? { maxSessions: options.maxSessions } : {}), ...(options.voices === false ? {} : { voices }) })
-  const batchCalls: Array<{ chunkId: string; startMs: number; keep?: ReadonlyArray<{ fromMs: number; toMs: number }> }> = []
+  const hub = makeLiveHub(repository, { config: { tickMs: 50, ackIntervalMs: 100, ...options.config }, ...(options.maxSessions ? { maxSessions: options.maxSessions } : {}) })
   const chatContexts: Array<{ note: ProviderNote & { live?: unknown }; system: string; context: string }> = []
   const providers: ProviderServices = {
-    transcribe: input => Effect.sync(() => {
-      batchCalls.push({ chunkId: input.chunkId, startMs: input.startMs, ...(input.keep ? { keep: input.keep } : {}) })
-      const words = decodeFakeSpeech(input.audio.subarray(44), RATE, options.script?.vocabulary ?? [])
-      const honour = input.keep !== undefined && options.batchWordTimes !== false
-      const segments: TranscriptSegmentDTO[] = []
-      let current: { speaker: string; text: string; start: number; end: number } | undefined
-      const flush = () => { if (current) segments.push({ id: crypto.randomUUID(), channel: input.channel, speakerId: `${input.channel}:${input.chunkId}:${current.speaker}`, speakerLabel: "Speaker 1", text: current.text.trim(), isFinal: true, startMs: input.startMs + Math.round(current.start * 1000), endMs: input.startMs + Math.round(current.end * 1000) }); current = undefined }
-      for (const word of words) {
-        const middle = input.startMs + (word.startSec + word.endSec) * 500
-        if (honour && !input.keep!.some(range => middle >= range.fromMs && middle < range.toMs)) { flush(); continue }
-        const speaker = word.speaker ?? "speaker_1"
-        if (current && current.speaker === speaker) { current.text += word.text; current.end = word.endSec } else { flush(); current = { speaker, text: word.text, start: word.startSec, end: word.endSec } }
-      }
-      flush()
-      return honour ? Object.assign(segments, { limitedToKeep: true }) : segments
-    }),
     generate: () => Effect.succeed("generated"), chat: () => Effect.succeed("answer"),
     async *chatStream(note, input: ChatInput) {
       const { chatAnswerMessages, meetingChatDocument } = await import("../src/ai")
@@ -82,7 +52,7 @@ export async function liveFixture(options: LiveFixtureOptions = {}) {
       yield "ok"
     },
   }
-  const processing = makeProcessingService(repository, { worker: false, providers, storageDir, live: hub, livePendingRetryMs: 20, ...(options.livePendingWaitMs === undefined ? {} : { livePendingWaitMs: options.livePendingWaitMs }) })
+  const processing = makeProcessingService(repository, { providers, live: hub })
   const endpoint = makeLiveEndpoint({
     repository, hub,
     resolvePrincipal: async headers => {
@@ -116,21 +86,6 @@ export async function liveFixture(options: LiveFixtureOptions = {}) {
     sockets.push(client)
     return client
   }
-  /** Uploads scripted audio as one durable part and runs the batch worker until it has nothing claimable. */
-  async function uploadPart(noteId: string, pcm: Uint8Array, startMs: number, sequence: number, channel: "mic" | "system" = "system", user: User = "alice") {
-    const scoped = processing.forRepository(repository.forUser(users[user]))
-    return Effect.runPromise(scoped.upload(noteId, crypto.randomUUID(), { channel, sequence, startMs, audioBase64: Buffer.from(wav(pcm)).toString("base64") }))
-  }
-  const chunks = (noteId: string) => Effect.runPromise(repository.listAudioChunks(noteId))
-  async function settleParts(noteId: string, timeoutMs = 15_000) {
-    const deadline = performance.now() + timeoutMs
-    for (;;) {
-      await processing.runPending()
-      if ((await chunks(noteId)).every(chunk => chunk.state === "ready" || chunk.state === "failed")) return
-      if (performance.now() > deadline) throw new Error("Durable parts did not settle")
-      await Bun.sleep(25)
-    }
-  }
   async function chat(noteId: string, message: string, user: User = "alice", includeSources = true) {
     const scoped = processing.forRepository(repository.forUser(users[user]))
     const stream = await Effect.runPromise(scoped.chatStream(noteId, { message, history: [], includeSources }))
@@ -144,9 +99,8 @@ export async function liveFixture(options: LiveFixtureOptions = {}) {
     await processing.dispose()
     // Not awaited: with client sockets of this same process still closing, the promise does not settle.
     void server.stop(true)
-    await rm(storageDir, { recursive: true, force: true })
   }
-  return { repository, fake, hub, processing, server, url, recordingNote, note, connect, uploadPart, chunks, settleParts, chat, batchCalls, voiceCalls, chatContexts, revoked, dispose }
+  return { repository, fake, hub, processing, server, url, recordingNote, note, connect, chat, chatContexts, revoked, dispose }
 }
 export type LiveFixture = Awaited<ReturnType<typeof liveFixture>>
 

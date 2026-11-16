@@ -59,7 +59,7 @@ test("a fresh server reports setup as not finished, with every step read from wh
   expect((await f.settings()).onboarding!.steps).toEqual({ ...nothingDone, name: true, language: true })
   const patched = await (await f.call("owner", "/admin/settings", "PATCH", { elevenLabsApiKey: secrets.eleven })).json() as AdminSettingsDTO
   expect(patched.onboarding!.steps).toEqual({ ...nothingDone, name: true, language: true, speech: true })
-  const chosen = await f.call("owner", "/admin/settings", "PATCH", { chatModels: [{ provider: "openai", model: "gpt-test" }], generationModel: { provider: "openai", model: "gpt-test" }, transcriptionModel: { provider: "elevenlabs", model: "scribe_v3" } })
+  const chosen = await f.call("owner", "/admin/settings", "PATCH", { chatModels: [{ provider: "openai", model: "gpt-test" }], generationModel: { provider: "openai", model: "gpt-test" } })
   expect(chosen.status).toBe(200)
   expect((await f.settings()).onboarding!.steps).toEqual({ ...nothingDone, name: true, language: true, speech: true, models: true })
 
@@ -68,12 +68,26 @@ test("a fresh server reports setup as not finished, with every step read from wh
   expect((await f.settings()).onboarding!.steps.language).toBe(false)
 })
 
-test("speech-to-text counts OpenAI only when OpenAI is the chosen speech provider", async () => {
+test("speech to text is live, so only an ElevenLabs key finishes it; OpenAI can no longer be chosen for it", async () => {
   const f = fixture()
   await f.call("owner", "/admin/settings", "PATCH", { openAiApiKey: secrets.openai })
   expect((await f.settings()).onboarding!.steps.speech).toBe(false)
-  expect((await f.call("owner", "/admin/settings", "PATCH", { transcriptionModel: { provider: "openai", model: "gpt-transcribe" } })).status).toBe(200)
-  expect((await f.settings()).onboarding!.steps.speech).toBe(true)
+  expect((await f.call("owner", "/admin/settings", "PATCH", { liveTranscriptionModel: { provider: "openai", model: "gpt-transcribe" } })).status).toBe(400)
+  // Nor a batch model of ElevenLabs: speech models must stream.
+  const batch = await f.call("owner", "/admin/settings", "PATCH", { elevenLabsApiKey: secrets.eleven, liveTranscriptionModel: { provider: "elevenlabs", model: "scribe_v3" } })
+  expect(batch.status).toBe(400)
+  expect(((await batch.json()) as { message: string }).message).toContain("Only live transcription models")
+  // Nor can live transcription be turned off through the API: the contract refuses null.
+  expect((await f.call("owner", "/admin/settings", "PATCH", { liveTranscriptionModel: null })).status).toBe(400)
+  expect((await f.settings()).onboarding!.steps.speech).toBe(false)
+})
+
+test("the OpenAI-compatible server finishes the language step with its address alone (no key needed)", async () => {
+  const f = fixture()
+  await f.call("owner", "/admin/settings", "PATCH", { openAiCompatibleBaseUrl: "http://10.0.0.5:11434/v1" })
+  expect((await f.settings()).onboarding!.steps.language).toBe(true)
+  await f.call("owner", "/admin/settings", "PATCH", { openAiCompatibleBaseUrl: null })
+  expect((await f.settings()).onboarding!.steps.language).toBe(false)
 })
 
 test("the setup state carries nothing secret", async () => {

@@ -9,6 +9,7 @@
  */
 import type { LiveTranscriberEvent, LiveTranscriberSession } from "@meeting-notes/contracts/live"
 import type { AudioChannelName } from "./repository"
+import { newAttribution } from "./speakers"
 
 /** What a held provider session was opened for. Only an identical request may take it over. */
 export interface LinkKey { readonly provider: string; readonly model: string; readonly channel: AudioChannelName; readonly sampleRate: number; readonly language?: string }
@@ -19,6 +20,8 @@ export type LinkOwner = (event: LiveTranscriberEvent | null) => unknown
 export class ProviderLink {
   /** Provider speaker to note speaker number. */
   speakers: Record<string, number> = {}
+  /** Who is who among the provider's speakers (speakers.ts), kept with the session they belong to. */
+  readonly attribution = newAttribution()
   /** Samples sent since the provider session opened, of any kind: where the provider's clock stands. */
   sent = 0
   /** The provider session ended or reported an error: it cannot be taken over. */

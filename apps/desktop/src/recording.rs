@@ -28,6 +28,12 @@ pub struct Recording {
     pub transcription_attention: TranscriptionAttention,
     microphone_level: f32,
     system_level: f32,
+    /// The level the bars are drawn from: the louder input, held until it
+    /// moves by [`LEVEL_STEP`] (see [`Recording::set_audio_levels`]).
+    shown_level: f32,
+    /// The input level a stretch of steady input started at and when, and
+    /// whether the shown level has settled onto it yet.
+    steady: Option<(f32, Instant, bool)>,
     pub note_id: Option<u64>,
     /// Captured by delayed transitions. Invalidated by user transitions/reset.
     pub epoch: u64,
@@ -35,18 +41,30 @@ pub struct Recording {
     live_since: Option<Instant>,
 }
 
+/// The smallest change in the input level that the bars follow: about half
+/// of the level it takes to move the centre bar by one step.
+pub const LEVEL_STEP: f32 = 0.04;
+/// How long the input must stay within a step for the shown level to settle
+/// onto it, so a slow fade does not leave the bars a step off.
+const SETTLE_AFTER: Duration = Duration::from_millis(500);
+
 impl Recording {
-    /// Level of actual capture inputs. Silence stays quiet; no demo waveform is
-    /// inferred from elapsed time. Capture/server adapters supply these values.
+    /// Level of actual capture inputs, as the level bars show it. Silence
+    /// stays quiet; no demo waveform is inferred from elapsed time.
+    /// Capture/server adapters supply these values.
     pub fn audio_level(&self) -> f32 {
         if self.is_active() {
-            self.microphone_level.max(self.system_level)
+            self.shown_level
         } else {
             0.
         }
     }
 
     pub fn set_audio_levels(&mut self, microphone: f32, system: f32) {
+        self.set_audio_levels_at(microphone, system, Instant::now());
+    }
+
+    fn set_audio_levels_at(&mut self, microphone: f32, system: f32, now: Instant) {
         let clean = |level: f32| {
             if level.is_finite() {
                 level.clamp(0., 1.)
@@ -56,6 +74,32 @@ impl Recording {
         };
         self.microphone_level = clean(microphone);
         self.system_level = clean(system);
+        // Each poll reads the loudness (25 × RMS) of the latest tenth of a
+        // second of audio, which is never quite the same twice even for a
+        // steady sound. The shown level holds until the input really moves,
+        // so a steady sound keeps steady bars (and the window is not redrawn
+        // for them), while speech, which swings by far more than a step,
+        // moves them on every poll.
+        let level = self.microphone_level.max(self.system_level);
+        if level == 0. || (level - self.shown_level).abs() >= LEVEL_STEP {
+            self.shown_level = level;
+        }
+        // Once the input has stayed within a step for half a second, the
+        // shown level settles onto it, once, if it is a quarter step or more
+        // away: a slow fade into room noise then rests on the room's own
+        // level rather than up to a step above it.
+        match self.steady {
+            Some((start, _, _)) if (level - start).abs() < LEVEL_STEP => {}
+            _ => self.steady = Some((level, now, false)),
+        }
+        if let Some((_, since, settled @ false)) = self.steady.as_mut()
+            && now.saturating_duration_since(*since) >= SETTLE_AFTER
+        {
+            *settled = true;
+            if (level - self.shown_level).abs() >= LEVEL_STEP / 4. {
+                self.shown_level = level;
+            }
+        }
     }
     pub fn begin(&mut self, note_id: u64) -> bool {
         self.begin_at(note_id)
@@ -277,6 +321,57 @@ mod tests {
         Generation, GenerationPhase, Phase, Recording, TranscriptionAttention, elapsed_label,
     };
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_steady_level_is_held_and_a_real_change_shows() {
+        let mut session = Recording::default();
+        assert!(session.begin(1));
+        session.set_audio_levels(0.6, 0.);
+        assert_eq!(session.audio_level(), 0.6);
+        // A steady sound's peak wobbles a little from poll to poll.
+        for wobble in [0.603, 0.598, 0.61, 0.592, 0.6005] {
+            session.set_audio_levels(wobble, 0.);
+            assert_eq!(session.audio_level(), 0.6);
+        }
+        // Speech moves by far more than a step, and is followed at once.
+        session.set_audio_levels(0.3, 0.);
+        assert_eq!(session.audio_level(), 0.3);
+        session.set_audio_levels(0.1, 0.45);
+        assert_eq!(session.audio_level(), 0.45);
+        // Silence is never held above zero.
+        session.set_audio_levels(0., 0.);
+        assert_eq!(session.audio_level(), 0.);
+    }
+
+    #[test]
+    fn a_slow_fade_settles_onto_the_room_and_then_holds() {
+        let mut session = Recording::default();
+        assert!(session.begin(1));
+        let start = Instant::now();
+        let poll = Duration::from_millis(80);
+        // Fading out in small steps, each under LEVEL_STEP: the shown level
+        // lags up to a step behind.
+        let mut at = start;
+        for level in [0.2, 0.17, 0.14, 0.11, 0.08, 0.06, 0.05] {
+            session.set_audio_levels_at(level, 0., at);
+            at += poll;
+        }
+        assert!(session.audio_level() > 0.05);
+        // The room stays at 0.05 with a little wobble: after half a second
+        // the bars rest on it, and then stay put.
+        for step in 0..12 {
+            let wobble = if step % 2 == 0 { 0.052 } else { 0.048 };
+            session.set_audio_levels_at(wobble, 0., at);
+            at += poll;
+        }
+        let settled = session.audio_level();
+        assert!((settled - 0.05).abs() < 0.005, "{settled}");
+        for step in 0..12 {
+            session.set_audio_levels_at(if step % 2 == 0 { 0.049 } else { 0.051 }, 0., at);
+            at += poll;
+            assert_eq!(session.audio_level(), settled);
+        }
+    }
 
     #[test]
     fn complete_workflow_keeps_owner_and_rejects_invalid_transitions() {

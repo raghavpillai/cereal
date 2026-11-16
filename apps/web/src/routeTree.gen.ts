@@ -21,6 +21,7 @@ import { Route as McpConsentRouteImport } from './routes/mcp.consent'
 import { Route as NotesIndexRouteImport } from './routes/notes.index'
 import { Route as NotesNoteIdRouteImport } from './routes/notes.$noteId'
 import { Route as STokenRouteImport } from './routes/s.$token'
+import { Route as NotesNoteIdChatRouteImport } from './routes/notes.$noteId_.chat'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -82,6 +83,11 @@ const STokenRoute = STokenRouteImport.update({
   path: '/s/$token',
   getParentRoute: () => rootRouteImport,
 } as any)
+const NotesNoteIdChatRoute = NotesNoteIdChatRouteImport.update({
+  id: '/$noteId_/chat',
+  path: '/$noteId/chat',
+  getParentRoute: () => NotesRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -96,6 +102,7 @@ export interface FileRoutesByFullPath {
   '/notes/$noteId': typeof NotesNoteIdRoute
   '/s/$token': typeof STokenRoute
   '/notes/': typeof NotesIndexRoute
+  '/notes/$noteId/chat': typeof NotesNoteIdChatRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -109,6 +116,7 @@ export interface FileRoutesByTo {
   '/notes/$noteId': typeof NotesNoteIdRoute
   '/s/$token': typeof STokenRoute
   '/notes': typeof NotesIndexRoute
+  '/notes/$noteId/chat': typeof NotesNoteIdChatRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -124,6 +132,7 @@ export interface FileRoutesById {
   '/notes/$noteId': typeof NotesNoteIdRoute
   '/s/$token': typeof STokenRoute
   '/notes/': typeof NotesIndexRoute
+  '/notes/$noteId_/chat': typeof NotesNoteIdChatRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -140,6 +149,7 @@ export interface FileRouteTypes {
     | '/notes/$noteId'
     | '/s/$token'
     | '/notes/'
+    | '/notes/$noteId/chat'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -153,6 +163,7 @@ export interface FileRouteTypes {
     | '/notes/$noteId'
     | '/s/$token'
     | '/notes'
+    | '/notes/$noteId/chat'
   id:
     | '__root__'
     | '/'
@@ -167,6 +178,7 @@ export interface FileRouteTypes {
     | '/notes/$noteId'
     | '/s/$token'
     | '/notes/'
+    | '/notes/$noteId_/chat'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -268,17 +280,26 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof STokenRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/notes/$noteId_/chat': {
+      id: '/notes/$noteId_/chat'
+      path: '/$noteId/chat'
+      fullPath: '/notes/$noteId/chat'
+      preLoaderRoute: typeof NotesNoteIdChatRouteImport
+      parentRoute: typeof NotesRoute
+    }
   }
 }
 
 interface NotesRouteChildren {
   NotesNoteIdRoute: typeof NotesNoteIdRoute
   NotesIndexRoute: typeof NotesIndexRoute
+  NotesNoteIdChatRoute: typeof NotesNoteIdChatRoute
 }
 
 const NotesRouteChildren: NotesRouteChildren = {
   NotesNoteIdRoute: NotesNoteIdRoute,
   NotesIndexRoute: NotesIndexRoute,
+  NotesNoteIdChatRoute: NotesNoteIdChatRoute,
 }
 
 const NotesRouteWithChildren = NotesRoute._addFileChildren(NotesRouteChildren)

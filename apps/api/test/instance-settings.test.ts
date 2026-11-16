@@ -24,9 +24,11 @@ function fixture(){
 }
 test('instance settings encrypt every provider key, preserve partial edits and route tasks independently',async()=>{
  const f=fixture()
- const settings=await run(f.admin.updateSettings({instanceName:'Product studio',instanceLogo:'data:image/png;base64,aGVsbG8=',openAiApiKey:'secret-openai-key',anthropicApiKey:'secret-anthropic-key',elevenLabsApiKey:'secret-eleven-key',chatModels:[{provider:'openrouter',model:'vendor/chat-a'},{provider:'openai',model:'gpt-test'}],generationModel:{provider:'anthropic',model:'claude-test'},transcriptionModel:{provider:'openai',model:'gpt-transcribe'}}))
+ const settings=await run(f.admin.updateSettings({instanceName:'Product studio',instanceLogo:'data:image/png;base64,aGVsbG8=',openAiApiKey:'secret-openai-key',anthropicApiKey:'secret-anthropic-key',elevenLabsApiKey:'secret-eleven-key',chatModels:[{provider:'openrouter',model:'vendor/chat-a'},{provider:'openai',model:'gpt-test'}],generationModel:{provider:'anthropic',model:'claude-test'}}))
  expect(settings.providers.filter(p=>p.configured)).toHaveLength(4)
- for(const key of ['secret-openai-key','secret-anthropic-key','secret-eleven-key']){expect(JSON.stringify(settings)).not.toContain(key);expect(JSON.stringify(await f.store.getSettings())).not.toContain(key)}
+ // Each saved key comes back only as a short masked preview; the key itself is nowhere in the answer or the store.
+ expect(settings.providers.find(p=>p.id==='openai')?.hint).toBe('…-key')
+ for(const key of ['secret-openai-key','secret-anthropic-key','secret-eleven-key','environment-router-key']){expect(JSON.stringify(settings)).not.toContain(key);expect(JSON.stringify(await run(f.admin.getSettings()))).not.toContain(key);expect(JSON.stringify(await f.store.getSettings())).not.toContain(key)}
  await run(f.admin.updateSettings({instanceName:'Another name'}));expect((await f.admin.configuration()).openAiKey).toBe('secret-openai-key')
  const providers=settingsAwareProviders(f.admin,f.transport),note=await run(f.repository.createNote({title:'Meeting'}))
  await run(providers.chat(note,{message:'Question',history:[],model:'openai:gpt-test'}))
@@ -35,16 +37,19 @@ test('instance settings encrypt every provider key, preserve partial edits and r
  await expect(f.admin.configuration('chat','openai:unlisted')).rejects.toThrow('Choose an enabled chat model')
  await run(f.admin.updateSettings({openAiApiKey:null}));expect((await run(f.admin.getSettings())).providers.find(p=>p.id==='openai')?.source).toBe('none')
 })
-test('catalogs are capability-filtered, key-scoped, cached, refreshable and disclose the Scribe fallback',async()=>{
+test('catalogs are capability-filtered, key-scoped, cached, refreshable, and offer only live speech models',async()=>{
  const f=fixture(),catalog=makeModelCatalog(f.transport)
  const first=await catalog('openrouter','key-one');expect(first.models.map(m=>m.id)).toEqual(['vendor/chat-a','vendor/chat-b'])
  // A key is checked at OpenRouter's key endpoint before its (public) model list is read: two requests per load.
  await catalog('openrouter','key-one');expect(f.requests.map(r=>r.url)).toEqual(['https://openrouter.ai/api/v1/key','https://openrouter.ai/api/v1/models'])
  await catalog('openrouter','key-two');await catalog('openrouter','key-one',true);expect(f.requests).toHaveLength(6)
- const openai=await catalog('openai','key');expect(openai.models).toHaveLength(2);expect(openai.models.find(m=>m.id==='gpt-transcribe')?.capabilities).toEqual(['transcription'])
- const fallback=makeModelCatalog(Object.assign(async()=>Response.json([{model_id:'eleven_voice',can_do_text_to_speech:true}]),{preconnect:()=>{}}) as typeof fetch)
- expect((await fallback('elevenlabs','key')).notice).toContain('does not list Scribe')
- expect((await fallback('elevenlabs','key')).models.some(m=>m.id==='scribe_v3')).toBe(true)
+ // OpenAI's batch transcription model is not offered at all: speech is transcribed live only.
+ const openai=await catalog('openai','key');expect(openai.models.map(m=>m.id)).toEqual(['gpt-test'])
+ // ElevenLabs lists a batch Scribe model; only the streaming ones are offered.
+ const eleven=await catalog('elevenlabs','key')
+ expect(eleven.models.map(m=>[m.id,m.capabilities])).toEqual([['scribe_v2_realtime',['live_transcription']],['scribe_v3_live',['live_transcription']]])
+ expect(eleven.notice).toContain('live Scribe models')
+ for(const provider of ['openrouter','openai','elevenlabs'] as const)expect((await catalog(provider,'key')).models.every(m=>m.capabilities.length===1&&['language','live_transcription'].includes(m.capabilities[0]!)),provider).toBe(true)
 })
 test('a wrong OpenRouter key is refused even though its model list is public; an unreachable key check does not block',async()=>{
  const models={data:[{id:'vendor/chat-a',name:'Chat A',architecture:{input_modalities:['text'],output_modalities:['text']}}]}
@@ -86,11 +91,4 @@ test('Anthropic streaming and tool results use the native Messages wire format',
  const tools=await p.chatToolStep!([{role:'system',content:'Find notes'},{role:'user',content:'Question'},{role:'assistant',content:null,tool_calls:[{id:'previous',type:'function',function:{name:'search',arguments:'{}'}}]},{role:'tool',tool_call_id:'previous',content:'Result'}],[{type:'function',function:{name:'search',description:'Search',parameters:{type:'object'}}}],new AbortController().signal)
  expect(tools[0]).toMatchObject({name:'search',arguments:'{"query":"meeting"}'})
  expect(requests[1].body.messages.at(-1).content[0]).toEqual({type:'tool_result',tool_use_id:'previous',content:'Result'})
-})
-test('OpenAI transcription uses the selected model and retains unknown speaker identity',async()=>{
- let received:any
- const transport=Object.assign(async(url:any,init:any)=>{received={url,model:init.body.get('model')};return Response.json({text:'A new recording'})},{preconnect:()=>{}}) as typeof fetch
- const p=makeProviderServices({openAiKey:'test-openai-key',transcriptionProvider:'openai',transcriptionModel:'gpt-transcribe',fetch:transport})
- const segments=await run(p.transcribe({audio:new Uint8Array([0]),channel:'mic',chunkId:crypto.randomUUID(),startMs:1000,durationMs:2000}))
- expect(received).toEqual({url:'https://api.openai.com/v1/audio/transcriptions',model:'gpt-transcribe'});expect(segments[0]).toMatchObject({text:'A new recording',speakerLabel:'Unknown speaker',startMs:1000,endMs:3000})
 })

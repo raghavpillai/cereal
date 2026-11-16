@@ -61,7 +61,7 @@ private final class FakeServer: @unchecked Sendable {
         }
         if path.hasSuffix("/notes/summaries") {
             let rows = (notes[user.id] ?? []).enumerated().map { index, title in
-#"{"id":"\#(UUID().uuidString.lowercased())","title":"\#(title)","date":"2026-11-1\#(index % 9)","duration":"1:12","createdAt":"2026-11-12T10:00:00.000Z","updatedAt":"2026-11-12T10:01:00.123Z","recordingState":"stopped","generationState":"ready","transcriptRevision":2,"generatedRevision":2,"hasBody":true,"hasSummary":true,"hasTranscript":true,"speakerCount":1,"excerpt":"Generated notes.","meeting":null,"attendees":{"people":[],"others":0,"total":0},"organizationId":null,"folders":[]}"#
+#"{"id":"\#(UUID().uuidString.lowercased())","title":"\#(title)","date":"2026-11-1\#(index % 9)","duration":"1:12","createdAt":"2026-11-12T10:00:00.000Z","updatedAt":"2026-11-12T10:01:00.123Z","recordingState":"stopped","generationState":"ready","transcriptRevision":2,"generatedRevision":2,"hasBody":true,"hasSummary":true,"hasTranscript":true,"speakerCount":1,"excerpt":"Generated notes.","meeting":null,"attendees":{"people":[],"others":0,"total":0},"organizationId":null}"#
             }
             return (200, "application/json", #"{"notes":[\#(rows.joined(separator: ","))],"nextCursor":null,"total":\#(rows.count)}"#)
         }
@@ -141,16 +141,19 @@ private let userB = "00000000-0000-4000-8000-00000000000b"
         defaults.set(address, forKey: "meetingNotes.instanceURL")
     }
 
+    /// A part in the delivery journal an earlier version kept, as it wrote it. `state` is
+    /// one of that version's delivery states: pending, acknowledged, ready or failed.
     @discardableResult
-    func leaveRecording(address: String, userID: String, state: AudioOutboxEntry.DeliveryState = .pending) throws -> URL {
+    func leaveRecording(address: String, userID: String, state: String = "pending") throws -> URL {
         let directory = root.appendingPathComponent(AccountID(address: address, userID: userID).raw, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let id = UUID().uuidString.lowercased()
-        let entry = AudioOutboxEntry(id: id, noteID: UUID().uuidString.lowercased(), channel: .mic, sequence: 0, startMs: 0,
-                                     durationMs: 5000, fileName: "\(id).wav", sourceFileName: "capture-0.wav", state: state)
-        var entries = (try? JSONDecoder().decode([AudioOutboxEntry].self, from: Data(contentsOf: directory.appendingPathComponent("outbox.json")))) ?? []
+        let entry: [String: Any] = ["id": id, "noteID": UUID().uuidString.lowercased(), "channel": "mic", "sequence": 0, "startMs": 0,
+                                    "durationMs": 5000, "fileName": "\(id).wav", "sourceFileName": "capture-0.wav", "state": state]
+        let journal = directory.appendingPathComponent("outbox.json")
+        var entries = (try? Data(contentsOf: journal)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [[String: Any]] } ?? []
         entries.append(entry)
-        try JSONEncoder().encode(entries).write(to: directory.appendingPathComponent("outbox.json"))
+        try JSONSerialization.data(withJSONObject: entries).write(to: journal)
         try Data("RIFF".utf8).write(to: directory.appendingPathComponent("\(id).wav"))
         return directory
     }
@@ -528,7 +531,7 @@ private func isUnreachable(_ status: AccountStatus) -> Bool { if case .unreachab
         let accounts = device.launch()
         let id = try await accounts.connect(instance: server.address, token: "token-1")
         let directory = try device.leaveRecording(address: server.address, userID: userA)
-        try device.leaveRecording(address: server.address, userID: userA, state: .ready)
+        try device.leaveRecording(address: server.address, userID: userA, state: "ready")
         #expect(accounts.dataSummary(for: id) == AccountDataSummary(recordings: 2, unsent: 1))
 
         try await accounts.signOut(id)
@@ -607,9 +610,9 @@ private func isUnreachable(_ status: AccountStatus) -> Bool { if case .unreachab
         let accounts = device.launch()
         let id = try await accounts.connect(instance: server.address, token: "token-1")
         #expect(accounts.dataSummary(for: id) == AccountDataSummary())
-        let directory = try device.leaveRecording(address: server.address, userID: userA, state: .ready)
-        try device.leaveRecording(address: server.address, userID: userA, state: .acknowledged)
-        try device.leaveRecording(address: server.address, userID: userA, state: .pending)
+        let directory = try device.leaveRecording(address: server.address, userID: userA, state: "ready")
+        try device.leaveRecording(address: server.address, userID: userA, state: "acknowledged")
+        try device.leaveRecording(address: server.address, userID: userA, state: "pending")
         // A capture that was still being recorded when the app was killed: audio that is nowhere else.
         let note = UUID().uuidString
         let folder = directory.appendingPathComponent("recordings/\(note)")
@@ -710,18 +713,13 @@ private func isUnreachable(_ status: AccountStatus) -> Bool { if case .unreachab
         // Two users on one server: two accounts, two directories, two items.
         #expect(a != b && Set(device.store.ids) == [a, b])
         #expect(accounts.label(for: a) == server.host + " · a@example.test")
-        let instance = try InstanceURL(server.address)
-        let first = try AudioOutbox(instance: instance, principalID: userA, root: device.root)
-        let second = try AudioOutbox(instance: instance, principalID: userB, root: device.root)
-        #expect(first.directory.path == (try accounts.storage.directory(a.raw)).path)
-        #expect(second.directory.path == (try accounts.storage.directory(b.raw)).path)
-        #expect(first.directory != second.directory)
-        // An outbox is delivered only through its own account's model.
-        let entry = AudioOutboxEntry(id: UUID().uuidString, noteID: UUID().uuidString, channel: .mic, sequence: 0, startMs: 0,
-                                     durationMs: 1, fileName: "unused.wav", sourceFileName: "capture.wav", state: .pending)
-        let notesB = try #require(accounts.session(b)?.notes)
-        await #expect(throws: APIClientError.unauthorized) { try await notesB.upload(entry, from: first) }
+        let first = try accounts.storage.directory(a.raw), second = try accounts.storage.directory(b.raw)
+        #expect(first != second)
+        for directory in [first, second] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Data("{}".utf8).write(to: directory.appendingPathComponent("captures.json"))
+        }
         try await accounts.erase(a)
-        #expect(!FileManager.default.fileExists(atPath: first.directory.path) && FileManager.default.fileExists(atPath: second.directory.path))
+        #expect(!FileManager.default.fileExists(atPath: first.path) && FileManager.default.fileExists(atPath: second.path))
     }
 }

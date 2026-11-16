@@ -67,7 +67,7 @@ async function notesChange(provider:"openrouter"|"openai"|"anthropic",model:stri
     {label:"C: notes cleared",body:""},
   ]
   const metered=meter(globalThis.fetch,"generation"),repository=makeMemoryRepository([first])
-  const processing=makeProcessingService(repository,{worker:false,providers:makeProviderServices({languageProvider:provider,languageModel:model,toolModel:model,fetch:metered.transport})})
+  const processing=makeProcessingService(repository,{providers:makeProviderServices({languageProvider:provider,languageModel:model,toolModel:model,fetch:metered.transport})})
   const outputs:string[]=[]
   try{
     for(const [index,version] of versions.entries()){

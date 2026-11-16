@@ -27,6 +27,11 @@ private func note(revision: Int, _ segments: [TranscriptSegmentDTO]) -> NoteDTO 
             transcriptSegments: segments, updatedAt: "2026-11-14T10:00:00.000Z")
 }
 
+private func gapEvent(fromMs: Int, toMs: Int, reason: String = "resume_window_exceeded") -> LiveWire.Gap? {
+    guard case .gap(let gap) = try? LiveWire.decode(#"{"type":"gap","channel":"mic","fromMs":\#(fromMs),"toMs":\#(toMs),"reason":"\#(reason)"}"#) else { return nil }
+    return gap
+}
+
 @MainActor @Suite struct LiveTranscriptModelTests {
     @Test func interimTextIsRevisedInPlaceAndTheFinalTakesOverItsLine() {
         let transcript = LiveTranscript(noteID: noteID)
@@ -70,11 +75,11 @@ private func note(revision: Int, _ segments: [TranscriptSegmentDTO]) -> NoteDTO 
         #expect(Set(transcript.lines.map(\.id)).count == 2)
     }
 
-    @Test func aNoteReadAddsWhatTheBatchPathStoredAndNeverRemovesLiveText() {
+    @Test func aNoteReadAddsWhatTheStreamDidNotCarryAndNeverRemovesLiveText() {
         let transcript = LiveTranscript(noteID: noteID)
         transcript.merge(note: note(revision: 2, [segment("aaaaaaaa-0000-4000-8000-000000000001", "One.", startMs: 0)]))
         transcript.apply(final(utteranceA, revision: 3, segment("aaaaaaaa-0000-4000-8000-000000000003", "Three.", startMs: 60_000)))
-        // A read taken before that final, which also carries a part the batch path filled in.
+        // A read taken before that final, which also carries a segment this stream did not carry.
         transcript.merge(note: note(revision: 3, [
             segment("aaaaaaaa-0000-4000-8000-000000000001", "One.", startMs: 0),
             segment("aaaaaaaa-0000-4000-8000-000000000002", "Two.", startMs: 30_000),
@@ -99,7 +104,7 @@ private func note(revision: Int, _ segments: [TranscriptSegmentDTO]) -> NoteDTO 
         transcript.merge(note: note(revision: 41, []))
         #expect(transcript.apply(.ready(transcriptRevision: 41, provider: "fake", model: "fake")) == false)
         #expect(transcript.apply(final(utteranceA, revision: 42, segment("aaaaaaaa-0000-4000-8000-000000000001", "A.", startMs: 0))) == false)
-        // Revision 43 was something else (a durable part transcribed by the batch path).
+        // Revision 43 was something else (text another device added).
         #expect(transcript.apply(final(utteranceB, revision: 44, segment("aaaaaaaa-0000-4000-8000-000000000002", "B.", startMs: 5_000))) == true)
     }
 
@@ -112,8 +117,77 @@ private func note(revision: Int, _ segments: [TranscriptSegmentDTO]) -> NoteDTO 
         ]))
         transcript.apply(.speakers([.init(from: "mic:n:4", to: "mic:n:2"), .init(from: "mic:n:5", to: "mic:n:7")]))
         #expect(transcript.segments.map(\.speakerId) == ["mic:n:2", "mic:n:2", "mic:n:7"])
-        #expect(transcript.segments.map(\.speakerLabel) == ["Speaker 2", "Speaker 2", "Speaker 7"])
+        // A voice with no labelled line yet takes the label the server gives it.
+        #expect(transcript.segments.map(\.speakerLabel) == ["Speaker 2", "Speaker 2", "Room speaker 6"])
         #expect(transcript.segments.map(\.text) == ["One.", "Two.", "Three."])
+    }
+
+    @Test func relabelsApplyToStoredSegmentsByIdAfterTheMerges() {
+        let transcript = LiveTranscript(noteID: noteID)
+        transcript.merge(note: note(revision: 3, [
+            segment("aaaaaaaa-0000-4000-8000-000000000001", "One.", startMs: 0, speaker: "mic:n:1", label: "Me"),
+            segment("aaaaaaaa-0000-4000-8000-000000000002", "Two.", startMs: 1_000, speaker: "mic:n:3", label: "Room speaker 2"),
+            segment("aaaaaaaa-0000-4000-8000-000000000003", "Three.", startMs: 2_000, speaker: "mic:n:1", label: "Me"),
+        ]))
+        // The voice first taken for the person recording was someone else: the merge runs first, then the relabel by id.
+        transcript.apply(.speakers([.init(from: "mic:n:3", to: "mic:n:1")], relabels: [
+            .init(segmentId: "aaaaaaaa-0000-4000-8000-000000000001", speakerId: "mic:n:2", speakerLabel: "Room speaker 1"),
+            .init(segmentId: "not-a-stored-segment", speakerId: "mic:n:9", speakerLabel: "Speaker 9"),
+        ]))
+        #expect(transcript.segments.map(\.speakerId) == ["mic:n:2", "mic:n:1", "mic:n:1"])
+        #expect(transcript.segments.map(\.speakerLabel) == ["Room speaker 1", "Me", "Me"])
+        #expect(transcript.segments.map(\.text) == ["One.", "Two.", "Three."])
+    }
+
+    @Test func stretchesWithNoTranscriptAreKeptMergedAndShownInTimeOrder() throws {
+        let transcript = LiveTranscript(noteID: noteID)
+        transcript.merge(note: note(revision: 2, [
+            segment("aaaaaaaa-0000-4000-8000-000000000001", "Before.", startMs: 700_000),
+            segment("aaaaaaaa-0000-4000-8000-000000000002", "After.", startMs: 731_000),
+        ]))
+        // This device skipped 12:03–12:10; the server saw the jump and reports the same stretch as a gap.
+        transcript.apply(.skipped(LiveSkip(channel: .mic, fromMs: 723_000, toMs: 730_000)))
+        transcript.apply(.gap(try #require(gapEvent(fromMs: 723_000, toMs: 730_000))))
+        #expect(transcript.gaps == [TranscriptGap(channel: .mic, fromMs: 723_000, toMs: 730_000)])
+        // A provider outage later on is another stretch.
+        transcript.apply(.gap(try #require(gapEvent(fromMs: 800_000, toMs: 815_500, reason: "provider_unavailable"))))
+        #expect(transcript.lines.map(\.id) == ["aaaaaaaa-0000-4000-8000-000000000001", "gap-mic-723000", "aaaaaaaa-0000-4000-8000-000000000002", "gap-mic-800000"])
+        #expect(TranscriptPresentation.untranscribedText(transcript.gaps) == "Couldn't transcribe 12:03–12:10, 13:20–13:36")
+        #expect(TranscriptPresentation.missingText(transcript.gaps[0]) == "Transcript missing 12:03–12:10")
+
+        // The saved note lists them too, and a read keeps what this device recorded itself.
+        var saved = note(revision: 3, transcript.segments)
+        saved = NoteDTO(body: saved.body, createdAt: saved.createdAt, date: saved.date, duration: saved.duration, enhanced: saved.enhanced,
+                        generatedRevision: nil, generationState: .idle, id: noteID, recordingState: .stopped, title: saved.title,
+                        transcriptGaps: [TranscriptGapDTO(channel: .mic, fromMs: 900_000, toMs: 903_000), TranscriptGapDTO(channel: .mic, fromMs: 600_000, toMs: 610_000)],
+                        transcriptRevision: 3, transcriptSegments: saved.transcriptSegments, updatedAt: saved.updatedAt)
+        transcript.merge(note: saved)
+        #expect(transcript.gaps.map(\.fromMs) == [600_000, 723_000, 800_000, 900_000])
+        let entries = TranscriptPresentation.entries(saved).map(\.id)
+        #expect(entries == ["gap-mic-600000", "aaaaaaaa-0000-4000-8000-000000000001", "aaaaaaaa-0000-4000-8000-000000000002", "gap-mic-900000"])
+        #expect(TranscriptPresentation.untranscribedText([]) == nil)
+    }
+
+    @Test func theRecordersVoiceIsMeAndLabelsTheServerGaveAreShownAsGiven() {
+        // A merge into a voice that has no labelled line yet: the first live voice is the person recording.
+        let transcript = LiveTranscript(noteID: noteID)
+        transcript.merge(note: note(revision: 2, [
+            segment("aaaaaaaa-0000-4000-8000-000000000001", "One.", startMs: 0, speaker: "mic:n:2", label: nil),
+            segment("aaaaaaaa-0000-4000-8000-000000000002", "Two.", startMs: 1_000, speaker: "mic:n:3", label: nil),
+        ]))
+        transcript.apply(.speakers([.init(from: "mic:n:2", to: "mic:n:1"), .init(from: "mic:n:3", to: "mic:n:4")]))
+        #expect(transcript.segments.map(\.speakerLabel) == ["Me", "Room speaker 3"])
+        #expect(TranscriptPresentation.liveLabel("system:n:2") == "Speaker 2" && TranscriptPresentation.liveLabel("mic:n:2") == "Room speaker 1")
+        #expect(TranscriptPresentation.liveLabel("mic:9f0c:1") == nil && TranscriptPresentation.liveLabel("mic:n:0") == nil)
+        // Shown: an unlabelled live voice has the server's label, and is not counted among the other voices; a label is used as given.
+        let rows = TranscriptPresentation.rows([
+            segment("aaaaaaaa-0000-4000-8000-000000000011", "Hi.", startMs: 0, speaker: "mic:n:1", label: nil),
+            segment("aaaaaaaa-0000-4000-8000-000000000012", "Hello.", startMs: 1_000, speaker: "mic:n:2", label: nil),
+            segment("aaaaaaaa-0000-4000-8000-000000000013", "Hey.", startMs: 2_000, speaker: "mic:n:3", label: nil),
+            segment("aaaaaaaa-0000-4000-8000-000000000014", "Yes.", startMs: 3_000, speaker: "mic:n:4", label: "Priya"),
+            segment("aaaaaaaa-0000-4000-8000-000000000015", "Right.", startMs: 4_000, speaker: "mic:n:1", label: "Me"),
+        ])
+        #expect(rows.map(\.speaker) == ["Me", "Room speaker 1", "Room speaker 2", "Priya", "Me"])
     }
 
     @Test func statusFollowsTheStreamAndNothingInterimOutlivesIt() {
@@ -127,7 +201,7 @@ private func note(revision: Int, _ segments: [TranscriptSegmentDTO]) -> NoteDTO 
         transcript.apply(.status(.ended))
         #expect(transcript.utterances.isEmpty)
         transcript.apply(interim(utteranceB, rev: 1, "more"))
-        transcript.apply(.status(.unavailable(.providerUnavailable)))
+        transcript.apply(.status(.unavailable(.notRecording)))
         #expect(transcript.utterances.isEmpty)
     }
 
@@ -326,18 +400,25 @@ private final class RefusingServer: @unchecked Sendable {
         }
     }
 
-    @Test func aClientAgainstARealSocketFallsBackSilentlyWhenLiveIsNotConfigured() async throws {
+    @Test func aClientAgainstARealSocketKeepsDiallingAServerWithoutLiveTranscription() async throws {
         let server = try RefusingServer(status: 503, reason: "Service Unavailable", body: #"{"error":"unavailable","message":"Live transcription is not configured"}"#)
         let port = try await server.start()
         defer { server.stop() }
         let capture = MemoryCapture()
         capture.grow(by: 16_000)
-        let client = try api(port: port).liveTranscriptClient(noteID: noteID, source: capture,
-            configuration: LiveTranscriptClient.Configuration(captureID: "c", baseMs: 0))
+        var configuration = LiveTranscriptClient.Configuration(captureID: "c", baseMs: 0)
+        configuration.backoff = [.milliseconds(20)]
+        let client = try api(port: port).liveTranscriptClient(noteID: noteID, source: capture, configuration: configuration)
         let log = EventLog(); await log.follow(client)
         await client.start()
+        // The recording has no other transcript, so a server that cannot take the stream yet is asked again.
+        try await waitUntil("asked again", timeout: .seconds(5)) { await log.statuses.contains(.providerUnavailable) }
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(await client.status == .providerUnavailable)
+        #expect(await log.statuses.first == .connecting)
+        await client.cancel()
         await log.finished()
-        #expect(await log.statuses == [.connecting, .unavailable(.notConfigured)])
+        #expect(await log.statuses.last == .ended)
     }
 
     @Test func anUnreachableServerIsATransportFailure() async throws {

@@ -172,7 +172,9 @@ struct ConnectionView: View {
             do {
                 let account = try await work()
                 password = ""; token = ""
+                #if DEBUG
                 mode.isDemo = false
+                #endif
                 // A note that was waiting for this sign-in opens; otherwise Home.
                 router.path = LinkNavigation.pathAfterSignIn(router.path, account: accounts.linkAccounts.first { $0.id == account })
                 dismiss()
@@ -206,7 +208,7 @@ struct ConnectionView: View {
         Task {
             do { if erase { try await accounts.erase(item.id) } else { try await accounts.signOut(item.id) } }
             catch { self.error = error.localizedDescription }
-            if accounts.sessions.isEmpty { mode.isDemo = false; router.path = [] }
+            if accounts.sessions.isEmpty { router.path = [] }
             busy = false
         }
     }
@@ -215,7 +217,9 @@ struct ConnectionView: View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("https://notes.example.com", text: addressField)
+                    // Verbatim: as a localized key the example address is read as Markdown,
+                    // which makes it a link and draws it in the tint colour.
+                    TextField(text: addressField, prompt: Text(verbatim: "https://notes.example.com")) { Text("Server address") }
                         .textContentType(.URL).keyboardType(.URL)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                         .accessibilityLabel("Instance URL")
@@ -312,7 +316,6 @@ struct ConnectionView: View {
                                 .font(.footnote).foregroundStyle(Theme.textSecondary)
                                 .accessibilityIdentifier("connection-needs-sign-in")
                         }
-                        Button("Use server notes") { mode.isDemo = false; router.path = []; dismiss() }
                         Button("Sign out", role: .destructive) { ask(session, erase: false) }
                             .accessibilityIdentifier("connection-sign-out")
                         Button("Remove account and erase its data…", role: .destructive) { ask(session, erase: true) }
@@ -352,11 +355,6 @@ struct ConnectionView: View {
                         Text("Recordings saved by an earlier version, for accounts that are not signed in here. They are kept until you erase them.")
                     }
                 }
-                Section {
-                    Button("Use local demo") { mode.isDemo = true; router.path = []; dismiss() }
-                } footer: {
-                    Text("Demo notes and recordings stay on this device. They are never automatically uploaded. They remain separate from your signed-in account.")
-                }
             }
             .disabled(busy)
             .animation(motion.snappy, value: busy)
@@ -373,8 +371,9 @@ struct ConnectionView: View {
             .animation(motion.settle, value: accounts.signature)
             .navigationTitle("Connection")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() }.disabled(busy) } }
-            .interactiveDismissDisabled(busy)
+            // The app needs a server: with no account here there is nothing to go back to.
+            .toolbar { if !accounts.sessions.isEmpty { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() }.disabled(busy) } } }
+            .interactiveDismissDisabled(busy || accounts.sessions.isEmpty)
             .onAppear {
                 instance = router.signInAddress ?? accounts.sessions.first?.record.instanceURL ?? ""
                 discovery.check(instance, typed: false)

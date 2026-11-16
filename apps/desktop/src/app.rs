@@ -14,16 +14,13 @@ pub enum Screen {
     Home,
     MyNotes,
     SearchResults,
-    Folder(u64),
     Favorites,
     Shared,
     /// The page a link opened: a shared note, read-only, or where a note
     /// is when the app is not signed in to its server (see `shared_view`).
     Link,
     Chat,
-    Connect,
     Settings,
-    Trash,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NoteTab {
@@ -33,7 +30,6 @@ pub enum NoteTab {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Menu {
     RecordingSettings,
-    TranscriptionLanguage,
     NoteDetails,
     CalendarEvent,
     RecordingHelp,
@@ -41,8 +37,6 @@ pub enum Menu {
     Note,
     Share,
     Templates,
-    MoveTo,
-    NewFolder,
     Shortcuts,
     /// Right-click menu of a note row in a list.
     NoteRow,
@@ -50,6 +44,8 @@ pub enum Menu {
     /// signed-out account, restoring a note deleted on the server. What it
     /// says is in `Cereal::account_sheet`.
     Account,
+    /// The Trash popover, opened from the sidebar's trash button.
+    Trash,
 }
 
 pub struct Cereal {
@@ -59,7 +55,6 @@ pub struct Cereal {
     pub screen: Screen,
     pub current_note: Option<u64>,
     pub sidebar_open: bool,
-    pub folders_open: bool,
     pub search_open: bool,
     pub search_results_query: String,
     pub search: Entity<TextInput>,
@@ -69,7 +64,6 @@ pub struct Cereal {
     pub note_body_dirty: bool,
     pub note_scroll: ScrollHandle,
     pub note_calendar_month: chrono::NaiveDate,
-    pub folder_input: Entity<TextInput>,
     pub attendee_input: Entity<TextInput>,
     pub active_tab: NoteTab,
     pub summary: crate::summary::SummaryState,
@@ -122,11 +116,24 @@ pub struct Cereal {
     pub recording_from: crate::recording::Phase,
     pub recording_changed_at: Option<std::time::Instant>,
     pub recording_last_click: Option<(bool, std::time::Instant)>,
-    pub transcription_language: String,
+    /// The recording bar control under the pointer and since when, for its
+    /// tooltip (see `recording_view::bar_tip`).
+    pub bar_tip: Option<(u64, std::time::Instant)>,
     pub microphone_muted: bool,
     pub menu: Option<Menu>,
     pub visible_menu: Option<Menu>,
     pub menu_epoch: u64,
+    /// The menu a press outside it closed, and which press that was ([`Cereal::press_seq`]):
+    /// the click that same press completes on the menu's own button must not open it again
+    /// ([`Cereal::open_menu`]). Cleared once that press is released.
+    pub menu_closed_by_press: Option<(Menu, u64)>,
+    /// Counts presses of the pointer in the window, so a record above belongs to one press.
+    pub press_seq: u64,
+    /// What a Trash row is asking ("Delete … forever?", or that the note
+    /// was edited elsewhere).
+    pub trash_ask: Option<crate::trash::Ask>,
+    /// Notes whose delete on their server has been sent and not answered.
+    pub deleting_forever: std::collections::HashSet<u64>,
     pub menu_keyboard: crate::chrome::MenuKeyboard,
     pub palette: crate::chrome::PaletteKeyboard,
     pub menu_exiting: bool,
@@ -148,11 +155,11 @@ pub struct Cereal {
     pub caches: crate::home::Caches,
     /// The list last shown, so returning to it from a note does not replay
     /// its entrance.
-    pub list_shown: Option<(std::mem::Discriminant<Screen>, Option<u64>)>,
+    pub list_shown: Option<std::mem::Discriminant<Screen>>,
     /// Screens to return to with the header back pill, most recent last.
     pub nav_history: Vec<Screen>,
     pub settings_tab: crate::screens::SettingsTab,
-    /// The note a list-row menu (or a folder menu opened from it) acts on,
+    /// The note a list-row menu acts on,
     /// and where that menu is anchored.
     pub row_menu: Option<crate::chrome::RowMenu>,
     /// Sidebar footer tool whose label is showing, and the last one shown
@@ -174,18 +181,17 @@ pub struct Cereal {
     pub chat_parked: std::collections::HashMap<String, crate::chat::ParkedChat>,
     pub chat_interrupted: std::collections::HashSet<usize>,
     pub chat_editing: Option<crate::chat::EditingChat>,
-    pub chat_recipes: Vec<crate::chat::ChatRecipe>,
-    pub chat_recipes_open: bool,
-    pub chat_recipe_editor: Option<crate::chat::RecipeEditor>,
-    /// The editor that was just closed, kept only to be drawn while it leaves.
-    pub recipe_editor_leaving: Option<crate::chat::RecipeEditor>,
     pub chat_maximized: bool,
+    /// The sidebar lists every conversation under Chat, not only the newest.
+    pub chat_threads_expanded: bool,
     pub chat_history_open: bool,
     /// When a press outside the recent-chats list last closed it (see
     /// `toggle_chat_history`).
     pub chat_history_closed_at: Option<std::time::Instant>,
     pub chat_scroll: ScrollHandle,
     pub chat_archives: Vec<crate::chat::ArchivedChat>,
+    /// Each account's saved threads on its server (`chat_sync.rs`).
+    pub chat_sync: crate::chat_sync::ChatSync,
     pub chat_thread_id: String,
     pub calendar_page: i32,
     pub calendars: crate::calendar::CalendarState,
@@ -229,7 +235,7 @@ impl Cereal {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let login = cx.new(crate::login::LoginView::new);
         let account = cx.new(crate::account::AccountView::new);
-        let search = cx.new(|cx| TextInput::new("Search folders or meetings", false, cx));
+        let search = cx.new(|cx| TextInput::new("Search meetings", false, cx));
         let ask = cx.new(|cx| TextInput::new("Ask anything", false, cx));
         ask.update(cx, |input, cx| input.set_chat_mode(cx));
         let title_input = cx.new(|cx| TextInput::new("New note", false, cx));
@@ -239,7 +245,6 @@ impl Cereal {
         editor.update(cx, |input, _| input.set_list_formatting(true));
         let note_scroll = ScrollHandle::new();
         editor.update(cx, |input, _| input.attach_scroll(note_scroll.clone()));
-        let folder_input = cx.new(|cx| TextInput::new("Folder name", false, cx));
         let attendee_input = cx.new(|cx| TextInput::new("Add attendees...", false, cx));
         let menu_key_listener = cx.listener(|this, event: &KeystrokeEvent, window, cx| {
             this.handle_palette_key(event, window, cx);
@@ -308,12 +313,7 @@ impl Cereal {
             cx.subscribe(&login, |this, _, _: &crate::login::LoginCompleted, cx| {
                 this.navigate(Screen::Home, cx)
             }),
-            cx.subscribe(&search, |this, _, _: &InputChanged, cx| {
-                if this.menu == Some(Menu::MoveTo) {
-                    this.menu_keyboard.selected = None;
-                }
-                cx.notify();
-            }),
+            cx.subscribe(&search, |_, _, _: &InputChanged, cx| cx.notify()),
             cx.subscribe(&search, |this, _, ev: &InputSubmitted, cx| {
                 if this.menu == Some(Menu::CalendarEvent) {
                     if crate::server::enabled() {
@@ -340,19 +340,9 @@ impl Cereal {
                     this.open_search_results(cx);
                 }
             }),
-            cx.subscribe(&ask, |this, _, event: &InputChanged, cx| {
-                if event.content.starts_with('/') {
-                    this.chat_recipes_open = true;
-                    this.chat_history_open = false;
-                    if this.current_note.is_some() {
-                        this.assistant_open = true;
-                        this.transcript_open = false;
-                    }
-                } else if this.chat_recipes_open {
-                    this.chat_recipes_open = false;
-                }
-                cx.notify();
-            }),
+            // The composer's send button and its open or folded shape
+            // follow what has been typed.
+            cx.subscribe(&ask, |_, _, _: &InputChanged, cx| cx.notify()),
             cx.subscribe(&ask, |this, _, _: &InputFocused, cx| {
                 if this.current_note.is_some()
                     && !this.assistant_open
@@ -384,7 +374,6 @@ impl Cereal {
                     this.persist(cx);
                 }
             }),
-            cx.subscribe(&folder_input, |_, _, _: &InputChanged, cx| cx.notify()),
             cx.subscribe(&attendee_input, |_, _, _: &InputChanged, cx| cx.notify()),
             cx.subscribe(&attendee_input, |this, _, ev: &InputSubmitted, cx| {
                 if crate::server::enabled() {
@@ -407,10 +396,6 @@ impl Cereal {
                     .update(cx, |input, cx| input.set_content("", cx));
                 this.persist(cx);
             }),
-            cx.subscribe(&folder_input, |_, _, _: &InputChanged, cx| cx.notify()),
-            cx.subscribe(&folder_input, |this, _, _: &InputSubmitted, cx| {
-                this.create_folder(cx)
-            }),
         ];
         subscriptions.extend(link_subscriptions);
         let mut this = Self {
@@ -424,7 +409,6 @@ impl Cereal {
             },
             current_note: None,
             sidebar_open: true,
-            folders_open: false,
             search_open: false,
             search_results_query: String::new(),
             search,
@@ -434,7 +418,6 @@ impl Cereal {
             note_body_dirty: false,
             note_scroll,
             note_calendar_month: chrono::Local::now().date_naive(),
-            folder_input,
             attendee_input,
             active_tab: NoteTab::Enhanced,
             summary: Default::default(),
@@ -473,11 +456,15 @@ impl Cereal {
             recording_from: crate::recording::Phase::Idle,
             recording_changed_at: None,
             recording_last_click: None,
-            transcription_language: "English (best quality)".into(),
+            bar_tip: None,
             microphone_muted: false,
             menu: None,
             visible_menu: None,
             menu_epoch: 0,
+            menu_closed_by_press: None,
+            press_seq: 0,
+            trash_ask: None,
+            deleting_forever: Default::default(),
             menu_keyboard: Default::default(),
             palette: Default::default(),
             menu_exiting: false,
@@ -507,15 +494,13 @@ impl Cereal {
             chat_parked: Default::default(),
             chat_interrupted: Default::default(),
             chat_editing: None,
-            chat_recipes: crate::chat::load_recipes(),
-            chat_recipes_open: false,
-            chat_recipe_editor: None,
-            recipe_editor_leaving: None,
             chat_maximized: false,
+            chat_threads_expanded: false,
             chat_history_open: false,
             chat_history_closed_at: None,
             chat_scroll: ScrollHandle::new(),
             chat_archives: crate::chat::load_history(),
+            chat_sync: Default::default(),
             chat_thread_id: uuid::Uuid::new_v4().to_string(),
             calendar_page: 0,
             calendars: Default::default(),
@@ -654,6 +639,10 @@ impl Cereal {
             self.transcript_open = false;
             self.transcript_find_open = false;
         }
+        if self.workspace.note(id).is_some() {
+            // What its notifications said is on screen now.
+            self.withdraw_note_notifications(id);
+        }
         if let Some(note) = self.workspace.note(id) {
             let title = note.title.clone();
             let body = note.body.clone();
@@ -692,9 +681,6 @@ impl Cereal {
             return;
         };
         self.workspace.note_mut(id).unwrap().title.clear();
-        if let Screen::Folder(folder) = self.screen {
-            self.workspace.note_mut(id).unwrap().folder_id = Some(folder);
-        }
         self.open_note(id, cx);
         self.active_tab = NoteTab::Notes;
         self.title_input
@@ -717,18 +703,6 @@ impl Cereal {
         self.workspace.create_note_in(slot)
     }
 
-    pub fn create_folder(&mut self, cx: &mut Context<Self>) {
-        let name = self.folder_input.read(cx).content().trim().to_string();
-        if name.is_empty() {
-            return;
-        }
-        let id = self.workspace.add_folder(name);
-        self.folder_input
-            .update(cx, |input, cx| input.set_content("", cx));
-        self.folders_open = true;
-        self.navigate(Screen::Folder(id), cx);
-        self.persist(cx);
-    }
     pub fn calendar_events(&self, query: &str) -> Vec<crate::model::Note> {
         let today = chrono::Local::now()
             .date_naive()
@@ -736,7 +710,7 @@ impl Cereal {
             .to_string();
         let mut events: Vec<_> = self
             .workspace
-            .visible_notes(None, false, query)
+            .visible_notes(false, query)
             .into_iter()
             .filter(|note| Some(note.id) != self.current_note && note.date >= today)
             .take(6)
@@ -745,7 +719,7 @@ impl Cereal {
         if events.is_empty() && query.trim().is_empty() {
             events = self
                 .workspace
-                .visible_notes(None, false, "")
+                .visible_notes(false, "")
                 .into_iter()
                 .filter(|note| Some(note.id) != self.current_note)
                 .take(3)
@@ -795,10 +769,6 @@ impl Cereal {
         if question.is_empty() {
             return;
         }
-        if question.starts_with('/') {
-            self.submit_matching_chat_recipe(&question, cx);
-            return;
-        }
         self.submit_chat_question(question, cx);
     }
     /// Submit a resolved prompt as text, bypassing composer slash commands.
@@ -828,7 +798,7 @@ impl Cereal {
                     .contains(w)
             })
             .collect();
-        let notes = self.workspace.visible_notes(None, false, "");
+        let notes = self.workspace.visible_notes(false, "");
         for note in notes.iter() {
             let source = format!("{}\n{}", note.enhanced, note.body);
             let matching: Vec<_> = source
@@ -895,7 +865,7 @@ impl Cereal {
         self.menu_exiting = false;
         self.menu_epoch = self.menu_epoch.wrapping_add(1);
         self.search.update(cx, |input, cx| {
-            input.set_placeholder("Search folders or meetings", cx)
+            input.set_placeholder("Search meetings", cx)
         });
         self.search_open = true;
         self.menu = None;
@@ -941,10 +911,6 @@ impl Cereal {
             self.chat_model_picker_open = false;
         } else if self.summary.open.is_some() {
             self.summary.dismiss();
-        } else if self.chat_recipe_editor.is_some() {
-            self.close_recipe_editor();
-        } else if self.chat_recipes_open {
-            self.close_chat_recipes(cx);
         } else if self.search_open {
             self.search_open = false;
         } else if self.menu.is_some() {
@@ -992,6 +958,14 @@ impl Render for Cereal {
                 cx.notify();
             }));
         }
+        // The Trash popover belongs to the sidebar's footer: it goes when
+        // the footer does (a note opened, the sidebar hidden).
+        if self.menu == Some(Menu::Trash) && !self.trash_button_shown() {
+            self.menu = None;
+        }
+        if self.menu != Some(Menu::Trash) {
+            self.trash_ask = None;
+        }
         match self.menu.clone() {
             Some(menu) if self.visible_menu.as_ref() != Some(&menu) || self.menu_exiting => {
                 // One menu replacing another in place pops again from part-way,
@@ -1005,11 +979,9 @@ impl Render for Cereal {
                 {
                     self.stage.kick(("menu", 0), 0.5, GOOEY);
                 }
-                // A row's target survives only inside its own menu and the folder
-                // picker opened from it; any other menu acts on the open note.
-                if !(menu == Menu::NoteRow
-                    || (menu == Menu::MoveTo && self.visible_menu == Some(Menu::NoteRow)))
-                {
+                // A row's target survives only inside its own menu; any other
+                // menu acts on the open note.
+                if menu != Menu::NoteRow {
                     self.row_menu = None;
                 }
                 self.menu_epoch = self.menu_epoch.wrapping_add(1);
@@ -1036,7 +1008,7 @@ impl Render for Cereal {
         if self.menu.is_some()
             && !matches!(
                 self.menu,
-                Some(Menu::NewFolder | Menu::NoteDetails | Menu::CalendarEvent | Menu::MoveTo)
+                Some(Menu::NoteDetails | Menu::CalendarEvent)
             )
         {
             self.focus.focus(window);
@@ -1044,6 +1016,7 @@ impl Render for Cereal {
         self.stage.begin();
         crate::motion::frame();
         crate::ui::set_dark(self.workspace.settings.dark_mode);
+        crate::ui::set_scale(window.scale_factor());
         crate::ui::provision_focus(cx);
         crate::ui::set_popover_open(self.visible_menu.is_some() || self.search_open);
         self.drain_chat_history(cx);
@@ -1073,9 +1046,7 @@ impl Render for Cereal {
             self.render_link_page(window, cx)
         } else {
             match self.screen {
-                Screen::Home | Screen::MyNotes | Screen::Folder(_) | Screen::Favorites => {
-                    self.render_home(window, cx)
-                }
+                Screen::Home | Screen::MyNotes | Screen::Favorites => self.render_home(window, cx),
                 _ => self.render_screen(window, cx),
             }
         };
@@ -1100,14 +1071,6 @@ impl Render for Cereal {
         let update_pose =
             self.stage
                 .presence(("update-notice", 0), self.updates.notice_open(), GOOEY);
-        let recipe_pose = self.stage.presence(
-            ("recipe-editor", 0),
-            self.chat_recipe_editor.is_some(),
-            GOOEY,
-        );
-        if !recipe_pose.visible || self.chat_recipe_editor.is_some() {
-            self.recipe_editor_leaving = None;
-        }
         let history_pose = self.stage.presence(
             ("chat-history-page", 0),
             self.chat_history_open && !self.search_open && full_chat,
@@ -1118,9 +1081,6 @@ impl Render for Cereal {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             std::mem::discriminant(&self.screen).hash(&mut hasher);
-            if let Screen::Folder(folder) = self.screen {
-                folder.hash(&mut hasher);
-            }
             if self.screen == Screen::Link {
                 self.links.epoch.hash(&mut hasher);
             }
@@ -1132,19 +1092,15 @@ impl Render for Cereal {
             // The list cascades in only when a different list is shown, not
             // on the way back from a note to the list the user just left.
             let list_key = std::mem::discriminant(&self.screen);
-            let folder = match self.screen {
-                Screen::Folder(folder) => Some(folder),
-                _ => None,
-            };
-            if self.current_note.is_none() && self.list_shown != Some((list_key, folder)) {
-                self.list_shown = Some((list_key, folder));
+            if self.current_note.is_none() && self.list_shown != Some(list_key) {
+                self.list_shown = Some(list_key);
                 self.stage.mark("page");
                 // The lists of notes share one scroll position. A list that
                 // is shown anew starts at its top, not where the one before
                 // it was left.
                 if matches!(
                     self.screen,
-                    Screen::Home | Screen::MyNotes | Screen::Folder(_) | Screen::Favorites
+                    Screen::Home | Screen::MyNotes | Screen::Favorites
                 ) {
                     self.home_scroll.set_offset(Point::default());
                 }
@@ -1263,8 +1219,13 @@ impl Render for Cereal {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .when(!login && !full_chat, |s| s.child(self.render_header(cx)))
-                    .when(!login && full_chat, |s| {
+                    // The Chat page has the pages' own header (the pill back
+                    // to where it was opened from); only a note's chat opened
+                    // to the full window has the chat header.
+                    .when(!login && !(full_chat && self.current_note.is_some()), |s| {
+                        s.child(self.render_header(cx))
+                    })
+                    .when(!login && full_chat && self.current_note.is_some(), |s| {
                         s.child(self.render_context_chat_header(cx))
                     })
                     .child(crate::motion::page(
@@ -1299,9 +1260,6 @@ impl Render for Cereal {
             })
             .when(self.visible_menu.is_some(), |s| {
                 s.child(self.render_menu(menu_pose, window, cx))
-            })
-            .when(recipe_pose.visible, |s| {
-                s.child(self.render_chat_recipe_editor(recipe_pose, window, cx))
             })
             .when(update_pose.visible, |s| {
                 s.child(self.render_update_notice(update_pose, window, cx))
@@ -1409,6 +1367,37 @@ impl Render for Cereal {
                     .size(px(0.)),
             )
         });
+        // Every press and release in the window, whatever is under the pointer (an open menu's
+        // overlay covers the window and takes the press). Presses are counted before any element
+        // sees them, so a menu a press closes records which press it was ([`Cereal::open_menu`]).
+        // The click a press completes is handled while its release is dispatched; once that is
+        // done the record has served its purpose, so a later click, a keyboard activation or a
+        // programmatic open is never refused because of it.
+        let view = cx.entity().downgrade();
+        let root = root.child(
+            canvas(
+                |_, _, _| (),
+                move |_, _, window, _| {
+                    let down = view.clone();
+                    window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Capture {
+                            let _ = down.update(cx, |this, _| this.press_seq += 1);
+                        }
+                    });
+                    let up = view.clone();
+                    window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
+                        if phase == DispatchPhase::Capture {
+                            let up = up.clone();
+                            window.defer(cx, move |_, cx| {
+                                let _ = up.update(cx, |this, _| this.menu_closed_by_press = None);
+                            });
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .size(px(0.)),
+        );
         self.stage.flush(window);
         root
     }

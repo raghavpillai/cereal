@@ -1,6 +1,6 @@
 /**
  * The API with live transcription, in one process, on the in-memory repository: the real route, hub,
- * session, worker and chat code, with no PostgreSQL and no Docker. Used by the development server
+ * session and chat code, with no PostgreSQL and no Docker. Used by the development server
  * (`scripts/live/dev-server.ts`) and the replay measurement (`scripts/replay-live.ts`).
  */
 import { mkdtemp, rm } from "node:fs/promises"
@@ -13,7 +13,6 @@ import { makeApiHandler } from "../../apps/api/src/api"
 import { chatAnswerMessages, meetingChatDocument } from "../../apps/api/src/ai"
 import { bootstrapPrincipal, isBootstrapToken } from "../../apps/api/src/auth"
 import { makeLiveHub } from "../../apps/api/src/live/hub"
-import { makeNoteVoiceMatcher } from "../../apps/api/src/live/voices"
 import { makeLiveEndpoint, type LiveConnection } from "../../apps/api/src/live/route"
 import { makeElevenLabsRealtime } from "../../apps/api/src/live/providers/elevenlabs-realtime"
 import { makeFakeTranscriber } from "../../apps/api/src/live/providers/fake"
@@ -82,7 +81,7 @@ export async function startLiveStack(options: LiveStackOptions = {}) {
   const token = options.token ?? DEV_TOKEN, provider = options.provider ?? "fake"
   const repository = makeMemoryRepository()
   const storageDir = await mkdtemp(join(tmpdir(), "cereal-live-"))
-  const upstream = { seconds: 0, sessions: 0 }, batch = { calls: 0, seconds: 0 }, chats: RecordedChat[] = []
+  const upstream = { seconds: 0, sessions: 0 }, chats: RecordedChat[] = []
   let transcriber: LiveTranscriber
   if (provider === "elevenlabs") {
     if (!process.env.ELEVENLABS_API_KEY) throw new Error("ELEVENLABS_API_KEY is not set; run with bun --env-file=.env")
@@ -92,15 +91,13 @@ export async function startLiveStack(options: LiveStackOptions = {}) {
   const metered: LiveTranscriber = { provider: transcriber.provider, model: transcriber.model, async open(open) {
     const session = await transcriber.open(open)
     upstream.sessions++
-    return { events: session.events, get bufferedBytes() { return session.bufferedBytes }, flush: () => session.flush(), close: () => session.close(),
+    return { events: session.events, get bufferedBytes() { return session.bufferedBytes }, get queuedSeconds() { return session.queuedSeconds }, flush: () => session.flush(), close: () => session.close(),
       send(pcm) { upstream.seconds += pcm.byteLength / 2 / open.sampleRate; session.send(pcm) },
       keepAlive() { const seconds = session.keepAlive(); upstream.seconds += seconds; return seconds } }
   } }
   const languageUsage: LanguageUsage[] = []
   const real = provider === "elevenlabs" || options.chat === "provider" ? makeProviderServices(options.meterLanguage ? { fetch: meteredFetch(languageUsage) } : {}) : undefined
   const providers: ProviderServices = {
-    // With the fake recogniser there is no batch recogniser either: audio the stream missed yields no text.
-    transcribe: input => { batch.calls++; batch.seconds += input.durationMs / 1000; return provider === "elevenlabs" ? real!.transcribe(input) : Effect.succeed([]) },
     generate: note => real ? real.generate(note) : Effect.succeed("# Notes\n\n- Generated notes are not available on the development server."),
     chat: (note, input) => real ? real.chat(note, input) : Effect.succeed("Chat is not available on the development server."),
     async *chatStream(note: ProviderNote, input, signal) {
@@ -113,10 +110,7 @@ export async function startLiveStack(options: LiveStackOptions = {}) {
       yield* real!.chatStream!(note, input, signal)
     },
   }
-  // Comparisons of voices across provider sessions go to the batch recogniser too; they are counted on their own as well.
-  const voiceChecks = { calls: 0, seconds: 0 }
-  const voices = makeNoteVoiceMatcher(repository, input => { voiceChecks.calls++; voiceChecks.seconds += input.durationMs / 1000; return providers.transcribe(input) }, storageDir)
-  const hub = makeLiveHub(repository, { ...(options.config ? { config: options.config } : {}), ...(options.maxSessions ? { maxSessions: options.maxSessions } : {}), ...(provider === "elevenlabs" ? { voices } : {}) })
+  const hub = makeLiveHub(repository, { ...(options.config ? { config: options.config } : {}), ...(options.maxSessions ? { maxSessions: options.maxSessions } : {}) })
   const processing = makeProcessingService(repository, { providers, storageDir, live: hub })
   const api = makeApiHandler(repository, token, { processing })
   const endpoint = makeLiveEndpoint({
@@ -135,7 +129,7 @@ export async function startLiveStack(options: LiveStackOptions = {}) {
     },
   })
   return {
-    repository, hub, processing, server, token, upstream, batch, voiceChecks, chats, languageUsage, provider: transcriber.provider, model: transcriber.model,
+    repository, hub, processing, server, token, upstream, chats, languageUsage, provider: transcriber.provider, model: transcriber.model,
     base: `http://127.0.0.1:${server.port}`,
     async stop() {
       await hub.dispose()

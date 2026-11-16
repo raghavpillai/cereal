@@ -130,8 +130,6 @@ struct RecordingNavigationTests {
     }
 
     @Test func theRecordingSurvivesLeavingItsScreenAndEndsOnlyOnAnExplicitStop() async throws {
-        UserDefaults.standard.set(2, forKey: "capture.partSeconds")
-        defer { UserDefaults.standard.removeObject(forKey: "capture.partSeconds") }
         let harness = try await LiveSessionHarness(framesPerUtterance: 10)
         defer { try? FileManager.default.removeItem(at: harness.root) }
         let router = Router()
@@ -155,8 +153,8 @@ struct RecordingNavigationTests {
         #expect(harness.controller.indicator?.id == noteID)
         #expect(harness.instance.count("POST", suffix: "/recording") == 1) // only the Start
 
-        // It is still a recording in every sense: audio is captured, parts are cut and
-        // uploaded, and the live transcript grows while no recording screen exists.
+        // It is still a recording in every sense: audio is captured and streamed, and the
+        // live transcript grows while no recording screen exists.
         let framesBefore = harness.controller.recorder.capturedFrames
         let finalsBefore = transcript.segments.count
         for _ in 0..<4 {
@@ -164,7 +162,6 @@ struct RecordingNavigationTests {
             try await Task.sleep(for: .milliseconds(120))
         }
         #expect(harness.controller.recorder.capturedFrames >= framesBefore + 4 * 16_000 - 400)
-        try await waitFor("parts while away") { harness.instance.allUploads.count >= 2 }
         try await waitFor("finals while away") { transcript.segments.count > finalsBefore }
         #expect(abs(harness.controller.recorder.elapsed - 5) < 0.2)
 

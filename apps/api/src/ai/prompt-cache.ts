@@ -26,7 +26,8 @@
  */
 import type {LanguageRequestParameters} from "./shared"
 
-export type LanguageProvider="openrouter"|"openai"|"anthropic"
+/** `openai_compatible` gets no cache fields at all: such a server caches by itself or not at all. */
+export type LanguageProvider="openrouter"|"openai"|"anthropic"|"openai_compatible"
 export type CacheStyle="anthropic"|"openai-breakpoints"|"automatic"
 const GPT_5_6_OR_LATER=/^gpt-(?:5\.(?:[6-9]|\d{2,})|[6-9]|\d{2,})(?:[.\/-]|$)/
 export const cacheStyle=(provider:LanguageProvider,model:string):CacheStyle=>

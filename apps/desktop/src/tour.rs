@@ -298,7 +298,7 @@ fn polish_steps() -> Vec<Step> {
         input("p-palette-down-return", 1500, |window, cx| press_key(window, cx, "enter")),
         step("p-palette-check", 600, |view, cx| {
             eprintln!(
-                "palette check: Down then Return opened {:?} (the row under New note is the first folder)",
+                "palette check: Down then Return opened {:?} (the row under New note is the first meeting)",
                 view.screen
             );
             view.search_open = false;
@@ -392,9 +392,6 @@ fn steps() -> Vec<Step> {
     vec![
         step("rest", 500, |_, _| {}),
         step("nav-chat", 750, |view, cx| view.navigate(Screen::Chat, cx)),
-        step("nav-connect", 750, |view, cx| {
-            view.navigate(Screen::Connect, cx)
-        }),
         step("nav-my-notes", 750, |view, cx| {
             view.navigate(Screen::MyNotes, cx)
         }),
@@ -461,16 +458,16 @@ fn steps() -> Vec<Step> {
             view.show_toast("All changes saved", cx)
         }),
         step("toast-dismiss", 550, |view, _| view.toast = None),
-        // The Calendar tab, where the toggle the next steps flip is shown.
+        // The Preferences tab, where the toggle the next steps flip is shown.
         step("settings-open", 900, |view, cx| {
-            view.open_settings(crate::screens::SettingsTab::Calendar, cx)
+            view.open_settings(crate::screens::SettingsTab::Preferences, cx)
         }),
         // In memory only: the tour never persists a changed preference.
         step("settings-toggle", 700, |view, _| {
-            view.workspace.settings.show_upcoming = !view.workspace.settings.show_upcoming
+            view.workspace.settings.dark_mode = !view.workspace.settings.dark_mode
         }),
         step("settings-toggle-back", 700, |view, _| {
-            view.workspace.settings.show_upcoming = !view.workspace.settings.show_upcoming
+            view.workspace.settings.dark_mode = !view.workspace.settings.dark_mode
         }),
         step("note-open", 950, |view, cx| view.open_note(1, cx)),
         step("tab-notes", 750, |view, _| view.active_tab = NoteTab::Notes),
@@ -556,9 +553,6 @@ fn still_steps() -> Vec<Step> {
         input("p-event-hover", 900, |window, cx| {
             pointer(window, cx, 760., 186.)
         }),
-        input("p-folders-hover", 900, |window, cx| {
-            pointer(window, cx, 96., 259.)
-        }),
         input("p-footer-tip", 900, |window, cx| {
             pointer(window, cx, 22., 775.)
         }),
@@ -575,17 +569,8 @@ fn still_steps() -> Vec<Step> {
             view.navigate(Screen::Shared, cx)
         }),
         step("p-chat", 900, |view, cx| view.navigate(Screen::Chat, cx)),
-        step("p-connect", 900, |view, cx| {
-            view.navigate(Screen::Connect, cx)
-        }),
         step("p-my-notes", 900, |view, cx| {
             view.navigate(Screen::MyNotes, cx)
-        }),
-        step("p-folder", 900, |view, cx| {
-            view.folders_open = true;
-            if let Some(folder) = view.workspace.folders.first().map(|folder| folder.id) {
-                view.navigate(Screen::Folder(folder), cx);
-            }
         }),
         settings(
             "p-settings-preferences",
@@ -597,7 +582,6 @@ fn still_steps() -> Vec<Step> {
         step("p-note", 1100, |view, cx| view.open_note(1, cx)),
         menu("p-note-menu", 900, Some(Menu::Note)),
         menu("p-note-templates", 900, Some(Menu::Templates)),
-        menu("p-note-folder-menu", 900, Some(Menu::MoveTo)),
         menu("p-note-details", 900, Some(Menu::NoteDetails)),
         menu("p-note-share", 900, Some(Menu::Share)),
         menu("p-note-menu-close", 500, None),
@@ -641,13 +625,6 @@ fn still_steps() -> Vec<Step> {
             view.close_chat_surface(cx);
             view.navigate(Screen::Chat, cx);
             view.submit_chat_question("List recent todos".into(), cx);
-        }),
-        step("p-recipes", 1100, |view, cx| {
-            view.chat_recipes_open = true;
-            cx.notify();
-        }),
-        step("p-recipes-close", 500, |view, cx| {
-            view.close_chat_recipes(cx)
         }),
         // Last: the sign-in screen, which follows the app's theme.
         step("p-login", 1100, |view, cx| view.navigate(Screen::Login, cx)),
@@ -712,13 +689,216 @@ fn icon_steps() -> Vec<Step> {
             if let Some(note) = view.workspace.note_mut(2) {
                 note.trashed = true;
             }
-            view.navigate(Screen::Trash, cx)
+            view.open_trash(cx)
         }),
         step("p-icons-empty-home", 4000, |view, cx| {
             for note in &mut view.workspace.notes {
                 note.trashed = true;
             }
             view.navigate(Screen::Home, cx)
+        }),
+    ]
+}
+
+/// The chat against its reference, `p-ask-…`:
+/// Home's composer at rest, focused and let go, a question unfolding the
+/// conversation over Home while it thinks and once it has answered, the
+/// panel folding back, and the Chat page with its threads. The answer is
+/// scripted (`start_scripted_chat`): no server is involved.
+#[cfg(debug_assertions)]
+fn chat_parity_steps() -> Vec<Step> {
+    fn script(think: u64) -> std::sync::mpsc::Receiver<crate::server::ChatStreamEvent> {
+        use crate::server::ChatStreamEvent;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let tool = |status: &str| {
+                serde_json::from_value(serde_json::json!({
+                    "callId": "t1",
+                    "label": "Searching recent meetings",
+                    "name": "list_meetings",
+                    "status": status,
+                    "resultCount": 3,
+                }))
+                .ok()
+            };
+            if let Some(tool) = tool("running") {
+                let _ = sender.send(ChatStreamEvent::Tool(tool));
+            }
+            std::thread::sleep(slow(Duration::from_millis(think)));
+            if let Some(tool) = tool("completed") {
+                let _ = sender.send(ChatStreamEvent::Tool(tool));
+            }
+            let answer = "Here are your recent action items, organized by meeting:\n\n\
+                ## Thursday, Nov 12\n\n### Weekly team standup\n\n\
+                - Jules: complete the search review\n\
+                - Sam: update the calendar empty state\n\n\
+                ### Product & design sync\n\n\
+                - Maya: share the updated prototype by Friday\n\
+                - Theo: arrange five usability sessions\n\n\
+                ## Wednesday, Nov 11\n\n### Customer discovery · Northstar\n\n\
+                - Shared project folders would make notes easier to find\n";
+            for word in answer.split_inclusive(' ') {
+                if sender.send(ChatStreamEvent::Delta(word.into())).is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(8));
+            }
+            let _ = sender.send(ChatStreamEvent::Done);
+        });
+        receiver
+    }
+    fn seed_threads(view: &mut Cereal) {
+        let now = chrono::Utc::now();
+        let titles = [
+            ("Meeting action items extractor", 0),
+            ("Untitled thread", 6 * 60),
+            ("Untitled conversation", 6 * 60 + 2),
+            ("Untitled thread", 6 * 60 + 4),
+            ("New conversation", 6 * 60 + 6),
+            ("Zach & Agora YC recap", 13 * 60),
+            ("Prototype codename ideas", 26 * 60),
+            ("Cereal research thread", 50 * 60),
+        ];
+        view.chat_archives.clear();
+        // Nineteen older ones, then the eight above, newest last.
+        for index in 0..19 {
+            view.chat_archives.push(thread(
+                &format!("older-{index}"),
+                "Older conversation",
+                now - chrono::Duration::days(3 + index),
+            ));
+        }
+        for (index, (title, minutes)) in titles.iter().enumerate().rev() {
+            view.chat_archives.push(thread(
+                &format!("recent-{index}"),
+                title,
+                now - chrono::Duration::minutes(*minutes),
+            ));
+        }
+    }
+    fn thread(id: &str, title: &str, at: chrono::DateTime<chrono::Utc>) -> crate::chat::ArchivedChat {
+        crate::chat::ArchivedChat {
+            id: id.into(),
+            note_id: 0,
+            account: None,
+            title: title.into(),
+            messages: vec![(title.into(), "Here is what I found in your notes.".into())],
+            interrupted: vec![],
+            annotations: Default::default(),
+            updated_at: Some(at.to_rfc3339()),
+        }
+    }
+    vec![
+        windowed("p-ask-home", 900, |view, window, cx| {
+            view.navigate(Screen::Home, cx);
+            view.clear_chat(cx);
+            view.focus.focus(window);
+        }),
+        windowed("p-ask-focused", 900, |view, window, cx| {
+            view.ask.read(cx).focus_handle.focus(window);
+            cx.notify();
+        }),
+        windowed("p-ask-blurred", 900, |view, window, cx| {
+            view.focus.focus(window);
+            cx.notify();
+        }),
+        windowed("p-ask-typed-blurred", 900, |view, window, cx| {
+            view.ask.update(cx, |input, cx| input.set_content("List recent todos", cx));
+            view.focus.focus(window);
+            cx.notify();
+        }),
+        windowed("p-ask-thinking", 900, |view, window, cx| {
+            view.ask.read(cx).focus_handle.focus(window);
+            view.start_scripted_chat("List recent todos".into(), script(20_000), cx);
+        }),
+        step("p-ask-wait-answer-quiet", 17_000, |_, _| {}),
+        step("p-ask-answer", 900, |view, _| view.chat_scroll.set_offset(Point::default())),
+        windowed("p-ask-collapsed", 900, |view, window, cx| {
+            view.close_chat_surface(cx);
+            view.focus.focus(window);
+        }),
+        windowed("p-ask-chat-page", 900, |view, window, cx| {
+            seed_threads(view);
+            view.clear_chat(cx);
+            view.navigate(Screen::Chat, cx);
+            view.focus.focus(window);
+        }),
+        windowed("p-ask-chat-page-focused", 900, |view, window, cx| {
+            view.ask.read(cx).focus_handle.focus(window);
+            cx.notify();
+        }),
+        step("p-ask-chat-threads-all", 900, |view, cx| {
+            view.chat_threads_expanded = true;
+            cx.notify();
+        }),
+        step("p-ask-chat-thread-open", 900, |view, cx| {
+            view.chat_threads_expanded = false;
+            if let Some(thread) = view.chat_threads().into_iter().find(|thread| thread.id == "recent-0") {
+                view.open_chat_thread(&thread.account, &thread.id, true, cx);
+            }
+        }),
+        step("p-ask-home-again", 900, |view, cx| view.navigate(Screen::Home, cx)),
+    ]
+}
+#[cfg(not(debug_assertions))]
+fn chat_parity_steps() -> Vec<Step> {
+    Vec::new()
+}
+
+/// Surfaces reached from somewhere other than their own button, `p-fix-…`:
+/// the recent chats from Home's focused composer, Trash from another page
+/// and from the command palette, and the line generated notes end with.
+/// Stills, run only when asked for (`CEREAL_TOUR=p-fix`).
+fn surface_steps() -> Vec<Step> {
+    vec![
+        windowed("p-fix-ask-focused", 900, |view, window, cx| {
+            view.navigate(Screen::Home, cx);
+            view.clear_chat(cx);
+            view.ask.read(cx).focus_handle.focus(window);
+            cx.notify();
+        }),
+        // The recent-chats button in the tray, 28 pt in and 20 pt down.
+        input("p-fix-ask-history", 1200, |window, cx| {
+            let size = window.viewport_size();
+            let centre = 192. + (f32::from(size.width) - 192.) / 2.;
+            click(window, cx, centre - 341.5 + 28., f32::from(size.height) - 124. + 20.);
+        }),
+        windowed("p-fix-trash", 1200, |view, window, cx| {
+            view.close_chat_surface(cx);
+            view.focus.focus(window);
+            for id in [2, 3] {
+                if let Some(note) = view.workspace.note_mut(id) {
+                    note.trashed = true;
+                }
+            }
+            view.navigate(Screen::Home, cx);
+            view.open_trash(cx);
+        }),
+        step("p-fix-trash-closed", 600, |view, cx| {
+            view.menu = None;
+            view.open_settings(crate::screens::SettingsTab::Preferences, cx);
+        }),
+        // From a page without the sidebar's footer: Home, with the popover.
+        step("p-fix-trash-from-settings", 1200, |view, cx| view.open_trash(cx)),
+        windowed("p-fix-palette-trash", 1200, |view, window, cx| {
+            view.menu = None;
+            view.open_search(window, cx);
+            view.search.update(cx, |input, cx| input.set_content("trash", cx));
+        }),
+        input("p-fix-palette-trash-down", 600, |window, cx| press_key(window, cx, "down")),
+        input("p-fix-palette-trash-return", 1200, |window, cx| press_key(window, cx, "enter")),
+        step("p-fix-transcript-link", 1200, |view, cx| {
+            view.menu = None;
+            for id in [2, 3] {
+                if let Some(note) = view.workspace.note_mut(id) {
+                    note.trashed = false;
+                }
+            }
+            if let Some(note) = view.workspace.note_mut(1) {
+                note.enhanced = "No usable meeting content captured. The transcript contains only a microphone test and no substantive discussion.\n\n---\n\nChat with meeting transcript: https://notes.example.com/t/51207249-97a9-4bd7-b02f-93428ffb367a".into();
+            }
+            view.open_note(1, cx);
+            view.active_tab = NoteTab::Enhanced;
         }),
     ]
 }
@@ -782,7 +962,7 @@ fn bench_steps() -> Vec<Step> {
                 .update(cx, |input, cx| input.set_content("review", cx));
             view.open_search_results(cx);
         }),
-        step("b-trash", 1600, |view, cx| view.navigate(Screen::Trash, cx)),
+        step("b-trash", 1600, |view, cx| view.open_trash(cx)),
         step("b-note-again", 1600, |view, cx| view.open_note(1, cx)),
         step("b-list", 1600, |view, cx| view.navigate(Screen::Home, cx)),
         input("b-pointer-rest", 500, |window, cx| {
@@ -1326,6 +1506,96 @@ fn gold_steps() -> Vec<Step> {
     steps
 }
 
+/// The recording capsule in the note's bottom bar, `p-bar-…`: at rest and
+/// with each of its controls hovered, while recording and once stopped, for
+/// measuring its insets. The pointer rests low in each control so its
+/// tooltip opens below the bar. `CEREAL_TOUR_BAR=<x>,<y>` is the capsule's
+/// top-left corner in window points (the default suits
+/// `CEREAL_TOUR_SIZE=1200x800`).
+fn bar_steps() -> Vec<Step> {
+    fn at(window: &mut Window, cx: &mut App, x: f32, y: f32) {
+        let (left, top) = std::env::var("CEREAL_TOUR_BAR")
+            .ok()
+            .and_then(|corner| {
+                let (x, y) = corner.split_once(',')?;
+                Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
+            })
+            .unwrap_or((264., 716.));
+        pointer(window, cx, left + x, top + y);
+    }
+    thread_local! {
+        /// Note 1's written notes, put back after the steps that change them.
+        static NOTES: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    }
+    fn restore(view: &mut Cereal) {
+        if let Some(notes) = NOTES.with(|notes| notes.borrow_mut().take())
+            && let Some(note) = view.workspace.note_mut(1)
+        {
+            note.enhanced = notes;
+        }
+    }
+    vec![
+        step("p-bar-live", 3000, |view, cx| {
+            view.navigate(Screen::Home, cx);
+            view.open_note(1, cx);
+            view.active_tab = NoteTab::Notes;
+            view.recording_last_click = None;
+            view.recording_changed_at = None;
+            view.start_recording_preview(1, cx);
+            view.transcript_open = false;
+            view.transcript_epoch = view.transcript_epoch.wrapping_add(1);
+            // Speech, as in the reference capture: bars of 13, 20 and 13 pt.
+            view.recording.set_audio_levels(0.82, 0.);
+        }),
+        input("p-bar-live-indicator", 3000, |window, cx| {
+            at(window, cx, 29., 50.)
+        }),
+        input("p-bar-live-stop", 3000, |window, cx| {
+            at(window, cx, 73., 50.)
+        }),
+        input("p-bar-stopping", 600, |window, cx| {
+            at(window, cx, -200., -200.)
+        }),
+        step("p-bar-paused", 3000, |view, cx| {
+            // Without written notes the stopped capsule offers "Resume".
+            if let Some(note) = view.workspace.note_mut(1) {
+                let notes = std::mem::take(&mut note.enhanced);
+                NOTES.with(|saved| {
+                    saved.borrow_mut().get_or_insert(notes);
+                });
+            }
+            view.recording_last_click = None;
+            view.recording_changed_at = None;
+            view.stop_recording_preview(cx);
+        }),
+        input("p-bar-paused-indicator", 3000, |window, cx| {
+            at(window, cx, 29., 50.)
+        }),
+        input("p-bar-paused-resume", 3000, |window, cx| {
+            at(window, cx, 86., 50.)
+        }),
+        input("p-bar-written", 600, |window, cx| {
+            at(window, cx, -200., -200.)
+        }),
+        // Once notes are written the stopped capsule is the indicator alone.
+        step("p-bar-done", 3000, |view, _| {
+            restore(view);
+            if let Some(note) = view.workspace.note_mut(1)
+                && note.enhanced.trim().is_empty()
+            {
+                note.enhanced = "Launch checklist".into();
+            }
+        }),
+        input("p-bar-done-indicator", 3000, |window, cx| {
+            at(window, cx, 29., 50.)
+        }),
+        // Takes the pointer off the bar for the tours that follow.
+        input("p-bar-leave-quiet", 300, |window, cx| {
+            at(window, cx, -200., -200.)
+        }),
+    ]
+}
+
 /// A stretch the stream skipped and its durable part then filled in,
 /// `p-gap-…`: stills for review. The reader has scrolled up and the filled
 /// text lands above what they are reading, which must not move.
@@ -1503,7 +1773,7 @@ fn audit_steps() -> Vec<Step> {
         wheel("a-search-results-end", 700., 400., -90_000.),
         step("a-my-notes", 900, |view, cx| view.navigate(Screen::MyNotes, cx)),
         step("a-favorites", 900, |view, cx| view.navigate(Screen::Favorites, cx)),
-        step("a-trash", 900, |view, cx| view.navigate(Screen::Trash, cx)),
+        step("a-trash", 900, |view, cx| view.open_trash(cx)),
         step("a-shared", 900, |view, cx| view.navigate(Screen::Shared, cx)),
         windowed("a-shared-paste-invalid", 900, |view, _, cx| {
             view.links
@@ -1511,13 +1781,11 @@ fn audit_steps() -> Vec<Step> {
                 .update(cx, |input, cx| input.set_content("not a link at all gjpqy", cx));
             view.open_pasted_link(cx);
         }),
-        step("a-connect", 900, |view, cx| view.navigate(Screen::Connect, cx)),
         step("a-account", 900, |view, cx| view.navigate(Screen::Account, cx)),
         open("a-note-long-title", "Quarterly planning, budgeting"),
         menu("a-note-long-title-menu", 900, Some(Menu::Note)),
         menu("a-note-long-title-share", 900, Some(Menu::Share)),
         menu("a-note-long-title-details", 900, Some(Menu::NoteDetails)),
-        menu("a-note-long-title-folder", 900, Some(Menu::MoveTo)),
         menu("a-note-long-title-templates", 900, Some(Menu::Templates)),
         menu("a-note-menus-close-quiet", 300, None),
         step("a-note-long-title-own", 900, |view, _| view.active_tab = NoteTab::Notes),
@@ -1613,13 +1881,8 @@ fn audit_steps() -> Vec<Step> {
             view.chat_history_open = true;
             cx.notify();
         }),
-        step("a-chat-recipes", 900, |view, cx| {
-            view.chat_history_open = false;
-            view.chat_recipes_open = true;
-            cx.notify();
-        }),
         step("a-chat-empty", 900, |view, cx| {
-            view.close_chat_recipes(cx);
+            view.chat_history_open = false;
             view.clear_chat(cx);
         }),
         open("a-transcript-long-note", "Two thousand line"),
@@ -1955,6 +2218,114 @@ fn closed_window_steps() -> Vec<Step> {
     steps
 }
 
+/// The transcript panel's stills, `p-tx-…` (run with `CEREAL_TOUR=p-tx`):
+/// a meeting with several voices on each channel, the panel at rest, a
+/// bubble under the pointer, and a passage opened from a source citation,
+/// then the same in the dark theme. `CEREAL_TOUR_HOVER=x,y` says where the
+/// pointer rests for `p-tx-hover`, `CEREAL_TOUR_CITE=<row>` which row the
+/// citation opens. Entirely fictional text.
+fn transcript_steps() -> Vec<Step> {
+    use meeting_notes_api_types::{AudioChannel, TranscriptSegmentDTO};
+    const LINES: &[(bool, u32, &str)] = &[
+        (false, 2, "Okay, I think everyone is here, so let's get going."),
+        (false, 2, "First thing is the onboarding numbers from last week."),
+        (true, 1, "Sure. Completion went from sixty-one to seventy-four percent."),
+        (true, 1, "Most of that is the shorter calendar step."),
+        (false, 3, "Is that across both platforms?"),
+        (true, 1, "Desktop only for now. Mobile ships on Thursday."),
+        (false, 2, "Got it."),
+        (false, 2, "And the drop-off at the permissions screen, did that move at all?"),
+        (true, 1, "A little. We still lose about one in eight people there, mostly when the microphone prompt and the screen recording prompt arrive back to back."),
+        (false, 3, "Could we ask for the screen recording later, when someone first shares a screen?"),
+        (true, 1, "That's the plan."),
+        (true, 1, "Theo has a prototype that defers it until the first meeting."),
+        (true, 4, "Yes, I can share it after this call."),
+        (true, 4, "It needs one more pass on the copy."),
+        (false, 2, "Great. Let's keep onboarding to three steps and review the prototype on Monday."),
+        (true, 1, "Works for me."),
+        (false, 3, "One more thing on search: the calendar results are still slow."),
+        (false, 3, "It's around two seconds on a cold start."),
+        (true, 1, "We're caching the event list now, so it should be under half a second next week."),
+        (false, 2, "Perfect."),
+        (false, 2, "Anything else before we wrap up?"),
+        (true, 1, "Just the budget review, but that can wait until the launch."),
+        (false, 3, "Agreed."),
+        (false, 2, "Okay, thanks everyone. Talk Monday."),
+    ];
+    /// The passage the source citation opens.
+    const CITED: usize = 14;
+    fn segment(index: usize) -> TranscriptSegmentDTO {
+        let (own, speaker, text) = LINES[index];
+        let name = if own { "mic" } else { "system" };
+        let start_ms = 4_000 + index as i64 * 3_700;
+        TranscriptSegmentDTO {
+            channel: if own { AudioChannel::Mic } else { AudioChannel::System },
+            end_ms: Some(start_ms + 3_200),
+            id: format!("33333333-0000-4000-8000-{index:012x}"),
+            is_final: true,
+            speaker_id: format!("{name}:n:{speaker}"),
+            speaker_label: Some(format!("Speaker {speaker}")),
+            start_ms,
+            text: text.into(),
+        }
+    }
+    fn open(view: &mut Cereal, cx: &mut Context<Cereal>, dark: bool) {
+        view.workspace.settings.dark_mode = dark;
+        view.navigate(Screen::Home, cx);
+        view.open_note(1, cx);
+        view.active_tab = NoteTab::Enhanced;
+        if let Some(note) = view.workspace.note_mut(1) {
+            note.replace_transcript("");
+            note.server_transcript_segments = (0..LINES.len()).map(segment).collect();
+            note.transcript_revision = note.transcript_revision.saturating_add(1);
+            // The notes were written from this transcript: no notice.
+            note.generated_revision = Some(note.transcript_revision);
+        }
+        view.summary.transcript_selection = None;
+        view.transcript_open = true;
+        view.transcript_epoch = view.transcript_epoch.wrapping_add(1);
+    }
+    fn hover(window: &mut Window, cx: &mut App) {
+        let (x, y) = std::env::var("CEREAL_TOUR_HOVER")
+            .ok()
+            .and_then(|at| {
+                let (x, y) = at.split_once(',')?;
+                Some((x.parse().ok()?, y.parse().ok()?))
+            })
+            .unwrap_or((860., 700.));
+        pointer(window, cx, x, y);
+    }
+    fn cite(view: &mut Cereal, window: &mut Window, cx: &mut Context<Cereal>) {
+        // `CEREAL_TOUR_CITE=<row>` cites another row (12: a gold bubble with
+        // another gold one right under it).
+        let cited = std::env::var("CEREAL_TOUR_CITE")
+            .ok()
+            .and_then(|row| row.parse::<usize>().ok())
+            .filter(|row| *row < LINES.len())
+            .unwrap_or(CITED);
+        let segment = segment(cited);
+        view.jump_to_transcript_quote(1, Some(&segment.id), &segment.text, None, window, cx);
+    }
+    let mut steps = Vec::new();
+    for dark in [false, true] {
+        let names = if dark {
+            ["p-tx-dark-normal", "p-tx-dark-hover", "p-tx-dark-away", "p-tx-dark-highlight"]
+        } else {
+            ["p-tx-normal", "p-tx-hover", "p-tx-away", "p-tx-highlight"]
+        };
+        steps.push(step(names[0], 3000, move |view, cx| open(view, cx, dark)));
+        steps.push(input(names[1], 3000, hover));
+        steps.push(input(names[2], 1500, |window, cx| pointer(window, cx, 20., 300.)));
+        steps.push(windowed(names[3], 3000, cite));
+    }
+    steps.push(step("p-tx-end", 600, |view, cx| {
+        view.workspace.settings.dark_mode = false;
+        view.transcript_open = false;
+        view.navigate(Screen::Home, cx);
+    }));
+    steps
+}
+
 /// Wait until the window has stopped rendering, so a still state is captured
 /// at rest and never mid-transition. Gives up after a few seconds: a state
 /// with a deliberate loop (a spinner) never goes quiet.
@@ -1996,8 +2367,11 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
             .chain(keyboard_steps())
             .chain(polish_steps())
             .chain(gap_still_steps())
+            .chain(bar_steps())
             .chain(gold_steps())
             .chain(icon_steps())
+            .chain(chat_parity_steps())
+            .chain(surface_steps())
             .chain(idle_steps());
         // `CEREAL_TOUR_SIZE=760x580` resizes the window first, and
         // `CEREAL_TOUR_SHOTS=<directory>` holds each still (`p-…`, `a-…`)
@@ -2036,6 +2410,7 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
             .chain(audit_bench_steps())
             .chain(pill_steps())
             .chain(closed_window_steps())
+            .chain(transcript_steps())
         {
             if only.is_empty()
                 && ["p-", "b-", "i-", "a-", "c-", "d-", "e-"]
@@ -2196,7 +2571,7 @@ pub fn functional_log(handle: WindowHandle<Cereal>, cx: &mut App) {
                     (
                         "screen",
                         format!(
-                            "{:?}, note {:?} ({:?}), tab {:?}, transcript open {}, chat open {}, search open {}, menu {:?}, model picker open {}, chat history open {}, recipes open {}",
+                            "{:?}, note {:?} ({:?}), tab {:?}, transcript open {}, chat open {}, search open {}, menu {:?}, model picker open {}, chat history open {}",
                             view.screen,
                             view.current_note,
                             note.map(|note| note.title.as_str()),
@@ -2206,8 +2581,7 @@ pub fn functional_log(handle: WindowHandle<Cereal>, cx: &mut App) {
                             view.search_open,
                             view.menu,
                             view.chat_model_picker_open,
-                            view.chat_history_open,
-                            view.chat_recipes_open
+                            view.chat_history_open
                         ),
                     ),
                     (
@@ -2750,7 +3124,8 @@ pub fn live_probe(handle: WindowHandle<Cereal>, seconds: u64, cx: &mut App) {
 /// * `stills`: every state of every step, each held until
 ///   `CEREAL_WELCOME_SHOTS/<name>.png` exists (an outside tool takes the
 ///   picture when it sees `welcome … shot <name>` on stderr).
-/// * `local`: the same walk without a server ("Try it on this Mac only").
+/// * `local`: the same walk without a server. The app no longer offers one;
+///   the walk passes the server step through a debug-only hook.
 /// * `leave-at-audio`: walks to the audio step and quits there, to check
 ///   that the next launch resumes on it.
 /// * `report`: says which screen and step the app opened on, then quits.
@@ -2949,6 +3324,16 @@ pub fn welcome(handle: WindowHandle<Cereal>, name: String, cx: &mut App) {
         pause(cx, 900).await;
         say(&format!("opened on {}", handle.update(cx, where_now).unwrap_or_default()));
         crate::motion::stats::report("launch");
+        // The walks that start from Home: an install without a server now
+        // opens on the server step, so the harness closes the welcome.
+        if matches!(name.as_str(), "again" | "menu-toggle") {
+            let _ = handle.update(cx, |view, _, cx| {
+                if view.screen == Screen::Welcome {
+                    view.finish_onboarding(cx);
+                }
+            });
+            pause(cx, 900).await;
+        }
         match name.as_str() {
             "report" => {
                 // What macOS says about each permission, read without asking.
@@ -2985,7 +3370,9 @@ pub fn welcome(handle: WindowHandle<Cereal>, name: String, cx: &mut App) {
                         pause(cx, 500).await;
                         shot(cx, ["", "tab-1", "tab-2", "tab-3"][stop]).await;
                     }
-                    press(handle, cx, "welcome-local").await;
+                    // Nothing on the step offers this any more: the walk
+                    // without a server is the harness's own.
+                    let _ = handle.update(cx, |view, _, cx| view.onboarding_choose_local(cx));
                 } else {
                     type_into(handle, cx, 0, &server, 45).await;
                     let found = until(handle, cx, 30, offered).await;
@@ -3148,7 +3535,9 @@ pub fn welcome(handle: WindowHandle<Cereal>, name: String, cx: &mut App) {
                     shot(cx, "2-server-signed-in").await;
                     press(handle, cx, "welcome-continue").await;
                 } else {
-                    press(handle, cx, "welcome-local").await;
+                    // Nothing on the step offers this any more: the walk
+                    // without a server is the harness's own.
+                    let _ = handle.update(cx, |view, _, cx| view.onboarding_choose_local(cx));
                 }
                 until(handle, cx, 10, step(Step::Audio)).await;
                 pause(cx, 1200).await;
@@ -3224,6 +3613,29 @@ pub fn welcome(handle: WindowHandle<Cereal>, name: String, cx: &mut App) {
                 pause(cx, 2500).await;
                 say(&format!("ended on {}", handle.update(cx, where_now).unwrap_or_default()));
                 shot(cx, "7-home").await;
+            }
+            "source" => {
+                // Signed in, then the source card of a server note's enhanced
+                // notes, streamed, reopened and closed mid-stream
+                // (`summary::probe`).
+                pause(cx, 1200).await;
+                press(handle, cx, "welcome-continue").await;
+                until(handle, cx, 5, step(Step::Server)).await;
+                type_into(handle, cx, 0, &server, 4).await;
+                until(handle, cx, 30, offered).await;
+                if let Some((email, password)) = &login {
+                    type_into(handle, cx, 1, email, 4).await;
+                    type_into(handle, cx, 2, password, 4).await;
+                    press(handle, cx, "welcome-continue").await;
+                }
+                let signed_in = until(handle, cx, 40, |view, _| view.onboarding_facts().signed_in).await;
+                say(&format!("signed in: {signed_in}"));
+                if signed_in {
+                    until(handle, cx, 10, step(Step::Audio)).await;
+                    let _ = handle.update(cx, |view, _, cx| view.finish_onboarding(cx));
+                    pause(cx, 1500).await;
+                    crate::summary::probe::run(handle, cx).await;
+                }
             }
             "signed-in" => {
                 // The server step at rest after signing in, and nothing else.
@@ -3382,6 +3794,394 @@ pub fn welcome(handle: WindowHandle<Cereal>, name: String, cx: &mut App) {
                 let _ = cx.update_window(handle.into(), |_, window, cx| key(window, cx, "escape"));
                 pause(cx, 1500).await;
                 say(&format!("after Escape: {}", handle.update(cx, where_now).unwrap_or_default()));
+            }
+            // The server calendar card with days that hold one and two events, for
+            // measuring its spacing (`CEREAL_TOUR_LINKED_CALENDAR=1`).
+            "calendar-card" => {
+                let _ = handle.update(cx, |view, _, cx| view.navigate(Screen::Home, cx));
+                pause(cx, 1200).await;
+                let _ = handle.update(cx, |view, _, cx| {
+                    let at = |days: i64, hour: u32, minute: u32| {
+                        let date = chrono::Local::now().date_naive() + chrono::Duration::days(days);
+                        date.and_hms_opt(hour, minute, 0).unwrap().and_local_timezone(chrono::Local).unwrap().to_rfc3339()
+                    };
+                    // The reference's days: two events today, then single
+                    // events tomorrow, the day after and a week out.
+                    let event = |id: &str, title: &str, days: i64, from: (u32, u32), to: (u32, u32), call: bool| {
+                        serde_json::json!({"id":id,"calendarId":"work","calendarName":"Work","color":"#87e5e8","title":title,"startAt":at(days, from.0, from.1),"endAt":at(days, to.0, to.1),"allDay":false,"startDate":"2026-11-26","endDate":"2026-11-26","timeZone":null,"location":null,"meetingUrl":if call { serde_json::json!("https://meet.example.com/abc") } else { serde_json::Value::Null },"noteId":null})
+                    };
+                    view.calendars.sources = serde_json::from_value(serde_json::json!([{"id":"work","name":"Work","provider":"google","color":"#87e5e8","enabled":true,"sourceHost":"calendar.google.com","lastSyncedAt":null,"lastSyncError":null,"eventCount":5,"createdAt":"2026-11-12T00:00:00Z"}])).unwrap_or_default();
+                    view.calendars.events = serde_json::from_value(serde_json::json!([
+                        event("a", "Maya Chen - Schedule a Time to Meet", 0, (17, 0), (17, 30), true),
+                        event("b", "Northwind Labs/H5 Data Centers Intro", 0, (19, 30), (20, 0), true),
+                        event("c", "R&D Weekly", 1, (14, 0), (15, 0), false),
+                        event("d", "Nir <-> Maya", 2, (15, 0), (15, 30), false),
+                        event("e", "gh.example.dev cert expires", 7, (7, 30), (11, 45), false),
+                    ])).unwrap_or_default();
+                    // What a server sends; without one it is 0 and no day shows.
+                    view.calendars.look_ahead_days = 30;
+                    view.calendars.personal_linked = true;
+                    view.calendars.loaded = true;
+                    view.calendars.loading = false;
+                    view.calendars.error = None;
+                    cx.notify();
+                });
+                pause(cx, 1500).await;
+                shot(cx, "calendar-card").await;
+                // `CEREAL_TOUR_HOVER="x,y x,y"`: one picture with the pointer
+                // at each point, in window coordinates.
+                let points: Vec<(f32, f32)> = crate::environment::var("CEREAL_TOUR_HOVER")
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .filter_map(|pair| {
+                        let (x, y) = pair.split_once(',')?;
+                        Some((x.parse().ok()?, y.parse().ok()?))
+                    })
+                    .collect();
+                for (index, (x, y)) in points.into_iter().enumerate() {
+                    let _ = handle.update(cx, |_, window, cx| pointer(window, cx, x, y));
+                    pause(cx, 900).await;
+                    shot(cx, &format!("calendar-card-hover-{index}")).await;
+                }
+            }
+            // Settings › Calendar with made-up calendars, for the visible
+            // calendars card.
+            "visible-calendars" => {
+                let _ = handle.update(cx, |view, _, cx| {
+                    let calendar = |id: &str, name: &str, color: &str, primary: bool| {
+                        serde_json::json!({"accessRole":"owner","color":color,"connectionId":"c","id":id,"name":name,"primary":primary,"selected":primary,"timeZone":"America/New_York"})
+                    };
+                    view.calendars.personal = serde_json::from_value(serde_json::json!([
+                        calendar("p2", "Northwind Labs - Visiting IAD", "#ac7262", false),
+                        calendar("p3", "Northwind Labs IAD OoO", "#cfb8c0", false),
+                        calendar("p1", "maya@example.com", "#9fe1e8", true),
+                        calendar("p4", "omer@example.com", "#c2c2c2", false),
+                        calendar("p5", "Office Visits", "#fbe983", false),
+                        calendar("p6", "Travel Dates", "#c2c2c2", false),
+                    ])).unwrap_or_default();
+                    view.calendars.personal_linked = true;
+                    view.calendars.loaded = true;
+                    view.open_settings(crate::screens::SettingsTab::Calendar, cx);
+                    cx.notify();
+                });
+                pause(cx, 1500).await;
+                shot(cx, "visible-calendars").await;
+            }
+            "server-required" => {
+                // What an install without a server opens on, and (with
+                // `CEREAL_WELCOME_LOGIN`) signing in there and opening Home.
+                pause(cx, 2000).await;
+                shot(cx, "1-opened").await;
+                if handle.update(cx, |view, _, _| view.onboarding.step() == Some(Step::Welcome)).unwrap_or(false) {
+                    press(handle, cx, "welcome-continue").await;
+                    until(handle, cx, 5, step(Step::Server)).await;
+                    pause(cx, 1500).await;
+                    shot(cx, "2-server").await;
+                }
+                // Continue without an address, a few times: nothing moves on.
+                for _ in 0..3 {
+                    press(handle, cx, "welcome-continue").await;
+                    pause(cx, 400).await;
+                }
+                say(&format!("after Continue with nothing typed: {}", handle.update(cx, where_now).unwrap_or_default()));
+                say(&format!(
+                    "the step offers this Mac only: {}",
+                    placed("welcome-local").is_some()
+                ));
+                if let Some((email, password)) = &login {
+                    type_into(handle, cx, 0, &server, 10).await;
+                    let found = until(handle, cx, 30, offered).await;
+                    say(&format!("server answered: {found}"));
+                    pause(cx, 800).await;
+                    shot(cx, "3-server-found").await;
+                    type_into(handle, cx, 1, email, 10).await;
+                    type_into(handle, cx, 2, password, 10).await;
+                    press(handle, cx, "welcome-continue").await;
+                    let signed_in = until(handle, cx, 40, |view, _| view.onboarding_facts().signed_in).await;
+                    say(&format!("signed in: {signed_in}"));
+                }
+                if handle.update(cx, |view, _, _| view.onboarding_facts().signed_in).unwrap_or(false) {
+                    pause(cx, 1500).await;
+                    let _ = handle.update(cx, |view, _, cx| {
+                        if view.screen == Screen::Welcome {
+                            view.finish_onboarding(cx);
+                        }
+                    });
+                    pause(cx, 2500).await;
+                    shot(cx, "4-home").await;
+                }
+            }
+            // The workspace switcher pressed three times with real pointer events:
+            // open, closed, open. Then the cases where the button must not be a
+            // toggle: reopening soon after an outside press closed the menu, a slow
+            // press, a keyboard-style open after an outside press, and a press whose
+            // release never arrived. The harness closes the welcome first.
+            "menu-toggle" => {
+                pause(cx, 1500).await;
+                for round in 1..=3 {
+                    press(handle, cx, "workspace-switcher").await;
+                    pause(cx, 900).await;
+                    let open = handle.update(cx, |view, _, _| view.menu.is_some()).unwrap_or(false);
+                    say(&format!("after press {round}: menu {}", if open { "open" } else { "closed" }));
+                }
+                async fn press_at(handle: WindowHandle<Cereal>, cx: &mut AsyncApp, at: Point<Pixels>, hold: u64, release: bool) {
+                    let send = |cx: &mut AsyncApp, event: PlatformInput| {
+                        let _ = cx.update_window(handle.into(), |_, window, cx| window.dispatch_event(event, cx));
+                    };
+                    send(cx, PlatformInput::MouseMove(MouseMoveEvent { position: at, ..Default::default() }));
+                    pause(cx, 260).await;
+                    send(cx, PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position: at, click_count: 1, ..Default::default() }));
+                    pause(cx, hold).await;
+                    if release {
+                        send(cx, PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: at, click_count: 1, ..Default::default() }));
+                    }
+                    pause(cx, 120).await;
+                    // Like `press`: the pointer leaves again, so no hover is left behind.
+                    send(cx, PlatformInput::MouseMove(MouseMoveEvent { position: point(px(-40.), px(-40.)), ..Default::default() }));
+                    pause(cx, 40).await;
+                }
+                let Some(switcher) = placed("workspace-switcher").map(|bounds| bounds.center()) else {
+                    say("missing workspace-switcher");
+                    finish(cx).await;
+                    return;
+                };
+                let open = |handle: WindowHandle<Cereal>, cx: &mut AsyncApp| {
+                    let menu = handle.update(cx, |view, _, _| view.menu.clone()).ok().flatten();
+                    let record = handle.update(cx, |view, _, _| format!("press {} record {:?} on {:?} visible {:?} exiting {}", view.press_seq, view.menu_closed_by_press, view.screen, view.visible_menu, view.menu_exiting)).unwrap_or_default();
+                    format!("{} [{record}]", if menu == Some(Menu::Workspace) { "open" } else if menu.is_none() { "closed" } else { "other menu" })
+                };
+                // Open (press 3 left it open), then press empty space.
+                let size = handle.update(cx, |_, window, _| window.viewport_size()).unwrap_or(size(px(1200.), px(800.)));
+                // Near the top right: nothing there takes a press. (The middle of an empty Home does: a
+                // press there, in this harness, left the switcher not answering clicks for the rest of the run.)
+                let empty = point(size.width - px(200.), px(60.));
+                say(&format!("switcher at {switcher:?}, empty space at {empty:?} in {size:?}"));
+                press_at(handle, cx, empty, 60, true).await;
+                say(&format!("C1 outside press: menu {}", open(handle, cx)));
+                press_at(handle, cx, switcher, 60, true).await;
+                pause(cx, 600).await;
+                say(&format!("C2 switcher pressed about 450 ms after an outside press: menu {} (want open)", open(handle, cx)));
+                press_at(handle, cx, switcher, 700, true).await;
+                pause(cx, 600).await;
+                say(&format!("E switcher held 700 ms while open: menu {} (want closed)", open(handle, cx)));
+                press_at(handle, cx, switcher, 60, true).await;
+                pause(cx, 600).await;
+                say(&format!("E2 switcher again: menu {} (want open)", open(handle, cx)));
+                press_at(handle, cx, empty, 60, true).await;
+                let opened = handle.update(cx, |view, _, cx| { let opened = view.open_menu(Menu::Workspace); cx.notify(); opened }).unwrap_or(false);
+                pause(cx, 600).await;
+                say(&format!("G keyboard-style open right after an outside press: opened={opened} menu {} (want open)", open(handle, cx)));
+                // A press whose release never reached the window (let go outside it), then a click.
+                press_at(handle, cx, empty, 60, false).await;
+                say(&format!("H1 outside press, no release: menu {}", open(handle, cx)));
+                press_at(handle, cx, switcher, 60, true).await;
+                pause(cx, 600).await;
+                say(&format!("H2 switcher: menu {} (want open)", open(handle, cx)));
+                press_at(handle, cx, switcher, 60, true).await;
+                pause(cx, 600).await;
+                say(&format!("H3 switcher again: menu {} (want closed)", open(handle, cx)));
+            }
+            // The sidebar's Trash popover, driven with real pointer events:
+            // the button as a toggle, an outside press, Escape, the arrow
+            // keys, Restore, Delete forever (cancelled, then confirmed) and
+            // the empty state. Run on a data folder whose welcome is done
+            // and whose workspace has trashed notes.
+            "trash" => {
+                async fn press_at(handle: WindowHandle<Cereal>, cx: &mut AsyncApp, at: Point<Pixels>) {
+                    let send = |cx: &mut AsyncApp, event: PlatformInput| {
+                        let _ = cx.update_window(handle.into(), |_, window, cx| window.dispatch_event(event, cx));
+                    };
+                    send(cx, PlatformInput::MouseMove(MouseMoveEvent { position: at, ..Default::default() }));
+                    pause(cx, 200).await;
+                    send(cx, PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position: at, click_count: 1, ..Default::default() }));
+                    pause(cx, 120).await;
+                    send(cx, PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: at, click_count: 1, ..Default::default() }));
+                    pause(cx, 120).await;
+                }
+                let state = |view: &mut Cereal, _: &mut Window, _: &mut Context<Cereal>| {
+                    let trashed: Vec<String> = view
+                        .workspace
+                        .notes
+                        .iter()
+                        .filter(|note| note.trashed)
+                        .map(|note| format!("{}:{}", note.id, note.title))
+                        .collect();
+                    format!(
+                        "screen {:?}, note {:?}, menu {:?}, confirm {:?}, selected {:?}, notes {}, trashed [{}]",
+                        view.screen,
+                        view.current_note,
+                        view.menu,
+                        view.trash_ask,
+                        view.menu_keyboard.selected,
+                        view.workspace.notes.len(),
+                        trashed.join(", ")
+                    )
+                };
+                let report = |handle: WindowHandle<Cereal>, cx: &mut AsyncApp, what: &str| {
+                    say(&format!("trash {what}: {}", handle.update(cx, state).unwrap_or_default()));
+                };
+                let rect = |name: &str| {
+                    placed(name).map_or("none".to_string(), |b| {
+                        format!(
+                            "{:.1},{:.1} {:.1}x{:.1}",
+                            f32::from(b.origin.x),
+                            f32::from(b.origin.y),
+                            f32::from(b.size.width),
+                            f32::from(b.size.height)
+                        )
+                    })
+                };
+                let _ = handle.update(cx, |view, _, cx| {
+                    if view.screen == Screen::Welcome {
+                        view.finish_onboarding(cx);
+                    }
+                    view.navigate(Screen::Home, cx);
+                });
+                pause(cx, 1500).await;
+                report(handle, cx, "start");
+                shot(cx, "0-closed").await;
+                // Hover: the tooltip.
+                if let Some(at) = placed("footer-trash").map(|b| b.center()) {
+                    let _ = cx.update_window(handle.into(), |_, window, cx| pointer(window, cx, f32::from(at.x), f32::from(at.y)));
+                    pause(cx, 1200).await;
+                    shot(cx, "0-tooltip").await;
+                }
+                press(handle, cx, "footer-trash").await;
+                pause(cx, 900).await;
+                report(handle, cx, "opened by the button");
+                say(&format!(
+                    "layout: button {}; popover {}; restore {}; delete {}",
+                    rect("footer-trash"),
+                    rect("trash-popover"),
+                    rect("trash-restore-0"),
+                    rect("trash-delete-0")
+                ));
+                shot(cx, "1-open").await;
+                press(handle, cx, "footer-trash").await;
+                pause(cx, 900).await;
+                report(handle, cx, "button pressed again");
+                shot(cx, "2-closed-by-button").await;
+                press(handle, cx, "footer-trash").await;
+                pause(cx, 700).await;
+                report(handle, cx, "opened again");
+                // An empty part of the page, so the press reaches nothing else.
+                press_at(handle, cx, point(px(880.), px(430.))).await;
+                pause(cx, 700).await;
+                report(handle, cx, "pressed outside");
+                press(handle, cx, "footer-trash").await;
+                pause(cx, 700).await;
+                for name in ["down", "down", "down", "up"] {
+                    let _ = cx.update_window(handle.into(), |_, window, cx| key(window, cx, name));
+                    pause(cx, 250).await;
+                }
+                pause(cx, 500).await;
+                report(handle, cx, "after down, down, down, up");
+                shot(cx, "3-keyboard").await;
+                let _ = cx.update_window(handle.into(), |_, window, cx| key(window, cx, "escape"));
+                pause(cx, 800).await;
+                report(handle, cx, "after Escape");
+                press(handle, cx, "footer-trash").await;
+                pause(cx, 800).await;
+                press(handle, cx, "trash-restore-0").await;
+                pause(cx, 900).await;
+                report(handle, cx, "after Restore on the first row");
+                shot(cx, "4-restored").await;
+                press(handle, cx, "trash-delete-0").await;
+                pause(cx, 700).await;
+                report(handle, cx, "after Delete forever on the first row");
+                shot(cx, "5-confirm").await;
+                // While the row asks, the arrows stay on it and Return lets go.
+                for name in ["down", "down"] {
+                    let _ = cx.update_window(handle.into(), |_, window, cx| key(window, cx, name));
+                    pause(cx, 250).await;
+                }
+                report(handle, cx, "after down, down while asking");
+                let _ = cx.update_window(handle.into(), |_, window, cx| key(window, cx, "enter"));
+                pause(cx, 500).await;
+                report(handle, cx, "after Return while asking");
+                press(handle, cx, "trash-delete-0").await;
+                pause(cx, 500).await;
+                let _ = cx.update_window(handle.into(), |_, window, cx| key(window, cx, "escape"));
+                pause(cx, 500).await;
+                report(handle, cx, "after Escape in the question");
+                press(handle, cx, "trash-delete-0").await;
+                pause(cx, 500).await;
+                press(handle, cx, "trash-cancel-0").await;
+                pause(cx, 500).await;
+                report(handle, cx, "after Cancel");
+                press(handle, cx, "trash-delete-0").await;
+                pause(cx, 500).await;
+                press(handle, cx, "trash-confirm-0").await;
+                pause(cx, 900).await;
+                report(handle, cx, "after Delete confirmed");
+                shot(cx, "6-deleted").await;
+                // What the row says when the server's copy was edited
+                // elsewhere (the server's 409, shown here without a server),
+                // then "Delete anyway".
+                let _ = handle.update(cx, |view, _, cx| {
+                    if let Some(row) = crate::trash::trash_rows(&view.workspace).first() {
+                        view.trash_ask = Some(crate::trash::Ask::Changed(row.id));
+                        cx.notify();
+                    }
+                });
+                pause(cx, 500).await;
+                report(handle, cx, "shown as edited elsewhere");
+                shot(cx, "6b-changed").await;
+                press(handle, cx, "trash-confirm-0").await;
+                pause(cx, 900).await;
+                report(handle, cx, "after Delete anyway");
+                for _ in 0..8 {
+                    if placed("trash-delete-0").is_none()
+                        || handle.update(cx, |view, _, _| crate::trash::trash_rows(&view.workspace).is_empty()).unwrap_or(true)
+                    {
+                        break;
+                    }
+                    press(handle, cx, "trash-delete-0").await;
+                    pause(cx, 400).await;
+                    press(handle, cx, "trash-confirm-0").await;
+                    pause(cx, 700).await;
+                }
+                pause(cx, 600).await;
+                report(handle, cx, "after deleting the rest");
+                shot(cx, "7-empty").await;
+                press(handle, cx, "footer-trash").await;
+                pause(cx, 900).await;
+                report(handle, cx, "closed");
+            }
+            // The popover growing out of the trash button and folding back
+            // into it, a frame at a time: run with `CEREAL_SLOW_MOTION=8`,
+            // and with `CEREAL_REDUCE_MOTION=1` for the plain fade.
+            "trash-motion" => {
+                async fn frame(cx: &mut AsyncApp, name: &str) {
+                    say(&format!("shot {name}"));
+                    if let Some(directory) = crate::environment::var_os("CEREAL_WELCOME_SHOTS") {
+                        let picture = std::path::PathBuf::from(directory).join(format!("{name}.png"));
+                        for _ in 0..200 {
+                            if picture.exists() {
+                                break;
+                            }
+                            cx.background_executor().timer(Duration::from_millis(20)).await;
+                        }
+                    }
+                }
+                let _ = handle.update(cx, |view, _, cx| {
+                    if view.screen == Screen::Welcome {
+                        view.finish_onboarding(cx);
+                    }
+                    view.navigate(Screen::Home, cx);
+                });
+                pause(cx, 1500).await;
+                let _ = handle.update(cx, |view, _, cx| view.toggle_trash(cx));
+                for index in 0..6 {
+                    frame(cx, &format!("m-open-{index}")).await;
+                    cx.background_executor().timer(Duration::from_millis(250)).await;
+                }
+                pause(cx, 800).await;
+                let _ = handle.update(cx, |view, _, cx| view.toggle_trash(cx));
+                for index in 0..4 {
+                    frame(cx, &format!("m-close-{index}")).await;
+                    cx.background_executor().timer(Duration::from_millis(250)).await;
+                }
             }
             other => say(&format!("unknown tour {other}")),
         }

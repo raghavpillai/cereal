@@ -42,8 +42,6 @@ impl Cereal {
         self.chat_model_picker_open = false;
         self.chat_messages.clear();
         self.chat_annotations.clear();
-        self.chat_recipe_editor = None;
-        self.chat_recipes_open = false;
         self.chat_history_open = false;
         self.audio_pending.clear();
         self.audio_error = None;
@@ -56,7 +54,6 @@ impl Cereal {
         self.ask.update(cx, |i, cx| i.set_content("", cx));
         self.search.update(cx, |i, cx| i.set_content("", cx));
         self.search_results_query.clear();
-        self.folder_input.update(cx, |i, cx| i.set_content("", cx));
         self.attendee_input
             .update(cx, |i, cx| i.set_content("", cx));
         self.search_open = false;
@@ -289,6 +286,7 @@ impl Cereal {
         };
         self.sign_in_asked = false;
         self.verify_failures.remove(&id);
+        self.withdraw_session_notification(&id);
         eprintln!("account {}: ready", id.short());
         if account.user_id.is_some()
             && let Some(paths) = super::Paths::of_environment()
@@ -296,7 +294,6 @@ impl Cereal {
             if !self.workspace.by_account() {
                 self.workspace = crate::model::Workspace::for_accounts(&paths);
             }
-            let fresh = !self.workspace.slots.contains_key(&account.slot);
             if let Err(reason) = self.workspace.load_account(account.slot, &account.id, &paths) {
                 eprintln!("account {}: workspace not loaded: {reason}", account.id.short());
                 self.show_toast(
@@ -308,9 +305,8 @@ impl Cereal {
                 );
             }
             self.workspace.set_hidden(account.slot, false);
-            if fresh {
-                self.load_account_chats(&account, &paths);
-            }
+            // The account's threads are read from its server; nothing is read from this Mac.
+            self.sync_account_chats(&account, cx);
             // Calendars hidden on this Mac before accounts get this one's id.
             let _ = crate::desktop_preferences::update_meeting(|preferences| {
                 crate::calendar::migrate_hidden_calendars(
@@ -359,13 +355,12 @@ impl Cereal {
                 self.settings_tab = crate::screens::SettingsTab::Profile;
                 self.navigate(Screen::Settings, cx);
             }
-            "trash" | "restore" | "restore-now" => self.navigate(Screen::Trash, cx),
+            "trash" | "restore" | "restore-now" => self.open_trash(cx),
             _ => {}
         }
         // The existing dialogs, to measure the account sheets against.
         match view.as_str() {
             "shortcuts" => self.menu = Some(crate::app::Menu::Shortcuts),
-            "new-folder" => self.menu = Some(crate::app::Menu::NewFolder),
             _ => {}
         }
         match view.as_str() {
@@ -461,7 +456,6 @@ impl Cereal {
             self.chat_archives.clear();
             super::enter_server_mode();
             self.workspace = crate::model::Workspace::load();
-            self.chat_recipes = crate::chat::load_recipes();
         }
         let recording_slot = self
             .recording
@@ -527,6 +521,7 @@ impl Cereal {
         self.verify_failures.remove(&account.id);
         self.chat_archives
             .retain(|chat| chat.account.as_ref() != Some(&account.id));
+        self.chat_sync.forget(&account.id);
         self.workspace.drop_slot(account.slot);
         self.caches = Default::default();
     }
@@ -597,13 +592,7 @@ impl Cereal {
         if self.account_blocked(&account).is_some() {
             // The capture is local and continues; the note stays open and
             // Stop works. Its parts are sent after the sign-in.
-            self.show_toast(
-                &format!(
-                    "Your session on {} has ended. The recording continues on this Mac; sign in to upload it.",
-                    account.host()
-                ),
-                cx,
-            );
+            self.notify_session_ended(id, &account.host(), true, cx);
             return;
         }
         if !super::any_shown() && !matches!(self.screen, Screen::Welcome | Screen::Link | Screen::Login) {
@@ -657,11 +646,10 @@ impl Cereal {
                     let alive = this.update(cx, |this, cx| {
                         super::registry().session_ended(&id);
                         let host = super::get(&id).map(|account| account.host()).unwrap_or_default();
-                        if !this.recording.is_active() {
-                            this.show_toast(
-                                &format!("Your session on {host} has ended. Sign in again."),
-                                cx,
-                            );
+                        let blocked = super::get(&id).is_some_and(|account| this.account_blocked(&account).is_some());
+                        // While recording, `account_needs_sign_in` says it.
+                        if !blocked {
+                            this.notify_session_ended(&id, &host, false, cx);
                         }
                         this.account_needs_sign_in(&id, cx);
                     });

@@ -195,6 +195,11 @@ pub fn exit_curve(t: f32) -> f32 {
     raw(t) / raw(1.)
 }
 
+/// CSS `cubic-bezier(.4, 0, .2, 1)`, the reference app's ease-in-out.
+pub fn standard_curve(t: f32) -> f32 {
+    cubic_bezier(t, 0.4, 0., 0.2, 1.)
+}
+
 /// Monotonic ease-out used for opacity-only transitions.
 pub fn fade_curve(t: f32) -> f32 {
     if !t.is_finite() || t <= 0. {
@@ -325,6 +330,8 @@ enum Curve {
     Spring(Spring),
     Exit,
     Fade,
+    /// CSS `cubic-bezier(.4, 0, .2, 1)`, the reference app's ease-in-out.
+    Standard,
 }
 
 /// One animated scalar. Retargeting starts from wherever the value currently
@@ -374,6 +381,7 @@ impl Track {
             Curve::Spring(spring) => spring.at(t),
             Curve::Exit => exit_curve(t),
             Curve::Fade => fade_curve(t),
+            Curve::Standard => standard_curve(t),
         };
         lerp(self.from, self.to, eased)
     }
@@ -1827,6 +1835,9 @@ pub struct Tactile {
     press: Option<Hsla>,
     base: Option<Hsla>,
     radius: Option<f32>,
+    /// Separate corner radii (top left, top right, bottom right, bottom
+    /// left), for a control joined to a neighbour inside one capsule.
+    corners: Option<[f32; 4]>,
     reveals: Option<u64>,
 }
 
@@ -1931,6 +1942,7 @@ pub fn tactile(hover: Hsla) -> Tactile {
         press: None,
         base: None,
         radius: Some(6.),
+        corners: None,
         reveals: None,
     }
 }
@@ -1944,6 +1956,19 @@ impl Tactile {
     /// Fully rounded ends (a capsule or a circle).
     pub fn round(mut self) -> Self {
         self.radius = None;
+        self.corners = None;
+        self
+    }
+
+    /// A radius per corner: top left, top right, bottom right, bottom left.
+    pub fn corners(
+        mut self,
+        top_left: f32,
+        top_right: f32,
+        bottom_right: f32,
+        bottom_left: f32,
+    ) -> Self {
+        self.corners = Some([top_left, top_right, bottom_right, bottom_left]);
         self
     }
 
@@ -2101,9 +2126,16 @@ impl Element for Tactile {
         };
         let rect = bounds.inset(px(inset));
         let limit = rect.size.width.min(rect.size.height) / 2.;
-        let radius = self
-            .radius
-            .map_or(limit, |radius| px((radius - inset).max(0.)).min(limit));
+        let corner = |radius: f32| px((radius - inset).max(0.)).min(limit);
+        let radius: Corners<Pixels> = match self.corners {
+            Some([top_left, top_right, bottom_right, bottom_left]) => Corners {
+                top_left: corner(top_left),
+                top_right: corner(top_right),
+                bottom_right: corner(bottom_right),
+                bottom_left: corner(bottom_left),
+            },
+            None => Corners::all(self.radius.map_or(limit, corner)),
+        };
         let held = press.clamp(0., 1.);
         if let Some(base) = self.base {
             window.paint_quad(fill(rect, base).corner_radii(radius));
@@ -2147,32 +2179,19 @@ impl Element for Tactile {
 }
 
 // ---------------------------------------------------------------------------
-// Live levels: springy bars for audio
+// Live levels: eased bars for audio
 // ---------------------------------------------------------------------------
 
-/// Advance a soft spring follower by `dt` seconds towards `target`. Unlike the
-/// fixed-duration curves above this keeps its velocity, so a level that keeps
-/// changing is followed fluidly instead of in steps.
-pub fn follow(position: f32, velocity: f32, target: f32, dt: f32) -> (f32, f32) {
-    const STIFFNESS: f32 = 380.;
-    const DAMPING: f32 = 2. * 0.62 * 19.493_589; // 2ζ√k
-    let (mut position, mut velocity) = (position, velocity);
-    let mut remaining = dt.clamp(0., 0.064);
-    while remaining > 0. {
-        let step = remaining.min(1. / 240.);
-        velocity += (STIFFNESS * (target - position) - DAMPING * velocity) * step;
-        position += velocity * step;
-        remaining -= step;
-    }
-    (position, velocity)
-}
-
 struct BarsState {
-    bars: Vec<(f32, f32)>,
-    last: Instant,
+    bars: Vec<Track>,
     /// When the next animation frame may be asked for.
     next_frame: Instant,
 }
+
+/// How long a level bar takes to reach a new height. Like the reference
+/// app's visualizer, each new target is a fresh 300 ms ease-in-out from
+/// wherever the bar is, with no overshoot.
+const BAR_GLIDE: Duration = Duration::from_millis(300);
 
 /// Level bars are three small shapes: 30 frames a second is smooth for them
 /// and halves what a meeting-long animation costs.
@@ -2203,7 +2222,7 @@ fn redraw_at(window: &Window, due: Instant, cause: &'static str) {
     wait(window, view, due, cause);
 }
 
-/// A row of vertical level bars that follow their target heights on springs.
+/// A row of vertical level bars that ease to each new target height.
 /// It paints quads directly and requests frames only until the bars come to
 /// rest, so a quiet or stopped recording costs nothing.
 pub struct Bars {
@@ -2300,27 +2319,23 @@ impl Element for Bars {
         let targets = &self.heights;
         let (heights, moving) = window.with_element_state::<BarsState, _>(id, |state, _| {
             let mut state = state.unwrap_or_else(|| BarsState {
-                bars: targets.iter().map(|height| (*height, 0.)).collect(),
-                last: now,
+                bars: targets
+                    .iter()
+                    .map(|height| Track::rest(*height, now))
+                    .collect(),
                 next_frame: now,
             });
-            state.bars.resize(targets.len(), (0., 0.));
-            let dt = now.saturating_duration_since(state.last).as_secs_f32() / time_scale();
-            state.last = now;
+            state.bars.resize(targets.len(), Track::rest(0., now));
             let mut moving = false;
             for (bar, target) in state.bars.iter_mut().zip(targets) {
                 if reduced {
-                    *bar = (*target, 0.);
+                    *bar = Track::rest(*target, now);
                     continue;
                 }
-                *bar = follow(bar.0, bar.1, *target, dt);
-                // A quarter of a pixel from the target and nearly still is at
-                // rest: nobody can see the remainder.
-                if (bar.0 - target).abs() < 0.25 && bar.1.abs() < 4. {
-                    *bar = (*target, 0.);
-                } else {
-                    moving = true;
+                if (bar.target() - target).abs() > f32::EPSILON {
+                    bar.retarget(*target, now, slow(BAR_GLIDE), Curve::Standard);
                 }
+                moving |= !bar.settled(now);
             }
             // One timer per 33 ms however often the view happens to render.
             let moving = moving && {
@@ -2332,7 +2347,11 @@ impl Element for Bars {
             };
             (
                 (
-                    state.bars.iter().map(|bar| bar.0).collect::<Vec<_>>(),
+                    state
+                        .bars
+                        .iter()
+                        .map(|bar| bar.value(now))
+                        .collect::<Vec<_>>(),
                     moving,
                 ),
                 state,
@@ -2396,7 +2415,28 @@ pub fn spinner(color: Hsla) -> AnyElement {
 /// retained; its separate masked rainbow stroke animation still needs a
 /// native renderer.
 pub fn thinking_status(id: impl Into<ElementId>, theme: Theme, cx: &App) -> Div {
-    let label: SharedString = "Thinking...".into();
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .py(px(8.))
+        .text_size(px(14.))
+        .line_height(px(20.))
+        .text_color(theme.muted)
+        .child(icon("cereal", 16., theme.muted))
+        .child(shimmer_label(id, "Thinking...", theme, cx))
+}
+
+/// A short status in 14 px text with the chat's five-second sheen running
+/// across it ("Thinking...", "Reading the transcript…"). Reduced motion
+/// leaves it still.
+pub fn shimmer_label(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    theme: Theme,
+    cx: &App,
+) -> SlowLoop<StyledText> {
+    let label: SharedString = label.into();
     let font_id = cx.text_system().resolve_font(&font(FONT));
     let advances: Vec<_> = label
         .char_indices()
@@ -2415,51 +2455,39 @@ pub fn thinking_status(id: impl Into<ElementId>, theme: Theme, cx: &App) -> Div 
         .sum::<f32>()
         .max(1.);
     let mut x = 0.;
-    let glyphs: Vec<_> = label
-        .char_indices()
-        .zip(advances)
-        .map(|(_, (range, advance))| {
+    let glyphs: Vec<_> = advances
+        .into_iter()
+        .map(|(range, advance)| {
             let center = (x + advance / 2.) / width;
             x += advance;
             (range, center)
         })
         .collect();
-    div()
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .py(px(8.))
-        .text_size(px(14.))
-        .line_height(px(20.))
-        .text_color(theme.muted)
-        .child(icon("cereal", 16., theme.muted))
-        .child(
-            // A five-second sweep: stepped at 30 Hz, not at the display rate.
-            slow_loop(
-                id,
-                Duration::from_secs(5),
-                StyledText::new(label),
-                move |text, turns| {
-                    let progress = css_ease_in_out(turns.fract());
-                    text.with_highlights(
-                        glyphs
-                            .iter()
-                            .map(|(range, center)| {
-                                let mut color = theme.text;
-                                color.a *= shimmer_opacity(*center, progress);
-                                (
-                                    range.clone(),
-                                    HighlightStyle {
-                                        color: Some(color),
-                                        ..Default::default()
-                                    },
-                                )
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                },
-            ),
-        )
+    // A five-second sweep: stepped at 30 Hz, not at the display rate.
+    slow_loop(
+        id,
+        Duration::from_secs(5),
+        StyledText::new(label),
+        move |text, turns| {
+            let progress = css_ease_in_out(turns.fract());
+            text.with_highlights(
+                glyphs
+                    .iter()
+                    .map(|(range, center)| {
+                        let mut color = theme.text;
+                        color.a *= shimmer_opacity(*center, progress);
+                        (
+                            range.clone(),
+                            HighlightStyle {
+                                color: Some(color),
+                                ..Default::default()
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2609,7 +2637,8 @@ fn shimmer_opacity(glyph_center: f32, progress: f32) -> f32 {
     0.2 + 0.8 * (1. - (2. * gradient_position - 1.).abs())
 }
 
-fn cubic_bezier(t: f32, x1: f64, y1: f64, x2: f64, y2: f64) -> f32 {
+/// A CSS `cubic-bezier(x1, y1, x2, y2)` timing function at time `t`.
+pub fn cubic_bezier(t: f32, x1: f64, y1: f64, x2: f64, y2: f64) -> f32 {
     if !t.is_finite() || t <= 0. {
         return 0.;
     }
@@ -3181,28 +3210,27 @@ mod tests {
     }
 
     #[test]
-    fn level_follower_is_fluid_bounded_and_comes_to_rest() {
-        let (mut position, mut velocity) = (3., 0.);
-        let mut peak: f32 = 0.;
-        let mut previous = position;
-        let mut largest_step: f32 = 0.;
-        for _ in 0..120 {
-            (position, velocity) = follow(position, velocity, 18., 1. / 120.);
-            largest_step = largest_step.max((position - previous).abs());
-            previous = position;
-            peak = peak.max(position);
+    fn level_bars_glide_like_the_reference_ease_in_out() {
+        // cubic-bezier(.4, 0, .2, 1): starts and ends gently, no overshoot.
+        assert_eq!(standard_curve(0.), 0.);
+        assert_eq!(standard_curve(1.), 1.);
+        assert!(standard_curve(0.1) < 0.1);
+        assert!(standard_curve(0.5) > 0.5);
+        let mut previous = 0.;
+        for step in 1..=100 {
+            let value = standard_curve(step as f32 / 100.);
+            assert!(value >= previous && value <= 1.);
+            previous = value;
         }
-        // It eases through intermediate heights instead of stepping…
-        assert!(largest_step < 3.);
-        // …overshoots a little like soft matter, and settles on the level.
-        assert!(peak > 18. && peak < 18. + 15. * 0.12);
-        assert!((position - 18.).abs() < 0.05 && velocity.abs() < 0.5);
-        // A dropped frame cannot make it explode.
-        let (position, velocity) = follow(3., 0., 18., 5.);
-        assert!(position.is_finite() && velocity.is_finite());
-        assert!((3. ..=20.).contains(&position));
-        // No time, no movement.
-        assert_eq!(follow(3., 0., 18., 0.), (3., 0.));
+        // A bar retargeted mid-glide starts from where it is.
+        let now = Instant::now();
+        let mut bar = Track::rest(3., now);
+        bar.retarget(13., now, BAR_GLIDE, Curve::Standard);
+        let halfway = bar.value(now + BAR_GLIDE / 2);
+        assert!(halfway > 3. && halfway < 13.);
+        bar.retarget(3., now + BAR_GLIDE / 2, BAR_GLIDE, Curve::Standard);
+        assert!((bar.value(now + BAR_GLIDE / 2) - halfway).abs() < 1e-4);
+        assert!(bar.settled(now + BAR_GLIDE * 2));
     }
 
     #[test]

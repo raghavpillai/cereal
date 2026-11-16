@@ -513,15 +513,6 @@ pub fn reminder_changes<'a>(
     (remove, add)
 }
 
-/// What macOS has said about notifications from this app.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Permission {
-    #[default]
-    Unknown,
-    Granted,
-    Denied,
-}
-
 /// The item's state in the main window's view.
 #[derive(Default)]
 pub struct State {
@@ -533,16 +524,24 @@ pub struct State {
     /// Reminders waiting with macOS: key (account and event) to the second
     /// they fire.
     reminders: HashMap<String, i64>,
-    /// "Scheduled meetings" was just turned on and macOS has not answered.
-    asking: bool,
-    pub permission: Permission,
+    /// Why macOS is being asked about notifications, while it has not
+    /// answered (see `notifications.rs`).
+    pub(crate) asking: Option<crate::notifications::Ask>,
+    /// macOS has been asked once in this launch because a notice may soon
+    /// be needed.
+    pub(crate) asked: bool,
+    /// macOS has been asked in this launch, for any reason: a "denied" now
+    /// may be macOS 26's answer while its Allow banner is still on screen.
+    pub(crate) asked_now: bool,
+    /// What has been said about the recording under way.
+    pub(crate) recording_notices: Option<crate::notifications::RecordingNotices>,
+    pub(crate) permission: crate::notifications::Permission,
     /// The login item's state (see `native::login_item_status`).
     pub login_item: i32,
 }
 
 fn logging() -> bool {
-    static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *LOG.get_or_init(|| crate::environment::var_os("CEREAL_MENUBAR_LOG").is_some())
+    crate::notifications::logging()
 }
 
 impl Cereal {
@@ -620,7 +619,7 @@ impl Cereal {
         if logging() {
             eprintln!("menubar reminders {change}");
         }
-        native::notifications_apply(&change);
+        crate::notifications::native::apply(&change);
     }
 
     fn sync_reminders(&mut self) {
@@ -629,7 +628,7 @@ impl Cereal {
             // The first launch of the build that changed the identifiers:
             // what an older build registered is cleared once, and what is
             // wanted is registered again below.
-            native::notifications_clear();
+            crate::notifications::native::clear();
             self.menu_bar.reminders.clear();
             let _ = crate::desktop_preferences::update_meeting(|preferences| {
                 preferences.reminder_scheme = REMINDER_SCHEME
@@ -665,7 +664,7 @@ impl Cereal {
         if logging() {
             eprintln!("menubar reminders {change}");
         }
-        native::notifications_apply(&change);
+        crate::notifications::native::apply(&change);
         self.menu_bar.reminders = wanted
             .into_iter()
             .map(|reminder| (reminder.key(), reminder.fire_at.timestamp()))
@@ -718,60 +717,6 @@ impl Cereal {
         }
     }
 
-    /// "Scheduled meetings" in Settings. macOS is asked for permission only
-    /// here, when the setting is turned on.
-    pub fn set_scheduled_notifications(&mut self, on: bool, cx: &mut Context<Self>) {
-        if !on {
-            self.menu_bar.asking = false;
-            if let Err(error) =
-                crate::desktop_preferences::update_meeting(|p| p.scheduled_notifications = false)
-            {
-                self.show_toast(&error, cx);
-            }
-            cx.notify();
-            return;
-        }
-        if !self.menu_bar.installed {
-            self.show_toast("Meeting reminders are available on macOS", cx);
-            return;
-        }
-        self.menu_bar.asking = true;
-        native::notifications_request();
-        cx.notify();
-    }
-
-    fn notifications_answered(&mut self, answer: &str, cx: &mut Context<Self>) {
-        let asking = std::mem::take(&mut self.menu_bar.asking);
-        let granted = answer == "granted";
-        self.menu_bar.permission = match answer {
-            "granted" => Permission::Granted,
-            "denied" => Permission::Denied,
-            _ => Permission::Unknown,
-        };
-        let enabled = crate::desktop_preferences::meeting().scheduled_notifications;
-        if granted && asking && !enabled {
-            if let Err(error) =
-                crate::desktop_preferences::update_meeting(|p| p.scheduled_notifications = true)
-            {
-                self.show_toast(&error, cx);
-            }
-        } else if !granted && (asking || enabled) {
-            // The setting never claims reminders macOS will not deliver.
-            let _ =
-                crate::desktop_preferences::update_meeting(|p| p.scheduled_notifications = false);
-            if asking {
-                self.show_toast(
-                    match answer {
-                        "unavailable" => "Meeting reminders need the packaged Cereal app",
-                        _ => "Allow notifications for Cereal in System Settings to get meeting reminders",
-                    },
-                    cx,
-                );
-            }
-        }
-        cx.notify();
-    }
-
     /// "Open Cereal when you log in".
     pub fn set_login_item(&mut self, on: bool, cx: &mut Context<Self>) {
         if let Err(error) = native::login_item_set(on) {
@@ -801,17 +746,14 @@ impl Cereal {
         let welcome = self.screen == Screen::Welcome;
         match command {
             "open" => self.reveal_main_window(window, cx),
-            "event" | "open-event" => {
+            "event" => {
                 self.reveal_main_window(window, cx);
-                // A reminder names its account. One whose account is no
-                // longer the one these events were read through does
-                // nothing.
-                let (account, event) = reminder_target(argument);
-                let current = account.is_none() || account == self.calendars.account;
-                if !welcome && !event.is_empty() && current {
-                    self.open_calendar_event(event.to_owned(), cx);
+                if !welcome && !argument.is_empty() {
+                    self.open_calendar_event(argument.to_owned(), cx);
                 }
             }
+            // A notification, or one of its buttons, was clicked.
+            "notification" => self.notification_chosen(argument, window, cx),
             "new-note" => {
                 self.reveal_main_window(window, cx);
                 if !welcome {
@@ -835,12 +777,19 @@ impl Cereal {
             "quit" => self.quit_requested(QuitKind::Quit, window, cx),
             "quit-completely" => self.quit_requested(QuitKind::Completely, window, cx),
             "notifications" => self.notifications_answered(argument, cx),
+            "notifications-request" => self.notifications_request_answered(argument, cx),
+            "notifications-delivered" => {
+                eprintln!("notifications delivered [{}]", argument.replace('\n', " | "))
+            }
             _ => {}
         }
     }
 
     fn menu_bar_tick(&mut self, cx: &mut Context<Self>) {
         self.refresh_menu_bar();
+        // Notifications may have been allowed or turned off in System
+        // Settings meanwhile; asking what macOS allows never prompts.
+        crate::notifications::native::status();
         // The calendar is read again every five minutes, so a meeting added
         // while the window is closed still reaches the menu.
         if now().minute() % 5 == 0 {
@@ -916,10 +865,11 @@ pub fn install(handle: WindowHandle<Cereal>, cx: &mut App) {
         view._subscriptions.push(observed);
         view.menu_bar_observed();
         view.refresh_menu_bar();
-        if crate::desktop_preferences::meeting().scheduled_notifications {
-            native::notifications_status();
-        }
+        // What macOS allows, without asking: Settings shows it, and a
+        // notice is posted only when allowed.
+        crate::notifications::native::status();
     });
+    crate::notifications::debug_install(handle, cx);
     // ⌘Q with the window closed has no window to handle it.
     cx.on_action(move |_: &crate::app::Quit, cx| {
         let _ = handle.update(cx, |view, window, cx| {
@@ -934,7 +884,7 @@ pub fn install(handle: WindowHandle<Cereal>, cx: &mut App) {
     cx.on_app_quit(|_| {
         // Nothing of the app outlives it: no item, no reminder left to
         // fire after "Quit Completely".
-        native::notifications_clear();
+        crate::notifications::native::clear();
         native::remove();
         async {}
     })
@@ -974,10 +924,6 @@ mod native {
         fn cereal_menubar_remove();
         fn cereal_menubar_frame(output: *mut f64);
         fn cereal_app_set_dock_visible(visible: bool);
-        fn cereal_notifications_status();
-        fn cereal_notifications_request();
-        fn cereal_notifications_apply(json: *const c_char) -> bool;
-        fn cereal_notifications_clear();
         fn cereal_login_item_status() -> i32;
         fn cereal_login_item_set(enabled: bool, error: *mut c_char, capacity: usize) -> bool;
     }
@@ -1056,25 +1002,6 @@ mod native {
         unsafe { cereal_app_set_dock_visible(visible) }
     }
 
-    pub fn notifications_status() {
-        unsafe { cereal_notifications_status() }
-    }
-
-    pub fn notifications_request() {
-        unsafe { cereal_notifications_request() }
-    }
-
-    pub fn notifications_apply(json: &str) {
-        let Ok(json) = CString::new(json) else { return };
-        unsafe {
-            cereal_notifications_apply(json.as_ptr());
-        }
-    }
-
-    pub fn notifications_clear() {
-        unsafe { cereal_notifications_clear() }
-    }
-
     pub fn login_item_status() -> i32 {
         unsafe { cereal_login_item_status() }
     }
@@ -1104,10 +1031,6 @@ mod native {
     pub fn update(_: &str) {}
     pub fn remove() {}
     pub fn set_dock_visible(_: bool) {}
-    pub fn notifications_status() {}
-    pub fn notifications_request() {}
-    pub fn notifications_apply(_: &str) {}
-    pub fn notifications_clear() {}
     pub fn login_item_status() -> i32 {
         -1
     }

@@ -10,7 +10,8 @@
           "enum": [
             "openrouter",
             "openai",
-            "anthropic"
+            "anthropic",
+            "openai_compatible"
           ]
         },
         "model": {

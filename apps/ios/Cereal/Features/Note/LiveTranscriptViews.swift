@@ -3,21 +3,24 @@ import APIClient
 import Contracts
 
 /// The words for a live stream's state. Nil means nothing needs saying: the
-/// stream is working, or it was never available and the recording is simply
-/// transcribed from its saved audio as before.
+/// stream is working. The stream is the recording's only transcript, so a
+/// stream that has ended for good says that what follows is not transcribed.
+/// While audio is not reaching the server it is kept on the iPhone (the
+/// capture file is the stream's buffer) and sent when the server is back.
 enum LiveStatusText {
+    static let finishing = "Finishing the transcript…"
+
     static func line(_ status: LiveTranscriptStatus) -> String? {
         switch status {
         case .off, .connecting, .live, .ended: nil
         case .catchingUp(let lagMs): lagMs >= 10_000 ? "Catching up · about \(lagMs / 1000) s behind" : "Catching up…"
-        case .providerUnavailable: "Live transcript paused · audio is still being recorded"
+        case .providerUnavailable: "Live transcript paused · audio is saved on this iPhone"
         case .paused: "Paused"
-        case .reconnecting: "Reconnecting…"
-        case .lowDataMode: "Live transcript is off in Low Data Mode"
+        case .reconnecting: "Reconnecting · audio is saved on this iPhone"
         case .unavailable(let reason):
             switch reason {
-            case .overLimit, .providerUnavailable: "Live transcript unavailable · text follows from the saved audio"
-            case .notConfigured, .unauthorized, .notFound, .notRecording, .replaced, .protocolError: nil
+            case .unauthorized: "Live transcript stopped · sign in again to transcribe"
+            case .notFound, .notRecording, .replaced, .protocolError: "Live transcript stopped · speech is no longer transcribed"
             }
         }
     }
@@ -26,30 +29,56 @@ enum LiveStatusText {
     static func isStreaming(_ status: LiveTranscriptStatus) -> Bool {
         switch status {
         case .connecting, .live, .catchingUp, .providerUnavailable, .paused, .reconnecting: true
-        case .off, .lowDataMode, .unavailable, .ended: false
+        case .off, .unavailable, .ended: false
         }
     }
 }
 
-/// One quiet line for the state of the live stream. It reads the status in its
-/// own body, so a change redraws this line and nothing around it.
+/// One quiet line for the state of the live stream, and under it, for as long
+/// as the recording is shown, the stretches that could not be transcribed. It
+/// reads the status in its own body, so a change redraws this line and nothing
+/// around it.
 struct LiveStatusLine: View {
     let live: LiveTranscript
     var font: Font = .footnote
     var color: Color = Theme.textTertiary
+    /// False where the stretches are already rows of the transcript.
+    var showsGaps = true
+    /// Said instead of the stream's own state: the capture has stopped and its audio is still being handed over.
+    var finishing = false
     @Environment(\.motion) private var motion
 
     var body: some View {
         let _ = PerfProbe.hit("LiveStatusLine.body")
-        let text = LiveStatusText.line(live.status)
-        ZStack {
+        let text = finishing ? LiveStatusText.finishing : LiveStatusText.line(live.status)
+        let missing = showsGaps ? TranscriptPresentation.untranscribedText(live.gaps) : nil
+        VStack(spacing: 4) {
             if let text {
                 Text(text).font(font).foregroundStyle(color).multilineTextAlignment(.center)
                     .transition(motion.fade)
                     .accessibilityIdentifier("live-transcript-status")
             }
+            if let missing {
+                Text(missing).font(font).foregroundStyle(Theme.danger).multilineTextAlignment(.center)
+                    .transition(motion.fade)
+                    .accessibilityIdentifier("live-transcript-missing")
+            }
         }
         .animation(motion.snappy, value: text)
+        .animation(motion.snappy, value: missing)
+    }
+}
+
+/// A stretch of the recording with no transcript, in its place among the lines.
+struct TranscriptGapRow: View {
+    let gap: TranscriptGap
+
+    var body: some View {
+        Label(TranscriptPresentation.missingText(gap), systemImage: "exclamationmark.triangle")
+            .font(.caption).foregroundStyle(Theme.textSecondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("transcript-gap-\(gap.fromMs)")
     }
 }
 
@@ -58,7 +87,7 @@ struct LiveStatusLine: View {
 /// newest line unless the reader has scrolled up to read something earlier.
 struct LiveTranscriptList: View {
     let live: LiveTranscript
-    /// False once recording has stopped and only saved audio is still being transcribed.
+    /// False once the recording has stopped.
     var recording = true
     @Environment(\.motion) private var motion
     @State private var followsTail = true
@@ -76,9 +105,13 @@ struct LiveTranscriptList: View {
                 LazyVStack(alignment: .leading, spacing: 20) {
                     if lines.isEmpty { LiveTranscriptPlaceholder(live: live, recording: recording) }
                     ForEach(lines) { line in
-                        LiveTranscriptLineView(line: line, microphoneIsMe: microphoneIsMe).id(line.id)
+                        if case .gap(let gap) = line {
+                            TranscriptGapRow(gap: gap).id(line.id)
+                        } else {
+                            LiveTranscriptLineView(line: line, microphoneIsMe: microphoneIsMe).id(line.id)
+                        }
                     }
-                    LiveStatusLine(live: live).frame(maxWidth: .infinity, alignment: .leading)
+                    LiveStatusLine(live: live, showsGaps: false).frame(maxWidth: .infinity, alignment: .leading)
                     // Full width, so scrolling to it never moves the list sideways.
                     Color.clear.frame(maxWidth: .infinity).frame(height: 1).id(Self.bottom)
                 }
@@ -152,7 +185,7 @@ private struct LiveTranscriptPlaceholder: View {
 
     private var text: String {
         guard recording else { return "No transcript is saved for this note." }
-        return LiveStatusText.isStreaming(live.status) ? "Listening…" : "Text appears here after each part of the recording is transcribed."
+        return LiveStatusText.isStreaming(live.status) ? "Listening…" : "Text appears here as people speak, once the live transcript connects."
     }
 }
 
@@ -192,6 +225,8 @@ struct LiveTranscriptLineView: View {
         switch line {
         case .stored(let row, _):
             (row.caption, row.segment.text, row.segment.isFinal, row.segment.id)
+        case .gap(let gap):
+            ("", TranscriptPresentation.missingText(gap), true, gap.id)
         case .interim(let utterance):
             (TranscriptPresentation.interimCaption(channel: utterance.channel, startMs: utterance.startMs, speakerLabel: utterance.speakerLabel,
                                                    microphoneIsMe: microphoneIsMe),

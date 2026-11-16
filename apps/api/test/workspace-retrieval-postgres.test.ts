@@ -21,7 +21,7 @@ import {postgresRepository} from "../eval/workspace/harness"
 
 const enabled=process.env.RUN_PG_TESTS==="1"&&!!process.env.DATABASE_URL&&/^\/mn_test_[a-f0-9]+$/.test(new URL(process.env.DATABASE_URL).pathname)
 const now=new Date(),workspace=largeWorkspace(now),d=(daysAgo:number)=>day(now,daysAgo).iso
-const base:ProviderServices={transcribe:()=>Effect.succeed([]),generate:()=>Effect.succeed(""),chat:()=>Effect.succeed("")}
+const base:ProviderServices={generate:()=>Effect.succeed(""),chat:()=>Effect.succeed("")}
 const call=(name:string,args:unknown):ChatToolCall=>({id:`call_${name}`,name,arguments:JSON.stringify(args)})
 interface Probe {name:string;message:string;
   /** Scripted planner calls. Empty: only the automatic first search runs. */

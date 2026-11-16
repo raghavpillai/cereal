@@ -8,7 +8,7 @@
 .note-title { position: relative; top: -1px; margin: 0 0 14px; font: 400 24px / 28px var(--font-display); letter-spacing: 0; text-wrap: wrap; overflow-wrap: anywhere; }
 .note-title:focus { outline: none; }
 
-/* The row under the title: the joined views, the details chip, the folder. */
+/* The row under the title: the joined views and the details chip. */
 .note-meta { display: flex; align-items: center; gap: 8px; flex-shrink: 0; height: 28px; margin: 0 0 20px -4px; }
 .note-views {
   display: flex; align-items: center; flex-shrink: 0; height: 28px;
@@ -36,8 +36,6 @@
 }
 .note-chip .is-people { margin-left: 4px; }
 .note-chip.is-button:hover { background: var(--app-hover); }
-.note-chip.is-folder { flex-shrink: 1; justify-content: flex-start; min-width: 0; max-width: 220px; padding: 0 11px; }
-.note-chip.is-folder > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .note-details-card { top: 32px; right: auto; left: 0; width: 280px; max-width: calc(100vw - 32px); transform-origin: 20px 0; }
 .note-shared-line { position: relative; top: -1px; color: var(--app-muted); font-size: 12px; line-height: 16px; white-space: nowrap; }
 .note-shared-foot { margin: 28px 0 0; color: var(--app-muted); font-size: 12px; line-height: 16px; }
@@ -80,6 +78,9 @@
 .note-text strong { font-weight: 600; }
 .note-text code { background: var(--app-hover); font: inherit; }
 .note-text em { font-style: italic; font-synthesis: style; }
+/* A web address in a note: the text's own colour, underlined, as the apps draw it. */
+.note-link { color: inherit; text-decoration: underline; text-decoration-color: var(--app-marker); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.note-link:hover { text-decoration-color: currentColor; }
 
 .note-loading { display: grid; gap: 12px; padding-top: 4px; }
 .note-loading .skeleton { height: 14px; }
@@ -240,3 +241,26 @@
   .note-doc { padding-bottom: 0; }
   .utterance, .note-text li { break-inside: avoid; }
 }
+
+/* ── Chat with a meeting's transcript (/notes/<id>/chat) ───────────────── */
+.chat-doc { gap: 0; }
+.chat-note-link { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; max-width: 100%; margin: 0 0 6px; color: var(--app-muted); font-size: 14px; line-height: 22px; text-decoration: none; }
+.chat-note-link > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-note-link:hover { color: var(--app-text); }
+.chat-doc .note-title { margin-bottom: 14px; }
+.chat-thread { display: flex; flex-direction: column; gap: 12px; }
+.chat-question { font-size: 14px; line-height: 20px; white-space: pre-wrap; }
+.chat-answer { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.chat-sources { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; font-size: 13px; line-height: 18px; color: var(--app-muted); }
+.chat-sources li { display: flex; gap: 8px; min-width: 0; }
+.chat-source-number { flex-shrink: 0; width: 18px; color: var(--app-marker); text-align: right; }
+.chat-source { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.chat-footer { margin: 0; }
+.chat-ask {
+  position: relative; display: flex; align-items: center; gap: 8px; width: 100%; min-height: 58px; padding: 8px 8px 8px 20px;
+  border: 1px solid var(--app-border); border-radius: 29px; background: var(--app-card); box-shadow: var(--app-shadow-capsule); pointer-events: auto;
+}
+.chat-ask textarea { flex: 1; min-width: 0; max-height: 120px; padding: 0; border: 0; background: transparent; color: var(--app-text); font: inherit; font-size: 15px; line-height: 22px; resize: none; outline: none; field-sizing: content; }
+.chat-ask textarea::placeholder { color: var(--app-muted); }
+.chat-ask .app-pill { height: 40px; padding: 0 18px; border-radius: 20px; }
+.chat-ask .app-pill:disabled { opacity: 0.45; }

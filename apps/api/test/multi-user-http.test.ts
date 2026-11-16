@@ -12,8 +12,8 @@ type Account = keyof typeof ids
 function fixture() {
   const repository = makeMemoryRepository()
   const contexts: string[] = []
-  const processing = makeProcessingService(repository, { worker: false, providers: {
-    transcribe: () => Effect.succeed([]), generate: () => Effect.succeed("generated"), chat: () => Effect.succeed("answer"),
+  const processing = makeProcessingService(repository, { providers: {
+    generate: () => Effect.succeed("generated"), chat: () => Effect.succeed("answer"),
     async *chatStream(note) { contexts.push(note.body); yield "Account-scoped answer" },
   } })
   const api = makeApiHandler(repository, "multiuser-bootstrap-test-at-least-32-characters", {
@@ -50,6 +50,7 @@ test("HTTP isolation covers list, detail, recording, transcript, chat, evidence,
       [`/notes/${note.id}/chat`, "POST", { message: "Read the private note", history: [] }],
       [`/notes/${note.id}/chat/stream`, "POST", { message: "Read the private note", history: [] }],
       [`/notes/${note.id}/evidence`, "POST", { paragraph: "Private", expectedTranscriptRevision: 0 }],
+      [`/notes/${note.id}/evidence/stream`, "POST", { paragraph: "Private", expectedTranscriptRevision: 0 }],
       [`/notes/${note.id}/shares`, "GET"],
       [`/notes/${note.id}/shares`, "POST", { includeBody: true, includeEnhanced: false }],
       [`/notes/${note.id}`, "DELETE"],

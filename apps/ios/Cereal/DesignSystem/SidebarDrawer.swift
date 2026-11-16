@@ -2,7 +2,7 @@ import SwiftUI
 import APIClient
 
 /// State of the notes sidebar. It is hidden at rest on every layout and is
-/// pulled in from the leading edge of Home, or opened with the Folders button.
+/// pulled in from the leading edge of Home, or opened with the sidebar button.
 @MainActor @Observable final class SidebarModel {
     static let shared = SidebarModel()
 

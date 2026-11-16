@@ -27,6 +27,7 @@ import type {ChatCitationDTO,ChatToolProgressDTO,NoteDTO} from "@meeting-notes/c
 import {meetingSearchTerms,selectMeetings,selectTranscriptPassages} from "../meeting-search"
 import type {ProviderNote} from "../providers"
 import type {RetrievalSession} from "./retrieval"
+import {forContext} from "../transcript-link"
 
 type Segment=NoteDTO["transcriptSegments"][number]
 type ToolName=ChatToolProgressDTO["name"]
@@ -171,7 +172,8 @@ export function createWorkspaceResearch(session:RetrievalSession) {
   // ------------------------------------------------------------ repository
   const searchRows=async(query:string,from?:string,to?:string):Promise<ReadonlyArray<NoteDTO>>=>{
     const search={query,limit:REPOSITORY_PAGE,...(from?{from}:{}),...(to?{to}:{})}
-    return repository.searchNotes?run(repository.searchNotes(search)):selectMeetings(await run(repository.listNotes()),search)
+    // Notes are read without the chat link line of their generated notes (transcript-link.ts).
+    return (repository.searchNotes?await run(repository.searchNotes(search)):selectMeetings(await run(repository.listNotes()),search)).map(forContext)
   }
   const searchSegments=async(query:string,options:{noteId?:string;from?:string;to?:string})=>{
     const search={query,limit:REPOSITORY_PAGE,...(options.noteId?{noteId:options.noteId}:{}),...(options.from?{from:options.from}:{}),...(options.to?{to:options.to}:{})}
@@ -203,7 +205,7 @@ export function createWorkspaceResearch(session:RetrievalSession) {
     return meeting
   }
   const fetched=new Map<string,Promise<NoteDTO|null>>()
-  const fetchNote=(id:string)=>{if(!fetched.has(id))fetched.set(id,run(repository.getNote(id)));return fetched.get(id)!}
+  const fetchNote=(id:string)=>{if(!fetched.has(id))fetched.set(id,run(repository.getNote(id)).then(note=>note&&forContext(note)));return fetched.get(id)!}
   async function load(meeting:Meeting):Promise<ProviderNote|null> {
     if(meeting.full!==undefined)return meeting.full
     signal.throwIfAborted()

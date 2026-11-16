@@ -7,12 +7,12 @@ use gpui::{prelude::*, *};
 #[derive(Clone, Copy)]
 enum SettingToggle {
     DarkMode,
-    ShowUpcoming,
     MenuBarEvents,
     EventsWithoutParticipants,
-    ScheduledNotifications,
+    Notification(crate::notifications::Kind),
     LiveIndicator,
     LoginItem,
+    VoiceIsolation,
 }
 
 /// The pages of the dedicated settings mode. Only settings this app really
@@ -64,9 +64,7 @@ impl Cereal {
             Screen::Chat => self.render_chat_screen(window, cx),
             Screen::SearchResults => self.render_search_results(window, cx),
             Screen::Shared => self.render_shared_screen(window, cx),
-            Screen::Connect => self.render_connect_screen(window, cx),
             Screen::Settings => self.render_settings_screen(window, cx),
-            Screen::Trash => self.render_trash_screen(window, cx),
             _ => div().flex_1().into_any_element(),
         }
     }
@@ -145,7 +143,7 @@ impl Cereal {
                                 .text_size(px(12.))
                                 .line_height(px(16.))
                                 .text_color(t.muted)
-                                .cursor_pointer()
+                                .cursor_default()
                                 .child(StyledText::new(snippet.clone()).with_highlights(highlights))
                                 .reach().on_click(
                                     cx.listener(move |this, _, _, cx| this.open_note(id, cx)),
@@ -185,11 +183,6 @@ impl Cereal {
                         self.ask.read(cx).focus_handle.is_focused(window),
                         cx,
                     )))
-                    .child(
-                        div()
-                            .mt(px(8.))
-                            .child(self.render_chat_recipe_suggestions(cx).py(px(0.))),
-                    )
                     .child(div().mt(px(40.)).h(px(1.)).bg(t.border))
                     .child(
                         div().mt(px(40.)).child(
@@ -339,9 +332,6 @@ impl Cereal {
     }
 
     fn render_chat_screen(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        if self.chat_recipes_open {
-            return self.render_chat_recipes_surface(window, cx);
-        }
         let t = self.theme();
         let empty = self.chat_messages.is_empty();
         let mut column = div()
@@ -351,8 +341,11 @@ impl Cereal {
             // so the last lines of a long answer (and what follows it) lay
             // beyond the end of the scroll range and could not be reached.
             .w(px(self.chat_column_width(window)))
-            .px(px(24.))
-            .pt(px(if empty { 112. } else { 24. }))
+            // Empty, the page's composer is 628 px wide (22 px in from the
+            // 672 px column) and starts 216 px down the window, as the
+            // reference measures.
+            .px(px(if empty { 22. } else { 24. }))
+            .pt(px(if empty { 114. } else { 24. }))
             .pb(px(28.))
             .flex()
             .flex_col()
@@ -363,7 +356,9 @@ impl Cereal {
                     session
                         .user
                         .name
-                        .trim()
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or_default()
                         .chars()
                         .take(40)
                         .collect::<String>()
@@ -372,74 +367,19 @@ impl Cereal {
                 .map(|name| format!("Hi {name}, ask anything"))
                 .unwrap_or_else(|| "Ask anything".into());
             let recents = self.render_workspace_chat_recents(cx);
-            let recipes_gap = if recents.is_some() { 44. } else { 52. };
             column = column
                 .child(
                     div()
-                        .px(px(8.))
-                        .mb(px(24.))
+                        .pl(px(11.))
+                        .pr(px(8.))
+                        .mb(px(22.))
                         .font_family(DISPLAY)
                         .text_size(px(26.))
                         .line_height(px(32.))
                         .child(greeting),
                 )
                 .child(self.render_personal_chat_composer(window, cx))
-                .child(
-                    div()
-                        .mt(px(12.))
-                        .px(px(8.))
-                        .h(px(28.))
-                        .flex()
-                        .items_center()
-                        .gap(px(12.))
-                        .child(
-                            div()
-                                .h(px(26.))
-                                .px(px(6.))
-                                .rounded(px(6.))
-                                .bg(t.fill)
-                                .flex()
-                                .items_center()
-                                .gap(px(4.))
-                                .child(icon("bolt", 13., t.muted))
-                                .child(icon("file", 13., t.muted))
-                                .child(icon("code", 13., t.muted)),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(12.))
-                                .child("Connect your tools"),
-                        )
-                        .child(
-                            div()
-                                .id("workspace-chat-connect-tools")
-                                .h(px(26.))
-                                .px(px(12.))
-                                .rounded_full()
-                                .bg(t.fill)
-                                .text_size(px(11.))
-                                .flex()
-                                .items_center()
-                                .cursor_pointer()
-                                .child(crate::motion::tactile(t.border).round())
-                                .child("Get started")
-                                .reach().on_click(cx.listener(|this, _, _, cx| {
-                                    this.navigate(Screen::Connect, cx);
-                                })),
-                        ),
-                )
-                .when_some(recents, |column, recents| column.child(recents))
-                .child(
-                    div()
-                        .mt(px(recipes_gap))
-                        .px(px(8.))
-                        .text_size(px(11.))
-                        .line_height(px(16.))
-                        .text_color(t.muted)
-                        .child("Recipes"),
-                )
-                .child(self.render_chat_recipe_suggestions(cx));
+                .when_some(recents, |column, recents| column.child(recents));
         } else {
             column = column.child(self.render_chat_turns(0, false, window, cx));
             if let Some(queue) = self.render_chat_queue(false, window, cx) {
@@ -500,30 +440,19 @@ impl Cereal {
 
     fn render_workspace_chat_recents(&self, cx: &mut Context<Self>) -> Option<Div> {
         let t = self.theme();
-        let chats: Vec<_> = self
-            .chat_archives
-            .iter()
-            .rev()
-            .filter(|chat| {
-                chat.note_id == 0
-                    || self
-                        .workspace
-                        .note(chat.note_id)
-                        .is_some_and(|note| !note.trashed)
-            })
-            .take(3)
-            .collect();
+        let chats: Vec<_> = self.chat_threads().into_iter().take(3).collect();
         if chats.is_empty() {
             return None;
         }
-        let mut section = div().mt(px(52.)).child(
+        let mut section = div().mt(px(54.)).child(
             div()
-                .px(px(8.))
+                .pl(px(8.))
+                .pr(px(10.))
                 .h(px(16.))
                 .flex()
                 .items_center()
                 .justify_between()
-                .text_size(px(11.))
+                .text_size(px(13.))
                 .line_height(px(16.))
                 .text_color(t.muted)
                 .child("Recents")
@@ -533,7 +462,7 @@ impl Cereal {
                         .flex()
                         .items_center()
                         .gap(px(4.))
-                        .cursor_pointer()
+                        .cursor_default()
                         .map(|link| {
                             crate::motion::warms(
                                 link,
@@ -550,50 +479,33 @@ impl Cereal {
                         })),
                 ),
         );
-        let mut rows = div().mt(px(10.)).px(px(6.));
+        let now = chrono::Utc::now();
+        let mut rows = div().mt(px(11.)).px(px(6.));
         for chat in chats {
-            let archive_id = chat.id.clone();
-            let updated = chat.updated_at.as_deref().and_then(|value| {
-                let timestamp = chrono::DateTime::parse_from_rfc3339(value).ok()?;
-                let age = chrono::Utc::now().signed_duration_since(timestamp);
-                let label = if age.num_seconds() < 0 {
-                    timestamp
-                        .with_timezone(&chrono::Local)
-                        .format("%-I:%M %p")
-                        .to_string()
-                } else if age.num_minutes() == 0 {
-                    "now".into()
-                } else if age.num_hours() == 0 {
-                    format!("{}m", age.num_minutes())
-                } else if age.num_days() == 0 {
-                    format!("{}h", age.num_hours())
-                } else if age.num_days() < 30 {
-                    format!("{}d", age.num_days())
-                } else {
-                    format!("{}mo", age.num_days() / 30)
-                };
-                Some(label)
-            });
+            let (archive_id, account) = (chat.id.clone(), chat.account.clone());
+            let updated = crate::chat::thread_age(&chat.updated_at, now);
             rows = rows.child(
                 div()
                     .id(SharedString::from(format!("workspace-recent-{}", chat.id)))
-                    .h(px(40.))
+                    .h(px(40.5))
                     .rounded(px(7.))
                     .flex()
                     .items_center()
                     .gap(px(12.))
-                    .cursor_pointer()
+                    .cursor_default()
                     .child(crate::motion::tactile(t.hover).radius(7.))
                     .child(
                         div()
-                            .size(px(28.))
-                            .rounded(px(7.))
-                            .bg(t.fill)
+                            .size(px(30.))
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(t.border)
+                            .bg(t.card)
                             .flex()
                             .items_center()
                             .justify_center()
                             .child(icon(
-                                if chat.note_id == 0 { "chat" } else { "file" },
+                                if chat.note_id == Some(0) { "chat" } else { "file" },
                                 15.,
                                 t.muted,
                             )),
@@ -602,21 +514,21 @@ impl Cereal {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(12.))
+                            .text_size(px(13.5))
                             .truncate()
-                            .child(chat.title.clone()),
+                            .child(chat.display_title().to_owned()),
                     )
                     .when_some(updated, |row, label| {
                         row.child(
                             div()
-                                .pr(px(6.))
-                                .text_size(px(11.))
+                                .pr(px(2.))
+                                .text_size(px(12.5))
                                 .text_color(t.muted)
                                 .child(label),
                         )
                     })
                     .reach().on_click(cx.listener(move |this, _, _, cx| {
-                        this.restore_archived_chat(&archive_id, true, cx);
+                        this.open_chat_thread(&account, &archive_id, true, cx);
                     })),
             );
         }
@@ -631,11 +543,16 @@ impl Cereal {
         let can_send = !self.ask.read(cx).content().trim().is_empty() && !active;
         div()
             .id("personal-chat-composer")
+            .relative()
+            .children(self.render_chat_model_picker(true, true, cx))
             .w_full()
-            .min_h(px(82.))
-            .px(px(12.))
-            .pt(px(11.))
-            .pb(px(7.))
+            // 82.5 px tall: the field's 22 px line 14 px down, the controls'
+            // 32 px row 7 px under it.
+            .min_h(px(82.5))
+            .pl(px(12.))
+            .pr(px(10.))
+            .pt(px(14.))
+            .pb(px(5.5))
             .rounded(px(18.))
             .border_1()
             .border_color(if focused { t.accent } else { t.border })
@@ -651,11 +568,11 @@ impl Cereal {
             })
             .flex()
             .flex_col()
-            .gap(px(8.))
+            .gap(px(7.))
             .child(
                 div()
                     .id("personal-chat-composer-text")
-                    .px(px(4.))
+                    .px(px(6.))
                     .min_h(px(22.))
                     .max_h(px(130.))
                     .overflow_y_scroll()
@@ -681,16 +598,8 @@ impl Cereal {
                         .opacity(DISABLED),
                     )
                     .child(
-                        div()
-                            .id("personal-chat-configured-model")
-                            .text_size(px(11.))
-                            .text_color(t.muted)
-                            .opacity(0.7)
-                            .child(if crate::server::enabled() {
-                                "Configured model"
-                            } else {
-                                "Local search"
-                            }),
+                        self.render_chat_model_button("personal-chat-configured-model", cx)
+                            .ml(px(2.)),
                     )
                     .child(div().flex_1())
                     .child(if active {
@@ -731,29 +640,6 @@ impl Cereal {
             .into_any_element()
     }
 
-    fn render_connect_screen(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let t = self.theme();
-        screen_scroller("connect-screen")
-            .child(
-                screen_column(self.page_column_width(window))
-                    .child(page_title("Connect", t))
-                    .child(
-                        div()
-                            .mt(px(9.))
-                            .px(px(8.))
-                            .text_color(t.muted)
-                            .line_height(px(21.))
-                            .child("Manage calendar connections on your own server."),
-                    )
-                    .child(
-                        settings_card(t)
-                            .mt(px(28.))
-                            .child(self.calendar_connections_row(cx)),
-                    ),
-            )
-            .into_any_element()
-    }
-
     /// The sidebar of settings mode: who is signed in, the settings pages, and
     /// Sign out when there is a session to end.
     pub fn render_settings_sidebar(&self, cx: &mut Context<Self>) -> Div {
@@ -764,8 +650,7 @@ impl Cereal {
         let name = self.workspace_name();
         let detail = match &session {
             Some(session) => session.user.email.clone(),
-            None if connected => "Sign in to your server".into(),
-            None => "Local demo on this Mac".into(),
+            None => "Sign in to your server".into(),
         };
         let avatar = div()
             .size(px(32.))
@@ -802,7 +687,7 @@ impl Cereal {
                     .gap(px(6.))
                     .rounded(px(8.))
                     .text_color(t.secondary)
-                    .cursor_pointer()
+                    .cursor_default()
                     .child(row_feedback(t, 8.))
                     .when(self.settings_tab == tab, |row| {
                         row.child(glide.probe(("settings", tab)))
@@ -861,7 +746,7 @@ impl Cereal {
                             .gap(px(8.))
                             .rounded(px(8.))
                             .text_color(t.danger)
-                            .cursor_pointer()
+                            .cursor_default()
                             .child(row_feedback(t, 8.))
                             .child(icon("share", 16., t.danger))
                             .child("Sign out")
@@ -928,17 +813,6 @@ impl Cereal {
                     .child(section_label("Notes & meetings", t))
                     .child(
                         settings_card(t)
-                            .child(settings_row(
-                                "globe",
-                                "Processing language",
-                                if connected {
-                                    "Used for transcription, notes and chat."
-                                } else {
-                                    "Applies once you connect to your server."
-                                },
-                                t,
-                            )
-                            .child(small("English", t)))
                             .child(
                                 settings_row(
                                     "mic",
@@ -955,7 +829,16 @@ impl Cereal {
                                         }),
                                     ),
                                 ),
-                            ),
+                            )
+                            .child(self.setting_toggle(
+                                "setting-voice-isolation",
+                                "sparkles",
+                                "Voice isolation",
+                                "Filters background noise from your mic for clearer transcripts. Applies when recording next starts or resumes; meeting audio is never changed.",
+                                meetings.voice_isolation,
+                                SettingToggle::VoiceIsolation,
+                                cx,
+                            )),
                     );
             }
             SettingsTab::Profile => {
@@ -973,32 +856,26 @@ impl Cereal {
                             }
                         ),
                     ),
-                    None if connected => (
+                    None => (
                         "Your account".to_string(),
                         "Sign in to your server.".to_string(),
-                    ),
-                    None => (
-                        "Personal workspace".to_string(),
-                        "Notes saved locally on this Mac.".to_string(),
                     ),
                 };
                 column = column.child(section_label("Account", t)).child(
                     settings_card(t)
                         .child(
-                            settings_row("cereal", title, detail, t).child(
-                                div()
-                                    .px(px(9.))
-                                    .py(px(4.))
-                                    .rounded_full()
-                                    .bg(t.fill)
-                                    .text_size(px(11.))
-                                    .text_color(t.muted)
-                                    .child(if session.is_some() {
-                                        "CONNECTED"
-                                    } else {
-                                        "LOCAL DEMO"
-                                    }),
-                            ),
+                            settings_row("cereal", title, detail, t).when(session.is_some(), |row| {
+                                row.child(
+                                    div()
+                                        .px(px(9.))
+                                        .py(px(4.))
+                                        .rounded_full()
+                                        .bg(t.fill)
+                                        .text_size(px(11.))
+                                        .text_color(t.muted)
+                                        .child("CONNECTED"),
+                                )
+                            }),
                         )
                         .child(
                             settings_row(
@@ -1072,15 +949,6 @@ impl Cereal {
                                 cx,
                             ))
                             .child(self.setting_toggle(
-                                "setting-upcoming",
-                                "calendar",
-                                "Show upcoming meetings",
-                                "Keep your calendar in view on Home.",
-                                self.workspace.settings.show_upcoming,
-                                SettingToggle::ShowUpcoming,
-                                cx,
-                            ))
-                            .child(self.setting_toggle(
                                 "setting-events-without-participants",
                                 "person-outline",
                                 "Show events with no participants",
@@ -1098,17 +966,31 @@ impl Cereal {
                     .child(settings_card(t).child(self.calendar_connections_row(cx)));
             }
             SettingsTab::Notifications => {
-                column = column
-                    .child(section_label("Meeting notifications", t))
-                    .child(settings_card(t).child(self.setting_toggle(
-                        "setting-scheduled-notifications",
-                        "bell",
-                        "Scheduled meetings",
-                        "Notify 1 minute before a meeting on your calendar starts. Click to open its note.",
-                        meetings.scheduled_notifications,
-                        SettingToggle::ScheduledNotifications,
+                use crate::notifications::Kind;
+                let toggle = |kind: Kind, cx: &mut Context<Self>| {
+                    let (id, symbol, label, description) = kind.row();
+                    self.setting_toggle(
+                        id,
+                        symbol,
+                        label,
+                        description,
+                        self.notification_switch_on(kind, &meetings),
+                        SettingToggle::Notification(kind),
                         cx,
-                    )));
+                    )
+                };
+                let meeting = toggle(Kind::Meeting, cx);
+                let notes = toggle(Kind::Notes, cx);
+                let recording = toggle(Kind::Recording, cx);
+                let account = toggle(Kind::Account, cx);
+                column = column
+                    .when_some(self.notification_permission_row(cx), |c, row| {
+                        c.child(section_label("macOS", t)).child(settings_card(t).child(row))
+                    })
+                    .child(section_label("Meeting notifications", t))
+                    .child(settings_card(t).child(meeting))
+                    .child(section_label("While you are in another app", t))
+                    .child(settings_card(t).child(notes).child(recording).child(account));
             }
             SettingsTab::About => {
                 column = column
@@ -1120,17 +1002,10 @@ impl Cereal {
                                 settings_row(
                                     "lock",
                                     "Storage",
-                                    if connected {
-                                        "Notes, transcripts and shared links belong to your account on your server. Audio is captured on this Mac and securely delivered for transcription when you record."
-                                    } else {
-                                        "Local demo notes stay on this Mac and remain separate from signed-in accounts. Sign in to use server transcription, summaries and shared notes."
-                                    },
+                                    "Notes, transcripts and shared links belong to your account on your server. Audio is captured on this Mac and securely delivered for transcription when you record.",
                                     t,
                                 )
-                                .child(small(
-                                    if connected { "Your server" } else { "On this Mac" },
-                                    t,
-                                )),
+                                .child(small("Your server", t)),
                             )
                             .child(
                                 settings_row(
@@ -1142,7 +1017,7 @@ impl Cereal {
                                 .child(
                                     pill("settings-shortcuts", "View", "", t).on_click(
                                         cx.listener(|this, _, _, cx| {
-                                            this.menu = Some(Menu::Shortcuts);
+                                            this.open_menu(Menu::Shortcuts);
                                             cx.notify();
                                         }),
                                     ),
@@ -1179,6 +1054,53 @@ impl Cereal {
                     .child(column),
             ))
             .into_any_element()
+    }
+
+    /// What macOS allows, when it is not simply "allowed": a way to allow
+    /// notifications, that macOS is still to answer, or where they were
+    /// turned off.
+    fn notification_permission_row(&self, cx: &mut Context<Self>) -> Option<Div> {
+        use crate::notifications::Standing;
+        let t = self.theme();
+        let settings = |id: &'static str| {
+            pill(id, "Open System Settings", "", t)
+                .flex_shrink_0()
+                .on_click(cx.listener(|this, _, _, _| this.open_notification_settings()))
+        };
+        Some(match self.notification_standing() {
+            Standing::Allowed => return None,
+            Standing::NotAsked => settings_row(
+                "bell",
+                "Allow notifications",
+                "macOS asks once. Cereal uses notifications for meetings, notes and recordings, as chosen below.",
+                t,
+            )
+            .child(
+                pill("settings-allow-notifications", "Allow…", "", t)
+                    .flex_shrink_0()
+                    .on_click(cx.listener(|this, _, _, cx| this.allow_notifications(cx))),
+            ),
+            Standing::Waiting => settings_row(
+                "bell",
+                "Waiting for permission",
+                "Choose Allow in the notification macOS shows for Cereal. The switches below start working once it is allowed.",
+                t,
+            )
+            .child(settings("settings-waiting-notification-settings")),
+            Standing::Refused => settings_row(
+                "warning",
+                "Notifications are off for Cereal",
+                "Turn on Allow notifications for Cereal in System Settings to get the notifications below.",
+                t,
+            )
+            .child(settings("settings-open-notification-settings")),
+            Standing::Unavailable => settings_row(
+                "warning",
+                "Notifications need the packaged app",
+                "macOS delivers notifications only to Cereal.app, not to a bare executable.",
+                t,
+            ),
+        })
     }
 
     /// Calendar management lives on the server; this row links to it.
@@ -1228,7 +1150,7 @@ impl Cereal {
             .child(div().text_size(px(12.)).child(choice.name()))
             .when(selected, |d| d.child(icon("check", 12., t.accent)))
             .when(crate::desktop_preferences::icon_supported(), |d| {
-                d.cursor_pointer()
+                d.cursor_default()
                     .reach().on_click(cx.listener(move |this, _, _, cx| {
                         match crate::desktop_preferences::select_icon(choice) {
                             Ok(()) => {
@@ -1254,17 +1176,11 @@ impl Cereal {
         let t = self.theme();
         settings_row(symbol, label, description, t)
             .id(id)
-            .cursor_pointer()
             .child(self.switch(id, enabled))
             .reach().on_click(cx.listener(move |this, _, _, cx| {
                 match setting {
                     SettingToggle::DarkMode => {
                         this.workspace.settings.dark_mode = !this.workspace.settings.dark_mode;
-                        this.workspace.settings_changed();
-                    }
-                    SettingToggle::ShowUpcoming => {
-                        this.workspace.settings.show_upcoming =
-                            !this.workspace.settings.show_upcoming;
                         this.workspace.settings_changed();
                     }
                     SettingToggle::MenuBarEvents => this.set_menu_bar_events(!enabled, cx),
@@ -1281,17 +1197,23 @@ impl Cereal {
                         );
                         crate::pill::refresh(cx);
                     }
-                    SettingToggle::ScheduledNotifications => {
-                        this.set_scheduled_notifications(!enabled, cx)
-                    }
+                    SettingToggle::Notification(kind) => this.set_notification(kind, !enabled, cx),
                     SettingToggle::LoginItem => this.set_login_item(!enabled, cx),
+                    SettingToggle::VoiceIsolation => {
+                        this.set_meeting_preference(
+                            |preferences| preferences.voice_isolation = !enabled,
+                            cx,
+                        );
+                        crate::audio::prepare_voice_isolation();
+                    }
                 }
                 this.persist(cx);
             }))
     }
 
-    /// The switch at the end of a setting's row: a 32 by 20 track and a
-    /// 14 px knob.
+    /// The switch at the end of a setting's row, the same design as a
+    /// calendar's ([`Self::row_switch`]): a 32 by 20 track, grey when off,
+    /// and a 16 pt knob 2 pt inside it that travels 12 pt.
     fn switch(&self, id: &'static str, enabled: bool) -> Div {
         let t = self.theme();
         // The knob is a droplet: its leading edge runs ahead and the
@@ -1307,7 +1229,7 @@ impl Cereal {
             .clamp(0., 1.);
         let slot = |on: bool| {
             div()
-                .size(px(14.))
+                .size(px(16.))
                 .rounded_full()
                 .when(on == enabled, |slot| slot.child(knob.probe(on)))
         };
@@ -1317,9 +1239,9 @@ impl Cereal {
             .mt(px(4.))
             .w(px(32.))
             .h(px(20.))
-            .p(px(3.))
+            .p(px(2.))
             .rounded_full()
-            .bg(t.fill)
+            .bg(self.switch_off())
             .child(
                 div()
                     .absolute()
@@ -1327,7 +1249,7 @@ impl Cereal {
                     .rounded_full()
                     .bg(t.accent.opacity(level)),
             )
-            .child(knob.indicator(rgb(0xffffff).into(), 7.))
+            .child(knob.indicator(rgb(0xfcfcf8).into(), 8.))
             .flex()
             .items_center()
             .justify_between()
@@ -1335,8 +1257,9 @@ impl Cereal {
             .child(slot(true))
     }
 
-    /// The same switch for a row that is one of many (a calendar): its knob
-    /// slides between the same two places without a droplet of its own.
+    /// The switch on a calendar's row, as in the reference: a 32 by 20
+    /// track, grey when off, and a 16 pt knob 2 pt inside it that travels
+    /// 12 pt. Its knob slides without a droplet of its own.
     fn row_switch(&self, key: u64, enabled: bool) -> Div {
         let t = self.theme();
         let level = self
@@ -1350,11 +1273,10 @@ impl Cereal {
         div()
             .relative()
             .flex_shrink_0()
-            .mt(px(4.))
             .w(px(32.))
             .h(px(20.))
             .rounded_full()
-            .bg(t.fill)
+            .bg(self.switch_off())
             .child(
                 div()
                     .absolute()
@@ -1365,12 +1287,21 @@ impl Cereal {
             .child(
                 div()
                     .absolute()
-                    .top(px(3.))
-                    .left(px(3. + 12. * level))
-                    .size(px(14.))
+                    .top(px(2.))
+                    .left(px(2. + 12. * level))
+                    .size(px(16.))
                     .rounded_full()
-                    .bg(rgb(0xffffff)),
+                    .bg(rgb(0xfcfcf8)),
             )
+    }
+
+    /// A switch's track when it is off: the reference's grey.
+    fn switch_off(&self) -> Hsla {
+        if self.workspace.settings.dark_mode {
+            rgba(0xffffff40).into()
+        } else {
+            rgb(0xacada8).into()
+        }
     }
 
     fn set_meeting_preference(
@@ -1385,112 +1316,119 @@ impl Cereal {
     }
 
     /// "Visible calendars": every calendar this account's events come from,
-    /// each with a switch, and Reset. Absent until there is one.
+    /// each with a switch, under a heading with Reset. As in the reference:
+    /// one card of compact rows (a bare colour square, the name, a switch)
+    /// with dashed lines between them, the person's own calendar first, and
+    /// a line at the end about connecting other calendars. Absent until
+    /// there is a calendar.
     fn visible_calendars(&self, cx: &mut Context<Self>) -> Option<Div> {
         let t = self.theme();
         let hidden = crate::desktop_preferences::meeting().hidden_calendars;
-        // (id, name, where it is from, colour, shown)
-        let mut rows: Vec<(String, String, String, String, bool)> = self
-            .calendars
-            .sources
-            .iter()
-            .filter(|source| source.enabled)
-            .map(|source| {
-                (
-                    source.id.clone(),
-                    source.name.clone(),
-                    format!("Shared by your server · {}", source.source_host),
-                    source.color.clone(),
-                    !hidden.contains(&source.id),
-                )
-            })
-            .collect();
-        rows.extend(self.calendars.personal.iter().map(|calendar| {
-            (
-                calendar.id.clone(),
-                calendar.name.clone(),
-                if calendar.primary {
-                    "Your Google calendar".to_owned()
-                } else {
-                    "Google Calendar".to_owned()
-                },
-                calendar.color.clone(),
-                calendar.selected,
-            )
-        }));
+        // (id, name, colour, shown)
+        let personal = |primary: bool| {
+            self.calendars
+                .personal
+                .iter()
+                .filter(move |calendar| calendar.primary == primary)
+                .map(|calendar| {
+                    (
+                        calendar.id.clone(),
+                        calendar.name.clone(),
+                        calendar.color.clone(),
+                        calendar.selected,
+                    )
+                })
+        };
+        let mut rows: Vec<(String, String, String, bool)> = personal(true).collect();
+        rows.extend(personal(false));
+        rows.extend(
+            self.calendars
+                .sources
+                .iter()
+                .filter(|source| source.enabled)
+                .map(|source| {
+                    (
+                        source.id.clone(),
+                        source.name.clone(),
+                        source.color.clone(),
+                        !hidden.contains(&source.id),
+                    )
+                }),
+        );
         if rows.is_empty() {
             return None;
         }
-        let changed = !hidden.is_empty()
-            || self
-                .calendars
-                .personal
-                .iter()
-                .any(|calendar| calendar.selected != calendar.primary);
+        let busy = self.calendars.choosing.is_some();
+        let rule = || {
+            div()
+                .flex_shrink_0()
+                .px(px(16.))
+                .h(px(hairline(0.5)))
+                .child(crate::calendar::dashed_rule(t.hairline).size_full())
+        };
+        // The line about other calendars links to the account's calendar
+        // connections, so it shows only when there is an account to open.
+        let connections = crate::server::calendar_connections_url();
+        let count = rows.len();
         let mut card = settings_card(t);
-        for (id, name, detail, color, shown) in rows {
+        for (index, (id, name, color, shown)) in rows.into_iter().enumerate() {
             let key = crate::lazy::key(&id);
-            let busy = self.calendars.choosing.is_some();
-            card = card.child(
-                div()
-                    .id(("visible-calendar", key))
-                    .relative()
-                    .min_h(px(64.))
-                    .px(px(16.))
-                    .py(px(12.))
-                    .flex()
-                    .items_center()
-                    .gap(px(14.))
-                    .cursor_pointer()
-                    .child(
-                        div()
-                            .size(px(32.))
-                            .flex_shrink_0()
-                            .rounded(px(8.))
-                            .bg(t.hover)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                div()
-                                    .size(px(10.))
-                                    .rounded(px(3.))
-                                    .bg(crate::calendar::calendar_color(&color)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .pt(px(2.))
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .line_height(px(18.))
-                                    .text_color(t.text)
-                                    .truncate()
-                                    .child(name),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .line_height(px(16.))
-                                    .text_color(t.muted)
-                                    .truncate()
-                                    .child(detail),
-                            ),
-                    )
-                    .child(self.row_switch(key, shown))
-                    .when(busy, |row| row.opacity(0.6))
-                    .reach()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_calendar_visible(id.clone(), !shown, cx)
-                    })),
-            );
+            card = card
+                .child(
+                    div()
+                        .id(("visible-calendar", key))
+                        .relative()
+                        .h(px(49.4))
+                        .flex_shrink_0()
+                        .px(px(16.))
+                        .flex()
+                        .items_center()
+                        .gap(px(16.))
+                        .child(
+                            div()
+                                .size(px(12.))
+                                .flex_shrink_0()
+                                .rounded(px(3.))
+                                .bg(crate::calendar::calendar_color(&color)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(13.))
+                                .line_height(px(18.))
+                                .text_color(t.text)
+                                .truncate()
+                                .child(name),
+                        )
+                        .child(self.row_switch(key, shown))
+                        .when(busy, |row| row.opacity(0.6))
+                        .reach()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_calendar_visible(id.clone(), !shown, cx)
+                        })),
+                )
+                .when(index + 1 < count || connections.is_some(), |card| card.child(rule()));
         }
+        card = card.when_some(connections, |card, url| card.child(
+            div()
+                .h(px(48.5))
+                .px(px(16.))
+                .flex()
+                .items_center()
+                .text_size(px(13.))
+                .line_height(px(18.))
+                .text_color(t.muted)
+                .child("Don't see the calendar you want?\u{a0}")
+                .child(
+                    div()
+                        .id("visible-calendars-connect")
+                        .underline()
+                        .child("See how to connect other calendars")
+                        .reach()
+                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                ),
+        ));
         Some(
             div()
                 .w_full()
@@ -1500,147 +1438,23 @@ impl Cereal {
                         .items_end()
                         .justify_between()
                         .child(section_label("Visible calendars", t))
-                        .when(changed, |heading| {
-                            heading.child(
-                                div()
-                                    .id("visible-calendars-reset")
-                                    .mb(px(6.))
-                                    .px(px(9.))
-                                    .text_size(px(13.))
-                                    .line_height(px(18.))
-                                    .text_color(t.accent)
-                                    .cursor_pointer()
-                                    .child("Reset")
-                                    .reach()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.reset_visible_calendars(cx)
-                                    })),
-                            )
-                        }),
+                        .child(
+                            div()
+                                .id("visible-calendars-reset")
+                                .mb(px(6.))
+                                .pr(px(17.))
+                                .text_size(px(13.))
+                                .line_height(px(18.))
+                                .text_color(t.accent)
+                                .child("Reset")
+                                .reach()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.reset_visible_calendars(cx)
+                                })),
+                        ),
                 )
                 .child(card),
         )
-    }
-
-    fn render_trash_screen(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let t = self.theme();
-        // Only what a Trash row shows is copied: its id, title, date and
-        // whether its server said it is gone.
-        let notes: Vec<_> = self
-            .workspace
-            .notes
-            .iter()
-            .filter(|note| note.trashed && !self.workspace.is_hidden(note))
-            .map(|note| {
-                (
-                    note.id,
-                    note.title.clone(),
-                    note.date.clone(),
-                    note.server_missing_since.is_some(),
-                )
-            })
-            .collect();
-        crate::motion::stats::copied(
-            notes
-                .iter()
-                .map(|(_, title, date, _)| title.len() + date.len())
-                .sum(),
-        );
-        let empty = notes.is_empty();
-        let scroll = crate::lazy::scroll("trash");
-        let keys: Vec<u64> = notes
-            .iter()
-            .map(|(id, title, _, gone)| crate::lazy::key(("trashed", id, title, gone)))
-            .collect();
-        screen_scroller("trash-screen")
-            .track_scroll(&scroll)
-            .child(
-                screen_column(self.page_column_width(window))
-                    .child(page_title("Trash", t))
-                    .child(
-                        div()
-                            .mt(px(9.))
-                            .text_color(t.muted)
-                            .line_height(px(21.))
-                            .child("Changed your mind? Restore a note to bring it back."),
-                    )
-                    .when(empty, |s| {
-                        s.child(
-                            div()
-                                .mt(px(90.))
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .gap(px(15.))
-                                .child(empty_illustration("trash", t))
-                                .child(
-                                    div()
-                                        .mt(px(8.))
-                                        .font_family(DISPLAY)
-                                        .text_size(px(24.))
-                                        .child("A clean slate"),
-                                )
-                                .child(small("There’s nothing in your trash.", t)),
-                        )
-                    })
-                    .when(!empty, |s| {
-                        // Cards 8 px apart, built only near the viewport.
-                        s.child(div().mt(px(28.)).child(crate::lazy::column(
-                            "trash",
-                            &keys,
-                            f32::from(window.viewport_size().width),
-                            8.,
-                            &scroll,
-                            window,
-                            |index| {
-                                let (id, title, date, gone) = notes[index].clone();
-                                // A note its own server no longer has says so.
-                                let date = if gone {
-                                    format!("{date} · {DELETED_ON_SERVER}")
-                                } else {
-                                    date
-                                };
-                                div()
-                                    .p(px(14.))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(14.))
-                                    .rounded(px(12.))
-                                    .border_1()
-                                    .border_color(t.border)
-                                    .bg(t.card)
-                                    .child(
-                                        div()
-                                            .size(px(35.))
-                                            .rounded(px(8.))
-                                            .bg(t.fill)
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .child(icon("document", 19., t.muted)),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(5.))
-                                            .child(title)
-                                            .child(small(date, t)),
-                                    )
-                                    .child(
-                                        pill(("restore-note", id), "Restore", "arrow-left", t)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.restore_from_trash(id, cx)
-                                            })),
-                                    )
-                                    .into_any_element()
-                            },
-                        )))
-                    }),
-            )
-            .into_any_element()
     }
 }
 
@@ -1800,8 +1614,8 @@ impl AccountSheet {
 fn never_uploaded(counts: &crate::accounts::saved::Counts) -> Option<String> {
     match counts.never_uploaded {
         0 => None,
-        1 => Some("1 recording was never uploaded: it exists only on this Mac.".into()),
-        n => Some(format!("{n} recordings were never uploaded: they exist only on this Mac.")),
+        1 => Some("1 recording is not on the server yet: it exists only on this Mac.".into()),
+        n => Some(format!("{n} recordings are not on the server yet: they exist only on this Mac.")),
     }
 }
 
@@ -1965,7 +1779,7 @@ impl Cereal {
                 action == sheet.default
             };
             let button = if filled {
-                // The dialog's filled button, as "Create" in "Create folder".
+                // The dialog's filled button.
                 div()
                     .id(("account-sheet-action", index))
                     .h(px(28.))
@@ -1976,7 +1790,7 @@ impl Cereal {
                     .text_size(px(13.))
                     .bg(if erases { t.danger } else { t.text })
                     .text_color(t.bg)
-                    .cursor_pointer()
+                    .cursor_default()
                     .child(label.clone())
             } else {
                 pill(("account-sheet-action", index), label.clone(), "", t).h(px(28.))
@@ -2260,8 +2074,8 @@ fn settings_card(t: Theme) -> Div {
     div()
         .w_full()
         .rounded(px(16.))
-        .border_1()
-        .border_color(t.border)
+        .border(px(hairline(0.5)))
+        .border_color(card_edge(t))
         .bg(t.card)
         .overflow_hidden()
 }
@@ -2407,18 +2221,18 @@ mod account_sheet_tests {
         let erase = AccountSheet::Erase {
             account: AccountId::of("https://notes.acme.com", "00000000-0000-4000-8000-000000000001"),
             host: "notes.acme.com".into(),
-            counts: saved::Counts { notes: 214, folders: 3, favorites: 12, chats: 9, recordings: 41, never_uploaded: 3 },
+            counts: saved::Counts { notes: 214, favorites: 12, chats: 9, recordings: 41, never_uploaded: 3 },
         }
         .text();
         assert_eq!(
             erase.body,
-            "214 notes saved here · 3 folders use them · 12 favourites · 9 chats · 41 recordings, 3 of which were never uploaded. The notes on notes.acme.com are not affected."
+            "214 notes saved here · 12 favourites · 9 chats · 41 recordings, 3 of which are not on the server yet. The notes on notes.acme.com are not affected."
         );
         assert_eq!(erase.buttons[1].0, "Erase, including 3 recordings that exist nowhere else");
         assert_eq!(erase.default, SheetAction::Cancel, "erasing is never what Return does");
         assert_eq!(
             erase.warning.as_deref(),
-            Some("3 recordings were never uploaded: they exist only on this Mac.")
+            Some("3 recordings are not on the server yet: they exist only on this Mac.")
         );
     }
 

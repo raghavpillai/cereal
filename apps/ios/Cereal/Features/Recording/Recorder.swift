@@ -9,7 +9,7 @@ enum MicPermission {
     static func request() async -> Bool { await AVAudioApplication.requestRecordPermission() }
 }
 
-/// Local demo provider seam. Server capture uses the authenticated, durable audio outbox.
+/// Local demo provider seam. Server capture is transcribed by its live stream.
 protocol TranscriptionClient: Sendable {
     func startSegment(noteID: UUID, index: Int) async throws
     func finishSegment(noteID: UUID, segment: CaptureSegment, audioFile: URL) async throws
@@ -42,11 +42,6 @@ final class Recorder {
     let isSimulated: Bool
     /// Called once for every finalized segment, including interruptions and partial failures.
     var onSegmentFinished: ((CaptureSegment, URL) -> Void)?
-    /// Continuous capture only. Set before starting: the capture reports each
-    /// time it grows past another multiple of this many seconds of audio.
-    @ObservationIgnored var partSeconds: Int?
-    /// Samples in the capture file at the boundary just crossed.
-    @ObservationIgnored var onPartBoundary: ((Int64) -> Void)?
     /// True on pause, false on resume. The capture's sample count is final when this is called.
     @ObservationIgnored var onPauseChanged: ((Bool) -> Void)?
 
@@ -63,7 +58,7 @@ final class Recorder {
     private let recordingRoot: URL?
 
     var isCapturing: Bool { state == .recording || state == .paused }
-    /// True while the capture in progress is one continuous file that parts can be cut from.
+    /// True while the capture in progress is one continuous file that a live stream can read.
     var capturesContinuously: Bool { backend is any ContinuousCaptureBackend }
     /// Samples (16 kHz) in the continuous capture file now, or as it was left by Stop.
     var capturedFrames: Int64 { (backend as? any ContinuousCaptureBackend)?.capturedFrames ?? lastCapturedFrames }
@@ -135,10 +130,6 @@ final class Recorder {
                 backend.onFailure = { [weak self, weak backend] message in
                     guard let self, let backend, self.backend === backend, isCapturing else { return }
                     fail(message)
-                }
-                if let continuous = backend as? any ContinuousCaptureBackend {
-                    continuous.partFrames = partSeconds.map { Int64($0) * Int64(ContinuousCapture.sampleRate) }
-                    continuous.onPartBoundary = { [weak self] frames in self?.onPartBoundary?(frames) }
                 }
                 self.backend = backend
                 usesInjectedAudio = !backend.usesMicrophone

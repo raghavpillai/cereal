@@ -10,11 +10,57 @@ const textBlocks=(content:unknown):any[]=>Array.isArray(content)
 
 /** Adapt the provider wire format once; grounding, output validation and abort
  * handling remain shared by chat, generation, evidence and retrieval tools. */
-export function languageTransport(transport:typeof fetch,provider:LanguageModelSelection['provider'],key:string):typeof fetch {
+/** Top-level fields of a chat completion request that every OpenAI-compatible server understands. Anything else
+ * (OpenRouter routing, Anthropic or OpenAI cache fields, reasoning settings, `stream_options`) is left out: a
+ * strict server answers an unknown field with 400. */
+const COMPATIBLE_FIELDS=['model','messages','stream','max_tokens','temperature','response_format','tools','tool_choice'] as const
+const MESSAGE_FIELDS=['role','content','tool_calls','tool_call_id'] as const
+/** The request as plain OpenAI chat completions: message content as one string (cache markers dropped with the
+ * parts that carried them), `max_completion_tokens` as the older `max_tokens`, and only the fields above. */
+export function compatibleBody(body:Record<string,any>):Record<string,unknown> {
+  const plain:Record<string,any>={...body,...(body.max_tokens===undefined&&body.max_completion_tokens!==undefined?{max_tokens:body.max_completion_tokens}:{})}
+  const messages=(Array.isArray(body.messages)?body.messages:[]).map((message:Record<string,any>)=>Object.fromEntries(MESSAGE_FIELDS.filter(field=>message[field]!==undefined).map(field=>[field,
+    field!=='content'||!Array.isArray(message.content)?message[field]:message.content.filter((part:unknown)=>object(part)&&typeof part.text==='string').map((part:any)=>part.text).join('')])))
+  return Object.fromEntries(COMPATIBLE_FIELDS.filter(field=>plain[field]!==undefined).map(field=>[field,field==='messages'?messages:plain[field]]))
+}
+/** A streamed answer passed through as it comes. Some servers end the stream after the last chunk without the
+ * closing `data: [DONE]`; when a chunk has already said the answer finished, the line is added so the reader
+ * knows the answer is whole. A stream that stops before that stays incomplete. */
+function closedStream(body:ReadableStream<Uint8Array>):ReadableStream<Uint8Array> {
+  const reader=body.getReader(),decoder=new TextDecoder(),encoder=new TextEncoder();let tail='',finished=false,done=false
+  return new ReadableStream<Uint8Array>({
+    async pull(controller){
+      try{
+        const next=await reader.read()
+        if(next.done){if(finished&&!done)controller.enqueue(encoder.encode('\n\ndata: [DONE]\n\n'));controller.close();return}
+        controller.enqueue(next.value)
+        tail=(tail+decoder.decode(next.value,{stream:true})).replace(/\r\n/g,'\n')
+        let end:number
+        while((end=tail.indexOf('\n\n'))>=0){
+          const data=tail.slice(0,end).split('\n').filter(line=>line.startsWith('data:')).map(line=>line.slice(5).trimStart()).join('\n');tail=tail.slice(end+2)
+          if(data==='[DONE]'){done=true;continue}
+          try{const raw=JSON.parse(data);if(Array.isArray(raw?.choices)&&raw.choices.some((choice:any)=>typeof choice?.finish_reason==='string'&&choice.finish_reason))finished=true}catch{/* the reader judges it */}
+        }
+        if(tail.length>1_000_000)tail=tail.slice(-100_000)
+      }catch(error){controller.error(error);await reader.cancel().catch(()=>{})}
+    },
+    cancel:()=>reader.cancel(),
+  })
+}
+
+/** Adapt the provider wire format once; grounding, output validation and abort
+ * handling remain shared by chat, generation, evidence and retrieval tools. `base` is where an OpenAI-compatible
+ * server's API starts (already checked); its key is optional and sent only when there is one. */
+export function languageTransport(transport:typeof fetch,provider:LanguageModelSelection['provider'],key:string,base=''):typeof fetch {
   if(provider==='openrouter')return transport
   return Object.assign(async(input:Parameters<typeof fetch>[0],init?:RequestInit)=>{
     if(String(input)!=='https://openrouter.ai/api/v1/chat/completions')return transport(input,init)
     const body=JSON.parse(String(init?.body))
+    if(provider==='openai_compatible'){
+      if(!base)throw new ProviderFailure('language','not_configured')
+      const response=await transport(base+'/chat/completions',{...init,redirect:'error',headers:{...(key?{Authorization:'Bearer '+key}:{}),'Content-Type':'application/json'},body:JSON.stringify(compatibleBody(body))})
+      return body.stream&&response.ok&&response.body?new Response(closedStream(response.body),{status:response.status,headers:response.headers}):response
+    }
     // A streamed chat completion reports usage (and so cached tokens) only when asked.
     if(provider==='openai')return transport('https://api.openai.com/v1/chat/completions',{...init,headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},body:JSON.stringify(body.stream?{...body,stream_options:{include_usage:true}}:body)})
     const messages:Array<{role:string;content:any[]}>=[],system:any[]=[]

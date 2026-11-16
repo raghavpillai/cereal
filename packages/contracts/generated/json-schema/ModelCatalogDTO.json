@@ -19,7 +19,6 @@
             "type": "string",
             "enum": [
               "language",
-              "transcription",
               "live_transcription"
             ]
           }
@@ -44,7 +43,8 @@
             "openrouter",
             "openai",
             "anthropic",
-            "elevenlabs"
+            "elevenlabs",
+            "openai_compatible"
           ]
         },
         "models": {

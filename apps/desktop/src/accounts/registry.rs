@@ -1541,8 +1541,8 @@ pub(crate) mod tests {
         // Something on this Mac for the account.
         let directory = paths.account(&id);
         std::fs::create_dir_all(paths.recordings(&id).join("note-1")).unwrap();
-        std::fs::write(paths.workspace(&id), br#"{"notes":[{"id":1,"title":"Kept","favorite":true,"folder_id":4}],"folders":[{"id":4,"name":"Clients"}]}"#).unwrap();
-        std::fs::write(paths.chats(&id), br#"{"version":1,"sessions":[],"recipes":[]}"#).unwrap();
+        std::fs::write(paths.workspace(&id), br#"{"notes":[{"id":1,"title":"Kept","favorite":true}]}"#).unwrap();
+        std::fs::write(paths.chats(&id), br#"{"version":1,"sessions":[]}"#).unwrap();
         let mut cleaned = None;
         let departed = registry
             .sign_out(&id, None, |account| cleaned = Some(account.epoch()))
@@ -1569,10 +1569,6 @@ pub(crate) mod tests {
         workspace.load_account(account.slot, &id, &paths).unwrap();
         let note = workspace.notes_of(account.slot).next().unwrap();
         assert_eq!((note.title.as_str(), note.favorite), ("Kept", true));
-        assert_eq!(
-            workspace.folders.iter().find(|folder| Some(folder.id) == note.folder_id).map(|f| f.name.as_str()),
-            Some("Clients")
-        );
         let _ = std::fs::remove_dir_all(root);
     }
 

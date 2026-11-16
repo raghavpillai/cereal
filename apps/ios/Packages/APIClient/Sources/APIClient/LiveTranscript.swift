@@ -33,9 +33,11 @@ public final class LiveUtterance: Identifiable {
     }
 }
 
-/// One line of a recording note's transcript: stored text, or text still being spoken.
+/// One line of a recording note's transcript: stored text, a stretch with no
+/// transcript, or text still being spoken.
 public enum LiveTranscriptLine: Identifiable {
     case stored(TranscriptPresentation.Row, id: String)
+    case gap(TranscriptGap)
     case interim(LiveUtterance)
 
     /// Stable while an utterance turns from interim into stored text, so the
@@ -43,6 +45,7 @@ public enum LiveTranscriptLine: Identifiable {
     public nonisolated var id: String {
         switch self {
         case .stored(_, let id): id
+        case .gap(let gap): gap.id
         case .interim(let utterance): utterance.id
         }
     }
@@ -50,8 +53,8 @@ public enum LiveTranscriptLine: Identifiable {
 
 /// The transcript of the note being recorded, as it grows. Stored segments
 /// come from the server (the live socket's finals, and note reads for whatever
-/// the batch path or another device added); interim utterances come from the
-/// live socket only.
+/// the stream did not carry, such as text another device added); interim
+/// utterances come from the live socket only.
 @MainActor @Observable
 public final class LiveTranscript {
     public nonisolated let noteID: String
@@ -59,6 +62,11 @@ public final class LiveTranscript {
     public private(set) var segments: [TranscriptSegmentDTO] = []
     /// Utterances still being spoken, oldest first.
     public private(set) var utterances: [LiveUtterance] = []
+    /// Stretches of the recording with no transcript, in timeline order: what
+    /// this device could not send (a backlog longer than the server's resume
+    /// window) and what the server could not transcribe. Kept for as long as
+    /// this object lives, and read back from the note's `transcriptGaps`.
+    public private(set) var gaps: [TranscriptGap] = []
     public private(set) var status: LiveTranscriptStatus = .off
     @ObservationIgnored public private(set) var transcriptRevision = 0
     /// Stored segment → the line it took over from an interim utterance.
@@ -67,10 +75,14 @@ public final class LiveTranscript {
 
     public init(noteID: String) { self.noteID = noteID }
 
-    /// Stored lines, then interim ones.
+    /// Stored lines and missing stretches in timeline order, then interim lines.
     public var lines: [LiveTranscriptLine] {
-        TranscriptPresentation.rows(segments).map { .stored($0, id: lineIDs[$0.segment.id] ?? $0.segment.id) }
-            + utterances.map { .interim($0) }
+        TranscriptPresentation.entries(segments, gaps: gaps).map { entry -> LiveTranscriptLine in
+            switch entry {
+            case .row(let row): .stored(row, id: lineIDs[row.segment.id] ?? row.segment.id)
+            case .gap(let gap): .gap(gap)
+            }
+        } + utterances.map { .interim($0) }
     }
 
     public func lineID(forSegment id: String) -> String { lineIDs[id] ?? id }
@@ -103,7 +115,7 @@ public final class LiveTranscript {
             transcriptRevision = max(transcriptRevision, final.transcriptRevision)
             store([final.segment])
             return missed
-        case .speakers(let merges):
+        case .speakers(let merges, let relabels):
             var updated = segments
             var changed = false
             for merge in merges {
@@ -115,9 +127,23 @@ public final class LiveTranscript {
                     changed = true
                 }
             }
+            // After the merges: segments the server has given another speaker, by id.
+            for relabel in relabels {
+                for index in updated.indices where updated[index].id == relabel.segmentId {
+                    let old = updated[index]
+                    guard old.speakerId != relabel.speakerId || old.speakerLabel != relabel.speakerLabel else { continue }
+                    updated[index] = TranscriptSegmentDTO(channel: old.channel, endMs: old.endMs, id: old.id, isFinal: old.isFinal,
+                        speakerId: relabel.speakerId, speakerLabel: relabel.speakerLabel, startMs: old.startMs, text: old.text)
+                    changed = true
+                }
+            }
             if changed { segments = updated }
             return false
-        case .gap:
+        case .gap(let gap):
+            add([TranscriptGap(channel: gap.channel == .mic ? .mic : .system, fromMs: gap.fromMs, toMs: gap.toMs)])
+            return false
+        case .skipped(let skip):
+            add([TranscriptGap(channel: skip.channel == .mic ? .mic : .system, fromMs: skip.fromMs, toMs: skip.toMs)])
             return false
         case .status(let value):
             if status != value { status = value }
@@ -135,6 +161,16 @@ public final class LiveTranscript {
         guard UUID(uuidString: note.id) == UUID(uuidString: noteID) else { return }
         transcriptRevision = max(transcriptRevision, note.transcriptRevision)
         store(note.transcriptSegments.filter(\.isFinal))
+        add((note.transcriptGaps ?? []).map { TranscriptGap(channel: $0.channel, fromMs: $0.fromMs, toMs: $0.toMs) })
+    }
+
+    /// Adds missing stretches. One stretch reported twice (by this device when
+    /// it skipped it, and by the server when it saw the jump) is one line.
+    private func add(_ incoming: [TranscriptGap]) {
+        let valid = incoming.filter { $0.toMs > $0.fromMs }
+        guard !valid.isEmpty else { return }
+        let merged = TranscriptGap.merged(gaps + valid)
+        if merged != gaps { gaps = merged }
     }
 
     private func store(_ incoming: [TranscriptSegmentDTO]) {
@@ -162,10 +198,5 @@ public final class LiveTranscript {
         }.map(\.element)
     }
 
-    /// `mic:n:3` is "Speaker 3": the note-scoped speaker numbering of live segments.
-    private static func speakerLabel(_ speakerID: String) -> String? {
-        let parts = speakerID.split(separator: ":")
-        guard parts.count == 3, parts[1] == "n", let number = Int(parts[2]) else { return nil }
-        return "Speaker \(number)"
-    }
+    static func speakerLabel(_ speakerID: String) -> String? { TranscriptPresentation.liveLabel(speakerID) }
 }

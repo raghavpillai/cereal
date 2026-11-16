@@ -1,9 +1,12 @@
-/* Tailwind utilities only: existing shared-note and account styles keep their reset. */
-@import "tailwindcss/theme.css";
+/* Tailwind utilities only: existing shared-note and account styles keep their reset.
+   The theme is a reference, inlined into each utility, and nothing is written to :root: Tailwind's own --text-sm,
+   --text-base, --radius-lg, --radius-xl and --font-mono would otherwise replace the design tokens of the same names
+   (styles/tokens.css) on every page for as long as this sheet is loaded. */
+@import "tailwindcss/theme.css" theme(reference inline);
 @import "tailwindcss/utilities.css" source(none);
 @source "./components/ui";
 @source "./components/admin";
-@theme inline {
+@theme inline reference {
  --color-background:var(--background);--color-foreground:var(--foreground);
  --color-card:var(--card);--color-card-foreground:var(--card-foreground);
  --color-popover:var(--popover);--color-popover-foreground:var(--popover-foreground);
@@ -24,7 +27,9 @@
  --background:var(--surface);--foreground:var(--ink);--card:var(--surface);--card-foreground:var(--ink);--popover:var(--surface-raised);--popover-foreground:var(--ink);
  --primary:var(--brand);--primary-foreground:var(--on-brand);--secondary:var(--wash-solid);--secondary-foreground:var(--ink-soft);
  --muted:var(--wash-solid);--muted-foreground:var(--ink-soft);--accent:var(--wash-solid);--accent-foreground:var(--ink);
- --destructive:var(--danger);--destructive-foreground:var(--surface);--border:var(--line-solid);--input:var(--line-strong);--ring:var(--focus);--radius:12px;
+ --destructive:var(--danger);--destructive-foreground:var(--surface);
+ /* Inputs and pickers are edged in --field-line, the 3:1 line a control needs when its border is its only edge; buttons carry their label and keep the lighter line. */
+--border:var(--line-solid);--input:var(--field-line);--ring:var(--focus);--radius:12px;
  /* One scale for every control on this page. Sizes below come from here and nowhere else.
     Height: inputs, select triggers, and any button that shares a row with one. Small: a button on its own in a row of text.
     Inset: the inner left/right padding of inputs and triggers; with the 1px border, content starts 13px in, and the
@@ -51,6 +56,9 @@
 
 /* ── Cards ────────────────────────────────────────────────────────────── */
 .instance-settings [data-slot=card]{min-width:0;border-style:solid;box-shadow:none}
+/* Loading and load errors stand where the cards will be, with the same inset. */
+.instance-settings>.admin-card{padding:var(--card-py) var(--card-px)}
+.instance-settings>.admin-card>.admin-loading{padding:var(--section-gap) 0}
 .instance-settings [data-slot=card-header]{padding:var(--card-py) var(--card-px)}
 .instance-settings [data-slot=card-content]{padding:0 var(--card-px) var(--card-py)}
 .instance-settings [data-slot=card-title]{font:500 14px/20px var(--font-ui);letter-spacing:0}
@@ -83,18 +91,24 @@
 .instance-settings [data-slot=button][data-size=icon]{width:var(--control-h-sm);height:var(--control-h-sm);padding:0}
 .instance-settings [data-slot=button] svg,.instance-select [data-slot=button] svg{width:14px;height:14px}
 .instance-settings [data-slot=button][data-variant=default]{border:1px solid var(--primary)}
-.instance-settings [data-slot=button][data-variant=outline]{border:1px solid var(--input)}
+.instance-settings [data-slot=button][data-variant=outline]{border:1px solid var(--line-strong)}
+/* A primary button that cannot be pressed yet is a quiet grey, not a faded gold: in dark, gold at half strength reads as olive.
+   While its request runs it keeps its colour, as Continue does in setup: data-busy, a spinner inside it, or the save row's spinner. */
+.instance-settings [data-slot=button]:is([data-variant=default],[data-variant=destructive]):disabled:not([data-busy]):not(:has(.animate-spin)):not(.instance-save:has(.animate-spin)>*){border-color:transparent;background:var(--wash-strong);color:var(--ink-faint);opacity:1}
 
 .instance-settings [data-slot=badge]{flex-shrink:0;height:20px;padding:0 6px;gap:4px;border-style:solid;border-radius:6px;font:400 var(--text-badge)/1 var(--font-ui);white-space:nowrap}
 .instance-settings [data-slot=badge] svg{width:11px;height:11px}
 
 /* A checkbox and its sentence: as tall as any other row, so a group reads as one column of rows. */
-.instance-settings .live-toggle{display:flex;flex-direction:row;justify-content:flex-start;align-items:center;gap:8px;min-height:var(--control-h);font-size:var(--text-control);line-height:18px;color:var(--foreground);cursor:pointer}
+/* The box sits on the first line, so a sentence that wraps on a phone keeps its box beside its start; one line is still a control tall. */
+.instance-settings .live-toggle{display:flex;flex-direction:row;justify-content:flex-start;align-items:flex-start;gap:8px;min-height:var(--control-h);padding:calc((var(--control-h) - 18px) / 2) 0;font-size:var(--text-control);line-height:18px;color:var(--foreground);cursor:pointer}
+.instance-settings .live-toggle>input{margin-top:1px}
 .instance-settings .remove-key{display:flex;flex-direction:row;align-items:center;gap:8px;min-height:20px;font-size:var(--text-label);line-height:16px;color:var(--muted-foreground);cursor:pointer}
 
 /* ── Identity ─────────────────────────────────────────────────────────── */
 .identity-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:32px;align-items:start}
-.logo-control{display:flex;align-items:center;gap:10px;min-height:var(--control-h)}
+.logo-control{display:flex;align-items:flex-start;gap:10px;min-height:var(--control-h)}
+.logo-control>div:nth-child(2){min-height:var(--control-h)}
 .team-logo-preview{display:grid;place-items:center;flex-shrink:0;width:var(--control-h);height:var(--control-h);border:1px solid var(--border);border-radius:var(--control-radius);background:var(--secondary)}
 .team-logo-preview>img{max-width:26px;max-height:26px;object-fit:contain}
 .logo-control>div:nth-child(2){display:flex;align-items:center;gap:10px;min-width:0}
@@ -110,6 +124,14 @@
 .provider-logo{display:inline-block;flex-shrink:0;width:20px;height:20px;object-fit:contain}
 .provider-details{display:flex;flex:1;min-width:0;flex-direction:column}
 .provider-details strong{font-size:var(--text-control);font-weight:500}
+/* Which key is saved, masked by the server ("sk-or-v1-…a1b2"), or the OpenAI-compatible server's address: under the name.
+   On a phone it is hidden here and shown in the open editor instead (see the phone rules below). */
+.provider-hint{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:11px/15px var(--font-mono);color:var(--muted-foreground)}
+/* A long provider name has a short form for a phone ("Compatible"); the full name stays in the title and for screen readers. */
+.provider-details strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.provider-name-short{display:none}
+.settings-optional{margin-left:4px;font-weight:400;color:var(--muted-foreground)}
+.provider-editor .settings-help+.settings-label{margin-top:var(--row-gap)}
 .provider-connected>span,.provider-disconnected>span{display:block;width:5px;height:5px;border-radius:50%;background:currentColor}
 .instance-settings .provider-row>[data-slot=button]{flex-shrink:0;padding:0 8px;gap:4px;font-weight:400}
 .provider-security{display:flex;align-items:center;gap:6px;margin:var(--row-gap) 0 0;font-size:var(--text-help);line-height:16px;color:var(--muted-foreground)}
@@ -123,6 +145,7 @@
 /* ── Models and Sign-in: a name on the left, its rows on the right ────── */
 .model-section{display:grid;grid-template-columns:128px minmax(0,1fr);gap:var(--section-gap);align-items:start}
 .model-section+.model-section{margin-top:var(--section-gap);padding-top:var(--section-gap);border-top:1px solid var(--border)}
+.model-section+.admin-google-only{margin-top:var(--section-gap);padding-top:var(--section-gap);border-top:1px solid var(--border)}
 /* As tall as a control and centred, so the name lines up with the first row beside it. */
 .model-section-heading{display:flex;flex-direction:column;justify-content:center;gap:2px;min-width:0;min-height:var(--control-h)}
 .instance-settings .model-section-heading h3{margin:0;font:500 var(--text-control)/18px var(--font-ui);color:var(--foreground)}
@@ -176,6 +199,8 @@
 .environment-note{margin:0;padding:12px;border:1px solid var(--border);border-radius:8px;font-size:var(--text-control);line-height:18px;color:var(--muted-foreground);overflow-wrap:anywhere}
 .environment-note code{font-size:12px;color:var(--foreground)}
 /* Storage: the same one-column field stack as the Google client; the test button and its result share a row when there is room. */
+/* Only when the section appears because of a choice just made, not when the form is drawn again after a Save. */
+.instance-settings .storage-bucket.just-chosen,.instance-settings .admin-google-only.just-chosen{animation:fade-in var(--dur-snappy) var(--ease-fade) backwards,rise var(--dur-settle) var(--spring-settle) backwards}
 .storage-fields{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--section-gap)}
 .storage-choice{display:grid;grid-template-columns:minmax(0,1fr);gap:0}
 :root .instance-settings .storage-choice input[type=radio]{display:inline-block;width:16px;height:16px;min-height:0;min-width:0;padding:0;border:0}
@@ -210,12 +235,16 @@
 .instance-save>span>svg{flex-shrink:0}
 .instance-save>button{flex-shrink:0}
 .instance-footer{display:flex;align-items:center;justify-content:space-between;gap:var(--section-gap);margin-top:var(--section-gap);padding-top:var(--section-gap);border-top:1px solid var(--border);font-size:var(--text-help);color:var(--muted-foreground)}
-.instance-footer>div{display:flex;align-items:center;gap:var(--section-gap)}
-.instance-footer a{display:inline-flex;align-items:center;gap:3px;text-decoration:none}
-.instance-settings .instance-footer [data-slot=button]{margin-right:-10px;font-size:var(--text-help);font-weight:400}
+.instance-footer>div{display:flex;flex-wrap:wrap;align-items:center;gap:4px var(--section-gap)}
+/* Three links of one kind: the same size and colour, no frame and no underline until hovered, 16px apart. */
+/* 4px of padding inside, taken back outside, so a focus ring clears the letters without moving them. */
+.instance-footer a,.instance-settings .instance-footer [data-slot=button],.instance-settings .instance-footer .instance-setup-again{display:inline-flex;align-items:center;gap:4px;height:auto;min-height:24px;padding:0 4px;margin:0 -4px;border:0;border-radius:4px;background:none;font:400 var(--text-help)/16px var(--font-ui);text-decoration:none}
+:root .instance-settings .instance-footer :is(a,button):hover:not(:disabled){color:var(--foreground);text-decoration:underline;text-underline-offset:3px;background:none}
+/* Every icon in the row comes after its words, as the arrow after "Google Calendar" does. */
+.instance-settings .instance-footer [data-slot=button] svg{order:1;width:12px;height:12px}
 
 /* ── Dialogs ──────────────────────────────────────────────────────────── */
-.instance-settings .admin-dialog{width:min(440px,calc(100% - 32px));border-radius:12px}
+.instance-settings .admin-dialog{width:min(440px,calc(100% - 32px));border-radius:var(--radius-lg)}
 .instance-settings .admin-dialog-title{padding:var(--card-py) var(--card-px)}
 .instance-settings .admin-dialog-title h2{font:400 22px/1.3 var(--font-display)}
 .instance-settings .admin-dialog-body{gap:12px;padding:var(--card-py) var(--card-px)}
@@ -253,6 +282,16 @@
  .instance-settings,.instance-select{--control-h:40px;--control-h-sm:32px;--card-px:16px}
  .instance-settings input:not([type=checkbox]):not([type=file]):not([type=color]):not([type=radio]),.instance-select .model-search input{font-size:16px}
  .instance-heading{margin-bottom:16px}
+ /* Beside the badge and the button the preview does not fit at this width; it is in the open editor instead. */
+ .provider-hint{display:none}
+ .provider-name-short{display:inline}
+ /* Beside a "Not connected" badge and "Connect" a name gets under 70px at 390px: the status goes under the name instead. */
+ .instance-settings .provider-row{display:grid;grid-template-columns:28px minmax(0,1fr) auto;align-items:center;column-gap:10px;row-gap:4px;padding-top:10px;padding-bottom:10px}
+ .instance-settings .provider-row>.provider-icon{grid-row:1/3}
+ .instance-settings .provider-row>.provider-details{grid-column:2;grid-row:1}
+ .instance-settings .provider-row>[data-slot=badge]{grid-column:2;grid-row:2;justify-self:start}
+ .instance-settings .provider-row>[data-slot=button]{grid-column:3;grid-row:1/3}
+ .provider-name-long{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
  .identity-fields{grid-template-columns:minmax(0,1fr);gap:var(--section-gap)}
  .logo-control>div:nth-child(2){flex-wrap:wrap;gap:4px 10px}
  .provider-list{grid-template-columns:minmax(0,1fr)}
@@ -267,6 +306,5 @@
  .administrator-row{min-height:52px}
  .administrator-person{flex-direction:column;align-items:flex-start;gap:0}
  .instance-footer{flex-direction:column;align-items:flex-start;gap:var(--row-gap)}
- .instance-settings .instance-footer [data-slot=button]{margin-right:0}
 }
 @media(prefers-reduced-motion:reduce){.instance-settings *,.instance-select *{animation:none!important;transition:none!important}}

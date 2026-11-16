@@ -9,7 +9,8 @@ struct ChatTests {
         var answer = ""
         for await chunk in LocalChatService().reply(to: "What did we decide?", context: note) { answer += chunk }
         #expect(answer.contains("Review the blue prototype on Monday."))
-        #expect(answer.contains("on-device preview"))
+        #expect(answer.contains("Saved note excerpt"))
+        #expect(!answer.contains("preview"))
         #expect(!answer.contains("six months"))
         #expect(!answer.contains("must-have"))
     }

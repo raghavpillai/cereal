@@ -1,5 +1,5 @@
 import { Effect } from "effect"
-import { mkdtemp, readdir, rm } from "node:fs/promises"
+import { mkdtemp, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import type { ImportNoteInput, MeetingContextDTO } from "@meeting-notes/contracts"
@@ -16,20 +16,11 @@ import { makeGoogleService } from "../src/google"
 import { makeMemoryNoteParticipantsService, makeNoteParticipantsService } from "../src/note-participants"
 import { parseCalendarFeed } from "../src/calendar-feed"
 import { secretBoxFromKey } from "../src/admin-secrets"
-import { ProviderFailure } from "../src/providers"
 
 /** The PostgreSQL suites run only against a throwaway database named mn_test_<hex>. */
 export const postgresEnabled = process.env.RUN_PG_TESTS === "1" && !!process.env.DATABASE_URL && /^\/mn_test_[a-f0-9]+$/.test(new URL(process.env.DATABASE_URL).pathname)
 export type Kind = "memory" | "postgres"
 export type Account = "alice" | "bob"
-
-/** A tenth of a second of audio; `tone` makes each part's bytes its own (parts are stored by their hash). */
-export function wav(tone = 0) {
-  const b = Buffer.alloc(44 + 3200, tone)
-  b.write("RIFF"); b.writeUInt32LE(b.length - 8, 4); b.write("WAVEfmt ", 8); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22)
-  b.writeUInt32LE(16000, 24); b.writeUInt32LE(32000, 28); b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34); b.write("data", 36); b.writeUInt32LE(3200, 40)
-  return b
-}
 
 /**
  * The whole API over HTTP (`api.handler`), with two signed-in people, shared ICS calendars, the meeting
@@ -37,7 +28,7 @@ export function wav(tone = 0) {
  * wires it. Every request goes through the typed routes, so schema limits and the import's own size limit
  * are exercised.
  */
-export async function stack(kind: Kind, options: { clock?: () => Date; transcribeFails?: () => boolean } = {}) {
+export async function stack(kind: Kind, options: { clock?: () => Date } = {}) {
   const cleanup: Array<() => Promise<unknown>> = []
   const dir = await mkdtemp(join(tmpdir(), "meeting-import-"))
   cleanup.push(() => rm(dir, { recursive: true, force: true }))
@@ -53,8 +44,7 @@ export async function stack(kind: Kind, options: { clock?: () => Date; transcrib
   const contexts = db ? makePrismaGoogleStore(db) : makeMemoryGoogleStore(repository, shared)
   const administration = makeAdministrationService(shared, undefined, { clock: options.clock })
   const google = makeGoogleService(contexts, secretBoxFromKey(Buffer.alloc(32, 3)), { clientId: "client", clientSecret: "secret", baseURL: "https://notes.example.test", ...(options.clock ? { clock: options.clock } : {}) })
-  const processing = makeProcessingService(repository, { storageDir: dir, worker: false, providers: {
-    transcribe: input => options.transcribeFails?.() ? Effect.fail(new ProviderFailure("transcription", "unavailable")) : Effect.succeed([{ id: crypto.randomUUID(), channel: input.channel, speakerId: "speaker_0", speakerLabel: null, text: "Recorded words.", isFinal: true, startMs: input.startMs, endMs: input.startMs + 100 }]),
+  const processing = makeProcessingService(repository, { storageDir: dir, providers: {
     generate: () => Effect.succeed("## Generated"), chat: () => Effect.succeed("answer"),
   } })
   const token = "import-test-bootstrap-token-at-least-32-characters"
@@ -86,15 +76,12 @@ export async function stack(kind: Kind, options: { clock?: () => Date; transcrib
     return events
   }
   return {
-    kind, ids, db, call, send, calendar, processing, dir, sendRaw: (request: Request) => api.handler(request),
-    /** How many stored audio files there are for one note (the storage keeps a note's parts under its id). */
-    audioFiles: async (noteId: string) => (await readdir(dir, { recursive: true, withFileTypes: true })).filter(entry => entry.isFile() && join(entry.parentPath, entry.name).includes(noteId)).length,
-    /** One recorded part, uploaded and (unless told otherwise) transcribed, so it is `ready`. */
-    record: async (account: Account, noteId: string, sequence = 0, transcribe = true) => {
-      const uploaded = await call(account, `/notes/${noteId}/audio/chunks/${crypto.randomUUID()}`, "PUT", { channel: "system", sequence, startMs: sequence * 100, audioBase64: wav(sequence + 1).toString("base64") })
-      if (uploaded.status !== 200) throw new Error(`upload answered ${uploaded.status}: ${uploaded.text}`)
-      if (transcribe) await processing.runPending()
-      return uploaded.json
+    kind, ids, db, repository, call, send, calendar, processing, dir, sendRaw: (request: Request) => api.handler(request),
+    /** A stretch of recording: the words the live session stores for it. */
+    record: async (_account: Account, noteId: string, sequence = 0) => {
+      const startMs = sequence * 100
+      await Effect.runPromise(repository.live!.append({ noteId, sessionId: crypto.randomUUID(), channel: "system", speakers: {}, coverage: [{ fromMs: startMs, toMs: startMs + 100 }],
+        turns: [{ speakerKey: "speaker_0", words: [{ text: "Recorded words ", startMs, endMs: startMs + 100 }] }] }))
     },
     close: async () => { for (const dispose of cleanup) await dispose().catch(() => undefined) },
   }

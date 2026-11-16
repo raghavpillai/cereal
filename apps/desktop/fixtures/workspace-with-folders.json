@@ -1,0 +1,14 @@
+{
+  "notes": [
+    {"id": 1, "title": "Kickoff with Northstar", "body": "Agenda and owners", "enhanced": "## Kickoff\n\n- Owners agreed", "date": "2026-11-12", "time": "10:30 AM", "duration": "32 min", "folder_id": 101, "favorite": true, "trashed": false},
+    {"id": 2, "title": "Hiring sync", "body": "Two candidates", "enhanced": "", "date": "2026-11-11", "time": "9:00 AM", "duration": "24 min", "folder_id": 102, "favorite": false, "trashed": false},
+    {"id": 3, "title": "Filed in a folder that no longer exists", "body": "Still mine", "date": "2026-11-10", "time": "3:30 PM", "duration": "12 min", "folder_id": 999, "favorite": false, "trashed": false},
+    {"id": 4, "title": "Never filed", "body": "Plain note", "date": "2026-11-09", "time": "11:00 AM", "duration": "5 min", "folder_id": null, "favorite": false, "trashed": false},
+    {"id": 5, "title": "Trashed while filed", "body": "In Trash", "date": "2026-11-08", "time": "1:00 PM", "duration": "8 min", "folder_id": 101, "favorite": false, "trashed": true}
+  ],
+  "folders": [
+    {"id": 101, "name": "Clients"},
+    {"id": 102, "name": "Hiring"}
+  ],
+  "settings": {"dark_mode": true, "auto_enhance": true, "show_upcoming": false, "space_banner_dismissed": true}
+}

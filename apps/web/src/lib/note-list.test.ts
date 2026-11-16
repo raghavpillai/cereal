@@ -9,7 +9,7 @@ function row(n: number, fields: Partial<NoteSummaryDTO> = {}): NoteSummaryDTO {
   return {
     id: id(n), title: `Note ${n}`, date: '2026-11-13', duration: '', createdAt: new Date(2026, 10, 13, 9, n).toISOString(), updatedAt: new Date(2026, 10, 13, 9, n).toISOString(),
     recordingState: 'idle', generationState: 'idle', transcriptRevision: 0, generatedRevision: null, hasBody: false, hasSummary: false, hasTranscript: false, speakerCount: 0,
-    excerpt: '', meeting: null, attendees: { people: [], others: 0, total: 0 }, organizationId: null, folders: [], ...fields,
+    excerpt: '', meeting: null, attendees: { people: [], others: 0, total: 0 }, organizationId: null, ...fields,
   }
 }
 const result = (n: number): NoteSearchResultDTO => ({ note: row(n), matchedIn: ['title'], title: [{ text: `Note ${n}`, hit: true }], excerpt: null })

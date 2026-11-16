@@ -93,7 +93,7 @@ struct ServerHomeView: View {
             }.scrollIndicators(.hidden).refreshable { await refresh() }
             .onChange(of: listSignature, initial: true) { regroup() }
         } standalone: {
-            GlassCircleButton(systemImage: "folder") { SidebarModel.shared.open() }
+            GlassCircleButton(systemImage: "sidebar.left") { SidebarModel.shared.open() }
         } rail: {
             RailGroup {
                 RailIcon(systemImage: "magnifyingglass") { router.path.append(.search) }
@@ -314,8 +314,8 @@ struct ServerHomeView: View {
         defer { creating = false }
         do {
             let note = try await session.notes.create(title: "", body: "")
-            router.serverCapture = ServerCaptureTarget(NoteRef(account: account, id: note.id))
-        } catch { creationError = error.localizedDescription }
+            router.serverCapture = ServerCaptureTarget(NoteRef(account: account, id: note.id), createdForRecording: true)
+        } catch { if let shown = ErrorText.shown(error) { creationError = shown } }
     }
 
     private var header: some View {
@@ -419,15 +419,15 @@ struct ServerHomeView: View {
     }
 }
 
-/// A note's row. It decides the tile itself, so audio being delivered for one
-/// note redraws rows, not the whole Home.
+/// A note's row. It decides the tile itself, so a recording starting or
+/// stopping redraws rows, not the whole Home.
 private struct ServerHomeNoteRow: View {
     let item: ServerHomeRow
     @Environment(ServerRecordingController.self) private var recording
 
     var body: some View {
-        // Audio still on this phone comes first; otherwise a meeting shows the other party's initial.
-        NoteListRow(tile: recording.isActive(item.ref) || recording.hasPendingAudio(item.ref) ? .phone : item.tile,
+        // The note being recorded on this phone comes first; otherwise a meeting shows the other party's initial.
+        NoteListRow(tile: recording.isActive(item.ref) ? .phone : item.tile,
                     title: item.title, subtitle: item.subtitle)
     }
 }

@@ -40,11 +40,11 @@ export function NotePage({ noteId }: { noteId: string }) {
     <p>Open it in the Cereal app to follow along. Its notes will be here once the meeting has ended.</p>
     <div className="reader-state-actions">{appURL && <a className="app-pill is-primary" href={appURL}><span>Open in Cereal</span></a>}<Link to="/notes" className="app-pill"><span>All notes</span></Link></div>
   </section>
-  return <NoteReader key={noteId} note={note ?? provisionalNote(row!)} row={note ? null : row} folder={(row ?? notes.summary(noteId))?.folders[0]?.name ?? null} appURL={appURL} refreshError={fresh.error} retry={fresh.reload} focusTitle={row !== null} />
+  return <NoteReader key={noteId} note={note ?? provisionalNote(row!)} row={note ? null : row} appURL={appURL} refreshError={fresh.error} retry={fresh.reload} focusTitle={row !== null} />
 }
 
 /** `row` is set while only the list row is known: the heading is real and the text is still on its way. */
-function NoteReader({ note, row, folder, appURL, refreshError, retry, focusTitle }: { note: NoteDTO; row: NoteSummaryDTO | null; folder: string | null; appURL: string | null; refreshError: string | null; retry: () => Promise<void>; focusTitle: boolean }) {
+function NoteReader({ note, row, appURL, refreshError, retry, focusTitle }: { note: NoteDTO; row: NoteSummaryDTO | null; appURL: string | null; refreshError: string | null; retry: () => Promise<void>; focusTitle: boolean }) {
   const { client, expired, meetings, session } = useNotes()
   const facts = noteFacts(note), { title } = facts
   const has = row ? { enhanced: row.hasSummary, body: row.hasBody, transcript: row.hasTranscript } : { enhanced: facts.hasSummary, body: facts.hasBody, transcript: facts.hasTranscript }
@@ -86,7 +86,6 @@ function NoteReader({ note, row, folder, appURL, refreshError, retry, focusTitle
         {meeting
           ? <Popover label="Meeting details" menu={false} className="note-details-card" buttonClassName="note-chip is-button" button={<DetailsChip date={date} people={people} />}>{() => <MeetingCard meeting={meeting} />}</Popover>
           : <span className="note-chip"><DetailsChip date={date} people={people} /></span>}
-        {folder && <span className="note-chip is-folder"><Icon name="folder" size={14} /><span>{folder}</span></span>}
       </div>
       <div className="note-content" key={loading ? `${shown}-loading` : shown} id={`note-${shown}`} role={has.enhanced ? 'tabpanel' : undefined} aria-label={has.enhanced ? (shown === 'enhanced' ? 'Enhanced' : 'My notes') : undefined} aria-busy={loading && !refreshError ? true : undefined}>
         {refreshError && !row && <p className="note-quiet" role="alert">This note could not be refreshed, so you may be reading an earlier copy.</p>}

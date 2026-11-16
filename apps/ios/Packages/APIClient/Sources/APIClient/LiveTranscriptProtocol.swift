@@ -121,7 +121,18 @@ public enum LiveWire {
             public var from: String
             public var to: String
         }
+        /// A stored segment that now carries another speaker or label ("Me", "Room speaker N", "Speaker N").
+        public struct Relabel: Decodable, Equatable, Sendable {
+            public var segmentId: String
+            public var speakerId: String
+            public var speakerLabel: String
+            public init(segmentId: String, speakerId: String, speakerLabel: String) {
+                self.segmentId = segmentId; self.speakerId = speakerId; self.speakerLabel = speakerLabel
+            }
+        }
         public var merges: [Merge]
+        /// Applied after `merges`. Absent when there are none.
+        public var relabels: [Relabel]?
     }
 
     public struct Gap: Decodable, Equatable, Sendable {
@@ -185,6 +196,9 @@ public enum LiveWire {
         public static let unauthenticated = 4401
         public static let notFound = 4404
         public static let clientTooSlow = 4408
+        /// The server is restarting this stream, for one when its provider session was lost.
+        /// Dial again at once and replay from the `ready` that follows.
+        public static let serviceRestart = 1012
         public static let replaced = 4409
         public static let overLimit = 4429
         public static let providerUnavailable = 4503

@@ -1,7 +1,7 @@
 import {expect,test} from 'bun:test'
-import {addAllowedEmails,allowedEmailEntry,defaultLiveModel,googleClientReady,instanceDraft,instancePatch,instanceProblem,storageProblem,storageTestInput,bucketReady,appsProblem,liveLimitsProblem} from './instance-settings'
+import {savedGoogleFields,storagePatch,savedKeyText,addAllowedEmails,allowedEmailEntry,defaultLiveModel,googleClientReady,instanceDraft,instancePatch,instanceProblem,storageProblem,storageTestInput,bucketReady,appsProblem,liveLimitsProblem} from './instance-settings'
 import type {AdminSettingsDTO} from '@meeting-notes/contracts'
-const saved:AdminSettingsDTO={instanceName:'Team',instanceLogo:null,providers:[{id:'openai',configured:true,source:'stored'}],chatModels:[{provider:'openai',model:'gpt-test'}],generationModel:{provider:'openai',model:'gpt-test'},transcriptionModel:{provider:'elevenlabs',model:'scribe_v3'},languageModel:'legacy/model',openRouterConfigured:false,elevenLabsConfigured:false,openRouterSource:'none',elevenLabsSource:'none',calendarRefreshMinutes:15,calendarLookAheadDays:30,updatedAt:null}
+const saved:AdminSettingsDTO={instanceName:'Team',instanceLogo:null,providers:[{id:'openai',configured:true,source:'stored'}],chatModels:[{provider:'openai',model:'gpt-test'}],generationModel:{provider:'openai',model:'gpt-test'},liveTranscriptionModel:{provider:'elevenlabs',model:'scribe_v3_live'},languageModel:'legacy/model',openRouterConfigured:false,elevenLabsConfigured:false,openRouterSource:'none',elevenLabsSource:'none',calendarRefreshMinutes:15,calendarLookAheadDays:30,updatedAt:null}
 test('instance edits preserve untouched keys and native calendar preferences',()=>{
  const draft=instanceDraft(saved);expect(instancePatch(draft,saved)).toEqual({})
  expect(instancePatch({...draft,instanceName:' New name '},saved)).toEqual({instanceName:'New name'})
@@ -10,15 +10,35 @@ test('instance edits preserve untouched keys and native calendar preferences',()
  expect(instanceProblem({...draft,chatModels:[]})).toContain('at least one')
  expect(instanceProblem({...draft,keys:{...draft.keys,openai:'line-one\nline-two'}})).toContain('single-line')
 })
-test('live transcription is patched only when it changes, and null turns it off',()=>{
+test('live transcription is always on: only a different live model is patched',()=>{
  const on:AdminSettingsDTO={...saved,liveTranscriptionModel:{provider:'elevenlabs',model:'scribe_v3_live'}},draft=instanceDraft(on)
  expect(draft.liveTranscriptionModel).toEqual({provider:'elevenlabs',model:'scribe_v3_live'})
  expect(instancePatch(draft,on)).toEqual({})
- expect(instancePatch({...draft,liveTranscriptionModel:null},on)).toEqual({liveTranscriptionModel:null})
  expect(instancePatch({...draft,liveTranscriptionModel:{provider:'elevenlabs',model:'scribe_v2_realtime'}},on)).toEqual({liveTranscriptionModel:{provider:'elevenlabs',model:'scribe_v2_realtime'}})
- // A server that does not report the setting reads as off, and stays untouched until it is turned on.
- const older=instanceDraft(saved);expect(older.liveTranscriptionModel).toBeNull();expect(instancePatch(older,saved)).toEqual({})
- expect(instancePatch({...older,liveTranscriptionModel:defaultLiveModel},saved)).toEqual({liveTranscriptionModel:defaultLiveModel})
+ expect(instanceDraft(saved).liveTranscriptionModel).toEqual(defaultLiveModel)
+ // The batch speech-to-text model is no longer a choice: nothing in the draft sends it.
+ expect(JSON.stringify(instancePatch({...draft,liveTranscriptionModel:{provider:'elevenlabs',model:'scribe_v2_realtime'}},on))).not.toContain('transcriptionModel"')
+})
+test('the OpenAI-compatible server: address patched as the server stores it, optional short key, problems said before saving',()=>{
+ const connected:AdminSettingsDTO={...saved,openAiCompatible:{baseUrl:'http://10.0.0.5:11434/v1',apiKeySet:false}},draft=instanceDraft(connected)
+ expect(draft.compatibleBaseUrl).toBe('http://10.0.0.5:11434/v1');expect(instancePatch(draft,connected)).toEqual({})
+ // The same address typed with a trailing slash is no change; another one is; clearing it disconnects.
+ expect(instancePatch({...draft,compatibleBaseUrl:'http://10.0.0.5:11434/v1/ '},connected)).toEqual({})
+ expect(instancePatch({...draft,compatibleBaseUrl:'http://localhost:1234/v1'},connected)).toEqual({openAiCompatibleBaseUrl:'http://localhost:1234/v1'})
+ expect(instancePatch({...draft,compatibleBaseUrl:''},connected)).toEqual({openAiCompatibleBaseUrl:null})
+ // A short key is fine for this provider (and not for the hosted ones).
+ expect(instanceProblem({...draft,keys:{...draft.keys,openai_compatible:'tok'}})).toBeNull()
+ expect(instancePatch({...draft,keys:{...draft.keys,openai_compatible:'tok'}},connected)).toEqual({openAiCompatibleApiKey:'tok'})
+ expect(instanceProblem({...draft,keys:{...draft.keys,openai:'short'}})).toContain('API key')
+ for(const bad of ['ftp://host/v1','http://user:pass@host/v1','http://host/v1?x=1','http://host/v1#top','localhost:11434'])expect(instanceProblem({...draft,compatibleBaseUrl:bad})).toStartWith('OpenAI-compatible:')
+ // A chat or notes model on that server needs its address.
+ expect(instanceProblem({...draft,compatibleBaseUrl:'',chatModels:[{provider:'openai_compatible',model:'llama3.2:3b'}]})).toContain('address')
+})
+test('a saved key reads by its masked hint, and says so when the environment provides it',()=>{
+ expect(savedKeyText({source:'stored',hint:'sk-or-v1-…a1b2'})).toBe('sk-or-v1-…a1b2 is saved. Type a new key to replace it')
+ expect(savedKeyText({source:'environment',hint:'sk-…k3Jd'})).toBe('sk-…k3Jd is set on the server. Type a key to use another')
+ expect(savedKeyText({source:'stored',hint:null})).toBe('A key is saved. Type a new key to replace it')
+ expect(savedKeyText({source:'none'})).toBeNull();expect(savedKeyText(undefined)).toBeNull()
 })
 const signIn={password:true,google:false,allowedEmails:['someone@example.com'],googleClientId:null,googleClientSecretSet:false,googleRedirectUris:['https://notes.example.test/api/v1/auth/google/callback','https://notes.example.test/api/integrations/google/callback']}
 const clientId='1234567890-fixture.apps.googleusercontent.com',clientSecret='GOCSPX-fixture-client-secret-value'
@@ -108,6 +128,30 @@ test('storage problems are caught before saving: S3 without a bucket or keys, an
  expect(storageProblem({...base,prefix:'a b'},false)).not.toBeNull()
  expect(storageProblem({...base,secretAccessKey:'short'},false)).toBe('Enter the secret access key exactly as the store shows it.')
  expect(bucketReady({...base,removeSecret:true},true)).toBe(false)
+})
+
+test('with Local disk chosen the hidden bucket fields are neither checked, sent, nor tested',()=>{
+ const local={backend:'local' as const,endpoint:'http://minio:9000',region:'US East',bucket:'My_Bucket',prefix:'a b',forcePathStyle:true,accessKeyId:'AKIAEXAMPLE0001',secretAccessKey:'short',removeSecret:false}
+ const savedS3={backend:'s3' as const,source:'stored' as const,endpoint:'https://store.example.com',region:'auto',bucket:'cereal-files',prefix:'team/',forcePathStyle:false,accessKeyId:'AKIAEXAMPLE0001',secretAccessKeySet:true}
+ // What the validator reproduced: S3 chosen, a bad endpoint or bucket typed, then back to Local disk.
+ expect(storageProblem(local,false)).toBeNull()
+ expect(instanceProblem({...instanceDraft({...saved,storage:savedS3}),storage:local},{...saved,storage:savedS3})).toBeNull()
+ // Only the switch is saved; the stored bucket stays as it was, and the test tries the disk alone.
+ expect(storagePatch(local,savedS3)).toEqual({backend:'local'})
+ expect(storagePatch(local,{...savedS3,backend:'local'})).toEqual({})
+ expect(storageTestInput(local)).toEqual({backend:'local'})
+ // The same fields are still checked once S3 is chosen again.
+ expect(storageProblem({...local,backend:'s3'},false)).toBe('The storage endpoint must use https.')
+})
+test('choosing email and password sets the hidden Google edits aside: they are not saved',()=>{
+ const stored:AdminSettingsDTO={...saved,signIn:{...signIn,password:false,google:true,allowedEmails:['@example.org'],googleClientId:clientId,googleClientSecretSet:true}}
+ const draft=instanceDraft(stored),edited={...draft,signIn:{...draft.signIn!,allowedEmails:['@example.org','new@example.com'],googleClientId:'another-client-id.apps',googleClientSecret:'another-secret-value',removeGoogleSecret:false}}
+ expect(instancePatch(edited,stored).signIn).toEqual({allowedEmails:['@example.org','new@example.com'],googleClientId:'another-client-id.apps',googleClientSecret:'another-secret-value'})
+ const hidden={...edited,signIn:savedGoogleFields(edited.signIn!,stored.signIn!)}
+ expect(instancePatch(hidden,stored)).toEqual({})
+ expect(hidden.signIn).toEqual(draft.signIn!)
+ // A removal typed before switching is not saved either.
+ expect(instancePatch({...draft,signIn:savedGoogleFields({...draft.signIn!,removeGoogleSecret:true},stored.signIn!)},stored)).toEqual({})
 })
 
 test('live limits and the iPhone app are patched only when they change, and checked before saving',()=>{

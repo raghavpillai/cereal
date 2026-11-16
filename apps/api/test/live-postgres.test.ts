@@ -34,7 +34,7 @@ describe.skipIf(!enabled)("live transcription on PostgreSQL", () => {
     return { ...made, recordingNote }
   }
 
-  test("finals are stored as live segments with note-scoped speakers and coverage; a covered part needs no batch call", async () => {
+  test("finals are stored as live segments with note-scoped speakers and coverage", async () => {
     const script = meeting(), f = await fixture({ script }), db = resources!.database
     const noteId = await f.recordingNote()
     const client = f.connect(noteId)
@@ -54,19 +54,17 @@ describe.skipIf(!enabled)("live transcription on PostgreSQL", () => {
     client.mark("end")
     await client.until(() => client.closed, "close")
     const coverage = await db.liveCoverage.findMany({ where: { noteId } })
-    expect(coverage.map(row => [row.source, row.fromMs, row.toMs])).toEqual([["live", 0, 9000]])
-    await f.uploadPart(noteId, script.pcm, 0, 0)
-    await f.settleParts(noteId)
-    expect(f.batchCalls).toEqual([])
-    expect((await db.audioChunk.findMany({ where: { noteId } })).map(row => [row.state, row.resolution])).toEqual([["ready", "live"]])
-    expect((await f.note(noteId)).transcriptRevision).toBe(3)
+    expect(coverage.map(row => [row.fromMs, row.toMs])).toEqual([[0, 9000]])
+    // Notes can be generated as soon as the recording stops.
+    await Effect.runPromise(resources!.repository.recording(noteId, "stop"))
+    expect(await Effect.runPromise(resources!.repository.beginGeneration(noteId, 3, crypto.randomUUID()))).not.toBeNull()
     // Deleting the note removes the ledger and the speakers with it.
     await Effect.runPromise(resources!.repository.deleteNote(noteId))
     expect(await db.liveCoverage.count({ where: { noteId } })).toBe(0)
     expect(await db.noteSpeaker.count({ where: { noteId } })).toBe(0)
   })
 
-  test("a gap is filled from the durable part: each line once, live text untouched, the part recorded as mixed", async () => {
+  test("a skipped backlog is declared as a gap and has no text; the ledger holds only what the stream covered", async () => {
     const script = encodeFakeSpeech([
       { atMs: 200, text: "the kestrel migration moved to march", speaker: "a" },
       { atMs: 3000, text: "halvorsen renewal is four hundred thousand", speaker: "b" },
@@ -92,20 +90,18 @@ describe.skipIf(!enabled)("live transcription on PostgreSQL", () => {
     await second.until(() => second.finals().some(message => message.segment.text === "castellane wants evidence this month"), "final after the gap")
     second.mark("end")
     await second.until(() => second.closed, "close")
-    await f.uploadPart(noteId, script.pcm, 0, 0)
-    await f.settleParts(noteId)
     const after = await f.note(noteId)
-    for (const line of script.lines) expect(occurrences(after, line.text), line.text).toBe(1)
-    expect(f.batchCalls).toHaveLength(1)
-    expect(f.batchCalls[0]!.keep).toEqual([{ fromMs: 2800, toMs: 11_500 }])
-    expect((await db.audioChunk.findMany({ where: { noteId } })).map(row => row.resolution)).toEqual(["mixed"])
-    expect((await db.transcriptSegment.findMany({ where: { noteId }, orderBy: { startMs: "asc" } })).map(row => row.origin)).toEqual(["live", "batch", "batch", "batch", "live"])
-    expect((await db.liveCoverage.findMany({ where: { noteId }, orderBy: { fromMs: "asc" } })).map(row => [row.source, row.fromMs, row.toMs])).toEqual([["live", 0, 2800], ["batch", 2800, 11_500], ["live", 11_500, 15_000]])
+    expect(after.transcriptSegments.map(segment => segment.text)).toEqual(["the kestrel migration moved to march", "castellane wants evidence this month"])
+    expect((await db.transcriptSegment.findMany({ where: { noteId }, orderBy: { startMs: "asc" } })).map(row => row.origin)).toEqual(["live", "live"])
+    // The skipped stretch is stored, and the note shows it as missing.
+    expect((await db.liveGap.findMany({ where: { noteId } })).map(row => [row.fromMs, row.toMs, row.reason])).toEqual([[2800, 11_500, "resume_window_exceeded"]])
+    expect(after.transcriptGaps).toEqual([{ channel: "system", fromMs: 2800, toMs: 11_500 }])
+    expect((await db.liveCoverage.findMany({ where: { noteId }, orderBy: { fromMs: "asc" } })).map(row => [row.fromMs, row.toMs])).toEqual([[0, 2800], [11_500, 15_000]])
     for (const message of [...first.finals(), ...second.finals()]) expect(after.transcriptSegments.find(segment => segment.id === message.segment.id)).toEqual(message.segment)
   })
 
-  test("a batch provider without word times replaces live text inside the part; speakers can be merged", async () => {
-    const script = meeting(), f = await fixture({ script, batchWordTimes: false, config: { endWaitMs: 200 } }), db = resources!.database
+  test("speakers the recogniser merges are relabelled in storage", async () => {
+    const script = meeting(), f = await fixture({ script, config: { endWaitMs: 200 } }), db = resources!.database
     const noteId = await f.recordingNote()
     const client = f.connect(noteId)
     await client.hello(stream())
@@ -118,58 +114,50 @@ describe.skipIf(!enabled)("live transcription on PostgreSQL", () => {
     expect(merged[1]!.mergedIntoId).toBe(merged[0]!.id)
     client.mark("end")
     await client.until(() => client.closed, "close")
-    await f.uploadPart(noteId, script.pcm, 0, 0)
-    await f.settleParts(noteId)
-    const stored = await f.note(noteId)
-    for (const line of script.lines) expect(occurrences(stored, line.text), line.text).toBe(1)
-    expect(await db.transcriptSegment.count({ where: { noteId, origin: "live" } })).toBe(0)
-    expect((await db.audioChunk.findMany({ where: { noteId } })).map(row => row.resolution)).toEqual(["batch"])
-    expect((await db.liveCoverage.findMany({ where: { noteId } })).map(row => [row.source, row.fromMs, row.toMs])).toEqual([["batch", 0, 9000]])
   })
 
-  test("Stop and Resume on a new provider session: the stored voices are found again and keep their numbers", async () => {
+  test("Stop and Resume on a new provider session: a channel's only voice keeps its number, and the microphone stays Me", async () => {
     const eleven = (name: string) => `${name} one two three four five six seven eight nine ten`
     const script = encodeFakeSpeech([
-      { atMs: 200, text: eleven("arjun"), speaker: "arjun" }, { atMs: 4000, text: eleven("priya"), speaker: "priya" },
-      { atMs: 10_200, text: eleven("priya"), speaker: "priya" }, { atMs: 14_000, text: eleven("noemi"), speaker: "noemi" }, { atMs: 18_000, text: eleven("arjun"), speaker: "arjun" },
+      { atMs: 200, text: eleven("arjun"), speaker: "arjun" },
+      { atMs: 10_200, text: eleven("arjun"), speaker: "arjun" }, { atMs: 14_000, text: eleven("noemi"), speaker: "noemi" },
     ], { durationMs: 22_000 })
     // No hold, so the Resume opens a new provider session, which numbers speakers in the order it hears them.
     const f = await fixture({ script, fake: { sessionSpeakers: true }, config: { holdMs: 0 } }), live = resources!.repository.live!
     const noteId = await f.recordingNote(), owner = f.processing.forRepository(resources!.repository.forUser(BOOTSTRAP_OWNER_ID))
+    const both = (baseMs: number) => (["system", "mic"] as const).map(channel => ({ channel, sampleRate: RATE, encoding: "pcm_s16le" as const, baseMs, resumeFromSample: 0 }))
     const first = f.connect(noteId)
-    await first.hello(stream(), "capture-1")
-    await first.audio(script.pcm, 0, samples(8000), { speed: 12 })
+    await first.hello(both(0), "capture-1")
+    await Promise.all((["system", "mic"] as const).map(channel => first.audio(script.pcm, 0, samples(8000), { speed: 12, channel })))
     await first.until(() => first.finals().length === 2, "two finals")
-    await f.uploadPart(noteId, script.pcm.subarray(0, samples(8000) * 2), 0, 0)
-    first.mark("end", { system: samples(8000) })
+    first.mark("end", { system: samples(8000), mic: samples(8000) })
     await Effect.runPromise(owner.recording(noteId, "stop"))
     await first.until(() => first.closed, "close")
-    expect(await Effect.runPromise(live.voices(noteId, "system"))).toEqual([1, 2])
-    expect(await Effect.runPromise(live.voices(noteId, "mic"))).toEqual([])
+    expect(await Effect.runPromise(live.voices(noteId, "system"))).toEqual([1])
+    expect(await Effect.runPromise(live.voices(noteId, "mic"))).toEqual([1])
     await Effect.runPromise(owner.recording(noteId, "resume"))
     const second = f.connect(noteId)
-    await second.hello([{ channel: "system", sampleRate: RATE, encoding: "pcm_s16le", baseMs: 10_000, resumeFromSample: 0 }], "capture-2")
-    await second.audio(script.pcm, samples(10_000), samples(22_000), { speed: 12, offset: -samples(10_000) })
-    await second.until(() => second.finals().length === 3, "three finals")
-    second.mark("end", { system: samples(12_000) })
+    await second.hello(both(10_000), "capture-2")
+    await Promise.all((["system", "mic"] as const).map(channel => second.audio(script.pcm, samples(10_000), samples(22_000), { speed: 12, offset: -samples(10_000), channel })))
+    await second.until(() => second.finals().length === 4, "four finals")
+    second.mark("end", { system: samples(12_000), mic: samples(12_000) })
     await second.until(() => second.closed, "close")
     const stored = await f.note(noteId)
-    expect(stored.transcriptSegments.map(segment => `${segment.speakerLabel}: ${segment.text.split(" ")[0]}`)).toEqual(["Speaker 1: arjun", "Speaker 2: priya", "Speaker 2: priya", "Speaker 3: noemi", "Speaker 1: arjun"])
+    const of = (channel: "mic" | "system") => stored.transcriptSegments.filter(segment => segment.channel === channel).map(segment => `${segment.speakerLabel}: ${segment.text.split(" ")[0]}`)
+    expect(of("system")).toEqual(["Speaker 1: arjun", "Speaker 1: arjun", "Speaker 2: noemi"])
+    // A second person at the microphone for one sentence is not a confident second voice: still Me.
+    expect(stored.transcriptSegments.filter(segment => segment.channel === "mic").every(segment => segment.speakerLabel === "Me")).toBe(true)
     expect(second.of("speakers")).toEqual([])
-    expect(await Effect.runPromise(live.voices(noteId, "system"))).toEqual([1, 2, 3])
-    expect(await resources!.database.noteSpeaker.count({ where: { noteId } })).toBe(3)
   })
   test("the live model setting is stored and cleared", async () => {
     const store = makePrismaCalendarStore(resources!.database)
-    const before = (await store.getSettings())?.liveTranscriptionModel ?? null
+    const before = (await store.getSettings())?.liveTranscriptionModel
     try {
       expect((await store.saveSettings({ liveTranscriptionModel: { provider: "elevenlabs", model: "scribe_v3_live" } })).liveTranscriptionModel).toEqual({ provider: "elevenlabs", model: "scribe_v3_live" })
       expect((await store.getSettings())!.liveTranscriptionModel).toEqual({ provider: "elevenlabs", model: "scribe_v3_live" })
-      // An unrelated save leaves it alone; null clears it.
+      // An unrelated save leaves it alone.
       expect((await store.saveSettings({ calendarLookAheadDays: 30 })).liveTranscriptionModel).toEqual({ provider: "elevenlabs", model: "scribe_v3_live" })
-      expect((await store.saveSettings({ liveTranscriptionModel: null })).liveTranscriptionModel).toBeNull()
-      expect((await store.getSettings())!.liveTranscriptionModel).toBeNull()
-    } finally { await store.saveSettings({ liveTranscriptionModel: before }) }
+    } finally { if (before) await store.saveSettings({ liveTranscriptionModel: before }) }
   })
 
   test("the real server entry point serves the live socket on PostgreSQL", async () => {
@@ -209,9 +197,8 @@ describe.skipIf(!enabled)("live transcription on PostgreSQL", () => {
     for (let index = 0; index < samples(3000); index++) view.setInt16(index * 2, Math.round(8000 * Math.sin(index / 6)), true)
     for (let sample = 0; sample < samples(5000); sample += samples(100)) { socket.send(encodeLiveAudioFrame({ channel: "system", firstSample: sample, pcm: pcm.subarray(sample * 2, (sample + samples(100)) * 2) }) as Uint8Array<ArrayBuffer>); await Bun.sleep(25) }
     await until(() => messages.some(message => message.type === "interim") && messages.some(message => message.type === "final"), "interim and final")
-    // A durable part of the same audio, uploaded during the recording, resolves from live coverage: the batch
-    // recogniser has no key here, so any attempt to call it would leave the part failed.
-    expect((await api(`/notes/${note.id}/audio/chunks/${crypto.randomUUID()}`, "PUT", { channel: "system", sequence: 0, startMs: 0, audioBase64: Buffer.from(wav(pcm)).toString("base64") })).status).toBe(200)
+    // Audio parts are not accepted at all: the live transcript is the only one.
+    expect((await api(`/notes/${note.id}/audio/chunks/${crypto.randomUUID()}`, "PUT", { channel: "system", sequence: 0, startMs: 0, audioBase64: Buffer.from(wav(pcm)).toString("base64") })).status).toBe(404)
     socket.send(JSON.stringify({ type: "mark", kind: "end", atSample: { system: samples(5000) } }))
     const stopped = await (await api(`/notes/${note.id}/recording`, "POST", { command: "stop" })).json() as { recordingState: string; transcriptSegments: Array<{ speakerId: string; text: string; isFinal: boolean }> }
     expect(stopped.recordingState).toBe("stopped")
@@ -219,9 +206,5 @@ describe.skipIf(!enabled)("live transcription on PostgreSQL", () => {
     expect(stopped.transcriptSegments.every(segment => segment.speakerId === "system:n:1" && segment.isFinal && segment.text.length > 0)).toBe(true)
     await until(() => closed !== undefined, "socket closed")
     expect(closed).toBe(1000)
-    let chunks: Array<{ state: string }> = []
-    for (let attempt = 0; attempt < 150; attempt++) { chunks = await (await api(`/notes/${note.id}/audio/chunks`, "GET")).json() as typeof chunks; if (chunks.every(chunk => chunk.state === "ready" || chunk.state === "failed")) break; await Bun.sleep(100) }
-    expect(chunks.map(chunk => chunk.state)).toEqual(["ready"])
-    expect((await resources!.database.audioChunk.findMany({ where: { noteId: note.id } })).map(row => row.resolution)).toEqual(["live"])
   }, 30_000)
 })

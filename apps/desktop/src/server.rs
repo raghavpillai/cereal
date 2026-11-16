@@ -1,7 +1,8 @@
 //! Native client of our owner-authenticated API. Provider credentials never enter
 //! this process. One serial worker per account preserves Start/Stop/Resume
-//! ordering; GPUI only polls completions. Failed uploads keep their immutable
-//! local WAVs for retry.
+//! ordering; GPUI only polls completions. Recordings stay on this Mac as WAV
+//! files; the transcript is the one the live stream delivered, and no audio
+//! is uploaded.
 //!
 //! Every request here goes through the client of the account that owns the
 //! thing it is about (`accounts::AccountClient`): a note's account, an
@@ -11,22 +12,21 @@ use crate::{
     app::Cereal,
     model::Note,
 };
-use base64::{Engine, engine::general_purpose::STANDARD};
 use gpui::*;
-use meeting_notes_api_types::{AudioChunkDTO, AudioChunkState as State, ChatAnswerDTO, NoteDTO};
-use serde::{Deserialize, Serialize};
+use meeting_notes_api_types::{ChatAnswerDTO, NoteDTO};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     fs,
-    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::Path,
     sync::{
-        Arc, Condvar, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 pub fn enabled() -> bool {
@@ -242,6 +242,7 @@ pub fn import_calendar_note(
             note.enhanced = remote.enhanced.clone();
         }
         note.transcript = transcript_text(&remote);
+        note.add_transcript_gaps(remote.transcript_gaps.clone().unwrap_or_default());
         note.server_transcript_segments = remote.transcript_segments;
         note.transcript_revision = remote.transcript_revision.max(0) as u64;
         note.generated_revision = remote.generated_revision.map(|v| v.max(0) as u64);
@@ -420,11 +421,16 @@ fn decode_chat_frame(data: &str) -> Option<ChatStreamEvent> {
     }
 }
 
-/// Independent, cancellable chat transport. Recording Stop/uploads never wait
+/// The chat models a server offers, leaving out any this build cannot read (a provider added on a newer
+/// server) instead of losing the whole list.
+pub fn chat_models_from(response: &Value) -> Vec<meeting_notes_api_types::LanguageModelSelection> {
+    response.get("models").and_then(Value::as_array).map(|models| models.iter().filter_map(|model| serde_json::from_value(model.clone()).ok()).collect()).unwrap_or_default()
+}
+/// Independent, cancellable chat transport. Recording Stop never waits
 /// behind an open language-model stream. The owner token travels through stdin.
 pub fn chat_model_key(choice: &meeting_notes_api_types::LanguageModelSelection) -> String {
     use meeting_notes_api_types::LanguageModelSelectionProvider as Provider;
-    let provider = match choice.provider { Provider::Openrouter => "openrouter", Provider::Openai => "openai", Provider::Anthropic => "anthropic" };
+    let provider = match choice.provider { Provider::Openrouter => "openrouter", Provider::Openai => "openai", Provider::Anthropic => "anthropic", Provider::OpenaiCompatible => "openai_compatible" };
     format!("{provider}:{}", choice.model)
 }
 /// A chat about a note goes to the note's account. A chat across meetings
@@ -432,13 +438,15 @@ pub fn chat_model_key(choice: &meeting_notes_api_types::LanguageModelSelection) 
 /// named (until the scope can be chosen, section 4.2).
 pub fn stream_chat_with_model(
     note: Option<Note>, scope: Option<AccountId>, message: String, history: Vec<Value>, cancel: Arc<AtomicBool>, model: Option<String>,
+    // The saved thread and exchange it is asked as (`chat_sync.rs`); `None`: the old endpoints.
+    thread: Option<crate::chat_sync::ThreadTurn>,
 ) -> mpsc::Receiver<ChatStreamEvent> {
     let client = match (&note, &scope) {
         (Some(note), _) => crate::accounts::client_of_note(note.id),
         (None, Some(account)) => crate::accounts::client(account),
         (None, None) => crate::accounts::default_client(),
     };
-    stream_chat_with_client(client, note, message, history, cancel, model)
+    stream_chat_with_client(client, note, message, history, cancel, model, thread)
 }
 fn stream_chat_with_client(
     client: Result<Client, String>,
@@ -447,6 +455,7 @@ fn stream_chat_with_client(
     history: Vec<Value>,
     cancel: Arc<AtomicBool>,
     model: Option<String>,
+    thread: Option<crate::chat_sync::ThreadTurn>,
 ) -> mpsc::Receiver<ChatStreamEvent> {
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
@@ -455,8 +464,10 @@ fn stream_chat_with_client(
             if cancel.load(Ordering::Acquire) {
                 return Ok(());
             }
+            let mut server_note = None;
             let path = if let Some(note) = note {
                 let id = client.ensure(&note)?;
+                server_note = Some(id.clone());
                 // Chat includes edits still visible in the native note, even if
                 // the user has not navigated away or pressed Save yet.
                 let _: NoteDTO = client.request_with_cancel(
@@ -469,11 +480,17 @@ fn stream_chat_with_client(
             } else {
                 "/api/v1/chat/stream".into()
             };
-            let mut payload = json!({"message":message,"history":history,"includeSources":true});
-            if let Some(model) = &model { payload["model"] = json!(model); }
-            if let Ok(time_zone) = iana_time_zone::get_timezone() {
-                payload["timeZone"] = json!(time_zone);
-            }
+            let (path, payload) = if let Some(thread) = &thread {
+                // Saved on the server as it arrives, as this exchange of the thread.
+                crate::chat_sync::stream_request(&client, thread, server_note.as_deref(), &message, model.as_deref())?
+            } else {
+                let mut payload = json!({"message":message,"history":history,"includeSources":true});
+                if let Some(model) = &model { payload["model"] = json!(model); }
+                if let Ok(time_zone) = iana_time_zone::get_timezone() {
+                    payload["timeZone"] = json!(time_zone);
+                }
+                (path, payload)
+            };
             // The stream's own transport, started by the account's client:
             // the session and the address come from the same place.
             let mut child = client.chat_stream(&path, &payload)?;
@@ -566,7 +583,9 @@ fn stream_chat_with_client(
 pub enum Action {
     Save,
     Recording(&'static str),
-    Sync,
+    /// Stop the recording, if it is still going, and write the notes from
+    /// the transcript; a note with no transcript is left as it is (see
+    /// [`Reply::untranscribed`]).
     Generate,
     // Retained for the explicitly opt-in legacy non-streaming integration test.
     // Interactive clients use the independent cancellable SSE transport.
@@ -583,24 +602,52 @@ pub struct Reply {
     pub url: String,
     pub answer: Option<String>,
     pub share_url: Option<String>,
+    /// Notes were asked for, and the recording had no transcript to write
+    /// them from: nothing was generated.
+    pub untranscribed: bool,
 }
 struct Job {
     note: Note,
     action: Action,
     reply: mpsc::Sender<Result<Reply, String>>,
 }
+/// What an account's serial worker is asked to do: an [`Action`] on a note,
+/// or deleting a note on the server for good (Delete forever in Trash). They
+/// share one queue, so a delete runs after anything sent for the note before.
+enum Work {
+    Run(Job),
+    Delete {
+        note: Note,
+        /// Delete even though the server's copy changed ("Delete anyway").
+        force: bool,
+        /// The server deletes only if the note is still what was read
+        /// (`conditional-delete` among its features).
+        conditional: bool,
+        reply: mpsc::Sender<Result<(), DeleteFailure>>,
+    },
+}
+
+/// Why Delete forever did not delete a note on its server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeleteFailure {
+    /// The server's copy was changed (on another device) since this Mac
+    /// last had it: nothing was deleted.
+    Changed,
+    /// Anything else, in words for the person. Nothing was deleted.
+    Failed(String),
+}
 pub struct Bridge {
-    sender: mpsc::Sender<Job>,
+    sender: mpsc::Sender<Work>,
 }
 impl Bridge {
     /// The serial worker of one account. Its client is made again whenever
     /// the account's epoch has moved (a replaced token), keeping what it
     /// knows of which notes are on the server.
     pub fn new(account: AccountId) -> Self {
-        let (sender, receiver) = mpsc::channel::<Job>();
+        let (sender, receiver) = mpsc::channel::<Work>();
         std::thread::spawn(move || {
             let mut client: Option<Client> = None;
-            while let Ok(job) = receiver.recv() {
+            while let Ok(work) = receiver.recv() {
                 if client.as_ref().is_none_or(|client| client.stale()) {
                     let ids = client.take().map(|client| client.ids).unwrap_or_default();
                     client = match crate::accounts::client(&account) {
@@ -609,27 +656,48 @@ impl Bridge {
                             Some(fresh)
                         }
                         Err(error) => {
-                            let _ = job.reply.send(Err(error));
+                            match work {
+                                Work::Run(job) => drop(job.reply.send(Err(error))),
+                                Work::Delete { reply, .. } => {
+                                    drop(reply.send(Err(DeleteFailure::Failed(error))))
+                                }
+                            }
                             continue;
                         }
                     };
                 }
-                let result = client
-                    .as_mut()
-                    .expect("the client was just made")
-                    .run(&job.note, job.action);
-                let _ = job.reply.send(result);
+                let client = client.as_mut().expect("the client was just made");
+                match work {
+                    Work::Run(job) => {
+                        let _ = job.reply.send(client.run(&job.note, job.action));
+                    }
+                    Work::Delete { note, force, conditional, reply } => {
+                        let _ = reply.send(client.delete(&note, force, conditional));
+                    }
+                }
             }
         });
         Self { sender }
     }
     fn send(&self, note: Note, action: Action) -> mpsc::Receiver<Result<Reply, String>> {
         let (reply, receiver) = mpsc::channel();
-        let _ = self.sender.send(Job {
+        let _ = self.sender.send(Work::Run(Job {
             note,
             action,
             reply,
-        });
+        }));
+        receiver
+    }
+    /// Delete `note` on its server for good, after whatever was sent for it
+    /// before. The answer is `Ok` once the server no longer has it.
+    pub(crate) fn delete(
+        &self,
+        note: Note,
+        force: bool,
+        conditional: bool,
+    ) -> mpsc::Receiver<Result<(), DeleteFailure>> {
+        let (reply, receiver) = mpsc::channel();
+        let _ = self.sender.send(Work::Delete { note, force, conditional, reply });
         receiver
     }
 }
@@ -695,58 +763,136 @@ impl Client {
         self.ids.insert(note.id, created.id.clone());
         Ok(created.id)
     }
+    /// Delete a note on the server for good (Delete forever in Trash).
+    /// Nothing is created or saved first: a note the server never had is
+    /// simply forgotten.
+    ///
+    /// Unless `force`, the server's copy is read first and the note is
+    /// deleted only if it is still what this Mac last had (the stamp of the
+    /// last refresh, or the same text and revisions); otherwise nothing is
+    /// deleted and [`DeleteFailure::Changed`] says so. With `conditional`
+    /// the DELETE carries that stamp (`ifStamp`), so an edit landing between
+    /// the read and the delete is not lost either (409).
+    ///
+    /// A 404 counts as "already deleted" only from a server that has
+    /// conditional deletes, in its own words (`not_found`); any other 404
+    /// (an older server, a proxy) is an error and the note stays.
+    fn delete(&mut self, note: &Note, force: bool, conditional: bool) -> Result<(), DeleteFailure> {
+        let failed = |message: &str| DeleteFailure::Failed(message.into());
+        if self.stale() {
+            return Err(failed("Account changed; request cancelled"));
+        }
+        if let (Some(mine), Some(theirs)) = (self.slot, handle::slot_of(note.id))
+            && mine != theirs
+        {
+            return Err(failed("This note belongs to another account"));
+        }
+        if note.server_id.is_some() && note.server_url.as_deref() != Some(&self.url) {
+            return Err(failed("This note belongs to a different server. Restore its server configuration before deleting it."));
+        }
+        let sidecar = self.association_path(note.id).map_err(DeleteFailure::Failed)?;
+        let known = self
+            .ids
+            .get(&note.id)
+            .cloned()
+            .or_else(|| note.server_id.clone())
+            .or_else(|| fs::read_to_string(&sidecar).ok().map(|id| id.trim().to_owned()));
+        let forget = |client: &mut Self, id: Option<&str>| {
+            if let (Some(id), Some(directory)) = (id, sidecar.parent()) {
+                let _ = fs::remove_dir_all(directory.join("uploads").join(id));
+            }
+            client.ids.remove(&note.id);
+            let _ = fs::remove_file(&sidecar);
+        };
+        let Some(known) = known else {
+            // Never sent: there is nothing on the server to delete.
+            forget(self, None);
+            return Ok(());
+        };
+        let id = crate::accounts::client::path_id(&known)
+            .map_err(|_| failed("This note's server id cannot be read. It is still in Trash."))?;
+        let gone = |error: &crate::accounts::client::RequestError| {
+            conditional
+                && matches!(error, crate::accounts::client::RequestError::Status { code: 404, error: Some(code), .. } if code == "not_found")
+        };
+        let unconfirmed = "The server did not confirm that it no longer has this note. It is still in Trash.";
+        let base = format!("/api/v1/notes/{id}");
+        let mut path = base.clone();
+        if !force {
+            match self.send::<NoteDTO>("GET", &base, None, None) {
+                Ok(remote) => {
+                    let stamp = sync_stamp(&remote.updated_at, remote.transcript_revision, remote.generated_revision);
+                    if note.server_sync_stamp.as_deref() != Some(stamp.as_str()) && !same_content(note, &remote) {
+                        return Err(DeleteFailure::Changed);
+                    }
+                    if conditional {
+                        path = format!("{base}?ifStamp={}", query_value(&delete_stamp(&remote)));
+                    }
+                }
+                Err(error) if gone(&error) => {
+                    forget(self, Some(&id));
+                    return Ok(());
+                }
+                Err(error) if error.is_not_found() => return Err(failed(unconfirmed)),
+                Err(error) => return Err(DeleteFailure::Failed(error.message())),
+            }
+        }
+        match self.send::<Value>("DELETE", &path, None, None) {
+            Ok(_) => {}
+            Err(crate::accounts::client::RequestError::Status { code: 409, .. }) if !force => {
+                return Err(DeleteFailure::Changed);
+            }
+            Err(error) if gone(&error) => {}
+            Err(error) if error.is_not_found() => return Err(failed(unconfirmed)),
+            Err(error) => return Err(DeleteFailure::Failed(error.message())),
+        }
+        forget(self, Some(&id));
+        Ok(())
+    }
     fn run(&mut self, note: &Note, action: Action) -> Result<Reply, String> {
         let id = self.ensure(note)?;
         let base = format!("/api/v1/notes/{id}");
         let _: NoteDTO = self.request("PATCH", &base, Some(note_update_payload(note)))?;
         let mut answer = None;
         let mut share_url = None;
+        let mut untranscribed = false;
         match action {
             Action::Save => {}
             Action::Recording(command) => {
                 let current: NoteDTO = self.request("GET", &base, None)?;
                 let command = recording_command(command, &current.recording_state);
                 if command == "stop" {
-                    stop_trace("the stop action has saved and read the note");
-                    // Let the live transcript stream send the end of the
-                    // capture first: the server ends the live session on
-                    // Stop. No stream, or one that is not connected, costs
-                    // no time; a stuck one costs at most this long.
-                    crate::live::wait_for_handover(note.id, Duration::from_millis(2500));
-                    stop_trace("the stream has handed over (or the wait ran out)");
+                    self.stop(note, &base)?;
+                } else {
+                    let _: NoteDTO = self.request(
+                        "POST",
+                        &format!("{base}/recording"),
+                        Some(json!({"command":command})),
+                    )?;
                 }
-                let _: NoteDTO = self.request(
-                    "POST",
-                    &format!("{base}/recording"),
-                    Some(json!({"command":command})),
-                )?;
-                if command == "stop" {
-                    stop_trace("the server has been told to stop");
-                    self.upload(note, &id)?;
-                    stop_trace("the upload is finished: every part is ready");
-                }
-            }
-            Action::Sync => {
-                let _: NoteDTO = self.request(
-                    "POST",
-                    &format!("{base}/recording"),
-                    Some(json!({"command":"stop"})),
-                )?;
-                self.upload(note, &id)?;
             }
             Action::Generate => {
-                let _: NoteDTO = self.request(
-                    "POST",
-                    &format!("{base}/recording"),
-                    Some(json!({"command":"stop"})),
-                )?;
-                self.upload(note, &id)?;
+                // The recording is stopped first (Stop sends this action, and
+                // a note still recording elsewhere has no final transcript):
+                // once the server answers, the live session has stored its
+                // last finals, and the notes are written from those.
+                self.stop(note, &base)?;
                 let current: NoteDTO = self.request("GET", &base, None)?;
-                let _: NoteDTO = self.request(
-                    "POST",
-                    &format!("{base}/generate"),
-                    Some(json!({"expectedTranscriptRevision":current.transcript_revision})),
-                )?;
+                if current
+                    .transcript_segments
+                    .iter()
+                    .all(|segment| segment.text.trim().is_empty())
+                {
+                    stop_trace("there is no transcript to write notes from");
+                    untranscribed = true;
+                } else {
+                    let _: NoteDTO = self.request(
+                        "POST",
+                        &format!("{base}/generate"),
+                        Some(json!({"expectedTranscriptRevision":current.transcript_revision})),
+                    )?;
+                    stop_trace("the notes are written");
+                }
             }
             Action::Chat { message, history } => {
                 let reply: ChatAnswerDTO = self.request(
@@ -779,305 +925,63 @@ impl Client {
             url: self.url.clone(),
             answer,
             share_url,
+            untranscribed,
         })
     }
-    /// Where the identities of a note's uploaded parts are kept.
-    fn mapping_root(&self, note: &Note, id: &str) -> Result<std::path::PathBuf, String> {
+
+    /// Tell the server the recording of `note` has stopped. The window
+    /// sends this only once the live stream has delivered every captured
+    /// sample (`Cereal::live_stop`): the server ends the live session on
+    /// Stop, and answers once that session has stored its last finals.
+    fn stop(&self, _note: &Note, base: &str) -> Result<(), String> {
+        stop_trace("the stop action has saved and read the note");
+        let _: NoteDTO = self.request(
+            "POST",
+            &format!("{base}/recording"),
+            Some(json!({"command":"stop"})),
+        )?;
+        stop_trace("the server has been told to stop");
+        Ok(())
+    }
+
+    /// Where the timeline positions of a note's captures are kept. The
+    /// folder is called `uploads` because the parts that once went up were
+    /// numbered there too; positions written by earlier versions are read
+    /// from the same files.
+    fn placement_root(&self, note: &Note, id: &str) -> Result<std::path::PathBuf, String> {
         let root = self
             .association_path(note.id)?
             .parent()
             .ok_or("Invalid association directory")?
             .join("uploads")
             .join(id);
-        fs::create_dir_all(&root).map_err(|_| "Cannot preserve upload identities")?;
+        fs::create_dir_all(&root).map_err(|_| "Cannot preserve capture positions")?;
         Ok(root)
     }
 
-    /// Where a capture sits on the note's timeline and how long its parts
-    /// are. Both are decided once, the first time anything places the
-    /// capture, and kept in two small files next to its part receipts; every
-    /// later upload (while recording, after Stop, a retry next week) reads
-    /// them, so a part always has the same identity and position.
-    ///
-    /// - A capture nothing has placed yet starts where the note's audio so
-    ///   far ends, and is cut into [`PART_SECONDS`] parts.
-    /// - A capture placed before part lengths were recorded, or whose parts
-    ///   are already on the server from an older client, keeps the 60-second
-    ///   parts those identities were made with.
-    ///
-    /// `recording` is true for the capture that is still being recorded: its
-    /// files are not final and none of its parts can be on the server.
-    fn capture_plan(
-        &self,
-        id: &str,
+    /// Where a capture sits on the note's timeline. Decided once, the first
+    /// time the capture is streamed, and kept in a small file, so every later
+    /// connection of its stream (a reconnect, a restart of the app) places
+    /// its audio at the same milliseconds. A capture nothing has placed yet
+    /// starts at `offset_ms`, where the note's audio so far ends.
+    fn capture_base(
         capture: &crate::audio::CaptureManifest,
-        existing: &HashMap<String, AudioChunkDTO>,
-        mapping_root: &Path,
+        placement_root: &Path,
         offset_ms: u64,
-        recording: bool,
-    ) -> Result<CapturePlan, String> {
+    ) -> Result<u64, String> {
         let capture_key =
             uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, capture.capture_id.as_bytes())
                 .to_string();
-        let base_path = mapping_root.join(format!("capture-{capture_key}.json"));
-        let parts_path = mapping_root.join(format!("capture-{capture_key}.parts.json"));
-        let mut capture_base: Option<u64> = fs::read(&base_path)
-            .ok()
-            .and_then(|data| serde_json::from_slice(&data).ok());
-        let recorded_parts: Option<u64> = fs::read(&parts_path)
+        let base_path = placement_root.join(format!("capture-{capture_key}.json"));
+        let base_ms = fs::read(&base_path)
             .ok()
             .and_then(|data| serde_json::from_slice(&data).ok())
-            .filter(|seconds| (1..=600).contains(seconds));
-        if capture_base.is_none() && recorded_parts.is_none() && !recording {
-            // Migrate an already-uploaded capture using its server metadata;
-            // this preserves old chunk identities across client upgrades.
-            'sources: for (channel, stats) in [
-                ("mic", &capture.stats.mic),
-                ("system", &capture.stats.system),
-            ] {
-                let paths = channel_paths(stats);
-                let mut relative = 0;
-                for path in paths {
-                    let wav = WavReader::open(Path::new(&path))?;
-                    let step = wav.step;
-                    for block in 0..wav.frames.div_ceil(step) {
-                        let chunk_id =
-                            chunk_identity(id, &capture.capture_id, channel, &path, block);
-                        if let Some(c) = existing.get(&chunk_id) {
-                            capture_base = Some((c.start_ms.max(0) as u64).saturating_sub(
-                                relative + block * step * 1000 / wav.rate as u64,
-                            ));
-                            break 'sources;
-                        }
-                    }
-                    relative += wav.duration_ms();
-                }
-            }
-        }
-        let part_seconds = match recorded_parts {
-            Some(seconds) => seconds,
-            // Never placed: a new capture.
-            None if capture_base.is_none() => {
-                save_mapping(&parts_path, &PART_SECONDS)?;
-                PART_SECONDS
-            }
-            None => LEGACY_PART_SECONDS,
-        };
-        let base_ms = capture_base.unwrap_or(offset_ms);
+            .unwrap_or(offset_ms);
         save_mapping(&base_path, &base_ms)?;
-        Ok(CapturePlan {
-            base_ms,
-            part_seconds,
-        })
-    }
-
-    /// The sequence number for the next part that has none yet: above every
-    /// number the server holds for the note and above every number a receipt
-    /// here has promised to a part, sent or not. The server refuses two parts
-    /// of one channel with the same number.
-    fn next_sequence(existing: &HashMap<String, AudioChunkDTO>, mapping_root: &Path) -> u64 {
-        let remote = existing.values().map(|c| c.sequence.max(0) as u64 + 1);
-        let promised = fs::read_dir(mapping_root)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|entry| !entry.file_name().to_string_lossy().starts_with("capture-"))
-            .filter_map(|entry| fs::read(entry.path()).ok())
-            .filter_map(|data| serde_json::from_slice::<UploadReceipt>(&data).ok())
-            .map(|receipt| receipt.sequence + 1);
-        remote.chain(promised).max().unwrap_or(0)
-    }
-
-    /// Send one part of a capture, unless the server already holds it.
-    /// `start_ms` is its position on the note's timeline. Returns its ID.
-    ///
-    /// A part's ID comes from what it is (note, capture, channel, file,
-    /// block), and its sequence number and position are written down before
-    /// it is sent, so sending it again, now or after a crash, is the same
-    /// request. A part the server has is left alone: it was sent while the
-    /// meeting was still being recorded, or by an earlier attempt. One whose
-    /// transcription failed is sent again and retried, as it always was.
-    #[allow(clippy::too_many_arguments)]
-    fn send_part(
-        &self,
-        target: &PartTarget,
-        existing: &HashMap<String, AudioChunkDTO>,
-        channel: &str,
-        path: &str,
-        block: u64,
-        bytes: Vec<u8>,
-        start_ms: u64,
-        sequence: &mut u64,
-        cancel: Option<Arc<AtomicBool>>,
-    ) -> Result<String, String> {
-        let chunk_id = chunk_identity(target.id, target.capture_id, channel, path, block);
-        let receipt_path = target.mapping_root.join(format!("{chunk_id}.json"));
-        let remote = existing.get(&chunk_id);
-        let receipt: UploadReceipt = if let Some(remote) = remote {
-            UploadReceipt {
-                sequence: remote.sequence.max(0) as u64,
-                start_ms: remote.start_ms.max(0) as u64,
-            }
-        } else if let Ok(data) = fs::read(&receipt_path) {
-            serde_json::from_slice(&data)
-                .map_err(|_| "Saved upload identity is malformed; local audio remains intact")?
-        } else {
-            UploadReceipt {
-                sequence: *sequence,
-                start_ms,
-            }
-        };
-        save_mapping(&receipt_path, &receipt)?;
-        *sequence = (*sequence).max(receipt.sequence + 1);
-        if remote.is_some_and(|remote| remote.state != State::Failed) {
-            return Ok(chunk_id);
-        }
-        let base = format!("/api/v1/notes/{}/audio/chunks", target.id);
-        let chunk: AudioChunkDTO = self.request_with_cancel(
-            "PUT",
-            &format!("{base}/{chunk_id}"),
-            Some(json!({"channel":channel,"sequence":receipt.sequence,"startMs":receipt.start_ms,"audioBase64":STANDARD.encode(bytes)})),
-            cancel.clone(),
-        )?;
-        if chunk.state == State::Failed {
-            let _: AudioChunkDTO = self.request_with_cancel(
-                "POST",
-                &format!("{base}/{chunk_id}/retry"),
-                None,
-                cancel,
-            )?;
-        }
-        Ok(chunk_id)
-    }
-
-    fn upload(&self, note: &Note, id: &str) -> Result<(), String> {
-        // Parts sent while the meeting was being recorded come from another
-        // thread. It is told to stop and has let go before this one looks at
-        // what the server holds, so no part is numbered twice.
-        stop_part_uploads(note.id, Duration::from_secs(5));
-        stop_trace("the part uploader of the meeting has let go");
-        let base = format!("/api/v1/notes/{id}/audio/chunks");
-        let existing: Vec<AudioChunkDTO> = self.request("GET", &base, None)?;
-        stop_trace(&format!("the server holds {} parts", existing.len()));
-        let existing: HashMap<_, _> = existing.into_iter().map(|c| (c.id.clone(), c)).collect();
-        let mut offset_ms = existing
-            .values()
-            .map(|c| (c.start_ms + c.duration_ms).max(0) as u64)
-            .max()
-            .unwrap_or(0);
-        let mapping_root = self.mapping_root(note, id)?;
-        let mut sequence = Self::next_sequence(&existing, &mapping_root);
-        let mut submitted = Vec::new();
-        for saved in &note.audio_captures {
-            let started = Instant::now();
-            let capture = loop {
-                let current = fs::read(&saved.manifest_path)
-                    .ok()
-                    .and_then(|data| {
-                        serde_json::from_slice::<crate::audio::CaptureManifest>(&data).ok()
-                    })
-                    .unwrap_or_else(|| saved.clone());
-                if current.completed() {
-                    stop_trace("the capture is finalised");
-                    break current;
-                }
-                if started.elapsed() > Duration::from_secs(15) {
-                    return Err(
-                        "Audio is still finalizing. Retry transcription after it has saved.".into(),
-                    );
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            };
-            let plan =
-                self.capture_plan(id, &capture, &existing, &mapping_root, offset_ms, false)?;
-            let target = PartTarget {
-                id,
-                capture_id: &capture.capture_id,
-                mapping_root: &mapping_root,
-            };
-            for (channel, stats) in [
-                ("mic", &capture.stats.mic),
-                ("system", &capture.stats.system),
-            ] {
-                let paths = channel_paths(stats);
-                let mut channel_offset = plan.base_ms;
-                for path in paths {
-                    let mut wav = WavReader::open(Path::new(&path))?.parts_of(plan.part_seconds);
-                    let mut block = 0;
-                    while let Some((bytes, start_ms)) = wav.next_chunk()? {
-                        submitted.push(self.send_part(
-                            &target,
-                            &existing,
-                            channel,
-                            &path,
-                            block,
-                            bytes,
-                            channel_offset + start_ms,
-                            &mut sequence,
-                            None,
-                        )?);
-                        block += 1;
-                    }
-                    channel_offset += wav.duration_ms();
-                }
-            }
-            offset_ms =
-                offset_ms.max(plan.base_ms + (capture.audio_seconds() * 1000.).round() as u64);
-        }
-        if submitted.is_empty() {
-            return Ok(());
-        }
-        stop_trace(&format!("{} parts are on the server or sent", submitted.len()));
-        let started = Instant::now();
-        loop {
-            let chunks: Vec<AudioChunkDTO> = self.request("GET", &base, None)?;
-            let mine: Vec<_> = chunks
-                .iter()
-                .filter(|c| submitted.contains(&c.id))
-                .collect();
-            if mine.iter().any(|c| c.state == State::Failed) {
-                return Err("Transcription failed. Local audio is safe; choose Retry transcription to retry.".into());
-            }
-            if mine.len() == submitted.len() && mine.iter().all(|c| c.state == State::Ready) {
-                return Ok(());
-            }
-            if started.elapsed() > Duration::from_secs(180) {
-                return Err("Transcription is still pending on the server. Choose Retry transcription to refresh.".into());
-            }
-            std::thread::sleep(Duration::from_millis(600));
-        }
+        Ok(base_ms)
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct UploadReceipt {
-    sequence: u64,
-    start_ms: u64,
-}
-
-/// Seconds of audio in one durable part of a capture made from now on. A
-/// part is sent as soon as it is complete, while the meeting is still being
-/// recorded, so this is about how long a stretch the live stream missed
-/// stays missing from the transcript.
-const PART_SECONDS: u64 = 30;
-/// The part length of captures whose identities predate that choice.
-const LEGACY_PART_SECONDS: u64 = 60;
-
-/// A capture's place on the note timeline and the length of its parts
-/// (see [`Client::capture_plan`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct CapturePlan {
-    base_ms: u64,
-    part_seconds: u64,
-}
-
-/// What the parts of one capture are sent as part of.
-struct PartTarget<'a> {
-    /// The note's ID on the server.
-    id: &'a str,
-    capture_id: &'a str,
-    mapping_root: &'a Path,
-}
 fn recording_command<'a>(
     requested: &'a str,
     state: &meeting_notes_api_types::RecordingState,
@@ -1102,46 +1006,233 @@ pub fn duration_seconds(text: &str) -> Option<f64> {
         })
         .map(|v| v as f64)
 }
+/// One event of the streamed source summary (`/evidence/stream`).
+#[derive(Debug, PartialEq)]
+pub enum EvidenceStreamEvent {
+    /// The next piece of the summary's text.
+    Delta(String),
+    /// The validated result: the summary as finally read, and its quotations.
+    Done(meeting_notes_api_types::EvidenceDTO),
+    /// Instead of `Done`. Nothing streamed before it is kept.
+    Error(String),
+}
+
+const EVIDENCE_FAILED: &str = "Transcript context could not be loaded. Try again.";
+
+fn decode_evidence_frame(data: &str) -> Option<EvidenceStreamEvent> {
+    use meeting_notes_api_types::{EvidenceStreamEventDTO, EvidenceStreamEventDtoType as Type};
+    let value: EvidenceStreamEventDTO = serde_json::from_str(data).ok()?;
+    match value.evidence_stream_event_dto_type {
+        Type::Delta if value.text.len() <= 1_048_576 => Some(EvidenceStreamEvent::Delta(value.text)),
+        Type::Delta => None,
+        Type::Done => value
+            .evidence
+            .filter(|evidence| {
+                evidence.summary.chars().count() <= 20_000
+                    && evidence.transcript_revision >= 0
+                    && evidence.quotes.len() <= 8
+                    && evidence.quotes.iter().all(|quote| {
+                        uuid::Uuid::parse_str(&quote.segment_id).is_ok()
+                            && quote.start_ms >= 0
+                            && quote.text.chars().count() <= 20_000
+                    })
+            })
+            .map(EvidenceStreamEvent::Done),
+        Type::Error => Some(EvidenceStreamEvent::Error(
+            value.text.chars().take(1000).collect(),
+        )),
+    }
+}
+
+/// The HTTP status the transport wrote last on its stderr; `None` when it
+/// got no response at all.
+fn http_status(stderr: &str) -> Option<u16> {
+    let code = stderr.trim_end();
+    let code = &code[code.len().saturating_sub(3)..];
+    code.parse().ok().filter(|code| *code >= 100)
+}
+
 /// Read-only source context has its own pending state, independent of recording
 /// commands and chat. Only the selected instance's server note can be queried.
-pub fn load_evidence(
-    note: &Note,
-    paragraph: &str,
+///
+/// The source summary of `paragraph`, streamed: deltas as the model writes,
+/// then `Done` or `Error`, on the returned channel. Setting `cancel` kills
+/// the transport, which closes the request and so the provider's. A server
+/// that answers the stream with nothing at all (one older than the stream
+/// endpoint) is asked the buffered way instead, and its summary arrives as
+/// one delta.
+pub fn stream_evidence(
+    note: Note,
+    paragraph: String,
     cancel: Arc<AtomicBool>,
-) -> Result<meeting_notes_api_types::EvidenceDTO, String> {
-    let client = crate::accounts::client_of_note(note.id)?;
-    let id = note
-        .server_id
-        .as_deref()
-        .ok_or("Save this note to the server before viewing transcript context.")?;
-    if note.server_url.as_deref() != Some(client.url.as_str()) || uuid::Uuid::parse_str(id).is_err()
-    {
-        return Err("This note is not connected to the selected server.".into());
-    }
-    let revision =
-        i64::try_from(note.transcript_revision).map_err(|_| "Invalid transcript revision")?;
-    let payload = meeting_notes_api_types::EvidenceRequestDTO {
-        paragraph: paragraph.to_string(),
-        expected_transcript_revision: revision,
-    };
-    client
-        .request_with_cancel(
-            "POST",
-            &format!("/api/v1/notes/{id}/evidence"),
-            Some(serde_json::to_value(payload).map_err(|_| "Invalid source-context request")?),
-            Some(cancel),
-        )
-        .map_err(|_| "Transcript context could not be loaded. Try again.".into())
+) -> mpsc::Receiver<EvidenceStreamEvent> {
+    stream_evidence_with_client(crate::accounts::client_of_note(note.id), note, paragraph, cancel)
+}
+
+fn stream_evidence_with_client(
+    client: Result<Client, String>,
+    note: Note,
+    paragraph: String,
+    cancel: Arc<AtomicBool>,
+) -> mpsc::Receiver<EvidenceStreamEvent> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        // The note's server, its id there and the request, or why there is none.
+        let target = || -> Result<(Client, String, Value), String> {
+            let client = client?;
+            let id = note
+                .server_id
+                .as_deref()
+                .ok_or("Save this note to the server before viewing transcript context.")?;
+            if note.server_url.as_deref() != Some(client.url.as_str())
+                || uuid::Uuid::parse_str(id).is_err()
+            {
+                return Err("This note is not connected to the selected server.".into());
+            }
+            let revision = i64::try_from(note.transcript_revision)
+                .map_err(|_| "Invalid transcript revision")?;
+            let payload = serde_json::to_value(meeting_notes_api_types::EvidenceRequestDTO {
+                paragraph: paragraph.clone(),
+                expected_transcript_revision: revision,
+            })
+            .map_err(|_| "Invalid source-context request")?;
+            Ok((client, id.to_owned(), payload))
+        };
+        let (client, id, payload) = match target() {
+            Ok(target) => target,
+            Err(error) => {
+                let _ = sender.send(EvidenceStreamEvent::Error(error));
+                return;
+            }
+        };
+        // `None` when the stream said something (and so has already ended
+        // the card), else the HTTP status it ended with, if any.
+        let run = || -> Result<Option<Option<u16>>, String> {
+            if cancel.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+            let mut child = client.event_stream_with_status(&format!("/api/v1/notes/{id}/evidence/stream"), &payload)?;
+            let status_output = child.stderr.take();
+            let Some(output) = child.stdout.take() else {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(EVIDENCE_FAILED.into());
+            };
+            let events = sender.clone();
+            let stopped = cancel.clone();
+            // Whether any event arrived: only a stream that said nothing can
+            // be a server without the endpoint.
+            let reader = std::thread::spawn(move || -> bool {
+                let mut heard = false;
+                let mut input = BufReader::new(output);
+                let mut line = String::new();
+                let mut data = Vec::new();
+                let mut bytes = 0;
+                loop {
+                    line.clear();
+                    match input.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(count) => {
+                            bytes += count;
+                            if bytes > 4 * 1024 * 1024 {
+                                let _ = events.send(EvidenceStreamEvent::Error(EVIDENCE_FAILED.into()));
+                                return true;
+                            }
+                        }
+                    }
+                    if stopped.load(Ordering::Acquire) {
+                        return true;
+                    }
+                    let line = line.trim_end_matches(['\r', '\n']);
+                    if line.is_empty() {
+                        if data.is_empty() {
+                            continue;
+                        }
+                        let frame = data.join("\n");
+                        data.clear();
+                        heard = true;
+                        let event = decode_evidence_frame(&frame)
+                            .unwrap_or_else(|| EvidenceStreamEvent::Error(EVIDENCE_FAILED.into()));
+                        let last = !matches!(event, EvidenceStreamEvent::Delta(_));
+                        if events.send(event).is_err() || last {
+                            return true;
+                        }
+                    } else if let Some(value) = line.strip_prefix("data:") {
+                        data.push(value.strip_prefix(' ').unwrap_or(value).to_string());
+                    }
+                }
+                if heard && !stopped.load(Ordering::Acquire) {
+                    let _ = events.send(EvidenceStreamEvent::Error(EVIDENCE_FAILED.into()));
+                }
+                heard
+            });
+            loop {
+                if cancel.load(Ordering::Acquire) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+                    Err(_) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break;
+                    }
+                }
+            }
+            let heard = reader.join().unwrap_or(true);
+            let mut status = String::new();
+            if let Some(mut stderr) = status_output {
+                let _ = stderr.read_to_string(&mut status);
+            }
+            Ok(if heard { None } else { Some(http_status(&status)) })
+        };
+        match run() {
+            Ok(None) => {}
+            _ if cancel.load(Ordering::Acquire) => {}
+            // Only a server that has no such endpoint is asked the buffered
+            // way. Any other silent end (refused, signed out, unavailable, or
+            // a connection lost once the model may have started) is reported,
+            // never asked again.
+            Ok(Some(Some(404 | 405))) => {
+                let buffered: Result<meeting_notes_api_types::EvidenceDTO, String> = client
+                    .request_with_cancel(
+                        "POST",
+                        &format!("/api/v1/notes/{id}/evidence"),
+                        Some(payload),
+                        Some(cancel.clone()),
+                    )
+                    .map_err(|_| EVIDENCE_FAILED.to_string());
+                let event = match buffered {
+                    Ok(evidence) => {
+                        let _ = sender.send(EvidenceStreamEvent::Delta(evidence.summary.clone()));
+                        EvidenceStreamEvent::Done(evidence)
+                    }
+                    Err(error) => EvidenceStreamEvent::Error(error),
+                };
+                if !cancel.load(Ordering::Acquire) {
+                    let _ = sender.send(event);
+                }
+            }
+            Ok(Some(_)) => {
+                let _ = sender.send(EvidenceStreamEvent::Error(EVIDENCE_FAILED.into()));
+            }
+            Err(error) => {
+                let _ = sender.send(EvidenceStreamEvent::Error(error));
+            }
+        }
+    });
+    receiver
 }
 
 /// Where the live transcript stream of a running capture connects, and where
 /// that capture sits on the note's timeline. Runs on the stream's own thread.
 ///
-/// The timeline position is decided here, once, by the rule `Client::upload`
-/// uses for the parts it sends after Stop, and is saved in the same mapping
-/// file, which `upload` then reads. So the stream and the durable parts place
-/// the same audio at the same milliseconds, and the server can tell which
-/// parts the stream already covered.
+/// The timeline position is decided here, once (see [`Client::capture_base`]),
+/// so every connection of the stream places the same audio at the same
+/// milliseconds.
 pub fn live_target(note: &Note, capture_id: &str) -> crate::live::Resolved {
     use crate::live::Resolved;
     // The note's own account, however long the stream has been waiting: a
@@ -1172,336 +1263,42 @@ pub fn live_target(note: &Note, capture_id: &str) -> crate::live::Resolved {
     }
 }
 
-/// What the uploader of a recording's parts tells the window.
-pub enum PartEvent {
-    /// The server finished a part and the note's transcript moved on: the
-    /// transcript as the server now has it. This is how text the live stream
-    /// did not deliver (a stretch it missed, or all of it on a server
-    /// without live transcription) reaches the window before Stop.
-    Transcript {
-        revision: u64,
-        segments: Vec<meeting_notes_api_types::TranscriptSegmentDTO>,
-    },
-}
-
-/// Part uploaders that are running: the note they belong to, the flag that
-/// stops them, and whether they have let go.
-type RunningUploader = (u64, Arc<AtomicBool>, Arc<(Mutex<bool>, Condvar)>);
-static PART_UPLOADERS: Mutex<Vec<RunningUploader>> = Mutex::new(Vec::new());
-
-/// Stop the part uploader of `note`, if one is running, and wait (at most
-/// `limit`) until it has let go of whatever request it was in.
 /// For the live probe (`CEREAL_LIVE_PROBE`): where the time between Stop
-/// and a finished upload goes, as lines on standard error with the time of
-/// day.
+/// and the notes being asked for goes, as lines on standard error with the
+/// time of day.
 pub(crate) fn stop_trace(event: &str) {
     if crate::environment::var_os("CEREAL_LIVE_PROBE").is_some() {
         eprintln!("stop path {}: {event}", chrono::Local::now().format("%H:%M:%S%.3f"));
     }
 }
 
-fn stop_part_uploads(note: u64, limit: Duration) {
-    let running: Vec<_> = PART_UPLOADERS
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .iter()
-        .filter(|(owner, _, _)| *owner == note)
-        .map(|(_, cancel, done)| (cancel.clone(), done.clone()))
-        .collect();
-    for (cancel, done) in running {
-        cancel.store(true, Ordering::Release);
-        let finished = done.0.lock().unwrap_or_else(|poison| poison.into_inner());
-        let _ = done.1.wait_timeout_while(finished, limit, |finished| !*finished);
-    }
-}
-
-/// Uploads the parts of one capture as they become complete, while the
-/// meeting is still being recorded. It has its own thread and its own
-/// client, so it never waits behind (or holds up) the serial worker that
-/// carries Start, Stop and saves.
-///
-/// Nothing depends on it. A part it did not get to is sent by the upload
-/// after Stop, with the same identity; a part it did send is not sent again.
-pub struct PartUploads {
-    cancel: Arc<AtomicBool>,
-    pub events: mpsc::Receiver<PartEvent>,
-}
-
-impl PartUploads {
-    /// Follow capture `capture_id` of `note` (which must already be on the
-    /// server) through `source`.
-    pub fn start(note: Note, capture_id: String, source: crate::live::Source) -> Self {
-        let id = note.id;
-        Self::start_with(
-            move || crate::accounts::client_of_note(id),
-            note,
-            capture_id,
-            source,
-        )
-    }
-
-    fn start_with(
-        connect: impl FnMut() -> Result<Client, String> + Send + 'static,
-        note: Note,
-        capture_id: String,
-        source: crate::live::Source,
-    ) -> Self {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let done = Arc::new((Mutex::new(false), Condvar::new()));
-        let (sender, events) = mpsc::channel();
-        let registered = (note.id, cancel.clone(), done.clone());
-        PART_UPLOADERS
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .push(registered);
-        let (stop, finished) = (cancel.clone(), done.clone());
-        let spawned = std::thread::Builder::new()
-            .name("part-uploads".into())
-            .spawn(move || {
-                upload_parts(connect, &note, &capture_id, &source, &stop, &sender);
-                finish_part_uploads(&finished);
-            });
-        if spawned.is_err() {
-            finish_part_uploads(&done);
-        }
-        Self { cancel, events }
-    }
-
-    /// Stop after the request in flight, if any, has been abandoned.
-    pub fn stop(&self) {
-        self.cancel.store(true, Ordering::Release);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn uploads_events(&self) -> Vec<PartEvent> {
-        self.events.try_iter().collect()
-    }
-}
-
-impl Drop for PartUploads {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-
-fn finish_part_uploads(done: &Arc<(Mutex<bool>, Condvar)>) {
-    *done.0.lock().unwrap_or_else(|poison| poison.into_inner()) = true;
-    done.1.notify_all();
-    PART_UPLOADERS
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .retain(|(_, _, other)| !Arc::ptr_eq(other, done));
-}
-
-/// How long after sending a part the server is first asked whether it has
-/// finished it (shorter under test, where parts are two seconds long).
-const FIRST_PART_CHECK: Duration = Duration::from_millis(if cfg!(test) { 500 } else { 4000 });
-
-/// A part that has been sent and is waiting for the server to finish it.
-struct SentPart {
-    id: String,
-    due: Instant,
-    wait: Duration,
-}
-
-/// What the uploader knows once it has reached the server.
-struct Uploading {
-    client: Client,
-    plan: CapturePlan,
-    mapping_root: std::path::PathBuf,
-    existing: HashMap<String, AudioChunkDTO>,
-    sequence: u64,
-}
-
-fn upload_parts(
-    mut connect: impl FnMut() -> Result<Client, String>,
-    note: &Note,
-    capture_id: &str,
-    source: &crate::live::Source,
-    cancel: &Arc<AtomicBool>,
-    events: &mpsc::Sender<PartEvent>,
-) {
-    let Some(id) = note
-        .server_id
-        .as_deref()
-        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
-    else {
-        return;
-    };
-    let chunks = format!("/api/v1/notes/{id}/audio/chunks");
-    let stopped = || cancel.load(Ordering::Acquire);
-    let mut uploading: Option<Uploading> = None;
-    // The next part of each file that has not been looked at.
-    let mut next: HashMap<(&'static str, String), u64> = HashMap::new();
-    let mut sent: Vec<SentPart> = Vec::new();
-    let mut revision: Option<i64> = None;
-    let (mut failures, mut retry_at) = (0u32, Instant::now());
-    while !stopped() {
-        std::thread::sleep(Duration::from_millis(250));
-        let now = Instant::now();
-        if now < retry_at {
-            continue;
-        }
-        let Some(manifest) = source.manifest() else {
-            continue;
-        };
-        let mut pass = || -> Result<(), String> {
-            if uploading.is_none() {
-                let client = connect()?;
-                if note.server_url.as_deref().is_some_and(|url| url != client.url) {
-                    return Err("This note belongs to another server".into());
-                }
-                let existing: Vec<AudioChunkDTO> =
-                    client.request_with_cancel("GET", &chunks, None, Some(cancel.clone()))?;
-                let existing: HashMap<_, _> =
-                    existing.into_iter().map(|c| (c.id.clone(), c)).collect();
-                let plan = client.live_capture_plan(note, id, capture_id, &existing)?;
-                let mapping_root = client.mapping_root(note, id)?;
-                let sequence = Client::next_sequence(&existing, &mapping_root);
-                uploading = Some(Uploading {
-                    client,
-                    plan,
-                    mapping_root,
-                    existing,
-                    sequence,
-                });
-            }
-            let up = uploading.as_mut().expect("the uploader was just prepared");
-            let target = PartTarget {
-                id,
-                capture_id,
-                mapping_root: &up.mapping_root,
-            };
-            // Every part that is complete: all of a file that has stopped
-            // growing, and of the one still growing the whole parts so far.
-            // The last, short part of the capture is the after-Stop upload's.
-            for (channel, stats) in [("mic", &manifest.stats.mic), ("system", &manifest.stats.system)]
-            {
-                let paths = channel_paths(stats);
-                let mut channel_offset = up.plan.base_ms;
-                for (index, path) in paths.iter().enumerate() {
-                    let closed = index + 1 < paths.len();
-                    let Ok(wav) = WavReader::open(Path::new(path)) else {
-                        break; // Its header is not on disk yet.
-                    };
-                    let mut wav = wav.parts_of(up.plan.part_seconds);
-                    let complete = if closed {
-                        wav.frames.div_ceil(wav.step)
-                    } else {
-                        wav.frames / wav.step
-                    };
-                    let block = next.entry((channel, path.clone())).or_insert(0);
-                    while *block < complete {
-                        if stopped() {
-                            return Ok(());
-                        }
-                        let Some((bytes, start_ms)) = wav.chunk(*block)? else {
-                            break;
-                        };
-                        let part = up.client.send_part(
-                            &target,
-                            &up.existing,
-                            channel,
-                            path,
-                            *block,
-                            bytes,
-                            channel_offset + start_ms,
-                            &mut up.sequence,
-                            Some(cancel.clone()),
-                        )?;
-                        sent.push(SentPart {
-                            id: part,
-                            due: Instant::now() + FIRST_PART_CHECK,
-                            wait: FIRST_PART_CHECK,
-                        });
-                        *block += 1;
-                    }
-                    if !closed {
-                        break;
-                    }
-                    channel_offset += wav.duration_ms();
-                }
-            }
-            // Has the server finished any of them? It may hold a part back
-            // until the live stream has had its say, so ask less and less
-            // often: after 4, 8, 16 and then every 30 seconds.
-            let now = Instant::now();
-            if sent.iter().any(|part| now >= part.due) {
-                let states: Vec<AudioChunkDTO> =
-                    up.client
-                        .request_with_cancel("GET", &chunks, None, Some(cancel.clone()))?;
-                let mut landed = false;
-                sent.retain_mut(|part| {
-                    match states.iter().find(|chunk| chunk.id == part.id).map(|chunk| &chunk.state) {
-                        Some(State::Ready) => {
-                            landed = true;
-                            false
-                        }
-                        // Left for the upload after Stop, which retries it
-                        // and reports it if it fails again.
-                        Some(State::Failed) => false,
-                        _ => {
-                            if now >= part.due {
-                                part.wait = (part.wait * 2).min(Duration::from_secs(30));
-                                part.due = now + part.wait;
-                            }
-                            true
-                        }
-                    }
-                });
-                if landed {
-                    let remote: NoteDTO = up.client.request_with_cancel(
-                        "GET",
-                        &format!("/api/v1/notes/{id}"),
-                        None,
-                        Some(cancel.clone()),
-                    )?;
-                    if revision != Some(remote.transcript_revision) {
-                        revision = Some(remote.transcript_revision);
-                        let _ = events.send(PartEvent::Transcript {
-                            revision: remote.transcript_revision.max(0) as u64,
-                            segments: remote.transcript_segments,
-                        });
-                    }
-                }
-            }
-            Ok(())
-        };
-        match pass() {
-            Ok(()) => failures = 0,
-            Err(_) if stopped() => break,
-            Err(_) => {
-                // The network, most likely. Look at the server afresh when
-                // it is back: after 1, 2, 4, 8, then every 15 seconds.
-                uploading = None;
-                failures += 1;
-                let delay = [1, 2, 4, 8, 15][(failures as usize - 1).min(4)];
-                retry_at = Instant::now() + Duration::from_secs(delay);
-            }
-        }
-        if manifest.completed() {
-            break; // Everything left is the after-Stop upload's.
-        }
-    }
-}
-
 impl Client {
-    /// The plan of capture `capture_id` while it is still being recorded:
-    /// the captures before it are placed first, exactly as the loop of
-    /// [`Client::upload`] will place them, and then this one after them.
-    fn live_capture_plan(
+    /// Note-timeline position of the first sample of capture `capture_id`,
+    /// while it is still being recorded: after the note's transcript so far
+    /// (which may come from another device), and after every earlier capture
+    /// of the note here, each placed as it was when it was streamed.
+    fn live_capture_base(&self, note: &Note, id: &str, capture_id: &str) -> Result<u64, String> {
+        let remote: NoteDTO = self.request("GET", &format!("/api/v1/notes/{id}"), None)?;
+        let offset_ms = remote
+            .transcript_segments
+            .iter()
+            .map(|segment| segment.end_ms.unwrap_or(segment.start_ms).max(0) as u64)
+            .max()
+            .unwrap_or(0);
+        self.capture_base_after(note, id, capture_id, offset_ms)
+    }
+
+    /// The position of capture `capture_id` when the note's audio from
+    /// elsewhere ends at `offset_ms`: the captures before it are placed
+    /// first, in order, and then this one after them.
+    fn capture_base_after(
         &self,
         note: &Note,
         id: &str,
         capture_id: &str,
-        existing: &HashMap<String, AudioChunkDTO>,
-    ) -> Result<CapturePlan, String> {
-        let mut offset_ms = existing
-            .values()
-            .map(|c| (c.start_ms + c.duration_ms).max(0) as u64)
-            .max()
-            .unwrap_or(0);
-        let mapping_root = self.mapping_root(note, id)?;
+        mut offset_ms: u64,
+    ) -> Result<u64, String> {
+        let placement_root = self.placement_root(note, id)?;
         for saved in &note.audio_captures {
             let live = saved.capture_id == capture_id;
             let capture = if live {
@@ -1513,68 +1310,40 @@ impl Client {
                         serde_json::from_slice::<crate::audio::CaptureManifest>(&data).ok()
                     })
                     .unwrap_or_else(|| saved.clone());
-                if !current.completed() {
+                // One that a quit or a crash left unfinished is as final as
+                // it will get.
+                if !current.settled() {
                     return Err("An earlier capture is still being finalised".into());
                 }
                 current
             };
-            let plan = self.capture_plan(id, &capture, existing, &mapping_root, offset_ms, live)?;
+            let base_ms = Self::capture_base(&capture, &placement_root, offset_ms)?;
             if live {
-                return Ok(plan);
+                return Ok(base_ms);
             }
-            offset_ms =
-                offset_ms.max(plan.base_ms + (capture.audio_seconds() * 1000.).round() as u64);
+            offset_ms = offset_ms.max(base_ms + (capture.audio_seconds() * 1000.).round() as u64);
         }
         Err("The capture does not belong to this note".into())
     }
-
-    /// Note-timeline position of the first sample of capture `capture_id`,
-    /// while it is still being recorded.
-    fn live_capture_base(&self, note: &Note, id: &str, capture_id: &str) -> Result<u64, String> {
-        let existing: Vec<AudioChunkDTO> =
-            self.request("GET", &format!("/api/v1/notes/{id}/audio/chunks"), None)?;
-        let existing: HashMap<_, _> = existing.into_iter().map(|c| (c.id.clone(), c)).collect();
-        Ok(self
-            .live_capture_plan(note, id, capture_id, &existing)?
-            .base_ms)
-    }
 }
 
-fn channel_paths(stats: &crate::audio::ChannelStats) -> Vec<String> {
-    if stats.paths.is_empty() {
-        stats.path.clone().into_iter().collect()
-    } else {
-        stats.paths.clone()
-    }
-}
-fn chunk_identity(
-    note_id: &str,
-    capture_id: &str,
-    channel: &str,
-    path: &str,
-    block: u64,
-) -> String {
-    uuid::Uuid::new_v5(
-        &uuid::Uuid::NAMESPACE_URL,
-        format!("{note_id}:{capture_id}:{channel}:{path}:{block}").as_bytes(),
-    )
-    .to_string()
-}
+/// Write `value` to `path` once: a file that is already there must hold the
+/// same value, so a decision made earlier is never silently replaced.
 fn save_mapping<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    let bytes = serde_json::to_vec(value).map_err(|_| "Cannot encode upload identity")?;
+    let bytes = serde_json::to_vec(value).map_err(|_| "Cannot encode capture position")?;
     if let Ok(previous) = fs::read(path) {
         return if previous == bytes {
             Ok(())
         } else {
             Err(
-                "Saved upload identity conflicts with the server; local audio remains intact"
+                "Saved capture position conflicts with this one; local audio remains intact"
                     .into(),
             )
         };
     }
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| "Cannot determine upload timestamp")?
+        .map_err(|_| "Cannot determine the time")?
         .as_nanos();
     let temporary = path.with_extension(format!("{}.{}.tmp", std::process::id(), stamp));
     let mut options = fs::OpenOptions::new();
@@ -1588,7 +1357,7 @@ fn save_mapping<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
         Ok(mut file) => {
             file.write_all(&bytes)
                 .and_then(|_| file.sync_all())
-                .map_err(|_| "Cannot preserve upload identity")?;
+                .map_err(|_| "Cannot preserve capture position")?;
             match fs::hard_link(&temporary, path) {
                 Ok(()) => Ok(()),
                 Err(e)
@@ -1597,162 +1366,23 @@ fn save_mapping<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
                 {
                     Ok(())
                 }
-                Err(_) => Err("Cannot preserve immutable upload identity".into()),
+                Err(_) => Err("Cannot preserve capture position".into()),
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            if fs::read(path).map_err(|_| "Cannot read upload identity")? == bytes {
+            if fs::read(path).map_err(|_| "Cannot read capture position")? == bytes {
                 Ok(())
             } else {
                 Err(
-                    "Saved upload identity conflicts with the server; local audio remains intact"
+                    "Saved capture position conflicts with this one; local audio remains intact"
                         .into(),
                 )
             }
         }
-        Err(_) => Err("Cannot preserve upload identity".into()),
+        Err(_) => Err("Cannot preserve capture position".into()),
     };
     let _ = fs::remove_file(temporary);
     result
-}
-
-/// Convert bounded 60-second ranges to PCM16 WAV. Reading a multi-hour capture
-/// never loads the whole file or silently truncates at an API upload limit.
-struct WavReader {
-    file: fs::File,
-    rate: u32,
-    format: u16,
-    bits: u16,
-    data_start: u64,
-    frames: u64,
-    position: u64,
-    /// Frames in one part.
-    step: u64,
-}
-impl WavReader {
-    /// Cut into parts of `seconds` instead of the 60 seconds of old.
-    fn parts_of(mut self, seconds: u64) -> Self {
-        // Stay below curl's configuration-line limit after base64 expansion,
-        // as well as the API's raw audio limit, even at 192 kHz.
-        self.step = (self.rate as u64 * seconds.max(1)).min(3_000_000);
-        self
-    }
-    /// Part `block` on its own, wherever the reader was.
-    fn chunk(&mut self, block: u64) -> Result<Option<(Vec<u8>, u64)>, String> {
-        self.position = (block * self.step).min(self.frames);
-        self.next_chunk()
-    }
-    fn open(path: &Path) -> Result<Self, String> {
-        let mut file = fs::File::open(path).map_err(|_| "Saved audio file is unavailable")?;
-        let mut header = [0u8; 12];
-        file.read_exact(&mut header)
-            .map_err(|_| "Invalid WAV header")?;
-        if &header[..4] != b"RIFF" || &header[8..] != b"WAVE" {
-            return Err("Unsupported saved audio container".into());
-        }
-        let length = file
-            .metadata()
-            .map_err(|_| "Cannot inspect saved audio")?
-            .len();
-        let mut format = None;
-        let mut data = None;
-        while file.stream_position().map_err(|_| "Cannot read WAV")? + 8 <= length {
-            let mut h = [0u8; 8];
-            file.read_exact(&mut h).map_err(|_| "Invalid WAV chunk")?;
-            let size = u32::from_le_bytes(h[4..8].try_into().unwrap()) as u64;
-            let start = file.stream_position().map_err(|_| "Cannot read WAV")?;
-            if start + size > length {
-                return Err("Saved WAV has incomplete audio; wait for finalization".into());
-            }
-            if &h[..4] == b"fmt " {
-                if size < 16 {
-                    return Err("Invalid WAV format".into());
-                }
-                let mut f = [0u8; 16];
-                file.read_exact(&mut f).map_err(|_| "Invalid WAV format")?;
-                format = Some((
-                    u16::from_le_bytes(f[..2].try_into().unwrap()),
-                    u16::from_le_bytes(f[2..4].try_into().unwrap()),
-                    u32::from_le_bytes(f[4..8].try_into().unwrap()),
-                    u16::from_le_bytes(f[14..16].try_into().unwrap()),
-                ));
-            } else if &h[..4] == b"data" {
-                data = Some((start, size));
-            }
-            file.seek(SeekFrom::Start(start + size + (size % 2)))
-                .map_err(|_| "Cannot seek saved audio")?;
-        }
-        let (code, channels, rate, bits) = format.ok_or("Missing WAV format")?;
-        let (data_start, bytes) = data.ok_or("Missing WAV samples")?;
-        if channels != 1
-            || !(8000..=192000).contains(&rate)
-            || !matches!((code, bits), (1, 16) | (3, 32))
-            || bytes % (bits as u64 / 8) != 0
-        {
-            return Err("Unsupported saved WAV encoding".into());
-        }
-        Ok(Self {
-            file,
-            rate,
-            format: code,
-            bits,
-            data_start,
-            frames: bytes / (bits as u64 / 8),
-            position: 0,
-            step: (rate as u64 * LEGACY_PART_SECONDS).min(3_000_000),
-        })
-    }
-    fn duration_ms(&self) -> u64 {
-        self.frames * 1000 / self.rate as u64
-    }
-    fn next_chunk(&mut self) -> Result<Option<(Vec<u8>, u64)>, String> {
-        if self.position == self.frames {
-            return Ok(None);
-        }
-        let count = (self.frames - self.position).min(self.step);
-        let start_ms = self.position * 1000 / self.rate as u64;
-        self.file
-            .seek(SeekFrom::Start(
-                self.data_start + self.position * (self.bits as u64 / 8),
-            ))
-            .map_err(|_| "Cannot seek saved audio")?;
-        let mut source = vec![0u8; count as usize * (self.bits as usize / 8)];
-        self.file
-            .read_exact(&mut source)
-            .map_err(|_| "Cannot read saved audio")?;
-        let pcm: Vec<u8> = if self.format == 1 {
-            source
-        } else {
-            source
-                .chunks_exact(4)
-                .flat_map(|v| {
-                    let value = f32::from_le_bytes(v.try_into().unwrap());
-                    let sample = if value.is_finite() {
-                        (value.clamp(-1., 1.) * 32767.).round() as i16
-                    } else {
-                        0
-                    };
-                    sample.to_le_bytes()
-                })
-                .collect()
-        };
-        let mut bytes = Vec::with_capacity(44 + pcm.len());
-        bytes.extend(b"RIFF");
-        bytes.extend((36 + pcm.len() as u32).to_le_bytes());
-        bytes.extend(b"WAVEfmt ");
-        bytes.extend(16u32.to_le_bytes());
-        bytes.extend(1u16.to_le_bytes());
-        bytes.extend(1u16.to_le_bytes());
-        bytes.extend(self.rate.to_le_bytes());
-        bytes.extend((self.rate * 2).to_le_bytes());
-        bytes.extend(2u16.to_le_bytes());
-        bytes.extend(16u16.to_le_bytes());
-        bytes.extend(b"data");
-        bytes.extend((pcm.len() as u32).to_le_bytes());
-        bytes.extend(pcm);
-        self.position += count;
-        Ok(Some((bytes, start_ms)))
-    }
 }
 
 /// Whole notes handed to the window at a time while the list refreshes.
@@ -1785,6 +1415,40 @@ fn sync_stamp(updated_at: &str, transcript_revision: i64, generated_revision: Op
         "{updated_at}|{transcript_revision}|{}",
         generated_revision.map_or_else(|| "-".to_string(), |revision| revision.to_string())
     )
+}
+
+/// The server's copy holds nothing this Mac does not: the same text,
+/// generated notes and revisions.
+fn same_content(note: &Note, remote: &NoteDTO) -> bool {
+    note.title == remote.title
+        && note.body == remote.body
+        && note.enhanced == remote.enhanced
+        && note.transcript_revision == remote.transcript_revision.max(0) as u64
+        && note.generated_revision == remote.generated_revision.map(|revision| revision.max(0) as u64)
+}
+
+/// The note as it was read, the way a conditional delete names it
+/// (`updatedAt|transcriptRevision|generatedRevision`, the last empty when
+/// there are no generated notes).
+fn delete_stamp(remote: &NoteDTO) -> String {
+    format!(
+        "{}|{}|{}",
+        remote.updated_at,
+        remote.transcript_revision,
+        remote.generated_revision.map_or_else(String::new, |revision| revision.to_string())
+    )
+}
+
+/// A value for a query string: everything but unreserved characters is
+/// percent-encoded.
+fn query_value(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (byte as char).to_string(),
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
 }
 
 /// The notes to read whole: those that are new here, and those whose row on the
@@ -1961,12 +1625,14 @@ pub fn association_file(recordings: &Path, url: &str, note_id: u64) -> std::path
         .join(format!("{}.txt", handle::file_id(note_id)))
 }
 
-/// What is queued again for a note when its account is Ready: the capture
-/// (which saves the text on its way) or the edit.
+/// What is queued again for a note when its account is Ready: the Stop of a
+/// recording the server has not confirmed (which saves the text on its way),
+/// or the edit.
 ///
-/// A capture is sent again only when the account comes back (`returning`:
-/// its session ended, was replaced, or its server could not be reached), and
-/// only once every capture of the note is final; an edit is always sent.
+/// A Stop is sent again only when the account comes back (`returning`: its
+/// session ended, was replaced, or its server could not be reached), and only
+/// once every capture of the note is final; an edit is always sent. No audio
+/// is sent: the transcript is what the live stream delivered.
 pub fn requeue_action(note: &Note, returning: bool) -> Option<Action> {
     if note.trashed && note.server_missing_since.is_some() {
         return None;
@@ -1979,8 +1645,11 @@ pub fn requeue_action(note: &Note, returning: bool) -> Option<Action> {
                 .unwrap_or_else(|| capture.clone())
                 .completed()
         });
-    if returning && note.unsent_capture && captures_final {
-        Some(Action::Sync)
+    // A Stop that waits for its capture to be delivered goes through
+    // `Cereal::live_deliver` instead, which sends it once the server has it.
+    let delivering = note.pending_stop.is_some() || !note.live_pending.is_empty();
+    if returning && note.unsent_capture && captures_final && !delivering {
+        Some(Action::Recording("stop"))
     } else if note.unsent_edits || note.enhanced_dirty {
         Some(Action::Save)
     } else {
@@ -1989,7 +1658,7 @@ pub fn requeue_action(note: &Note, returning: bool) -> Option<Action> {
 }
 
 /// Put a note in Trash as "Deleted on the server": its own server answered
-/// 404 for it. Its text, folder, favourite and capture files stay. A note
+/// 404 for it. Its text, favourite and capture files stay. A note
 /// that is open, or has anything unsent, is left alone.
 pub fn mark_missing(note: &mut Note, now: &str) -> bool {
     if note.has_unsent_work() || note.server_missing_since.is_some() {
@@ -2119,7 +1788,7 @@ impl Cereal {
                     let _ = sender.send(SyncMessage::Missing(gone.missing));
                 }
                 let models = if wants_models {
-                    client.request::<meeting_notes_api_types::ChatModelsDTO>("GET", "/api/v1/models/chat", None).map(|response| response.models).unwrap_or_default()
+                    client.request::<Value>("GET", "/api/v1/models/chat", None).map(|response| chat_models_from(&response)).unwrap_or_default()
                 } else {
                     Vec::new()
                 };
@@ -2332,6 +2001,7 @@ impl Cereal {
                 note.enhanced = remote.enhanced.clone();
             }
             note.transcript = transcript_text(&remote);
+            note.add_transcript_gaps(remote.transcript_gaps.clone().unwrap_or_default());
             note.server_transcript_segments = remote.transcript_segments.clone();
             note.transcript_revision = remote.transcript_revision.max(0) as u64;
             note.generated_revision = remote.generated_revision.map(|v| v.max(0) as u64);
@@ -2363,35 +2033,52 @@ impl Cereal {
         for (id, action) in queue {
             self.server_action(id, action, cx);
         }
+        // Captures that a quit, a crash or a lost session left part-way to
+        // the server, and Stops that were waiting for them: streamed again
+        // from where the server is, and the Stop sent after.
+        let owed: Vec<u64> = self
+            .workspace
+            .notes_of(account.slot)
+            .filter(|note| recording != Some(note.id))
+            .filter(|note| note.pending_stop.is_some() || !note.live_pending.is_empty())
+            .filter(|note| !(note.trashed && note.server_missing_since.is_some()))
+            .map(|note| note.id)
+            .collect();
+        for id in owed {
+            self.live_deliver(id, None, cx);
+        }
     }
 
     /// Send something about a note to the account it belongs to, through
     /// that account's serial worker. Nothing falls back to another account.
     pub fn server_action(&mut self, id: u64, action: Action, cx: &mut Context<Self>) {
+        self.server_action_sent(id, action, cx);
+    }
+
+    /// [`Cereal::server_action`], saying whether the action went to the
+    /// account's worker.
+    pub fn server_action_sent(&mut self, id: u64, action: Action, cx: &mut Context<Self>) -> bool {
         if !enabled() {
-            return;
+            return false;
         }
         let Some(account) = crate::accounts::of_note(id) else {
-            return;
+            return false;
         };
         if !account.shown() {
             // Its session has ended (or was never verified in this launch):
             // nothing is sent. What is unsent stays marked on the note and
             // is queued again after the sign-in.
-            return;
+            return false;
         }
         let account_epoch = account.epoch();
         let account_id = account.id.clone();
         let Some(note) = self.workspace.note(id).cloned() else {
-            return;
+            return false;
         };
         let generating = matches!(&action, Action::Generate);
         let chat = matches!(&action, Action::Chat { .. });
-        // An action that ends with every part of the note's audio sent.
-        let uploads = matches!(
-            &action,
-            Action::Recording("stop") | Action::Sync | Action::Generate
-        );
+        // An action that ends with the server told the recording stopped.
+        let stops = matches!(&action, Action::Recording("stop") | Action::Generate);
         let chat_index = self.chat_messages.len().checked_sub(1);
         let epoch = if generating {
             Some(self.generation.begin(id, note.transcript_revision))
@@ -2408,16 +2095,14 @@ impl Cereal {
             .or_insert_with(|| Bridge::new(account_id.clone()))
             .send(note, action);
         self.server_pending += 1;
-        self.server_status = Some(
-            if generating {
-                "Generating notes on server…"
-            } else if chat {
-                "Thinking…"
-            } else {
-                "Syncing audio and transcript…"
-            }
-            .into(),
-        );
+        // Saves, Start and Stop go by without a word.
+        self.server_status = if generating {
+            Some("Generating notes on server…".into())
+        } else if chat {
+            Some("Thinking…".into())
+        } else {
+            None
+        };
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = loop {
@@ -2435,6 +2120,11 @@ impl Cereal {
             };
             let _ = this.update(cx, |this, cx| {
                 this.server_pending = this.server_pending.saturating_sub(1);
+                if stops {
+                    // Answered either way: a Stop still pending is sent
+                    // again when the account is next ready.
+                    this.live.stopping.remove(&id);
+                }
                 if crate::accounts::epoch_of(&account_id) != Some(account_epoch) {
                     // The account's session was replaced or ended, or it
                     // was signed out of. The note keeps its unsent marks
@@ -2469,8 +2159,13 @@ impl Cereal {
                             if note.title == submitted_title && note.body == submitted_body {
                                 note.unsent_edits = false;
                             }
-                            if uploads && !recording_now {
+                            if stops && !recording_now {
                                 note.unsent_capture = false;
+                                // Nothing was owed when this Stop went out
+                                // (and nothing has been recorded since).
+                                if note.live_pending.is_empty() {
+                                    note.pending_stop = None;
+                                }
                             }
                             // The server names a note nobody has named when
                             // its notes are generated: the list row and the
@@ -2498,6 +2193,10 @@ impl Cereal {
                                 note.transcript_revision =
                                     reply.note.transcript_revision.max(0) as u64;
                             }
+                            // What the server lists as captured but never
+                            // transcribed, with what this Mac's stream was
+                            // told of.
+                            note.add_transcript_gaps(reply.note.transcript_gaps.clone().unwrap_or_default());
                             // A generation canceled by navigation/capture cannot replace
                             // the current editing surface. Server keeps its own guard.
                             note.reconcile_enhanced_reply(
@@ -2531,22 +2230,32 @@ impl Cereal {
                         if let Some(epoch) = epoch
                             && this.generation.epoch == epoch
                         {
-                            this.generation.writing(epoch);
-                            this.generation.phase = crate::recording::GenerationPhase::Ready;
+                            if reply.untranscribed {
+                                // Nothing to write notes from: say so, and
+                                // leave the note as it is.
+                                this.generation.cancel();
+                            } else {
+                                this.generation.writing(epoch);
+                                this.generation.phase = crate::recording::GenerationPhase::Ready;
+                                this.notify_notes(id, None);
+                            }
                         }
-                        this.server_status = if this.server_pending == 0 {
-                            None
-                        } else {
-                            Some("Syncing with server…".into())
-                        };
+                        // What another action still on its way says stays.
+                        if generating && reply.untranscribed {
+                            this.server_status = Some(NO_TRANSCRIPT.into());
+                        } else if this.server_pending == 0 || generating || chat {
+                            this.server_status = None;
+                        }
                         this.persist(cx);
                         if this.current_note == Some(id) {
                             this.refresh_meeting_context(id, cx);
                         }
+
                     }
                     Err(error) => {
                         if generating && epoch == Some(this.generation.epoch) {
                             this.generation.cancel();
+                            this.notify_notes(id, Some(&error));
                         }
                         if chat
                             && this.current_note == Some(id)
@@ -2563,11 +2272,16 @@ impl Cereal {
             });
         })
         .detach();
+        true
     }
     pub fn submit_server_chat(&mut self, question: String, cx: &mut Context<Self>) {
         self.start_streaming_chat(question, cx);
     }
 }
+
+/// What a note says when Stop (or Generate) found no transcript to write
+/// notes from: the live stream delivered nothing for this recording.
+pub const NO_TRANSCRIPT: &str = "No transcript was captured for this recording";
 
 fn transcript_text(note: &NoteDTO) -> String {
     crate::note::server_transcript_utterances(&note.transcript_segments)
@@ -2584,59 +2298,22 @@ fn transcript_text(note: &NoteDTO) -> String {
         .join("\n\n")
 }
 
-/// The pieces of this module that a test elsewhere needs to stand in for the
-/// app: a client for a local fake server, the part uploader on it, and Stop.
-#[cfg(test)]
-pub(crate) mod testing {
-    use super::*;
-
-    fn client(url: &str, root: &Path) -> Client {
-        Client::for_test(url.to_owned(), "fictional-part-upload-owner-token-0000", Some(root))
-    }
-
-    /// Record, before anything has placed the capture, that its parts are
-    /// `seconds` long: a meeting's worth of 30-second parts is too long for
-    /// a test, and the length is read from this file like any other.
-    pub(crate) fn set_part_seconds(url: &str, root: &Path, note: &Note, capture_id: &str, seconds: u64) {
-        let id = note.server_id.as_deref().unwrap();
-        let mapping_root = client(url, root).mapping_root(note, id).unwrap();
-        let key = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, capture_id.as_bytes());
-        save_mapping(&mapping_root.join(format!("capture-{key}.parts.json")), &seconds).unwrap();
-    }
-
-    pub(crate) fn part_uploads(
-        url: &str,
-        root: &Path,
-        note: Note,
-        capture_id: &str,
-        source: crate::live::Source,
-    ) -> PartUploads {
-        let (url, root) = (url.to_owned(), root.to_path_buf());
-        PartUploads::start_with(
-            move || Ok(client(&url, &root)),
-            note,
-            capture_id.to_owned(),
-            source,
-        )
-    }
-
-    /// What the serial worker does for Stop: the recording command, then the
-    /// durable upload. Returns the note as the server then has it.
-    pub(crate) fn stop_recording(url: &str, root: &Path, note: &Note) -> Result<NoteDTO, String> {
-        client(url, root)
-            .run(note, Action::Recording("stop"))
-            .map(|reply| reply.note)
-    }
-
-    pub(crate) fn live_url(url: &str, note_id: &str) -> String {
-        crate::accounts::client::live_url(url, note_id)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Client, WavReader};
-    use std::fs;
+    use super::Client;
+
+    #[test]
+    fn chat_models_skip_what_this_build_cannot_read() {
+        use super::{chat_model_key, chat_models_from};
+        use serde_json::json;
+        let models = chat_models_from(&json!({"models": [
+            {"provider": "openai_compatible", "model": "llama3.2:3b"},
+            {"provider": "openrouter", "model": "openai/gpt-6-sol"},
+            {"provider": "some_future_provider", "model": "x"},
+        ]}));
+        assert_eq!(models.iter().map(chat_model_key).collect::<Vec<_>>(), vec!["openai_compatible:llama3.2:3b", "openrouter:openai/gpt-6-sol"]);
+        assert!(chat_models_from(&json!({"unexpected": true})).is_empty());
+    }
 
     #[test]
     fn share_capabilities_cannot_change_origin_or_smuggle_an_arbitrary_path() {
@@ -3068,6 +2745,7 @@ mod tests {
             vec![],
             Arc::new(AtomicBool::new(false)),
             None,
+            None,
         );
         assert_eq!(
             receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
@@ -3109,7 +2787,7 @@ mod tests {
         let client = Client::for_test(format!("http://{address}"), "fictional-cancel-owner", None);
         let cancel = Arc::new(AtomicBool::new(false));
         let receiver =
-            stream_chat_with_client(Ok(client), None, "Question".into(), vec![], cancel.clone(), None);
+            stream_chat_with_client(Ok(client), None, "Question".into(), vec![], cancel.clone(), None, None);
         assert_eq!(
             receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
             ChatStreamEvent::Delta("first".into())
@@ -3123,167 +2801,6 @@ mod tests {
     }
     /// Explicit opt-in: real authenticated requests and provider credits, using
     /// only the fictional WAV supplied by the caller. Never runs in normal CI.
-    #[test]
-    #[ignore = "requires a deployed server, owner token and synthetic QA audio"]
-    fn live_server_record_transcribe_generate_resume_chat() {
-        use super::{Action, Client};
-        use crate::{
-            audio::{CaptureManifest, ChannelStats, NativeStats},
-            model::Note,
-        };
-        let audio =
-            std::env::var("MEETING_QA_AUDIO").expect("Set MEETING_QA_AUDIO to synthetic PCM WAV");
-        let resume_audio = std::env::var("MEETING_QA_RESUME").unwrap_or_else(|_| audio.clone());
-        assert!(
-            crate::environment::var_os("CEREAL_DATA_DIR").is_some(),
-            "Use an isolated CEREAL_DATA_DIR for this test"
-        );
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        let mut client = crate::accounts::default_client().unwrap();
-        let mut first = Note {
-            id: stamp,
-            title: "Fictional desktop provider pipeline acceptance".into(),
-            body: "Synthetic test conversation; no real meeting content.".into(),
-            date: chrono::Utc::now().date_naive().to_string(),
-            ..Default::default()
-        };
-        let created = client.run(&first, Action::Recording("start")).unwrap();
-        let id = created.note.id.clone();
-        first.server_id = Some(id.clone());
-        first.server_url = Some(created.url.clone());
-        let make_capture = |local_id: u64, name: &str, path: &str| {
-            let wav = WavReader::open(std::path::Path::new(path)).unwrap();
-            CaptureManifest {
-                version: 1,
-                capture_id: format!("synthetic-{stamp}-{name}"),
-                note_id: local_id,
-                directory: std::path::PathBuf::from(path).parent().unwrap().into(),
-                manifest_path: std::path::PathBuf::from(format!(
-                    "/tmp/no-live-manifest-{stamp}-{name}.json"
-                )),
-                started_at: chrono::Utc::now().to_rfc3339(),
-                finished_at: Some(chrono::Utc::now().to_rfc3339()),
-                error: None,
-                stats: NativeStats {
-                    version: 1,
-                    phase: "stopped".into(),
-                    requested_channels: 2,
-                    mic: ChannelStats {
-                        state: "disabled".into(),
-                        ..Default::default()
-                    },
-                    system: ChannelStats {
-                        state: "stopped".into(),
-                        sample_rate: wav.rate as f64,
-                        channels: 1,
-                        frames_received: wav.frames,
-                        frames_written: wav.frames,
-                        path: Some(path.into()),
-                        paths: vec![path.into()],
-                        ..Default::default()
-                    },
-                },
-            }
-        };
-        let outcome = (|| -> Result<serde_json::Value, String> {
-            first
-                .audio_captures
-                .push(make_capture(first.id, "first", &audio));
-            let stopped = client.run(&first, Action::Recording("stop"))?;
-            if stopped.note.transcript_segments.is_empty() {
-                return Err("No real transcript arrived".into());
-            }
-            let transcript = stopped
-                .note
-                .transcript_segments
-                .iter()
-                .map(|s| s.text.as_str())
-                .collect::<Vec<_>>()
-                .join(" ")
-                .to_lowercase();
-            let expected_terms = std::env::var("MEETING_QA_TRANSCRIPT_TERMS").unwrap_or_default();
-            if expected_terms
-                .split(',')
-                .map(str::trim)
-                .filter(|term| !term.is_empty())
-                .any(|term| !transcript.contains(&term.to_lowercase()))
-            {
-                return Err("The actual desktop transcript did not contain every requested synthetic fixture fact".into());
-            }
-            let generated = client.run(&first, Action::Generate)?;
-            if generated.note.enhanced.is_empty()
-                || generated.note.generated_revision != Some(generated.note.transcript_revision)
-            {
-                return Err("Generation did not consume the real transcript revision".into());
-            }
-            // Simulate a second device that imported the same note with no local
-            // capture history. Its first new recording must resume, allocate the
-            // next sequence and start after the first device's remote timeline.
-            let mut imported = Note {
-                id: stamp + 1,
-                title: first.title.clone(),
-                body: first.body.clone(),
-                date: first.date.clone(),
-                server_id: Some(id.clone()),
-                server_url: Some(created.url.clone()),
-                ..Default::default()
-            };
-            let mut second = crate::accounts::default_client()?;
-            second.run(&imported, Action::Recording("start"))?;
-            imported
-                .audio_captures
-                .push(make_capture(imported.id, "second", &resume_audio));
-            let resumed = second.run(&imported, Action::Recording("stop"))?;
-            if resumed.note.id != id
-                || resumed.note.transcript_revision <= generated.note.transcript_revision
-            {
-                return Err("Resume did not append to the same note".into());
-            }
-            let before: Vec<meeting_notes_api_types::AudioChunkDTO> =
-                second.request("GET", &format!("/api/v1/notes/{id}/audio/chunks"), None)?;
-            // A retry must not create new transcript segments or advance revision.
-            let retried = second.run(&imported, Action::Sync)?;
-            if retried.note.transcript_revision != resumed.note.transcript_revision {
-                return Err("Retry duplicated transcript content".into());
-            }
-            let mut chunks = before;
-            chunks.sort_by_key(|c| c.sequence);
-            if chunks.len() < 2
-                || chunks
-                    .windows(2)
-                    .any(|w| w[1].start_ms < w[0].start_ms + w[0].duration_ms)
-            {
-                return Err("Cross-device audio chunks overlap or are missing".into());
-            }
-            let regenerated = second.run(&imported, Action::Generate)?;
-            if regenerated.note.generated_revision != Some(resumed.note.transcript_revision) {
-                return Err("Regeneration revision was stale".into());
-            }
-            let chatted = second.run(
-                &imported,
-                Action::Chat {
-                    message: "What actions and decisions were discussed?".into(),
-                    history: Vec::new(),
-                },
-            )?;
-            if chatted.answer.as_ref().is_none_or(|a| a.trim().is_empty()) {
-                return Err("Chat returned no answer".into());
-            }
-            Ok(
-                serde_json::json!({"sameNote":true,"chunks":chunks.len(),"firstRevision":generated.note.transcript_revision,"resumedRevision":resumed.note.transcript_revision,"retryDidNotDuplicate":true,"crossDeviceTimelineOrdered":true,"enhancedCharacters":regenerated.note.enhanced.len(),"chatCharacters":chatted.answer.unwrap().len()}),
-            )
-        })();
-        let cleanup =
-            client.request::<serde_json::Value>("DELETE", &format!("/api/v1/notes/{id}"), None);
-        assert!(cleanup.is_ok(), "Could not delete synthetic QA fixture");
-        eprintln!(
-            "Desktop live provider verification: {}",
-            outcome.expect("Desktop provider integration failed")
-        );
-    }
     #[test]
     fn native_transport_preserves_unicode_json_and_owner_authentication() {
         use std::{
@@ -3357,85 +2874,6 @@ mod tests {
         assert_eq!(reply["ok"], true);
         server.join().unwrap();
     }
-    fn fixture(format: u16, rate: u32, bits: u16, samples: &[u8]) -> std::path::PathBuf {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let p =
-            std::env::temp_dir().join(format!("meeting-wav-{}-{stamp}.wav", std::process::id()));
-        let mut b = Vec::new();
-        b.extend(b"RIFF");
-        b.extend((36 + samples.len() as u32).to_le_bytes());
-        b.extend(b"WAVEfmt ");
-        b.extend(16u32.to_le_bytes());
-        b.extend(format.to_le_bytes());
-        b.extend(1u16.to_le_bytes());
-        b.extend(rate.to_le_bytes());
-        b.extend((rate * (bits as u32 / 8)).to_le_bytes());
-        b.extend((bits / 8).to_le_bytes());
-        b.extend(bits.to_le_bytes());
-        b.extend(b"data");
-        b.extend((samples.len() as u32).to_le_bytes());
-        b.extend(samples);
-        fs::write(&p, b).unwrap();
-        p
-    }
-    #[test]
-    fn float_capture_conversion_preserves_samples_and_sanitizes_nonfinite() {
-        let samples: Vec<_> = [0f32, 0.5, -0.5, 2., f32::NAN]
-            .into_iter()
-            .flat_map(f32::to_le_bytes)
-            .collect();
-        let p = fixture(3, 48000, 32, &samples);
-        let mut w = WavReader::open(&p).unwrap();
-        let (bytes, offset) = w.next_chunk().unwrap().unwrap();
-        assert_eq!(offset, 0);
-        assert_eq!(&bytes[..4], b"RIFF");
-        assert_eq!(bytes.len(), 54);
-        let output: Vec<_> = bytes[44..]
-            .chunks_exact(2)
-            .map(|b| i16::from_le_bytes(b.try_into().unwrap()))
-            .collect();
-        assert_eq!(output, vec![0, 16384, -16384, 32767, 0]);
-        assert!(w.next_chunk().unwrap().is_none());
-        fs::remove_file(p).unwrap();
-    }
-    #[test]
-    fn long_recording_splits_without_truncation_and_preserves_offsets() {
-        let p = fixture(1, 16000, 16, &vec![0u8; (16000 * 60 + 1) * 2]);
-        let mut w = WavReader::open(&p).unwrap();
-        let a = w.next_chunk().unwrap().unwrap();
-        let b = w.next_chunk().unwrap().unwrap();
-        assert_eq!(a.1, 0);
-        assert_eq!(a.0.len(), 44 + 16000 * 60 * 2);
-        assert_eq!(b.1, 60000);
-        assert_eq!(b.0.len(), 46);
-        assert!(w.next_chunk().unwrap().is_none());
-        fs::remove_file(p).unwrap();
-    }
-    #[test]
-    fn incomplete_audio_is_rejected_instead_of_silently_uploading_a_prefix() {
-        let p = fixture(3, 48000, 32, &0.5f32.to_le_bytes());
-        let mut b = fs::read(&p).unwrap();
-        b.truncate(b.len() - 1);
-        fs::write(&p, b).unwrap();
-        assert!(WavReader::open(&p).is_err());
-        fs::remove_file(p).unwrap();
-    }
-    #[test]
-    fn retry_chunk_identity_is_stable_and_source_scoped() {
-        let key = "note-a:capture-one:system:file:0";
-        let a = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, key.as_bytes());
-        assert_eq!(
-            a,
-            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, key.as_bytes())
-        );
-        assert_ne!(
-            a,
-            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, b"note-a:capture-one:mic:file:0")
-        );
-    }
 }
 
 #[cfg(test)]
@@ -3492,6 +2930,176 @@ mod evidence_transport_tests {
         fixture.join().unwrap();
     }
 
+    fn evidence_note(address: std::net::SocketAddr) -> crate::model::Note {
+        crate::model::Note {
+            id: 9,
+            server_id: Some("419d65d1-7a2c-44ca-84cc-ad489522d561".into()),
+            server_url: Some(format!("http://{address}")),
+            transcript_revision: 3,
+            ..Default::default()
+        }
+    }
+
+    /// One request off `listener`: its request line and body.
+    fn read_request(listener: &TcpListener) -> (std::net::TcpStream, String, serde_json::Value) {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8(head).unwrap();
+        let length: usize = head
+            .lines()
+            .find_map(|line| line.to_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap()))
+            .unwrap_or(0);
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).unwrap();
+        let line = head.lines().next().unwrap().to_owned();
+        (stream, line, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[test]
+    fn streamed_evidence_arrives_word_by_word_then_done_with_its_quotations() {
+        use super::{EvidenceStreamEvent as Event, stream_evidence_with_client};
+        use std::io::Write;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let segment = "00000000-0000-4000-8000-000000000001";
+        let server = std::thread::spawn(move || {
+            let (mut socket, line, body) = read_request(&listener);
+            assert!(line.starts_with("POST /api/v1/notes/419d65d1-7a2c-44ca-84cc-ad489522d561/evidence/stream "));
+            assert_eq!(body, serde_json::json!({"paragraph":"Ship Monday","expectedTranscriptRevision":3}));
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n: keepalive\n\n").unwrap();
+            for text in ["Zoë ", "moved it 🦊"] {
+                let frame = format!("data: {}\n\n", serde_json::json!({"type":"delta","text":text}));
+                for bytes in frame.as_bytes().chunks(3) {
+                    socket.write_all(bytes).unwrap();
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            let done = serde_json::json!({"type":"done","text":"","evidence":{"summary":"Zoë moved it 🦊","quotes":[{"segmentId":segment,"text":"We moved it.","speakerLabel":"Speaker 4","startMs":47000}],"transcriptRevision":3}});
+            socket.write_all(format!("data: {done}\n\n").as_bytes()).unwrap();
+        });
+        let client = Client::for_test(format!("http://{address}"), "fictional-evidence-stream-owner", None);
+        let receiver = stream_evidence_with_client(Ok(client), evidence_note(address), "Ship Monday".into(), Arc::new(AtomicBool::new(false)));
+        let next = || receiver.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(next(), Event::Delta("Zoë ".into()));
+        assert_eq!(next(), Event::Delta("moved it 🦊".into()));
+        let Event::Done(evidence) = next() else { panic!("expected done") };
+        assert_eq!(evidence.summary, "Zoë moved it 🦊");
+        assert_eq!(evidence.quotes[0].segment_id, segment);
+        assert_eq!(evidence.transcript_revision, 3);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn closing_streamed_evidence_closes_the_connection() {
+        use super::{EvidenceStreamEvent as Event, stream_evidence_with_client};
+        use std::io::Write;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _, _) = read_request(&listener);
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"delta\",\"text\":\"first\"}\n\n").unwrap();
+            let mut byte = [0; 1];
+            let closed = socket.read(&mut byte);
+            assert!(matches!(closed, Ok(0)) || closed.is_err());
+        });
+        let client = Client::for_test(format!("http://{address}"), "fictional-evidence-cancel-owner", None);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let receiver = stream_evidence_with_client(Ok(client), evidence_note(address), "Ship Monday".into(), cancel.clone());
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(3)).unwrap(), Event::Delta("first".into()));
+        cancel.store(true, Ordering::Release);
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(3)), Err(mpsc::RecvTimeoutError::Disconnected));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_server_without_the_stream_is_asked_the_buffered_way() {
+        missing_stream_endpoint("404 Not Found");
+        missing_stream_endpoint("405 Method Not Allowed");
+    }
+
+    fn missing_stream_endpoint(status: &'static str) {
+        use super::{EvidenceStreamEvent as Event, stream_evidence_with_client};
+        use std::io::Write;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, line, _) = read_request(&listener);
+            assert!(line.contains("/evidence/stream "));
+            socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").as_bytes()).unwrap();
+            drop(socket);
+            let (mut socket, line, body) = read_request(&listener);
+            assert!(line.starts_with("POST /api/v1/notes/419d65d1-7a2c-44ca-84cc-ad489522d561/evidence "));
+            assert_eq!(body["expectedTranscriptRevision"], 3);
+            let answer = serde_json::json!({"summary":"Buffered","quotes":[],"transcriptRevision":3}).to_string();
+            socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len()).as_bytes()).unwrap();
+        });
+        let client = Client::for_test(format!("http://{address}"), "fictional-evidence-fallback-owner", None);
+        let receiver = stream_evidence_with_client(Ok(client), evidence_note(address), "Ship Monday".into(), Arc::new(AtomicBool::new(false)));
+        let next = || receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(next(), Event::Delta("Buffered".into()));
+        assert!(matches!(next(), Event::Done(evidence) if evidence.summary == "Buffered"));
+        server.join().unwrap();
+    }
+
+    /// A stream that ends before its first event with `status` (or, with
+    /// `None`, with the connection dropped): reported as an error, and the
+    /// server is not asked again.
+    fn silent_stream_is_not_asked_again(status: Option<&'static str>) {
+        use super::{EvidenceStreamEvent as Event, stream_evidence_with_client};
+        use std::io::Write;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, line, _) = read_request(&listener);
+            assert!(line.contains("/evidence/stream "));
+            if let Some(status) = status {
+                socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").as_bytes()).unwrap();
+            }
+            drop(socket);
+            // No second request follows.
+            listener.set_nonblocking(true).unwrap();
+            let until = std::time::Instant::now() + Duration::from_millis(1500);
+            while std::time::Instant::now() < until {
+                assert!(listener.accept().is_err(), "the buffered route was asked after {status:?}");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let client = Client::for_test(format!("http://{address}"), "fictional-evidence-silent-owner", None);
+        let receiver = stream_evidence_with_client(Ok(client), evidence_note(address), "Ship Monday".into(), Arc::new(AtomicBool::new(false)));
+        assert!(matches!(receiver.recv_timeout(Duration::from_secs(5)).unwrap(), Event::Error(_)));
+        server.join().unwrap();
+        assert!(receiver.recv_timeout(Duration::from_millis(200)).is_err());
+    }
+
+    #[test]
+    fn only_a_missing_endpoint_is_asked_the_buffered_way() {
+        silent_stream_is_not_asked_again(Some("400 Bad Request"));
+        silent_stream_is_not_asked_again(Some("401 Unauthorized"));
+        silent_stream_is_not_asked_again(Some("503 Service Unavailable"));
+        // The model may have started: a lost connection is never re-asked.
+        silent_stream_is_not_asked_again(None);
+        assert_eq!(super::http_status("curl: (22) The requested URL returned error: 404\n404"), Some(404));
+        assert_eq!(super::http_status("000"), None);
+        assert_eq!(super::http_status(""), None);
+    }
+
+    #[test]
+    fn evidence_frames_are_checked_before_they_reach_the_card() {
+        use super::{EvidenceStreamEvent as Event, decode_evidence_frame};
+        assert_eq!(decode_evidence_frame(r#"{"type":"delta","text":"a"}"#), Some(Event::Delta("a".into())));
+        assert_eq!(decode_evidence_frame(r#"{"type":"error","text":"No"}"#), Some(Event::Error("No".into())));
+        // A done without its result, or with a quotation that is not a segment id, is refused.
+        assert_eq!(decode_evidence_frame(r#"{"type":"done","text":""}"#), None);
+        assert_eq!(decode_evidence_frame(r#"{"type":"done","text":"","evidence":{"summary":"s","quotes":[{"segmentId":"nope","text":"t","speakerLabel":null,"startMs":0}],"transcriptRevision":1}}"#), None);
+        assert_eq!(decode_evidence_frame(r#"{"type":"surprise","text":""}"#), None);
+    }
+
     #[test]
     fn the_live_socket_is_on_the_notes_own_server_with_tls_wherever_requests_have_it() {
         let id = "419d65d1-7a2c-44ca-84cc-ad489522d561";
@@ -3505,133 +3113,17 @@ mod evidence_transport_tests {
         );
     }
 
-    /// A WAV of `frames` silent PCM16 frames at `rate`.
-    fn silent_wav(path: &std::path::Path, rate: u32, frames: u32) {
-        let mut bytes = Vec::new();
-        bytes.extend(b"RIFF");
-        bytes.extend((36 + frames * 2).to_le_bytes());
-        bytes.extend(b"WAVEfmt ");
-        bytes.extend(16u32.to_le_bytes());
-        bytes.extend(1u16.to_le_bytes());
-        bytes.extend(1u16.to_le_bytes());
-        bytes.extend(rate.to_le_bytes());
-        bytes.extend((rate * 2).to_le_bytes());
-        bytes.extend(2u16.to_le_bytes());
-        bytes.extend(16u16.to_le_bytes());
-        bytes.extend(b"data");
-        bytes.extend((frames * 2).to_le_bytes());
-        bytes.resize(bytes.len() + frames as usize * 2, 0);
-        std::fs::write(path, bytes).unwrap();
-    }
-
-    /// Part identities are decided once per capture and never change: a new
-    /// capture is cut into 30-second parts, one that was placed or uploaded
-    /// before part lengths were recorded keeps its 60-second parts, and
-    /// either way a later run reads the same answer from disk.
-    #[test]
-    fn a_capture_keeps_the_part_length_it_was_first_given() {
-        use super::{AudioChunkDTO, WavReader};
-        use crate::audio::{CaptureManifest, ChannelStats, NativeStats};
-        use std::collections::HashMap;
-        let root = std::env::temp_dir().join(format!("cereal-part-plan-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let client = Client::for_test("http://127.0.0.1:9", "fictional-part-plan-owner-token-00000", Some(&root));
-        let id = "419d65d1-7a2c-44ca-84cc-ad489522d561";
-        let note = crate::model::Note { id: 5, server_id: Some(id.into()), ..Default::default() };
-        let mapping_root = client.mapping_root(&note, id).unwrap();
-        let wav = root.join("mic.wav");
-        silent_wav(&wav, 8_000, 8_000 * 150); // two and a half minutes
-        let capture = |name: &str| CaptureManifest {
-            version: 1,
-            capture_id: name.into(),
-            note_id: 5,
-            directory: root.clone(),
-            manifest_path: root.join(format!("{name}.json")),
-            started_at: "2026-11-14T10:00:00Z".into(),
-            finished_at: Some("2026-11-14T10:03:00Z".into()),
-            error: None,
-            stats: NativeStats {
-                requested_channels: 1,
-                mic: ChannelStats {
-                    sample_rate: 8_000.,
-                    frames_written: 8_000 * 150,
-                    path: Some(wav.to_string_lossy().into_owned()),
-                    paths: vec![wav.to_string_lossy().into_owned()],
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        };
-        let none = HashMap::new();
-        // A capture nothing has placed: 30-second parts, written down.
-        let new = capture("capture-new");
-        let plan = client.capture_plan(id, &new, &none, &mapping_root, 7_000, false).unwrap();
-        assert_eq!(plan, super::CapturePlan { base_ms: 7_000, part_seconds: 30 });
-        // Asked again later, with the note's audio now ending elsewhere.
-        assert_eq!(client.capture_plan(id, &new, &none, &mapping_root, 99_000, false).unwrap(), plan);
-        let reader = WavReader::open(&wav).unwrap().parts_of(plan.part_seconds);
-        assert_eq!(reader.frames.div_ceil(reader.step), 5);
-        // A capture an older client placed (a position, no part length):
-        // it keeps the 60-second parts its identities were made with.
-        let placed = capture("capture-placed");
-        let key = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, b"capture-placed");
-        super::save_mapping(&mapping_root.join(format!("capture-{key}.json")), &3_000u64).unwrap();
-        let plan = client.capture_plan(id, &placed, &none, &mapping_root, 99_000, false).unwrap();
-        assert_eq!(plan, super::CapturePlan { base_ms: 3_000, part_seconds: 60 });
-        // A capture whose parts are on the server from before any of this
-        // was written down: found by its 60-second identity, kept at 60.
-        let uploaded = capture("capture-uploaded");
-        let second = super::chunk_identity(id, "capture-uploaded", "mic", &wav.to_string_lossy(), 1);
-        let on_server: HashMap<String, AudioChunkDTO> = [(
-            second.clone(),
-            serde_json::from_value(serde_json::json!({"id": second, "noteId": id, "channel": "mic", "sequence": 4,
-                "startMs": 500_000, "durationMs": 60_000, "state": "ready", "error": null})).unwrap(),
-        )]
-        .into();
-        let plan = client.capture_plan(id, &uploaded, &on_server, &mapping_root, 99_000, false).unwrap();
-        assert_eq!(plan, super::CapturePlan { base_ms: 440_000, part_seconds: 60 });
-        let mut reader = WavReader::open(&wav).unwrap().parts_of(plan.part_seconds);
-        assert_eq!(reader.frames.div_ceil(reader.step), 3);
-        // A part can be read on its own, as the uploader does while the file
-        // grows: the second 60 seconds start a minute in.
-        let (bytes, start_ms) = reader.chunk(1).unwrap().unwrap();
-        assert_eq!((bytes.len(), start_ms), (44 + 8_000 * 60 * 2, 60_000));
-        assert_eq!(reader.chunk(2).unwrap().unwrap().0.len(), 44 + 8_000 * 30 * 2);
-        assert!(reader.chunk(3).unwrap().is_none());
-        // A part's number is above every number the server holds and every
-        // number already promised to a part that has not got there yet.
-        assert_eq!(Client::next_sequence(&none, &mapping_root), 0);
-        assert_eq!(Client::next_sequence(&on_server, &mapping_root), 5);
-        let promised = super::chunk_identity(id, "capture-new", "mic", &wav.to_string_lossy(), 0);
-        super::save_mapping(
-            &mapping_root.join(format!("{promised}.json")),
-            &super::UploadReceipt { sequence: 11, start_ms: 7_000 },
-        )
-        .unwrap();
-        assert_eq!(Client::next_sequence(&on_server, &mapping_root), 12);
-        // A part the server already holds is not sent again (this client
-        // points at a closed port: sending would fail), and keeps the number
-        // and position the server has for it.
-        let mut sequence = 12;
-        let target = super::PartTarget { id, capture_id: "capture-uploaded", mapping_root: &mapping_root };
-        let sent = client.send_part(&target, &on_server, "mic", &wav.to_string_lossy(), 1, vec![0; 64], 0, &mut sequence, None);
-        assert_eq!(sent, Ok(second));
-        assert_eq!(sequence, 12);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
     /// The live stream decides where a capture sits on the note's timeline
-    /// while it is still recording; the durable upload must then place the
-    /// same capture's parts at the same milliseconds. Both go through one
-    /// mapping file, written by whichever comes first (here: the stream).
+    /// while it is still recording: after the note's transcript so far and
+    /// after the earlier captures here. Decided once, and written down, so
+    /// a later connection of the same stream places it at the same spot.
     #[test]
-    fn a_live_capture_takes_the_timeline_position_the_upload_will_use() {
+    fn a_live_capture_takes_its_timeline_position_once() {
         use crate::{
             audio::{CaptureManifest, ChannelStats, NativeStats},
             model::Note,
         };
         use std::{
-            collections::HashMap,
             fs,
             io::{Read, Write},
             net::TcpListener,
@@ -3641,16 +3133,24 @@ mod evidence_transport_tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let id = "419d65d1-7a2c-44ca-84cc-ad489522d561";
-        // The server is asked for the note's parts twice. The first time it
-        // has none. The second time (a later connection, after another
-        // device added audio) it lists a part that ends much later.
+        let note_json = |end_ms: i64| {
+            serde_json::json!({
+                "id": id, "title": "", "body": "", "enhanced": "", "date": "2026-11-16", "duration": "",
+                "createdAt": "2026-11-16T10:00:00Z", "updatedAt": "2026-11-16T10:00:00Z",
+                "recordingState": "recording", "generationState": "idle", "transcriptRevision": 1,
+                "generatedRevision": null,
+                "transcriptSegments": [{"id": "419d65d1-7a2c-44ca-84cc-ad489522d570", "channel": "mic",
+                    "speakerId": "mic:n:1", "speakerLabel": "Me", "startMs": 0, "endMs": end_ms,
+                    "text": "Earlier words.", "isFinal": true}]
+            })
+            .to_string()
+        };
+        // The note is read twice. The first time its transcript ends at 4 s
+        // (before the earlier capture here ends). The second time (a later
+        // connection, after another device added to it) much later.
+        let bodies = [note_json(4_000), note_json(900_000)];
         let server = std::thread::spawn(move || {
-            for body in [
-                "[]".to_string(),
-                serde_json::json!([{"id":"419d65d1-7a2c-44ca-84cc-ad489522d570","noteId":id,"channel":"mic",
-                    "sequence":0,"startMs":0,"durationMs":900_000,"state":"ready","error":null}])
-                .to_string(),
-            ] {
+            for body in bodies {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut request = Vec::new();
                 let mut byte = [0; 1];
@@ -3659,7 +3159,8 @@ mod evidence_transport_tests {
                     request.push(byte[0]);
                 }
                 let request = String::from_utf8(request).unwrap();
-                assert!(request.starts_with(&format!("GET /api/v1/notes/{id}/audio/chunks ")));
+                // The note itself: never its audio parts.
+                assert!(request.starts_with(&format!("GET /api/v1/notes/{id} ")), "{request}");
                 write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -3695,8 +3196,7 @@ mod evidence_transport_tests {
             fs::write(&manifest.manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
             manifest
         };
-        // An earlier capture of 12.5 s that was never uploaded, then the one
-        // being recorded now.
+        // An earlier capture of 12.5 s, then the one being recorded now.
         let note = Note {
             id: 77,
             server_id: Some(id.into()),
@@ -3707,8 +3207,9 @@ mod evidence_transport_tests {
             ..Default::default()
         };
         let client = Client::for_test(format!("http://{address}"), "fictional-live-base-owner-token-0000", Some(&root));
-        assert_eq!(client.live_capture_base(&note, id, "capture-live"), Ok(12_500));
-        // What `upload` will read for each capture when the recording stops.
+        assert_eq!(client.live_capture_base(&note, id, "capture-live"), Ok(16_500));
+        // Where each capture was written down: the earlier one after the
+        // transcript, this one after the earlier one.
         let saved = |name: &str| -> u64 {
             let key = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, name.as_bytes());
             let path = client
@@ -3721,11 +3222,22 @@ mod evidence_transport_tests {
                 .join(format!("capture-{key}.json"));
             serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
         };
-        assert_eq!((saved("capture-earlier"), saved("capture-live")), (0, 12_500));
-        // Decided once: a later look at a server that now holds more audio
-        // does not move a capture that is already streaming.
-        assert_eq!(client.live_capture_base(&note, id, "capture-live"), Ok(12_500));
-        assert_eq!((saved("capture-earlier"), saved("capture-live")), (0, 12_500));
+        assert_eq!((saved("capture-earlier"), saved("capture-live")), (4_000, 16_500));
+        // Decided once: a later look at a note that now holds more does not
+        // move a capture that is already streaming.
+        assert_eq!(client.live_capture_base(&note, id, "capture-live"), Ok(16_500));
+        assert_eq!((saved("capture-earlier"), saved("capture-live")), (4_000, 16_500));
+        // A capture an earlier version placed keeps its position.
+        let older = Note { audio_captures: vec![capture("capture-older", false, 0)], ..note.clone() };
+        let key = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, b"capture-older");
+        super::save_mapping(
+            &client.placement_root(&older, id).unwrap().join(format!("capture-{key}.json")),
+            &3_000u64,
+        )
+        .unwrap();
+        assert_eq!(client.capture_base_after(&older, id, "capture-older", 99_000), Ok(3_000));
+        // A capture not of this note has no position.
+        assert!(client.capture_base_after(&note, id, "capture-elsewhere", 0).is_err());
         server.join().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
@@ -3748,7 +3260,7 @@ mod note_sync_tests {
     }
     fn row_json(n: u32, updated: &str, transcript: i64) -> String {
         format!(
-            r#"{{"id":"{}","title":"Note {n}","date":"2026-11-12","duration":"","createdAt":"2026-11-12T10:00:00.000Z","updatedAt":"{updated}","recordingState":"stopped","generationState":"idle","transcriptRevision":{transcript},"generatedRevision":null,"hasBody":true,"hasSummary":false,"hasTranscript":false,"speakerCount":0,"excerpt":"","meeting":null,"attendees":{{"people":[],"others":0,"total":0}},"organizationId":null,"folders":[]}}"#,
+            r#"{{"id":"{}","title":"Note {n}","date":"2026-11-12","duration":"","createdAt":"2026-11-12T10:00:00.000Z","updatedAt":"{updated}","recordingState":"stopped","generationState":"idle","transcriptRevision":{transcript},"generatedRevision":null,"hasBody":true,"hasSummary":false,"hasTranscript":false,"speakerCount":0,"excerpt":"","meeting":null,"attendees":{{"people":[],"others":0,"total":0}},"organizationId":null}}"#,
             id(n)
         )
     }
@@ -4052,7 +3564,7 @@ mod account_tests {
             "recordingState": "idle", "generationState": "idle", "transcriptRevision": 0,
             "generatedRevision": null, "hasBody": true, "hasSummary": false, "hasTranscript": false,
             "speakerCount": 0, "excerpt": "", "meeting": null,
-            "attendees": {"people": [], "others": 0, "total": 0}, "organizationId": null, "folders": []
+            "attendees": {"people": [], "others": 0, "total": 0}, "organizationId": null
         })
     }
 
@@ -4128,14 +3640,13 @@ mod account_tests {
             title: "Gone on the server".into(),
             body: "Its text".into(),
             server_id: Some(B.into()),
-            folder_id: Some(3),
             favorite: true,
             ..Default::default()
         };
         assert!(mark_missing(&mut note, "2026-11-16T10:00:00Z"));
         assert!(note.trashed);
         assert_eq!(note.server_missing_since.as_deref(), Some("2026-11-16T10:00:00Z"));
-        assert_eq!((note.body.as_str(), note.folder_id, note.favorite), ("Its text", Some(3), true));
+        assert_eq!((note.body.as_str(), note.favorite), ("Its text", true));
         assert!(mark_listed(&mut note));
         assert!(!note.trashed && note.server_missing_since.is_none());
         let mut unsent = Note { unsent_edits: true, ..Default::default() };
@@ -4143,6 +3654,137 @@ mod account_tests {
         assert!(!unsent.trashed);
         let mut capturing = Note { unsent_capture: true, ..Default::default() };
         assert!(!mark_missing(&mut capturing, "now"));
+    }
+
+    const NOT_FOUND: &str = r#"{"error":"not_found","message":"Note not found"}"#;
+
+    /// A trashed note of this server, as the last refresh left it.
+    fn trashed(id: u64, server_id: &str, url: &str, title: &str) -> Note {
+        Note {
+            id,
+            title: title.into(),
+            trashed: true,
+            server_id: Some(server_id.into()),
+            server_url: Some(url.into()),
+            server_sync_stamp: Some(sync_stamp("2026-11-16T10:00:00Z", 0, None)),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn t1_delete_forever_deletes_on_the_server_and_forgets_the_association() {
+        let server = Fake::start(move |request| match (request.method.as_str(), request.path.as_str()) {
+            ("GET", path) if path == format!("/api/v1/notes/{A}") => json(200, note_json(A, "Kept as read")),
+            ("DELETE", path) if path.starts_with(&format!("/api/v1/notes/{A}")) => json(200, r#"{"deleted":true}"#),
+            (_, path) if path.starts_with(&format!("/api/v1/notes/{B}")) => json(404, NOT_FOUND),
+            _ => json(500, r#"{"error":"internal","message":"Server is down"}"#),
+        });
+        let root = scratch("t1");
+        let mut client = Client::for_test(&server.url, TOKEN, Some(&root));
+        let on_server = handle::handle(1, 5).unwrap();
+        let note = trashed(on_server, A, &server.url, "Kept as read");
+        client.ids.insert(on_server, A.into());
+        let sidecar = association_file(&root, &server.url, on_server);
+        fs::create_dir_all(sidecar.parent().unwrap().join("uploads").join(A)).unwrap();
+        fs::write(&sidecar, A).unwrap();
+        client.delete(&note, false, true).unwrap();
+        assert!(!sidecar.exists() && !client.ids.contains_key(&on_server));
+        assert!(!sidecar.parent().unwrap().join("uploads").join(A).exists());
+        // Known only by its sidecar, and already gone: the server says so in
+        // its own words, and it has conditional deletes.
+        let by_sidecar = handle::handle(1, 6).unwrap();
+        let sidecar = association_file(&root, &server.url, by_sidecar);
+        fs::write(&sidecar, B).unwrap();
+        client.delete(&Note { id: by_sidecar, trashed: true, ..Default::default() }, false, true).unwrap();
+        assert!(!sidecar.exists());
+        // Never sent: nothing is asked of the server.
+        client.delete(&Note { id: handle::handle(1, 7).unwrap(), trashed: true, ..Default::default() }, false, true).unwrap();
+        assert_eq!(
+            server.paths(),
+            [
+                format!("GET /api/v1/notes/{A}"),
+                // The stamp of what was read: updatedAt|transcriptRevision|(no generated notes).
+                format!("DELETE /api/v1/notes/{A}?ifStamp=2026-11-16T10%3A00%3A00Z%7C0%7C"),
+                format!("GET /api/v1/notes/{B}"),
+            ],
+            "nothing is created or saved first"
+        );
+        // A failure keeps everything, so the note stays in Trash.
+        let failing = handle::handle(1, 8).unwrap();
+        let sidecar = association_file(&root, &server.url, failing);
+        let other = "3a49a4af-c660-42e9-a36a-a806fbb41e03";
+        fs::write(&sidecar, other).unwrap();
+        let error = client.delete(&Note { id: failing, trashed: true, ..Default::default() }, false, true).unwrap_err();
+        assert_eq!(error, DeleteFailure::Failed("Server is down".into()));
+        assert!(sidecar.exists());
+        // Another server's note is never sent here.
+        let elsewhere = trashed(handle::handle(1, 9).unwrap(), A, "https://elsewhere.example.com", "x");
+        assert!(client.delete(&elsewhere, false, true).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn t2_a_note_edited_elsewhere_since_it_was_trashed_is_not_deleted_unless_asked_again() {
+        let edited = "3a49a4af-c660-42e9-a36a-a806fbb41e04";
+        let raced = "3a49a4af-c660-42e9-a36a-a806fbb41e05";
+        let server = Fake::start(move |request| match (request.method.as_str(), request.path.as_str()) {
+            // Edited on another device: a new title and a later change.
+            ("GET", path) if path == format!("/api/v1/notes/{edited}") => json(
+                200,
+                note_json(edited, "Edited on the iPhone")
+                    .replace(r#""updatedAt":"2026-11-16T10:00:00Z""#, r#""updatedAt":"2026-11-16T11:00:00Z""#),
+            ),
+            ("DELETE", path) if path == format!("/api/v1/notes/{edited}") => json(200, r#"{"deleted":true}"#),
+            // Unchanged when read, edited before the delete arrived.
+            ("GET", path) if path == format!("/api/v1/notes/{raced}") => json(200, note_json(raced, "As read")),
+            ("DELETE", path) if path.starts_with(&format!("/api/v1/notes/{raced}?ifStamp=")) => json(
+                409,
+                r#"{"error":"conflict","message":"The note changed since it was read, so it was not deleted"}"#,
+            ),
+            _ => json(500, r#"{"error":"internal","message":"unexpected"}"#),
+        });
+        let root = scratch("t2");
+        let mut client = Client::for_test(&server.url, TOKEN, Some(&root));
+        let mut note = trashed(handle::handle(1, 5).unwrap(), edited, &server.url, "As this Mac had it");
+        note.server_sync_stamp = Some(sync_stamp("2026-11-16T09:00:00Z", 0, None));
+        assert_eq!(client.delete(&note, false, true), Err(DeleteFailure::Changed));
+        assert!(
+            !server.paths().iter().any(|path| path.starts_with("DELETE")),
+            "nothing is deleted while the server's copy is newer"
+        );
+        // "Delete anyway": no read, no condition.
+        client.delete(&note, true, true).unwrap();
+        assert_eq!(server.paths().last().unwrap(), &format!("DELETE /api/v1/notes/{edited}"));
+        // The same text as here, though the stamp is old (this Mac saved it
+        // since the last refresh): deleted, on condition.
+        let mut same = trashed(handle::handle(1, 6).unwrap(), raced, &server.url, "As read");
+        same.server_sync_stamp = None;
+        assert_eq!(client.delete(&same, false, true), Err(DeleteFailure::Changed), "409: it changed in between");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn t3_a_404_deletes_nothing_here_unless_the_server_says_it_has_no_such_note() {
+        let server = Fake::start(move |_| json(404, "<html>Not here</html>"));
+        let root = scratch("t3");
+        let mut client = Client::for_test(&server.url, TOKEN, Some(&root));
+        let id = handle::handle(1, 5).unwrap();
+        let note = trashed(id, A, &server.url, "Kept");
+        let sidecar = association_file(&root, &server.url, id);
+        fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        fs::write(&sidecar, A).unwrap();
+        // A proxy's page, and the API's own words from a server without
+        // conditional deletes: neither is taken as "already deleted".
+        assert!(matches!(client.delete(&note, false, true), Err(DeleteFailure::Failed(_))));
+        let api = Fake::start(move |_| json(404, NOT_FOUND));
+        let mut older = Client::for_test(&api.url, TOKEN, Some(&root));
+        let note = trashed(id, A, &api.url, "Kept");
+        let sidecar_two = association_file(&root, &api.url, id);
+        fs::create_dir_all(sidecar_two.parent().unwrap()).unwrap();
+        fs::write(&sidecar_two, A).unwrap();
+        assert!(matches!(older.delete(&note, false, false), Err(DeleteFailure::Failed(_))));
+        assert!(sidecar.exists() && sidecar_two.exists());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -4237,7 +3879,7 @@ mod account_tests {
     }
 
     #[test]
-    fn s3_what_was_recorded_while_the_session_had_ended_is_sent_after_sign_in() {
+    fn s3_the_stop_of_a_recording_made_while_the_session_had_ended_is_sent_after_sign_in() {
         let directory = scratch("s3");
         let manifest_path = directory.join("manifest.json");
         let manifest: crate::audio::CaptureManifest = serde_json::from_value(serde_json::json!({
@@ -4259,10 +3901,10 @@ mod account_tests {
         let mut finished = manifest;
         finished.finished_at = Some("2026-11-16T10:40:00Z".into());
         fs::write(&manifest_path, serde_json::to_vec(&finished).unwrap()).unwrap();
-        // Back after the sign-in, its parts are sent with the identities
-        // they always had (the upload after Stop).
-        assert!(matches!(requeue_action(&note, true), Some(Action::Sync)));
-        // At an ordinary launch a capture is not sent by itself, as before.
+        // Back after the sign-in, the server is told it stopped. No audio
+        // goes with it: the transcript is what the live stream delivered.
+        assert!(matches!(requeue_action(&note, true), Some(Action::Recording("stop"))));
+        // At an ordinary launch a Stop is not sent by itself, as before.
         assert!(requeue_action(&note, false).is_none());
         // An unsent edit is sent either way.
         let edited = Note { unsent_edits: true, ..note.clone() };
@@ -4271,5 +3913,87 @@ mod account_tests {
         let gone = Note { trashed: true, server_missing_since: Some("now".into()), ..note };
         assert!(requeue_action(&gone, true).is_none());
         let _ = fs::remove_dir_all(directory);
+    }
+
+    /// Stop goes straight on to the notes: the server is told the recording
+    /// stopped (once the stream has handed over), and the notes are written
+    /// from the transcript it then has. No audio is uploaded, and nothing
+    /// waits for parts. A recording with no transcript is not sent to be
+    /// written up at all.
+    #[test]
+    fn stop_writes_the_notes_from_the_live_transcript_and_uploads_no_audio() {
+        let with_text = |id: &str, segments: serde_json::Value| {
+            let mut note: serde_json::Value = serde_json::from_str(&note_json(id, "Standup")).unwrap();
+            note["transcriptRevision"] = 3.into();
+            note["transcriptSegments"] = segments;
+            note.to_string()
+        };
+        let spoken = serde_json::json!([{"id": "3a49a4af-c660-42e9-a36a-a806fbb41e70", "channel": "mic",
+            "speakerId": "mic:n:1", "speakerLabel": "Me", "startMs": 0, "endMs": 1_500,
+            "text": "Ship it on Friday.", "isFinal": true}]);
+        let silent = serde_json::json!([{"id": "3a49a4af-c660-42e9-a36a-a806fbb41e71", "channel": "system",
+            "speakerId": "system:n:1", "speakerLabel": "Speaker 1", "startMs": 0, "endMs": 1_500,
+            "text": "  ", "isFinal": true}]);
+        let (a, b) = (with_text(A, spoken), with_text(B, silent));
+        let server = Fake::start(move |request| match request.path.as_str() {
+            path if path.starts_with(&format!("/api/v1/notes/{A}")) => json(200, a.clone()),
+            path if path.starts_with(&format!("/api/v1/notes/{B}")) => json(200, b.clone()),
+            _ => json(500, "{}"),
+        });
+        let root = scratch("stop");
+        let mut client = Client::for_test(&server.url, TOKEN, Some(&root));
+        let note = |local: u64, id: &str| Note {
+            id: handle::handle(1, local).unwrap(),
+            title: "Standup".into(),
+            server_id: Some(id.into()),
+            server_url: Some(server.url.clone()),
+            ..Default::default()
+        };
+        let reply = client.run(&note(1, A), Action::Generate).unwrap();
+        assert!(!reply.untranscribed);
+        assert_eq!(
+            server.paths(),
+            [
+                format!("PATCH /api/v1/notes/{A}"),
+                format!("POST /api/v1/notes/{A}/recording"),
+                format!("GET /api/v1/notes/{A}"),
+                format!("POST /api/v1/notes/{A}/generate"),
+                format!("GET /api/v1/notes/{A}"),
+            ]
+        );
+        let bodies: Vec<String> = server.seen.lock().unwrap().iter().map(|seen| seen.body.clone()).collect();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&bodies[1]).unwrap(), serde_json::json!({"command": "stop"}));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&bodies[3]).unwrap(),
+            serde_json::json!({"expectedTranscriptRevision": 3})
+        );
+        // Nothing was said: the note is left as it is, and says so.
+        server.seen.lock().unwrap().clear();
+        let reply = client.run(&note(2, B), Action::Generate).unwrap();
+        assert!(reply.untranscribed);
+        assert_eq!(
+            server.paths(),
+            [
+                format!("PATCH /api/v1/notes/{B}"),
+                format!("POST /api/v1/notes/{B}/recording"),
+                format!("GET /api/v1/notes/{B}"),
+                format!("GET /api/v1/notes/{B}"),
+            ]
+        );
+        // A Stop on its own (another recording takes over) only stops.
+        server.seen.lock().unwrap().clear();
+        let reply = client.run(&note(1, A), Action::Recording("stop")).unwrap();
+        assert!(!reply.untranscribed);
+        assert_eq!(
+            server.paths(),
+            [
+                format!("PATCH /api/v1/notes/{A}"),
+                format!("GET /api/v1/notes/{A}"),
+                format!("POST /api/v1/notes/{A}/recording"),
+                format!("GET /api/v1/notes/{A}"),
+            ]
+        );
+        assert!(!server.paths().iter().any(|path| path.contains("/audio")));
+        let _ = fs::remove_dir_all(root);
     }
 }

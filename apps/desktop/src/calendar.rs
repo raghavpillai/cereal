@@ -263,6 +263,88 @@ pub(crate) fn event_time(event: &CalendarEventDTO) -> String {
     }
 }
 
+/// An event's time as "Coming up" writes it: "5:00 – 5:30 PM", with the
+/// meridiem said once when both ends share it ("11:30 AM – 12:30 PM" when
+/// they do not). Each piece is (text, is a meridiem).
+pub(crate) fn event_time_pieces(event: &CalendarEventDTO) -> Vec<(String, bool)> {
+    if event.all_day {
+        return vec![("All day".into(), false)];
+    }
+    let (Ok(start), Ok(end)) = (
+        DateTime::parse_from_rfc3339(&event.start_at),
+        DateTime::parse_from_rfc3339(&event.end_at),
+    ) else {
+        return vec![("Time unavailable".into(), false)];
+    };
+    let (start, end) = (start.with_timezone(&Local), end.with_timezone(&Local));
+    let (from, from_half) = (start.format("%-I:%M").to_string(), start.format("%p").to_string());
+    let (to, to_half) = (end.format("%-I:%M").to_string(), end.format("%p").to_string());
+    if from_half == to_half {
+        vec![(format!("{from} – {to}"), false), (to_half, true)]
+    } else {
+        vec![
+            (from, false),
+            (from_half, true),
+            (format!(" – {to}"), false),
+            (to_half, true),
+        ]
+    }
+}
+
+/// [`event_time_pieces`] in 12 pt secondary ink, each AM/PM as a smaller
+/// capital run on the digits' baseline (the same style as [`time_label`]).
+fn event_time_label(event: &CalendarEventDTO, t: Theme) -> Div {
+    div()
+        .flex()
+        .items_baseline()
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .text_size(px(12.))
+        .line_height(px(16.))
+        .text_color(t.muted)
+        .children(event_time_pieces(event).into_iter().map(|(text, meridiem)| {
+            if meridiem {
+                div()
+                    .ml(px(3.))
+                    .text_size(px(7.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(text)
+            } else {
+                div().child(text)
+            }
+        }))
+}
+
+/// A dashed hairline the width of its box: 4.5 pt dashes on an 8 pt period
+/// (respaced so the period divides the width), centred on both ends so each
+/// end shows half a dash. Set its height for the stroke.
+pub(crate) fn dashed_rule(color: Hsla) -> Canvas<()> {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let width = f32::from(bounds.size.width);
+            if width <= 0. {
+                return;
+            }
+            let periods = (width / 8.).round().max(1.);
+            let step = width / periods;
+            for k in 0..=periods as usize {
+                let centre = k as f32 * step;
+                let (start, end) = ((centre - 2.25).max(0.), (centre + 2.25).min(width));
+                if end > start {
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(bounds.origin.x + px(start), bounds.origin.y),
+                            size(px(end - start), bounds.size.height),
+                        ),
+                        color,
+                    ));
+                }
+            }
+        },
+    )
+}
+
 pub(crate) fn safe_meeting_url(text: &str) -> bool {
     let Some(rest) = text
         .strip_prefix("https://")
@@ -539,6 +621,12 @@ impl Cereal {
     }
 
     pub(crate) fn open_calendar_event(&mut self, event_id: String, cx: &mut Context<Self>) {
+        self.open_calendar_event_and(event_id, false, cx)
+    }
+
+    /// Open an event's note and, when `record` ("Start recording" on its
+    /// notification) or the meeting is under way, start recording it.
+    pub(crate) fn open_calendar_event_and(&mut self, event_id: String, record: bool, cx: &mut Context<Self>) {
         if self.calendars.opening.is_some() {
             return;
         }
@@ -575,7 +663,7 @@ impl Cereal {
             .and_then(|event| local_note_for_event(&self.workspace, event, slot, &server))
         {
             self.open_note(id, cx);
-            if active_at_gesture.is_some() && !self.recording.is_active() {
+            if (record || active_at_gesture.is_some()) && !self.recording.is_active() {
                 self.start_recording_preview(id, cx);
             }
             return;
@@ -636,9 +724,10 @@ impl Cereal {
                         };
                         this.persist(cx);
                         this.open_note(id, cx);
-                        if active_at_gesture
-                            .as_ref()
-                            .is_some_and(|event| is_active_timed_event(event, chrono::Utc::now()))
+                        if (record
+                            || active_at_gesture
+                                .as_ref()
+                                .is_some_and(|event| is_active_timed_event(event, chrono::Utc::now())))
                             && !this.recording.is_active()
                         {
                             this.start_recording_preview(id, cx);
@@ -661,12 +750,13 @@ impl Cereal {
             .id("connected-calendar-events")
             .track_scroll(&self.calendars.scroll)
             .max_h(px(302.))
+            .flex_shrink_0()
             .overflow_y_scroll()
             .w_full()
-            .rounded(px(17.))
+            .rounded(px(16.))
             .bg(t.card)
-            .border_1()
-            .border_color(t.border)
+            .border(px(hairline(0.5)))
+            .border_color(card_edge(t))
             .flex()
             .flex_col();
         if let Some(error) = &self.calendars.error {
@@ -718,6 +808,12 @@ impl Cereal {
                     )));
                 }
                 let mut visible = 0;
+                // One group per day, measured against the reference card: a
+                // day's events sit on a 48 pt pitch, each day group has 6 pt
+                // above and below its rows (so a colour bar is 16 pt from the
+                // card's edge or the day line), and a dashed hairline that
+                // takes no space marks where one day ends and the next begins.
+                let mut groups = 0;
                 for delta in 0..i64::from(self.calendars.look_ahead_days) {
                     let date = day + Duration::days(delta);
                     let events = events_on_day(
@@ -730,69 +826,38 @@ impl Cereal {
                     if events.is_empty() && delta != 0 {
                         continue;
                     }
+                    let today = date == crate::menubar::now().date_naive();
+                    let mut group = div().relative().flex_shrink_0().py(px(6.)).flex().flex_col();
+                    if groups > 0 {
+                        group = group.child(
+                            dashed_rule(t.hairline)
+                                .absolute()
+                                .top(px(-hairline(0.5)))
+                                .left_0()
+                                .right_0()
+                                .h(px(hairline(0.5))),
+                        );
+                    }
+                    let mut in_group = 0;
                     if events.is_empty()
                         && self.calendars.error.is_none()
                         && !self.calendars.loading
                     {
-                        rows = rows.child(
-                            div()
-                                .min_h(px(60.))
-                                .flex_shrink_0()
-                                .px(px(16.))
-                                .py(px(10.))
-                                .flex()
-                                .items_center()
-                                .gap(px(12.))
+                        in_group += 1;
+                        group = group.child(
+                            event_line(Some(day_label(date, today, t)))
                                 .child(
-                                    div()
-                                        .w(px(140.))
-                                        .flex_shrink_0()
-                                        .flex()
-                                        .items_center()
-                                        .child(
-                                            div()
-                                                .font_family(DISPLAY)
-                                                .w(px(40.))
-                                                .text_size(px(27.))
-                                                .line_height(px(32.))
-                                                .child(date.day().to_string()),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .text_size(px(11.))
-                                                .line_height(px(12.))
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap(px(4.))
-                                                        .child(date.format("%B").to_string())
-                                                        .when(
-                                                            date == crate::menubar::now().date_naive(),
-                                                            |d| {
-                                                                d.child(
-                                                                    div()
-                                                                        .size(px(5.))
-                                                                        .rounded_full()
-                                                                        .bg(rgb(0xc84f34)),
-                                                                )
-                                                            },
-                                                        ),
-                                                )
-                                                .child(small(date.format("%a").to_string(), t)),
-                                        ),
-                                )
-                                .child(div().w(px(3.)).h(px(28.)).rounded_full().bg(t.muted))
-                                .child(small(
-                                    if self.calendar_page == 0 {
-                                        "No events today"
-                                    } else {
-                                        "No events on this day"
-                                    },
-                                    t,
-                                )),
+                                    event_cell()
+                                        .child(event_bar(t.muted))
+                                        .child(small(
+                                            if self.calendar_page == 0 {
+                                                "No events today"
+                                            } else {
+                                                "No events on this day"
+                                            },
+                                            t,
+                                        )),
+                                ),
                         );
                     }
                     for (index, event) in events.into_iter().enumerate() {
@@ -801,80 +866,44 @@ impl Cereal {
                         }
                         let id = event.id.clone();
                         let opening = self.calendars.opening.as_deref() == Some(id.as_str());
-                        let mut event_row = div()
+                        let hover = crate::motion::reveal_key(("linked-event", id.as_str(), delta));
+                        // Only the event lights up under the pointer, never
+                        // the date beside it: a 44 pt wash with 8 pt corners
+                        // from 8 pt before the colour bar to 9 pt inside the
+                        // card's edge.
+                        let mut cell = event_cell()
                             .id(SharedString::from(format!("linked-event-{id}-{delta}")))
-                            .relative()
-                            .min_h(px(60.))
-                            .px(px(16.))
-                            .py(px(10.))
-                            .flex()
-                            .items_center()
-                            .gap(px(12.))
-                            .when(self.calendars.opening.is_none(), |row| {
-                                row.child(crate::motion::tactile(t.hover).radius(0.))
-                            });
-                        event_row = event_row
-                            .child(
-                                div()
-                                    .w(px(140.))
-                                    .flex_shrink_0()
-                                    .flex()
-                                    .items_center()
-                                    .when(index == 0, |d| {
-                                        d.child(
-                                            div()
-                                                .font_family(DISPLAY)
-                                                .w(px(40.))
-                                                .text_size(px(27.))
-                                                .line_height(px(32.))
-                                                .child(date.day().to_string()),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .text_size(px(11.))
-                                                .line_height(px(12.))
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap(px(4.))
-                                                        .child(date.format("%B").to_string())
-                                                        .when(
-                                                            date == crate::menubar::now().date_naive(),
-                                                            |d| {
-                                                                d.child(
-                                                                    div()
-                                                                        .size(px(5.))
-                                                                        .rounded_full()
-                                                                        .bg(rgb(0xc84f34)),
-                                                                )
-                                                            },
-                                                        ),
-                                                )
-                                                .child(small(date.format("%a").to_string(), t)),
-                                        )
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .w(px(3.))
-                                    .h(px(28.))
-                                    .rounded_full()
-                                    .bg(calendar_color(&event.color)),
-                            )
+                            .when(self.calendars.opening.is_none(), |cell| {
+                                cell.child(crate::motion::hover_probe(hover))
+                                    .bg(t.hover.opacity(crate::motion::revealed(hover)))
+                            })
+                            .child(event_bar(calendar_color(&event.color)))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
+                                    // The time sits 18.35 pt below the title,
+                                    // as in the reference.
+                                    .pb(px(0.65))
                                     .flex()
                                     .flex_col()
-                                    .gap(px(2.))
                                     .child(
                                         div()
+                                            // As written: "<->" stays three
+                                            // characters, not an arrow.
+                                            .font(Font {
+                                                family: FONT.into(),
+                                                features: FontFeatures(std::sync::Arc::new(vec![
+                                                    ("calt".into(), 0),
+                                                    ("liga".into(), 0),
+                                                ])),
+                                                fallbacks: None,
+                                                weight: FontWeight::NORMAL,
+                                                style: FontStyle::Normal,
+                                            })
                                             .text_size(px(14.))
                                             .line_height(px(18.))
+                                            .text_color(t.text)
                                             .truncate()
                                             .child(if opening {
                                                 "Opening meeting…".into()
@@ -882,45 +911,54 @@ impl Cereal {
                                                 event.title.clone()
                                             }),
                                     )
-                                    .child(small(
-                                        format!("{} · {}", event_time(event), event.calendar_name),
-                                        t,
-                                    ))
-                                    .when_some(
-                                        event.location.as_ref().filter(|value| !value.is_empty()),
-                                        |d, location| d.child(small(location.clone(), t)),
-                                    ),
+                                    .child(event_time_label(event, t).mt(px(-0.15))),
                             );
+                        // Join stays out of the resting card, as in the
+                        // reference, and shows at the end of the highlight
+                        // while the event is under the pointer.
                         if let Some(url) = event
                             .meeting_url
                             .as_ref()
                             .filter(|url| safe_meeting_url(url))
                         {
                             let url = url.clone();
-                            event_row = event_row.child(
-                                pill(
-                                    SharedString::from(format!("join-event-{}-{delta}", event.id)),
-                                    "Join",
-                                    "external-link",
-                                    t,
-                                )
-                                .h(px(28.))
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(cx.listener(
-                                    move |_, _, _, cx| {
+                            cell = cell.child(
+                                div()
+                                    .id(SharedString::from(format!("join-event-{}-{delta}", event.id)))
+                                    .flex_shrink_0()
+                                    .h(px(28.))
+                                    .flex()
+                                    .items_center()
+                                    .text_size(px(12.))
+                                    .line_height(px(16.))
+                                    .rounded(px(4.))
+                                    .text_color(t.muted)
+                                    .hover(|join| join.text_color(t.text))
+                                    .opacity(crate::motion::revealed(hover))
+                                    .child("Join")
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                    // Tab reaches it (and shows it) like any control.
+                                    .reach()
+                                    .on_click(cx.listener(move |_, _, _, cx| {
                                         cx.stop_propagation();
                                         cx.open_url(&url);
-                                    },
-                                )),
-                            )
+                                    })),
+                            );
                         }
                         if self.calendars.opening.is_none() {
-                            event_row = event_row.cursor_pointer().reach().on_click(cx.listener(
-                                move |this, _, _, cx| this.open_calendar_event(id.clone(), cx),
-                            ));
+                            cell = cell.reach().on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_calendar_event(id.clone(), cx)
+                            }));
                         }
-                        rows = rows.child(event_row);
+                        group = group.child(
+                            event_line((index == 0).then(|| day_label(date, today, t))).child(cell),
+                        );
+                        in_group += 1;
                         visible += 1;
+                    }
+                    if in_group > 0 {
+                        rows = rows.child(group);
+                        groups += 1;
                     }
                 }
                 if visible == 100 {
@@ -932,10 +970,14 @@ impl Cereal {
                 }
             }
         }
+        // The header as in the reference: the calendar settings appear
+        // while the pointer is over "Coming up" or its card, beside the day
+        // arrows; the arrows sit on a 24 pt pitch, and "back" is dimmed where
+        // there is nothing before today.
         let heading_hover = crate::motion::reveal_key("linked-coming-up-heading");
+        let at_start = self.calendar_page == 0;
         let controls = div()
             .flex()
-            .gap(px(1.))
             .child(
                 tool_tip(
                     "manage-calendars",
@@ -943,6 +985,8 @@ impl Cereal {
                     "Calendar connections",
                     t,
                 )
+                .w(px(24.))
+                .cursor(CursorStyle::Arrow)
                 .opacity(crate::motion::revealed(heading_hover))
                 .on_click(cx.listener(|_, _, _, cx| {
                     if let Some(url) = crate::server::calendar_connections_url() {
@@ -951,51 +995,150 @@ impl Cereal {
                 })),
             )
             .child(
-                tool_tip("linked-calendar-refresh", "refresh", "Refresh calendars", t)
-                    .opacity(crate::motion::revealed(heading_hover))
-                    .on_click(cx.listener(|this, _, _, cx| this.load_calendar_events(cx))),
+                tool("linked-calendar-prev", "chevron-left", t)
+                    .w(px(24.))
+                    .cursor(CursorStyle::Arrow)
+                    .when(at_start, |back| back.opacity(0.4))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.calendar_page > 0 {
+                            this.calendar_page -= 1;
+                            this.load_calendar_events(cx);
+                        }
+                    })),
             )
             .child(
-                tool("linked-calendar-prev", "chevron-left", t).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.calendar_page = this.calendar_page.saturating_sub(1);
-                        this.load_calendar_events(cx);
-                    },
-                )),
-            )
-            .child(
-                tool("linked-calendar-next", "chevron-right", t).on_click(cx.listener(
-                    |this, _, _, cx| {
+                tool("linked-calendar-next", "chevron-right", t)
+                    .w(px(24.))
+                    .cursor(CursorStyle::Arrow)
+                    .on_click(cx.listener(|this, _, _, cx| {
                         this.calendar_page = this.calendar_page.saturating_add(1);
                         this.load_calendar_events(cx);
-                    },
-                )),
+                    })),
             );
         let title = if self.calendar_page == 0 {
             "Coming up".into()
         } else {
             day.format("%B %-d").to_string()
         };
-        div()
-            .pt(px(10.))
+        div().w_full().flex().flex_col().flex_shrink_0().child(div()
+            .id("linked-coming-up")
+            .relative()
+            .child(crate::motion::hover_probe(heading_hover))
+            .pt(px(8.8))
             .w_full()
             .flex()
             .flex_col()
             .flex_shrink_0()
             .child(
                 div()
-                    .id("linked-coming-up-heading")
-                    .child(crate::motion::hover_probe(heading_hover))
-                    .h(px(37.))
-                    .px(px(8.))
+                    .h(px(38.2))
+                    .pl(px(8.))
+                    .pr(px(10.))
                     .flex()
                     .items_start()
                     .justify_between()
                     .child(heading(title, t))
                     .child(controls),
             )
-            .child(rows)
+            .child(rows))
     }
+}
+
+/// The date at the start of a day's first event: the serif day number
+/// centred in a 32 pt box, then the month (with a red dot for today) over the
+/// weekday in grey.
+fn day_label(date: NaiveDate, today: bool, t: Theme) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .child(
+            // Centred 32 pt from the card's inner edge (the box is wider
+            // than the 16 pt gutter allows so two digits never wrap), and
+            // 1.7 pt below the colour bar's centre, as in the reference.
+            div()
+                .font_family(DISPLAY)
+                .w(px(40.))
+                .ml(px(-4.))
+                .mt(px(3.4))
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .text_center()
+                .text_size(px(27.))
+                .line_height(px(32.))
+                .text_color(t.text)
+                .child(date.day().to_string()),
+        )
+        .child(
+            div()
+                .ml(px(4.))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .text_size(px(11.5))
+                        .line_height(px(12.))
+                        .text_color(t.text)
+                        .child(date.format("%B").to_string())
+                        .when(today, |month| {
+                            month.child(div().size(px(5.)).rounded_full().bg(rgb(0xaf5139)))
+                        }),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.25))
+                        .line_height(px(12.))
+                        .text_color(t.muted)
+                        .child(date.format("%a").to_string()),
+                ),
+        )
+}
+
+/// One event's line in "Coming up": 48 pt tall, the date column (or its
+/// empty space after a day's first event), then the event cell.
+fn event_line(date: Option<Div>) -> Div {
+    div()
+        .h(px(48.))
+        .flex_shrink_0()
+        .pl(px(16.))
+        .pr(px(9.))
+        .flex()
+        .items_center()
+        .child(
+            div()
+                .w(px(144.))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .children(date),
+        )
+}
+
+/// The part of an event's line that is the event: the colour bar 8 pt in,
+/// the title over the time, and room for Join at the end.
+fn event_cell() -> Div {
+    div()
+        .relative()
+        .flex_1()
+        .min_w_0()
+        .h(px(44.))
+        .pl(px(8.))
+        .pr(px(16.))
+        .rounded(px(8.))
+        .flex()
+        .items_center()
+        .gap(px(12.))
+}
+
+fn event_bar(color: impl Into<Hsla>) -> Div {
+    div()
+        .w(px(3.))
+        .h(px(28.))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(color.into())
 }
 
 #[cfg(test)]
@@ -1065,6 +1208,32 @@ mod tests {
             );
         }
         assert_eq!(event_time(&event), "All day");
+        assert_eq!(super::event_time_pieces(&event), vec![("All day".to_owned(), false)]);
+    }
+
+    #[test]
+    fn coming_up_says_a_shared_meridiem_once() {
+        let local = |hour, minute| {
+            Local
+                .with_ymd_and_hms(2026, 11, 16, hour, minute, 0)
+                .unwrap()
+                .to_rfc3339()
+        };
+        let same = event("same", "work", false, &local(17, 0), &local(17, 30));
+        assert_eq!(
+            super::event_time_pieces(&same),
+            vec![("5:00 – 5:30".to_owned(), false), ("PM".to_owned(), true)]
+        );
+        let across = event("across", "work", false, &local(11, 30), &local(12, 30));
+        assert_eq!(
+            super::event_time_pieces(&across),
+            vec![
+                ("11:30".to_owned(), false),
+                ("AM".to_owned(), true),
+                (" – 12:30".to_owned(), false),
+                ("PM".to_owned(), true),
+            ]
+        );
     }
     #[test]
     fn overlapping_sources_remain_distinct_but_disabled_sources_do_not_appear() {

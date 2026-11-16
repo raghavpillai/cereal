@@ -223,7 +223,7 @@ describe.skipIf(!enabled)("notes list and search on PostgreSQL",()=>{
     }finally{await db!.user.deleteMany({where:{id:dana}});await zoned.close()}
   },60_000)
 
-  test("attendees, meeting time and folders come from saved context, scoped to the owner",async()=>{
+  test("attendees and meeting time come from saved context, scoped to the owner",async()=>{
     const [withPeople,broken,plain]=[noteIds[NOTES-1]!,noteIds[NOTES-2]!,noteIds[NOTES-3]!]
     const context=meeting([person("Me",`list-${ada}@example.invalid`,{isSelf:true}),person("Grace Hopper","grace@navy.example",{givenName:"Grace"}),person(null,"alan@bletchley.example"),person("Boardroom",null,{isResource:true}),
       ...Array.from({length:5},(_,i)=>person(`Guest ${i+1}`,null))])
@@ -231,14 +231,11 @@ describe.skipIf(!enabled)("notes list and search on PostgreSQL",()=>{
     await db!.noteMeetingContext.create({data:{noteId:broken,userId:ada,meeting:{participants:"not a list"}}})
     // A context row that names another user is not this owner's context.
     await db!.noteMeetingContext.create({data:{noteId:plain,userId:bob,meeting:JSON.parse(JSON.stringify(context))}})
-    const mine=await db!.meetingFolder.create({data:{ownerId:ada,organizationId:north,name:"Customers"}}),foreign=await db!.meetingFolder.create({data:{ownerId:bob,organizationId:north,name:"BOB_FOLDER"}})
-    await db!.meetingFolderNote.createMany({data:[{folderId:mine.id,noteId:withPeople},{folderId:foreign.id,noteId:withPeople}]})
     const rows=new Map((await list(ada,{limit:"3"})).notes.map(note=>[note.id,note]))
-    expect(rows.get(withPeople)).toMatchObject({meeting:{startAt:"2026-03-02T15:00:00.000Z",endAt:"2026-03-02T15:30:00.000Z",allDay:false},folders:[{id:mine.id,name:"Customers"}],
+    expect(rows.get(withPeople)).toMatchObject({meeting:{startAt:"2026-03-02T15:00:00.000Z",endAt:"2026-03-02T15:30:00.000Z",allDay:false},
       attendees:{total:8,others:7,people:[{name:"Grace Hopper",shortName:"Grace",initials:"GH"},{name:"alan@bletchley.example",shortName:"alan",initials:"AE"},{name:"Guest 1",shortName:"Guest",initials:"G1"},{name:"Guest 2",shortName:"Guest",initials:"G2"}]}})
-    expect(rows.get(broken)).toMatchObject({meeting:null,attendees:{people:[],others:0,total:0},folders:[]})
+    expect(rows.get(broken)).toMatchObject({meeting:null,attendees:{people:[],others:0,total:0}})
     expect(rows.get(plain)).toMatchObject({meeting:null,attendees:{total:0}})
-    expect(JSON.stringify([...rows.values()])).not.toContain("BOB_FOLDER")
     const byName=await search(ada,{q:"hopper"})
     expect(byName.results.map(result=>result.note.id)).toEqual([withPeople])
     expect(byName.results[0]).toMatchObject({matchedIn:["people"],excerpt:{source:"people",parts:[{text:"Grace ",hit:false},{text:"Hopper",hit:true}]}})

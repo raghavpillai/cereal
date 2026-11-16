@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { NoteText, inlineParts, listIndentUnit, noteBlocks, noteLine, wordChunks } from './markdown'
+import { NoteText, inlineParts, listIndentUnit, noteBlocks, noteLine, webLinks, wordChunks } from './markdown'
 
 describe('a note read a line at a time, as the desktop app reads it', () => {
   test('what one line is', () => {
@@ -62,12 +62,42 @@ describe('a note read a line at a time, as the desktop app reads it', () => {
     expect(inlineParts('')).toEqual([])
   })
 
-  test('nothing in a note becomes markup, a link or an image', () => {
-    const html = renderToStaticMarkup(<NoteText value={'## Résumé 🦀 <b>x</b>\n\n- <img src=x onerror=alert(1)>\n- [unsafe](javascript:alert(1)) and https://example.com/docs\n\n<script>alert(1)</script>'} />)
+  test('nothing in a note becomes markup or an image; only a web address written out in full becomes a link', () => {
+    const html = renderToStaticMarkup(<NoteText value={'## Résumé 🦀 <b>x</b>\n\n- <img src=x onerror=alert(1)>\n- [unsafe](javascript:alert(1)) and [label](https://elsewhere.example) javascript:alert(2)\n\n<script>alert(1)</script>'} />)
     expect(html).toContain('Résumé')
     expect(html).toContain('&lt;img')
     expect(html).toContain('&lt;script&gt;')
-    for (const tag of ['<img', '<script', '<a ', '<b>', 'href=']) expect(html).not.toContain(tag)
+    for (const tag of ['<img', '<script', '<b>', 'href="javascript']) expect(html).not.toContain(tag)
+    // A Markdown link stays as written: its label could say anything. The address inside it is shown, and links, as itself.
+    expect(html).toContain('[label](</span><a class="note-link" href="https://elsewhere.example/" target="_blank" rel="noopener noreferrer"><span class="w">https://elsewhere.example</span></a><span class="w">)')
+    expect((html.match(/<a /g) ?? []).length).toBe(1)
+  })
+
+  test('the chat link at the foot of generated notes is a link that reads as the address it opens', () => {
+    const address = 'https://notes.example.test/notes/51207249-97a9-4bd7-b02f-93428ffb367a/chat'
+    const html = renderToStaticMarkup(<NoteText value={`# Notes\n- One\n\n---\n\nChat with meeting transcript: ${address} I CAN TYPE HERE`} />)
+    expect(html).toContain('<hr/>')
+    expect(html).toContain(`<a class="note-link" href="${address}" target="_blank" rel="noopener noreferrer">${address}</a>`)
+    expect(html.replace(/<[^>]+>/g, '')).toContain(`Chat with meeting transcript: ${address} I CAN TYPE HERE`)
+  })
+
+  test('the addresses that become links are the same on every client (testdata/web-addresses.json)', async () => {
+    const vectors = JSON.parse(await Bun.file(new URL('../../../../testdata/web-addresses.json', import.meta.url)).text()) as { cases: { text: string; links: string[] }[] }
+    expect(vectors.cases.length).toBeGreaterThan(15)
+    for (const { text, links } of vectors.cases) expect(webLinks(text).filter(piece => piece.href).map(piece => piece.text), JSON.stringify(text)).toEqual(links)
+    // A look-alike is shown, never linked, on the page as well.
+    const html = renderToStaticMarkup(<NoteText value={'- https://good.example@evil.example/login\n- https://\u0430pple.com/login'} />)
+    expect(html).not.toContain('<a ')
+  })
+
+  test('web addresses in a line', () => {
+    expect(webLinks('See https://a.example/x, then (https://b.example/y).')).toEqual([
+      { text: 'See ', href: null }, { text: 'https://a.example/x', href: 'https://a.example/x' }, { text: ', then (', href: null },
+      { text: 'https://b.example/y', href: 'https://b.example/y' }, { text: ').', href: null },
+    ])
+    expect(webLinks('no address here')).toEqual([{ text: 'no address here', href: null }])
+    expect(webLinks('ftp://a.example and http://')).toEqual([{ text: 'ftp://a.example and http://', href: null }])
+    expect(webLinks('')).toEqual([{ text: '', href: null }])
   })
 
   test('the page it makes: headings with their gutter mark, lists by depth, a continuation inside its item', () => {

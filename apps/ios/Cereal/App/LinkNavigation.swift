@@ -126,12 +126,16 @@ extension Router {
         switch destination {
         case .push(let route): path = LinkNavigation.path(path, pushing: route)
         case .serverNote(let ref):
+            #if DEBUG
             mode.isDemo = false
+            #endif
             path = [.serverNote(ref)]
         case .sharedOnServer(let shared):
-            // Over the account's own screens; the local demo's screens are left behind with it.
+            // Over the account's own screens; the debug demo's screens are left behind with it.
             path = mode.isDemo ? [.sharedNote(shared)] : LinkNavigation.path(path, pushing: .sharedNote(shared))
+            #if DEBUG
             mode.isDemo = false
+            #endif
         }
     }
 

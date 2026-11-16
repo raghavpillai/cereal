@@ -60,8 +60,8 @@ test("enhancement source contains original notes and transcript, while chat can 
 
 test("regeneration uses newly edited original notes without replacing them or the transcript",async()=>{
  const repo=makeMemoryRepository(),note=await Effect.runPromise(repo.createNote(input)),seen:string[]=[]
- const providers={transcribe:()=>Effect.succeed([]),generate:(source:typeof note)=>Effect.sync(()=>{seen.push(source.body);return "# Current risks\n- Supported transcript detail."}),chat:()=>Effect.succeed("")}
- const processing=makeProcessingService(repo,{providers,worker:false})
+ const providers={generate:(source:typeof note)=>Effect.sync(()=>{seen.push(source.body);return "# Current risks\n- Supported transcript detail."}),chat:()=>Effect.succeed("")}
+ const processing=makeProcessingService(repo,{providers})
  await Effect.runPromise(processing.generate(note.id,note.transcriptRevision))
  const revised="# My decision\n- Hold launch until reviewed"
  await Effect.runPromise(repo.updateNote(note.id,{body:revised}))

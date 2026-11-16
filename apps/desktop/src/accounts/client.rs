@@ -441,6 +441,18 @@ impl AccountClient {
     /// worker, cancellable by killing the child. The token travels through
     /// stdin.
     pub(crate) fn chat_stream(&self, path: &str, payload: &Value) -> Result<Child, String> {
+        self.event_stream(path, payload, false)
+    }
+
+    /// [`Self::chat_stream`] whose child also writes the response's HTTP
+    /// status (`000` when there was no response) as the last thing on its
+    /// stderr, so a caller can tell an endpoint the server does not have from
+    /// any other failure.
+    pub(crate) fn event_stream_with_status(&self, path: &str, payload: &Value) -> Result<Child, String> {
+        self.event_stream(path, payload, true)
+    }
+
+    fn event_stream(&self, path: &str, payload: &Value, status: bool) -> Result<Child, String> {
         check_path(path).map_err(|error| error.message())?;
         if self.stale() {
             return Err("Request cancelled".into());
@@ -455,9 +467,10 @@ impl AccountClient {
             .args(["--disable", "--config", "-", "--silent", "--show-error", "--fail", "--no-buffer"])
             .args(SAFE_TRANSPORT)
             .args(["--connect-timeout", "10", "--max-time", "180"])
+            .args(if status { &["--write-out", "%{stderr}%{http_code}"][..] } else { &[][..] })
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(if status { Stdio::piped() } else { Stdio::null() })
             .spawn()
             .map_err(|_| "Cannot start chat transport")?;
         let Some(mut input) = child.stdin.take() else {

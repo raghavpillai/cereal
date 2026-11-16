@@ -17,6 +17,7 @@
 import type {ProviderNote} from "../providers"
 import type {LanguageMessage,LanguageRequestParameters} from "./shared"
 import {analyseNote,elapsed,voiceTags,type NoteAnalysis} from "./notes-generation-analysis"
+import {withoutTranscriptLink} from "../transcript-link"
 
 /** Output budget: the prompt held a 100-minute meeting to about 650 words (at
  * most 1,100 output tokens, measured). The cap is far above that because a
@@ -46,7 +47,8 @@ export const generationContext=(note:ProviderNote)=>{
     ...(meeting?{calendarEvent:{title:meeting.title,startAt:meeting.startAt,endAt:meeting.endAt,timeZone:meeting.timeZone,location:meeting.location,
       // Invitees, not attendance. Emails are kept because the domain often says which side someone is on.
       invited:meeting.participants.filter(person=>!person.isResource).map(person=>({name:person.displayName,email:person.email,...(person.isSelf?{noteOwner:true}:{}),...(person.isOrganizer?{organizer:true}:{}),...(person.responseStatus==="declined"?{declined:true}:{})}))}}:{}),
-    userNotes:note.body,
+    // A chat link pasted into the typed notes is not meeting content, and the model must not copy it back (transcript-link.ts).
+    userNotes:withoutTranscriptLink(note.id,note.body),
     transcript:note.transcriptSegments.map((segment,index)=>({at:elapsedMs(segment.startMs),voice:tags[index]!,speakerId:segment.speakerId,text:segment.text})),
   }
 }

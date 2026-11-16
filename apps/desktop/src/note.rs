@@ -37,32 +37,18 @@ fn metadata_labels(note: &Note, today: NaiveDate) -> (String, String) {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct NoteMetadataAnchors {
     pub details_left: f32,
-    pub folder_left: f32,
 }
 
 /// The document is centered independently of sidebar state on a note page.
-/// Use the same content gutter and joined-tab sizes as the actual metadata row.
-fn metadata_anchors(
-    viewport_width: f32,
-    has_enhanced: bool,
-    active: NoteTab,
-    metadata_width: f32,
-) -> NoteMetadataAnchors {
-    let document_width = viewport_width.min(if has_enhanced { 682. } else { 672. });
+/// Use the same content gutter and joined-tab width as the actual metadata
+/// row; `joined_views` is `None` while the note has no enhanced notes.
+fn metadata_anchors(viewport_width: f32, joined_views: Option<f32>) -> NoteMetadataAnchors {
+    let document_width = viewport_width.min(if joined_views.is_some() { 682. } else { 672. });
     let gutter_left = (viewport_width - document_width) / 2. + 29.;
-    let joined_views = if !has_enhanced {
-        0.
-    } else if active == NoteTab::Enhanced {
-        148.
-    } else {
-        // 100 px "My notes" + the 46 px collapsed Enhanced tab + the border.
-        148.
-    };
-    let details_left = gutter_left + if has_enhanced { joined_views + 8. } else { 0. };
+    let details_left = gutter_left + joined_views.map_or(0., |width| width + 8.);
     let clamp = |left: f32, width: f32| left.clamp(12., (viewport_width - width - 12.).max(12.));
     NoteMetadataAnchors {
         details_left: clamp(details_left, 280.),
-        folder_left: clamp(details_left + metadata_width + 8., 288.),
     }
 }
 
@@ -71,10 +57,94 @@ fn metadata_anchors(
 pub(crate) struct NoteTabs {
     /// The first tab's label: "My notes" on a note of one's own.
     pub notes_label: &'static str,
-    /// That tab's width while it is the active one.
-    pub notes_width: f32,
     /// Whether the Enhanced tab carries its template-menu chevron.
     pub menu: bool,
+}
+
+// Geometry of the joined view tabs, in points, taken from the reference
+// capture of this control (`.local/gooey/desktop/audit/15-…` and `24-…`, one
+// pixel per point) by where the ink falls. The selected tab is a capsule
+// exactly the track's size on its end of the track: no inset, so its radius
+// is the track's. Each glyph starts about 13.5 pt from its segment's outer
+// edge and stays there in both states; a widening tab uncovers its label.
+// The `*_LEAD` values are the glyph boxes' insets that put the ink there.
+const TAB_HEIGHT: f32 = 28.;
+const NOTES_GLYPH: f32 = 18.;
+const NOTES_LEAD: f32 = 11.1;
+const NOTES_LABEL_GAP: f32 = 2.35;
+const SPARKLE_GLYPH: f32 = 16.;
+const SPARKLE_LEAD: f32 = 12.5;
+/// Collapsed, the sparkle sits nearer the capsule beside it, as in the reference.
+const SPARKLE_LEAD_COLLAPSED: f32 = 11.6;
+const SPARKLE_LABEL_GAP: f32 = 5.9;
+/// The template-menu chevron, and its gap after the label or the glyph.
+const CHEVRON: f32 = 10.5;
+const CHEVRON_GAP: f32 = 0.3;
+const CHEVRON_GAP_COLLAPSED: f32 = 1.3;
+/// After the last thing in a tab: a label, a chevron, or a lone glyph.
+const LABEL_TRAIL: f32 = 13.2;
+const CHEVRON_TRAIL: f32 = 7.8;
+const CHEVRON_TRAIL_COLLAPSED: f32 = 10.9;
+/// A collapsed tab without a chevron: the lines at the track's start, as in
+/// the reference, and the sparkle at its end, as far from the end as the
+/// lines are from the start.
+const GLYPH_TAB: f32 = 35.;
+const SPARKLE_TRAIL_COLLAPSED: f32 = 11.4;
+
+/// The widths of the two view tabs, collapsed and selected. A collapsed tab
+/// is as wide as its glyph (and chevron) need, never wider, so the track is
+/// the selected tab plus the other's glyph. On a note's own page the two
+/// states come out the same width, as the reference's do, so the metadata
+/// chips beside it stay put.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct NoteTabWidths {
+    pub notes: f32,
+    pub notes_collapsed: f32,
+    pub enhanced: f32,
+    pub enhanced_collapsed: f32,
+}
+
+impl NoteTabWidths {
+    /// The track's width while `selected` is the selected tab.
+    pub fn track(self, selected: NoteTab) -> f32 {
+        match selected {
+            NoteTab::Notes => self.notes + self.enhanced_collapsed,
+            NoteTab::Enhanced => self.notes_collapsed + self.enhanced,
+        }
+    }
+}
+
+/// Lay out the view tabs for the two labels' drawn widths.
+pub(crate) fn note_tab_widths(notes_label: f32, enhanced_label: f32, menu: bool) -> NoteTabWidths {
+    let notes = NOTES_LEAD + NOTES_GLYPH + NOTES_LABEL_GAP + notes_label + LABEL_TRAIL;
+    let (enhanced, enhanced_collapsed) = if menu {
+        (
+            SPARKLE_LEAD
+                + SPARKLE_GLYPH
+                + SPARKLE_LABEL_GAP
+                + enhanced_label
+                + CHEVRON_GAP
+                + CHEVRON
+                + CHEVRON_TRAIL,
+            SPARKLE_LEAD_COLLAPSED
+                + SPARKLE_GLYPH
+                + CHEVRON_GAP_COLLAPSED
+                + CHEVRON
+                + CHEVRON_TRAIL_COLLAPSED,
+        )
+    } else {
+        (
+            SPARKLE_LEAD + SPARKLE_GLYPH + SPARKLE_LABEL_GAP + enhanced_label + LABEL_TRAIL,
+            SPARKLE_LEAD_COLLAPSED + SPARKLE_GLYPH + SPARKLE_TRAIL_COLLAPSED,
+        )
+    };
+    // Whole points, so the capsule's edges land on pixels at 1x too.
+    NoteTabWidths {
+        notes: notes.round(),
+        notes_collapsed: GLYPH_TAB,
+        enhanced: enhanced.round(),
+        enhanced_collapsed: enhanced_collapsed.round(),
+    }
 }
 
 /// The width of a view tab's label as it is drawn: 13 px in the body face.
@@ -118,46 +188,27 @@ pub(crate) fn note_meta_chip(id: &'static str, t: Theme) -> Stateful<Div> {
 impl Cereal {
     pub(crate) fn note_metadata_anchors(&self, window: &Window) -> NoteMetadataAnchors {
         let Some(note) = self.current_note.and_then(|id| self.workspace.note(id)) else {
-            return metadata_anchors(
-                f32::from(window.viewport_size().width),
-                false,
-                NoteTab::Notes,
-                128.,
-            );
+            return metadata_anchors(f32::from(window.viewport_size().width), None);
         };
         let enhanced = !note.enhanced.trim().is_empty() || self.generation.is_running_for(note.id);
-        let (date, people) = metadata_labels(note, crate::menubar::now().date_naive());
-        let text_width = |label: &str| {
-            let text: SharedString = label.to_owned().into();
-            let runs = [TextRun {
-                len: text.len(),
-                font: font(FONT),
-                color: self.theme().text,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }];
-            f32::from(
-                window
-                    .text_system()
-                    .shape_line(text, px(13.), &runs, None)
-                    .width,
+        let joined = enhanced.then(|| {
+            note_tab_widths(
+                note_tab_label_width("My notes", window),
+                note_tab_label_width("Enhanced", window),
+                true,
             )
-        };
-        // Two14px icons, three6px gaps, horizontal12px padding and1px borders.
-        let width = 72. + text_width(&date) + text_width(&people);
-        metadata_anchors(
-            f32::from(window.viewport_size().width),
-            enhanced,
-            self.active_tab,
-            width,
-        )
+            .track(self.active_tab)
+        });
+        metadata_anchors(f32::from(window.viewport_size().width), joined)
     }
 
-    /// The joined capsule that switches a note between its two documents.
-    /// The active tab's fill is one shape that flows across to the other tab
-    /// while both tabs trade widths on the same spring. `select` is told the
-    /// tab that was pressed and whether it was already the active one.
+    /// The joined capsule that switches a note between its two documents: a
+    /// sunken track, and on it the selected tab as a raised capsule of the
+    /// track's own height and radius, flush with the track's end. The
+    /// capsule is one shape that flows across to the other tab (stretching
+    /// like a droplet, see [`crate::motion::Glide`]) while both tabs trade
+    /// widths on the same spring. `select` is told the tab that was pressed
+    /// and whether it was already the active one.
     pub(crate) fn note_view_tabs(
         &self,
         tabs_shown: NoteTabs,
@@ -168,89 +219,178 @@ impl Cereal {
     ) -> Div {
         let t = self.theme();
         let tabs = self.stage.glide("note-tabs");
+        let notes_label = note_tab_label_width(tabs_shown.notes_label, window);
+        let widths = note_tab_widths(
+            notes_label,
+            note_tab_label_width("Enhanced", window),
+            tabs_shown.menu,
+        );
+        // The track's edge is lighter than the selected capsule's, which
+        // paints over it: one edge wherever they meet, never two.
+        let track_edge = t.hairline.opacity(0.55);
+        let pill_edge = Hsla {
+            a: (t.hairline.a * 1.25).min(1.),
+            ..t.hairline
+        };
+        // The selected tab's ink. Light mode uses the secondary ink, as the
+        // reference does; dark mode goes halfway to the primary text, so the
+        // selected label stands out from the chips beside it there too
+        // (8.1:1 on the capsule, against 5.4:1 for the chips).
+        let dark = t.bg.l < 0.5;
+        let selected_ink = if dark {
+            crate::motion::mix(t.secondary, t.text, 0.5)
+        } else {
+            t.secondary
+        };
         let mut views = div()
-            .h(px(28.))
+            .relative()
+            .h(px(TAB_HEIGHT))
             .flex()
             .items_center()
-            .gap(px(0.))
             .rounded_full()
-            .border_1()
-            .border_color(t.hairline)
-            // A sunken track; the selected tab is a raised, outlined capsule.
             .bg(t.sidebar)
             .flex_shrink_0()
-            .child(tabs.outlined_indicator(t.card, Some(t.hairline), 14.));
-        // The Enhanced tab's menu chevron and the room it takes.
-        let chevron = if tabs_shown.menu { 12. } else { 0. };
-        for (index, (tab, label, symbol)) in [
-            (NoteTab::Notes, tabs_shown.notes_label, "notes-lines"),
-            (NoteTab::Enhanced, "Enhanced", "sparkles"),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+            // The capsule's spring may reach a fraction of a point past the
+            // ends of the track; the track keeps it in.
+            .overflow_hidden()
+            // The edge is its own layer so the tabs fill the whole track
+            // and the selected capsule can sit on its outer edge.
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(track_edge),
+            )
+            .child(tabs.outlined_indicator(t.card, Some(pill_edge), TAB_HEIGHT / 2.));
+        for (index, tab) in [NoteTab::Notes, NoteTab::Enhanced].into_iter().enumerate() {
             let active = display_tab == tab;
             let enhanced = tab == NoteTab::Enhanced;
-            let target = if active {
+            let chevron = enhanced && tabs_shown.menu;
+            let (label, glyph, glyph_size, (lead_collapsed, lead), label_gap, collapsed, selected) =
                 if enhanced {
-                    100. + chevron
+                    (
+                        "Enhanced",
+                        "note-tab-sparkle",
+                        SPARKLE_GLYPH,
+                        (SPARKLE_LEAD_COLLAPSED, SPARKLE_LEAD),
+                        SPARKLE_LABEL_GAP,
+                        widths.enhanced_collapsed,
+                        widths.enhanced,
+                    )
                 } else {
-                    tabs_shown.notes_width
-                }
-            } else if enhanced {
-                // Collapsed, Enhanced still shows its menu chevron.
-                34. + chevron
-            } else {
-                34.
-            };
-            let width = self
-                .stage
-                .aim(("note-tab", index as u64), target, crate::motion::GOOEY);
-            // Content is pinned to the leading edge with the inset that centres
-            // it at rest, so the icon stays put and the label is uncovered as
-            // the tab widens instead of sliding in from a clipped centre.
-            let content = if active {
-                15. + 6. + note_tab_label_width(label, window) + if enhanced { chevron } else { 0. }
-            } else if enhanced {
-                15. + chevron
-            } else {
-                15.
-            };
-            let inset = self.stage.aim(
-                ("note-tab-inset", index as u64),
-                ((target - content) / 2.).max(0.),
+                    (
+                        tabs_shown.notes_label,
+                        "note-tab-lines",
+                        NOTES_GLYPH,
+                        (NOTES_LEAD, NOTES_LEAD),
+                        NOTES_LABEL_GAP,
+                        widths.notes_collapsed,
+                        widths.notes,
+                    )
+                };
+            let width = self.stage.aim(
+                ("note-tab", index as u64),
+                if active { selected } else { collapsed },
                 crate::motion::GOOEY,
             );
-            views = views.child(
-                round_tool(
-                    SharedString::from(format!("note-tab-{label}")),
-                    if enhanced && active {
-                        "sparkles-solid"
-                    } else {
-                        symbol
-                    },
-                    label,
-                    t,
+            // How far this tab is open, 0 collapsed to 1 selected. The label,
+            // the gaps and the ink all follow it, so a tab uncovers or covers
+            // its label in step with its width and nothing jumps.
+            let open = if selected > collapsed {
+                ((width - collapsed) / (selected - collapsed)).clamp(0., 1.)
+            } else if active {
+                1.
+            } else {
+                0.
+            };
+            let lerp = |from: f32, to: f32| from + (to - from) * open;
+            let ink = crate::motion::mix(t.muted, selected_ink, open);
+            // The label is uncovered and covered by its tab's edge, but never
+            // shown cut through a letter: it is only visible once the tab has
+            // room for all of it (the last few tenths of `open`, inside the
+            // last letter's side bearing), fades in from there, and is gone
+            // within a frame or two of its tab starting to close.
+            let room = ((open - 0.93) / 0.06).clamp(0., 1.);
+            let arrived = self
+                .stage
+                .presence(
+                    ("note-tab-label", index as u64),
+                    open >= 0.97,
+                    crate::motion::SNAPPY,
                 )
-                .w(px(width.max(28.)))
-                .h(px(28.))
-                .justify_start()
-                .pl(px(inset.max(0.)))
-                .gap(px(6.))
-                .text_size(px(13.))
-                .whitespace_nowrap()
+                .fade;
+            let label_fade = room * room * (3. - 2. * room) * arrived;
+            let collapsed_trail = if chevron {
+                CHEVRON_TRAIL_COLLAPSED
+            } else {
+                collapsed - lead_collapsed - glyph_size
+            };
+            let selected_trail = if chevron { CHEVRON_TRAIL } else { LABEL_TRAIL };
+            let id = SharedString::from(format!("note-tab-{label}"));
+            let element = div()
+                .id(id)
+                .h(px(TAB_HEIGHT))
+                .w(px(width.max(0.)))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .rounded_full()
                 .overflow_hidden()
-                .when(active, |d| {
-                    d.text_color(t.text).child(tabs.probe(index)).child(label)
+                .whitespace_nowrap()
+                .cursor_default()
+                .pl(px(lerp(lead_collapsed, lead)))
+                .pr(px(lerp(collapsed_trail, selected_trail).max(0.)))
+                .text_size(px(13.))
+                // A collapsed tab washes under the pointer like any tool; the
+                // wash fades out as the tab opens into the raised capsule, so
+                // the capsule stays white under the pointer and only darkens
+                // while it is held.
+                .child(
+                    crate::motion::tactile(t.hover.opacity(1. - open))
+                        .press(t.border.opacity(0.6))
+                        .round(),
+                )
+                .when(active, |d| d.child(tabs.probe(index)))
+                .child(icon(glyph, glyph_size, ink))
+                // The label shrinks away rather than the chevron being pushed
+                // out of a narrowing tab.
+                .when(open > 0., |d| {
+                    d.child(
+                        div()
+                            .ml(px(label_gap * open))
+                            .min_w_0()
+                            .flex_shrink()
+                            .overflow_hidden()
+                            .text_color(selected_ink)
+                            .opacity(label_fade)
+                            .child(label),
+                    )
                 })
-                // The chevron hugs the label, and stays on the collapsed tab.
-                .when(enhanced && tabs_shown.menu, |d| {
-                    d.child(icon("chevron-down", 9., t.secondary).ml(px(-3.)))
+                .when(chevron, |d| {
+                    d.child(
+                        icon("note-tab-chevron", CHEVRON, ink)
+                            .ml(px(lerp(CHEVRON_GAP_COLLAPSED, CHEVRON_GAP))),
+                    )
                 })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    select(this, tab, active, window, cx)
-                })),
-            );
+                .reach()
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    // Pressed from the keyboard, the tab keeps the focus
+                    // (`select` hands it to the page, which suits a click).
+                    let focused = event.is_keyboard().then(|| window.focused(cx)).flatten();
+                    select(this, tab, active, window, cx);
+                    if let Some(handle) = focused {
+                        window.focus(&handle);
+                    }
+                }));
+            // The selected tab shows its name already; only a collapsed one,
+            // a lone glyph, is named on hover.
+            views = views.child(if active {
+                element
+            } else {
+                with_tooltip(element, label.into(), t)
+            });
         }
         views
     }
@@ -282,7 +422,13 @@ impl Cereal {
                 .into_any_element();
         };
         let id = note.id;
-        let generating = self.generation.is_running_for(id);
+        // Stop was pressed and the stream is still delivering what the
+        // server does not have: the notes are asked for after that. Shown
+        // in the generation chip's place, as the step before it.
+        let finishing = !self.generation.is_running_for(id)
+            && note.pending_stop == Some(crate::model::PendingStop::Generate)
+            && (self.live.delivering(id) || !note.live_pending.is_empty());
+        let generating = self.generation.is_running_for(id) || finishing;
         let has_enhanced = !note.enhanced.trim().is_empty() || generating;
         let document_width =
             window
@@ -298,7 +444,6 @@ impl Cereal {
         let views = self.note_view_tabs(
             NoteTabs {
                 notes_label: "My notes",
-                notes_width: 100.,
                 menu: true,
             },
             display_tab,
@@ -307,7 +452,7 @@ impl Cereal {
             |this, tab, active, window, cx| {
                 this.focus.focus(window);
                 if active && tab == NoteTab::Enhanced {
-                    this.menu = Some(Menu::Templates);
+                    this.open_menu(Menu::Templates);
                 } else {
                     this.summary.dismiss();
                     this.active_tab = tab;
@@ -349,7 +494,7 @@ impl Cereal {
                 // rather than drawn across their first heading.
                 .child(div().h(px(88. * chip.value.clamp(0., 1.))).mx(px(-24.)).px(px(24.)).overflow_hidden().flex().flex_col().gap(px(12.))
                     .child(div().text_size(px(16.)).line_height(px(24.)).text_color(t.muted).opacity(chip.fade).child("Add your thoughts…"))
-                    .child(self.render_generation_status(body_width + px(48.), chip)))
+                    .child(self.render_generation_status(body_width + px(48.), chip, finishing)))
                 .when(!note.enhanced.trim().is_empty(), |d| d.child(self.render_enhanced_content(&note,t,body_width,window,cx)))
                 .into_any_element(),
             NoteTab::Enhanced if note.enhanced.trim().is_empty()=>div().w(body_width).flex().flex_col().items_center().py(px(48.)).gap(px(12.))
@@ -400,7 +545,7 @@ impl Cereal {
                     .when(has_enhanced, |d| d.child(views))
                     .child(
                         note_meta_chip("note-details", t)
-                            .cursor_pointer()
+                            .cursor_default()
                             .child(row_feedback(t, 0.).round())
                             .child(icon("calendar-dots", 14., t.muted))
                             .child(date_label)
@@ -412,70 +557,10 @@ impl Cereal {
                                 if crate::server::enabled() {
                                     this.refresh_meeting_context(id, cx);
                                 }
-                                this.menu = Some(Menu::NoteDetails);
+                                this.open_menu(Menu::NoteDetails);
                                 cx.notify();
                             })),
                     )
-                    .child(if has_enhanced {
-                        let folder = note.folder_id.and_then(|folder| {
-                            self.workspace.folders.iter().find(|f| f.id == folder)
-                        });
-                        let filed = folder.is_some();
-                        let label = folder
-                            .map(|folder| folder.name.clone())
-                            .unwrap_or_else(|| "Add to folder".into());
-                        // The chip sizes to its label; only a very long folder
-                        // name is shortened, and then with an ellipsis.
-                        div()
-                            .id("note-add-folder")
-                            .h(px(28.))
-                            .max_w(px(220.))
-                            .min_w_0()
-                            .px(px(11.))
-                            .rounded_full()
-                            .border_1()
-                            .border_color(t.hairline)
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .text_size(px(13.))
-                            .text_color(t.muted)
-                            .cursor_pointer()
-                            .child(row_feedback(t, 0.).round())
-                            .child(icon(
-                                if filed { "folder" } else { "folder-plus" },
-                                14.,
-                                t.muted,
-                            ))
-                            .child(div().flex_1().min_w_0().truncate().child(label))
-                            .reach().on_click(cx.listener(|this, _, window, cx| {
-                                this.focus.focus(window);
-                                this.search.update(cx, |input, cx| {
-                                    input.set_content("", cx);
-                                    input.set_placeholder("Search", cx);
-                                });
-                                this.menu = Some(Menu::MoveTo);
-                                this.search.read(cx).focus_handle.focus(window);
-                                cx.notify();
-                            }))
-                            .into_any_element()
-                    } else {
-                        round_tool("note-add-folder", "folder-plus", "Add to folder", t)
-                            .size(px(28.))
-                            .border_1()
-                            .border_color(t.hairline)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.focus.focus(window);
-                                this.search.update(cx, |input, cx| {
-                                    input.set_content("", cx);
-                                    input.set_placeholder("Search", cx);
-                                });
-                                this.menu = Some(Menu::MoveTo);
-                                this.search.read(cx).focus_handle.focus(window);
-                                cx.notify();
-                            }))
-                            .into_any_element()
-                    }),
             )
             // Switching between My notes and Enhanced settles in rather than
             // swapping abruptly. Keyed by the tab only, so typing never replays it.
@@ -493,14 +578,11 @@ impl Cereal {
                 .presence(("assistant", 0), self.assistant_open, crate::motion::PANEL);
         let owned = self.recording.note_id == Some(id);
         let live = owned && self.recording.is_active();
-        let suggestion = if live {
-            "What did I miss"
-        } else {
-            "Write follow up email"
-        };
+        // The bar's centre sits 56 pt above the window's bottom edge, as in
+        // the reference, now that its controls are 56 pt tall.
         let footer = div()
             .absolute()
-            .bottom(px(26.))
+            .bottom(px(28.))
             .left(px(24.))
             .right(px(24.))
             .flex()
@@ -517,23 +599,17 @@ impl Cereal {
                     .when(!assistant.visible, |d| {
                         d.child(
                             div()
-                                .h(px(59.))
+                                .relative()
+                                .h(px(56.))
                                 .flex_1()
                                 .min_w_0()
                                 .rounded_full()
-                                .border_1()
-                                .border_color(t.border)
                                 .bg(t.card)
-                                .shadow(vec![BoxShadow {
-                                    color: rgba(0x29292908).into(),
-                                    offset: point(px(0.), px(2.)),
-                                    blur_radius: px(5.),
-                                    spread_radius: px(0.),
-                                }])
+                                .map(|d| crate::recording_view::bar_edge(d, t))
                                 .flex()
                                 .items_center()
                                 .gap(px(10.))
-                                .pl(px(22.))
+                                .pl(px(20.))
                                 .pr(px(11.))
                                 .child(
                                     div()
@@ -542,26 +618,7 @@ impl Cereal {
                                         .text_size(px(14.))
                                         .line_height(px(22.))
                                         .child(self.ask.clone()),
-                                )
-                                .when(document_width >= px(560.), |d| {
-                                    d.child(
-                                        pill("note-follow-up", suggestion, "command", t)
-                                            .h(px(36.))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.ask.update(cx, |input, cx| {
-                                                    input.set_content(
-                                                        if live {
-                                                            "What did I miss?"
-                                                        } else {
-                                                            "Write follow up email"
-                                                        },
-                                                        cx,
-                                                    )
-                                                });
-                                                this.submit_chat(cx);
-                                            })),
-                                    )
-                                }),
+                                ),
                         )
                     }),
             );
@@ -644,7 +701,6 @@ impl Cereal {
                             // status: the note scrolls behind it, and a
                             // bare line of text there was set on top of the
                             // note's own lines.
-                            let retry = self.server_pending == 0;
                             d.child(
                                 div()
                                     .absolute()
@@ -657,7 +713,7 @@ impl Cereal {
                                 div()
                                     .h(px(32.))
                                     .pl(px(12.))
-                                    .pr(px(if retry { 4. } else { 12. }))
+                                    .pr(px(12.))
                                     .rounded_full()
                                     .border_1()
                                     .border_color(t.border)
@@ -668,30 +724,7 @@ impl Cereal {
                                     .text_size(px(12.))
                                     .line_height(px(16.))
                                     .text_color(t.muted)
-                                    .child(self.server_status.clone().unwrap_or_default())
-                                    .when(retry, |d| {
-                                        d.child(
-                                            div()
-                                                .id("retry-server-transcription")
-                                                .px(px(10.))
-                                                .py(px(6.))
-                                                .rounded(px(8.))
-                                                .bg(t.fill)
-                                                .cursor_pointer()
-                                                .child(
-                                                    crate::motion::tactile(neutral_wash(0.14))
-                                                        .radius(8.),
-                                                )
-                                                .child("Retry transcription")
-                                                .reach().on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.server_action(
-                                                        id,
-                                                        crate::server::Action::Sync,
-                                                        cx,
-                                                    )
-                                                })),
-                                        )
-                                    }),
+                                    .child(self.server_status.clone().unwrap_or_default()),
                                     ),
                             )
                         },
@@ -740,9 +773,7 @@ impl Cereal {
             )
         } else if self.assistant_open {
             Some(
-                (px(if self.chat_recipes_open {
-                    465.
-                } else if self
+                (px(if self
                     .chat_messages
                     .iter()
                     .any(|(_, answer)| !answer.is_empty())
@@ -857,6 +888,17 @@ impl Cereal {
         if source_highlight.is_none() {
             self.summary.transcript_selection = None;
         }
+        let ring = if source_highlight.is_some() {
+            self.stage
+                .presence(SOURCE_RING, true, crate::motion::GOOEY)
+        } else {
+            self.stage.forget(SOURCE_RING);
+            crate::motion::Pose::REST
+        };
+        // The panel's content box: its outline is drawn inside `width`.
+        let inside = width - px(2.);
+        // The bubbles' column, with room for the scroll thumb.
+        let column = inside - px(8.);
         let matches = transcript_find_matches(&utterances, &query);
         let live_revision = self.live.revision();
         let reopened = self.transcript_last_epoch != self.transcript_epoch;
@@ -918,10 +960,18 @@ impl Cereal {
                     .rev()
                     .filter(|segment| !segment.text.trim().is_empty())
                     .take(8)
-                    .enumerate()
-                    .filter_map(|(back, segment)| {
+                    .filter_map(|segment| {
                         let slot = self.live.firmed_slot(&segment.id)?;
-                        Some((utterances.len().checked_sub(back + 1)?, line_level(Some(slot))))
+                        let id = crate::lazy::key(("segment", &segment.id));
+                        // Among the newest rows (gap rows may stand between).
+                        let row = utterances
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .take(16)
+                            .find(|(_, row)| row.id == id)?
+                            .0;
+                        Some((row, line_level(Some(slot))))
                     })
                     .collect()
             })
@@ -1008,7 +1058,7 @@ impl Cereal {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .cursor_pointer()
+                            .cursor_default()
                             .child(crate::motion::tactile(t.hover).radius(4.))
                             .child(icon("chevron-down", 12., t.muted).with_transformation(
                                 Transformation::rotate(radians(if previous {
@@ -1071,7 +1121,7 @@ impl Cereal {
                 tool_tip("transcript-help", "help", "Recording help", t).on_click(cx.listener(
                     |this, _, window, cx| {
                         this.focus.focus(window);
-                        this.menu = Some(Menu::RecordingHelp);
+                        this.open_menu(Menu::RecordingHelp);
                         cx.notify();
                     },
                 )),
@@ -1101,7 +1151,7 @@ impl Cereal {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .cursor_pointer()
+                    .cursor_default()
                     .child(crate::motion::tactile(t.hover).radius(6.))
                     .active(|d| d.opacity(0.7))
                     .child(div().w(px(12.)).h(px(1.)).bg(t.muted))
@@ -1148,7 +1198,7 @@ impl Cereal {
                 .child("Always get consent when transcribing others. Learn more ›")
                 .reach().on_click(cx.listener(|this, _, window, cx| {
                     this.focus.focus(window);
-                    this.menu = Some(Menu::RecordingHelp);
+                    this.open_menu(Menu::RecordingHelp);
                     cx.notify();
                 })),
         ));
@@ -1159,8 +1209,6 @@ impl Cereal {
                 "Transcribing…"
             } else if crate::server::enabled() {
                 "Transcript Paused"
-            } else if !crate::audio::preview_mode() {
-                "Audio is saved locally. Transcription is not connected."
             } else if live && !failed {
                 "Waiting for speech…"
             } else {
@@ -1183,17 +1231,23 @@ impl Cereal {
             // their measured height as spacers, so an hour-long transcript
             // scrolls and animates like a short one.
             let voices = transcript_voices(rows);
+            let marks = transcript_marks(rows);
             let keys: Vec<u64> = (0..rows.len())
-                .map(|index| transcript_key(index, rows, voices, source_highlight))
+                .map(|index| transcript_key(index, rows, voices, &marks))
                 .collect();
             let stored = utterances.len();
             let ids: Vec<u64> = rows.iter().map(|row| row.id).collect();
             let mut counter = LineCounter::new(13., cx);
+            crate::lazy::hold_glide(
+                "transcript",
+                self.transcript_open
+                    .then(|| transcript_glide_owner(id, self.transcript_epoch)),
+            );
             body = body.child(crate::lazy::estimated(
                 "transcript",
                 &ids,
                 &keys,
-                f32::from(width),
+                f32::from(column),
                 0.,
                 &self.transcript_scroll,
                 window,
@@ -1202,8 +1256,8 @@ impl Cereal {
                         index,
                         rows,
                         voices,
-                        width - px(8.),
-                        source_highlight,
+                        column,
+                        &marks,
                         &mut counter,
                     )
                 },
@@ -1222,11 +1276,13 @@ impl Cereal {
                         index,
                         rows,
                         voices,
+                        &marks,
                         t,
-                        width - px(8.),
+                        column,
                         &query,
                         active_match,
                         source_highlight,
+                        ring,
                         level,
                     )
                 },
@@ -1261,7 +1317,7 @@ impl Cereal {
             .absolute()
             .bottom_0()
             .left_0()
-            .w(width)
+            .w(inside)
             .h_full()
             .flex()
             .flex_col()
@@ -1312,7 +1368,7 @@ impl Cereal {
                                 .child(icon("share", 12., warning_ink))
                                 .reach().on_click(cx.listener(|this, _, window, cx| {
                                     this.focus.focus(window);
-                                    this.menu = Some(Menu::RecordingHelp);
+                                    this.open_menu(Menu::RecordingHelp);
                                     cx.notify();
                                 })),
                         )
@@ -1324,7 +1380,7 @@ impl Cereal {
                                 .text_color(warning_ink)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.focus.focus(window);
-                                    this.menu = Some(Menu::RecordingHelp);
+                                    this.open_menu(Menu::RecordingHelp);
                                     cx.notify();
                                 })),
                         ),
@@ -1357,40 +1413,10 @@ impl Cereal {
                                 .on_click(cx.listener(
                                     |this, _, window, cx| {
                                         this.focus.focus(window);
-                                        this.menu = Some(Menu::RecordingSettings);
+                                        this.open_menu(Menu::RecordingSettings);
                                         cx.notify();
                                     },
                                 )),
-                            )
-                            .child(
-                                div()
-                                    .id("transcript-language")
-                                    .h(px(28.))
-                                    .px(px(6.))
-                                    .rounded(px(6.))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(7.))
-                                    .text_size(px(13.))
-                                    .text_color(t.muted)
-                                    .cursor_pointer()
-                                    .child(crate::motion::tactile(t.hover).radius(6.))
-                                    .child(div().text_size(px(11.)).child("文A"))
-                                    .child(if crate::server::enabled() {
-                                        "English"
-                                    } else if !crate::audio::preview_mode() {
-                                        "Transcription unavailable"
-                                    } else if self.transcription_language.starts_with("English") {
-                                        "English"
-                                    } else {
-                                        "Multi-language"
-                                    })
-                                    .child(icon("chevron-down", 12., t.muted))
-                                    .reach().on_click(cx.listener(|this, _, window, cx| {
-                                        this.focus.focus(window);
-                                        this.menu = Some(Menu::TranscriptionLanguage);
-                                        cx.notify();
-                                    })),
                             ),
                     ),
             );
@@ -1534,7 +1560,7 @@ impl Cereal {
                     .flex_col()
                     .justify_center()
                     .gap(px(3.))
-                    .cursor_pointer()
+                    .cursor_default()
                     .child(crate::motion::tactile(t.bg).radius(0.))
                     .child(
                         div()
@@ -1558,7 +1584,7 @@ impl Cereal {
                             input.set_content("", cx);
                             input.set_placeholder("Search event...", cx);
                         });
-                        this.menu = Some(Menu::CalendarEvent);
+                        this.open_menu(Menu::CalendarEvent);
                         this.search.read(cx).focus_handle.focus(window);
                         cx.notify();
                     })),
@@ -1631,7 +1657,7 @@ impl Cereal {
                     .flex()
                     .items_start()
                     .gap(px(10.))
-                    .cursor_pointer()
+                    .cursor_default()
                     .child(crate::motion::tactile(t.bg).radius(6.))
                     .child(
                         div()
@@ -1704,19 +1730,32 @@ impl Cereal {
             } else {
                 0.
             });
-        let width = px(682.).min(available_width - px(32.));
-        let has_answer = self
-            .chat_messages
-            .iter()
-            .any(|(_, answer)| !answer.is_empty());
+        // Over Home the panel has the footprint of the tray the focused
+        // composer sits in (see `ask_bar`), 4 px around the bar it grows out
+        // of: 683 px wide and 467 px tall as soon as a question is sent,
+        // even before its answer arrives, as the reference measures. Over a
+        // note it keeps the note's own bar.
+        let home = self.current_note.is_none();
+        let width = if home {
+            px(683.).min(available_width - px(40.))
+        } else {
+            px(682.).min(available_width - px(32.))
+        };
+        let has_answer = if home {
+            !self.chat_messages.is_empty()
+        } else {
+            self.chat_messages
+                .iter()
+                .any(|(_, answer)| !answer.is_empty())
+        };
         // The recent-chats list drops down inside the panel. Over a
         // conversation the panel is already tall enough and keeps its
         // height: it used to shrink to 360, which moved the header, and the
         // button that had just been clicked, 105 px down from under the
         // pointer, so the click meant to close the list landed on the note
         // and closed the chat instead. An empty chat still grows to fit it.
-        let height = (px(if self.chat_recipes_open || has_answer {
-            465.
+        let height = (px(if has_answer {
+465.
         } else if self.chat_history_open {
             360.
         } else {
@@ -1728,7 +1767,7 @@ impl Cereal {
             self.chat_editing.is_some(),
             crate::motion::SNAPPY,
         );
-        // Growing for an answer, recipes or an edit banner rides a spring
+        // Growing for an answer or an edit banner rides a spring
         // instead of jumping to the new height.
         let height = px(self.stage.aim(
             ("assistant-height", 0),
@@ -1737,31 +1776,27 @@ impl Cereal {
         ));
         let mut messages = div()
             .p(px(16.))
-            .pt(px(if has_answer { 60. } else { 16. }))
+            .pt(px(match (has_answer, home) {
+                (true, true) => 33.,
+                (true, false) => 60.,
+                _ => 16.,
+            }))
             .flex()
             .flex_col();
-        if self.chat_messages.is_empty() {
-            messages = messages.child(self.render_chat_recipe_suggestions(cx));
-        }
         if !self.chat_messages.is_empty() {
             messages = messages.child(self.render_chat_turns(1, true, window, cx));
         }
         if let Some(queue) = self.render_chat_queue(true, window, cx) {
             messages = messages.child(queue);
         }
-        if has_answer && self.chat_messages.len() == 1 && self.chat_stream.is_none() {
-            messages = messages.child(self.render_chat_recipe_suggestions(cx));
-        }
-        let header = if self.chat_recipes_open {
-            self.render_chat_recipes_header(cx)
-        } else {
+        let header = {
+            // No rule under it: the conversation runs up to the controls.
             div()
                 .relative()
                 .h(px(48.))
-                .border_b_1()
-                .border_color(t.border)
                 .flex_shrink_0()
-                .px(px(14.))
+                .pl(px(14.))
+                .pr(px(13.5))
                 .flex()
                 .items_center()
                 .gap(px(4.))
@@ -1797,9 +1832,7 @@ impl Cereal {
                         })),
                 )
         };
-        let body = if self.chat_recipes_open {
-            self.render_chat_recipes(cx).into_any_element()
-        } else {
+        let body = {
             div()
                 .id("note-chat-scroll")
                 .track_scroll(&self.chat_scroll)
@@ -1814,7 +1847,7 @@ impl Cereal {
         // arrive.
         let scroll_down = self.stage.presence(
             ("chat-scroll-down", 0),
-            !self.chat_recipes_open && self.chat_can_scroll_down(),
+            self.chat_can_scroll_down(),
             crate::motion::SNAPPY,
         );
         let history = self.stage.presence(
@@ -1851,7 +1884,8 @@ impl Cereal {
             .child(
                 div()
                     .flex_shrink_0()
-                    .px(px(4.))
+                    .px(px(if home { 3. } else { 4. }))
+                    .when(home, |d| d.pb(px(3.)))
                     .child(self.render_chat_composer_focused(
                         self.ask.read(cx).focus_handle.is_focused(window),
                         cx,
@@ -1884,7 +1918,7 @@ impl Cereal {
                 )
             })
             .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                if event.button == MouseButton::Left && this.chat_recipe_editor.is_none() {
+                if event.button == MouseButton::Left {
                     this.close_chat_surface(cx);
                 }
             }));
@@ -1893,20 +1927,33 @@ impl Cereal {
         crate::motion::pop(
             div()
                 .absolute()
-                .bottom(px(22.))
-                .left((available_width - width) / 2. + px(1.))
+                .bottom(px(if home { 23. } else { 22. }))
+                .left((available_width - width) / 2. + px(if home { 0.5 } else { 1. }))
                 .w(width)
                 .h(height + px(2.))
                 .rounded(px(32.))
                 .border_1()
                 .border_color(t.border)
                 .bg(t.card)
-                .shadow_xl()
+                .map(|card| {
+                    if home {
+                        // Barely there, as in the reference: the panel reads
+                        // by its edge, not by a cast shadow.
+                        card.shadow(vec![BoxShadow {
+                            color: rgba(0x2929290f).into(),
+                            offset: point(px(0.), px(4.)),
+                            blur_radius: px(16.),
+                            spread_radius: px(0.),
+                        }])
+                    } else {
+                        card.shadow_xl()
+                    }
+                })
                 .overflow_hidden()
                 .occlude()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(inner),
-            crate::motion::Pop::unfold(59., f32::from(height) + 2.),
+            crate::motion::Pop::unfold(if home { 58. } else { 59. }, f32::from(height) + 2.),
             pose.solid(),
         )
     }
@@ -2004,7 +2051,17 @@ impl<'a> Rows<'a> {
     }
 }
 
+/// The `source` of the row that stands where a stretch of the recording has
+/// no transcript.
+pub(crate) const GAP_SOURCE: &str = "Transcript gap";
+
 impl TranscriptUtterance {
+    /// The row marks a stretch without transcript: it is not text anyone
+    /// said, and is never found, cited or copied.
+    pub(crate) fn is_gap(&self) -> bool {
+        self.source == GAP_SOURCE
+    }
+
     fn matches(&self, query: &str) -> bool {
         query.is_empty()
             || self.text.to_lowercase().contains(query)
@@ -2031,17 +2088,16 @@ pub(crate) fn transcript_quote_target(
     if quote.is_empty() {
         return Err("This source quotation is unavailable.");
     }
+    let rows = transcript_utterances(note);
     if let Some(segment_id) = segment_id {
-        return note
-            .server_transcript_segments
+        let id = crate::lazy::key(("segment", segment_id));
+        return rows
             .iter()
-            .filter(|segment| !segment.text.trim().is_empty())
-            .position(|segment| segment.id == segment_id && segment.text.contains(quote))
+            .position(|row| row.id == id && !row.is_gap() && row.text.contains(quote))
             .ok_or("This source quotation is no longer available.");
     }
-    transcript_utterances(note)
-        .iter()
-        .position(|row| row.text.contains(quote))
+    rows.iter()
+        .position(|row| !row.is_gap() && row.text.contains(quote))
         .ok_or("This source quotation is no longer available.")
 }
 
@@ -2090,17 +2146,92 @@ impl Cereal {
         });
         self.transcript_find_index = 0;
         self.transcript_last_query.clear();
-        crate::lazy::reveal("transcript", target);
+        // The passage glides to the middle of the panel and its ring plays
+        // again, even when it is the one already open.
+        crate::lazy::centre("transcript", target, transcript_glide_owner(note_id, self.transcript_epoch));
+        self.stage.forget(SOURCE_RING);
         self.focus.focus(window);
         cx.notify();
     }
 }
 
+/// A note's transcript as the panel shows it: its rows in time order, with
+/// a row "Transcript missing 12:03–12:10" where a stretch of the recording
+/// was captured and never transcribed (`transcript_gaps`).
 pub(crate) fn transcript_utterances(note: &crate::model::Note) -> Vec<TranscriptUtterance> {
-    if !note.server_transcript_segments.is_empty() {
-        return server_transcript_utterances(&note.server_transcript_segments);
+    let (rows, starts): (Vec<_>, Vec<i64>) = if !note.server_transcript_segments.is_empty() {
+        let starts = note
+            .server_transcript_segments
+            .iter()
+            .filter(|segment| !segment.text.trim().is_empty())
+            .map(|segment| segment.start_ms)
+            .collect();
+        (server_transcript_utterances(&note.server_transcript_segments), starts)
+    } else {
+        let rows = legacy_transcript_utterances(&note.transcript);
+        let starts = rows
+            .iter()
+            .map(|row| {
+                row.timestamp
+                    .as_deref()
+                    .and_then(crate::server::duration_seconds)
+                    .map_or(i64::MAX, |seconds| (seconds * 1000.) as i64)
+            })
+            .collect();
+        (rows, starts)
+    };
+    with_gap_rows(rows, &starts, &note.transcript_gaps)
+}
+
+/// `rows` (starting at `starts`, in milliseconds) with a row for each
+/// stretch in `gaps` that is long enough to mention, at its time. Stretches
+/// of the two channels that overlap are one row.
+pub(crate) fn with_gap_rows(
+    rows: Vec<TranscriptUtterance>,
+    starts: &[i64],
+    gaps: &[meeting_notes_api_types::TranscriptGapDTO],
+) -> Vec<TranscriptUtterance> {
+    let mut stretches: Vec<(i64, i64)> = gaps
+        .iter()
+        .filter(|gap| gap.to_ms - gap.from_ms >= crate::live_view::GAP_SHOWN_MS)
+        .map(|gap| (gap.from_ms.max(0), gap.to_ms.max(0)))
+        .collect();
+    if stretches.is_empty() {
+        return rows;
     }
-    legacy_transcript_utterances(&note.transcript)
+    stretches.sort();
+    let mut merged: Vec<(i64, i64)> = Vec::new();
+    for (from, to) in stretches {
+        match merged.last_mut() {
+            Some(last) if from <= last.1 => last.1 = last.1.max(to),
+            _ => merged.push((from, to)),
+        }
+    }
+    let gap_row = |(from, to): (i64, i64)| TranscriptUtterance {
+        id: crate::lazy::key(("gap", from, to)),
+        key: format!("gap:{from}"),
+        speaker: None,
+        part: None,
+        own: false,
+        source: GAP_SOURCE,
+        timestamp: Some(crate::live_view::clock(from as u64)),
+        text: format!(
+            "Transcript missing {}",
+            crate::live_view::gap_span(from as u64, to as u64)
+        ),
+        is_final: true,
+    };
+    let mut out = Vec::with_capacity(rows.len() + merged.len());
+    let mut next = merged.into_iter().peekable();
+    for (index, row) in rows.into_iter().enumerate() {
+        let start = starts.get(index).copied().unwrap_or(i64::MAX);
+        while let Some(gap) = next.next_if(|(from, _)| *from <= start) {
+            out.push(gap_row(gap));
+        }
+        out.push(row);
+    }
+    out.extend(next.map(gap_row));
+    out
 }
 
 pub(crate) fn server_transcript_utterances(
@@ -2274,6 +2405,9 @@ fn transcript_find_matches(
     }
     let mut matches = Vec::new();
     for (utterance_index, utterance) in utterances.iter().enumerate() {
+        if utterance.is_gap() {
+            continue;
+        }
         let ranges = transcript_match_ranges(&utterance.text, query);
         if ranges.is_empty() && utterance.matches(&query.to_lowercase()) {
             // Preserve the existing ability to find explicit speaker/time metadata.
@@ -2319,17 +2453,20 @@ fn transcript_content(
         live: &[],
     };
     let voices = transcript_voices(rows);
+    let marks = transcript_marks(rows);
     (0..rows.len())
         .map(|index| {
             transcript_bubble(
                 index,
                 rows,
                 voices,
+                &marks,
                 t,
                 width,
                 query,
                 active_match,
                 source_highlight,
+                crate::motion::Pose::REST,
                 1.,
             )
         })
@@ -2345,7 +2482,7 @@ fn transcript_content(
 fn transcript_voices(rows: Rows) -> (usize, usize) {
     let voices = |own: bool| {
         rows.iter()
-            .filter(|row| row.own == own && (row.is_final || row.speaker.is_some()))
+            .filter(|row| !row.is_gap() && row.own == own && (row.is_final || row.speaker.is_some()))
             .map(|row| &row.key)
             .collect::<std::collections::HashSet<_>>()
             .len()
@@ -2394,15 +2531,88 @@ fn transcript_names_speaker(index: usize, rows: Rows, voices: (usize, usize)) ->
         && utterance.speaker.is_some()
 }
 
+/// The transcript's measurements, from the reference transcript panel (1 px
+/// per pt captures of it): a 13 px line of 17.875 inside 8 × 6 padding, 8 px
+/// corners that tighten to 6 where a bubble continues its voice, 2 px between
+/// the bubbles of one voice and 10 px between voices.
+const BUBBLE_TEXT: f32 = 13.;
+const BUBBLE_LINE: f32 = 17.875;
+const BUBBLE_PAD_X: f32 = 8.;
+const BUBBLE_PAD_Y: f32 = 6.;
+const BUBBLE_RADIUS: f32 = 8.;
+const BUBBLE_JOINED_RADIUS: f32 = 6.;
+/// Half the space between two rows of one voice (each row's own padding).
+const ROW_PAD_Y: f32 = 1.;
+/// What a row adds above and below itself where the voice changes.
+const VOICE_GAP: f32 = 4.;
+/// A speaker's name: 12/16 medium, 2 px above the bubble.
+const LABEL_LINE: f32 = 16.;
+const LABEL_GAP: f32 = 2.;
+/// The centred time between voices: 8 px under the bubble above it, a 12/16
+/// line, then the row's own 4 px.
+const MARK_TOP: f32 = 8.;
+const MARK_LINE: f32 = 16.;
+/// The cited passage's outline, drawn on the bubble's own edge, and the
+/// hairline of panel colour inside it.
+const RING_WIDTH: f32 = 1.5;
+const RING_GAP: f32 = 1.;
+/// Which opening of which note's transcript a citation's glide belongs to:
+/// the transcript list is one column for every note, so a glide that is
+/// still under way ends when the panel closes, reopens or shows another note.
+pub(crate) fn transcript_glide_owner(note_id: u64, epoch: u64) -> u64 {
+    crate::lazy::key(("transcript-glide", note_id, epoch))
+}
+/// The cited passage's outline: it fades in once per citation.
+pub(crate) const SOURCE_RING: crate::motion::TrackKey = ("transcript-source-ring", 0);
+/// How far a 12 px time sits above a 13 px line's baseline in the same
+/// line box, so it is moved down by it and the two baselines agree. Measured
+/// on 1 px per pt captures (the stems' bottom edges, from their coverage):
+/// 1.08 px, of which the font's metrics (ascent 0.986 em, descent 0.327 em)
+/// account for 0.33 and the rest is where text is placed on the pixel grid.
+const TIME_BASELINE: f32 = 1.;
+/// The least time between two centred times.
+const MARK_EVERY_SECONDS: u32 = 60;
+
+/// Seconds into the meeting of a row's "MM:SS" or "H:MM:SS" time.
+fn transcript_seconds(timestamp: &str) -> Option<u32> {
+    timestamp.split(':').try_fold(0u32, |total, part| {
+        Some(total.checked_mul(60)?.checked_add(part.trim().parse().ok()?)?)
+    })
+}
+
+/// Which rows are preceded by a centred time: where the other channel takes
+/// over, at most once a minute (the reference marks a change of channel the
+/// same way). Words still being spoken count too, by when they started, so a
+/// row has its mark (and its height) from its first word and keeps it when
+/// the words become final: the tail never steps down. A row's mark depends
+/// only on the rows before it, so text arriving at the end never moves one.
+fn transcript_marks(rows: Rows) -> Vec<bool> {
+    let mut last = rows
+        .get(0)
+        .and_then(|row| row.timestamp.as_deref())
+        .and_then(transcript_seconds);
+    (0..rows.len())
+        .map(|index| {
+            let row = rows.at(index);
+            let seconds = row.timestamp.as_deref().and_then(transcript_seconds);
+            let mark = index > 0
+                && rows.at(index - 1).own != row.own
+                && seconds.is_some_and(|seconds| {
+                    last.is_none_or(|last| seconds >= last + MARK_EVERY_SECONDS)
+                });
+            if mark {
+                last = seconds;
+            }
+            mark
+        })
+        .collect()
+}
+
 /// Everything that decides how tall utterance `index` is drawn (at a given
 /// width): its text, its spacing from its neighbours, whether it is named and
-/// whether it carries the source highlight. A bubble is measured once per key.
-fn transcript_key(
-    index: usize,
-    rows: Rows,
-    voices: (usize, usize),
-    source_highlight: Option<usize>,
-) -> u64 {
+/// whether a centred time precedes it. A bubble is measured once per key; the
+/// source ring is drawn outside the bubble and does not change its height.
+fn transcript_key(index: usize, rows: Rows, voices: (usize, usize), marks: &[bool]) -> u64 {
     // Not the index itself: a row keeps its key, and so its measured height,
     // when rows are inserted above it.
     crate::lazy::key((
@@ -2411,8 +2621,23 @@ fn transcript_key(
         transcript_neighbours(index, rows),
         index + 1 == rows.len(),
         transcript_names_speaker(index, rows, voices),
-        source_highlight == Some(index),
+        marks.get(index).copied().unwrap_or(false),
     ))
+}
+
+/// The space a row leaves above its stack (inside and outside the row):
+/// the voice gap or the centred time, its padding, and the panel's top inset.
+fn transcript_row_top(index: usize, same_before: bool, marked: bool) -> (f32, f32) {
+    let margin = if marked {
+        MARK_TOP
+    } else if !same_before {
+        VOICE_GAP
+    } else {
+        0.
+    } + if index == 0 { 6. } else { 0. };
+    // After a mark the row keeps the voice gap of its own, under the time.
+    let inside = ROW_PAD_Y + if marked { VOICE_GAP } else { 0. };
+    (margin, inside)
 }
 
 /// A guess of how tall [`transcript_bubble`] will draw row `index`, from the
@@ -2423,26 +2648,57 @@ fn transcript_row_estimate(
     rows: Rows,
     voices: (usize, usize),
     width: Pixels,
-    source_highlight: Option<usize>,
+    marks: &[bool],
     counter: &mut LineCounter,
 ) -> f32 {
+    if rows.at(index).is_gap() {
+        return GAP_ROW_HEIGHT
+            + if index == 0 { 6. } else { 0. }
+            + if index + 1 == rows.len() { 6. } else { 0. };
+    }
     let (same_before, same_after) = transcript_neighbours(index, rows);
-    let highlighted = source_highlight == Some(index);
-    // The bubble's column, less the highlight's and the bubble's padding.
+    let marked = marks.get(index).copied().unwrap_or(false);
+    // The bubble's column, less the bubble's padding.
     let column = (f32::from(width) - 80.).max(1.);
-    let text_width = column - if highlighted { 8. } else { 0. } - 16.;
+    let text_width = column - 2. * BUBBLE_PAD_X;
     let lines = counter.lines(&rows.at(index).text, text_width) as f32;
     let label = if transcript_names_speaker(index, rows, voices) {
-        16. + 2.
+        LABEL_LINE + LABEL_GAP
     } else {
         0.
     };
-    let highlight = if highlighted { 8. } else { 0. };
-    let margins = if same_before { 0. } else { 4. }
-        + if index == 0 { 6. } else { 0. }
-        + if same_after { 0. } else { 4. }
+    let mark = if marked { MARK_LINE } else { 0. };
+    let (top, inside) = transcript_row_top(index, same_before, marked);
+    let bottom = if same_after { 0. } else { VOICE_GAP }
         + if index + 1 == rows.len() { 6. } else { 0. };
-    lines * 17.875 + 12. + label + highlight + 2. + margins
+    lines * BUBBLE_LINE + 2. * BUBBLE_PAD_Y + label + mark + top + inside + ROW_PAD_Y + bottom
+}
+
+/// How tall a gap row is drawn: its 20 px line and 4 px either side.
+const GAP_ROW_HEIGHT: f32 = 28.;
+
+/// The small centred row where a stretch of the recording has no
+/// transcript.
+fn transcript_gap_row(index: usize, rows: Rows, t: Theme, width: Pixels) -> AnyElement {
+    let row = rows.at(index);
+    div()
+        .id(("transcript-gap", index))
+        .w(width - px(16.))
+        .mx(px(12.))
+        .flex_shrink_0()
+        .mt(px(4. + if index == 0 { 6. } else { 0. }))
+        .mb(px(4. + if index + 1 == rows.len() { 6. } else { 0. }))
+        .h(px(20.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(5.))
+        .text_size(px(11.))
+        .line_height(px(16.))
+        .text_color(t.muted)
+        .child(icon("warning", 11., t.muted))
+        .child(row.text.clone())
+        .into_any_element()
 }
 
 /// One utterance of the transcript.
@@ -2451,158 +2707,205 @@ fn transcript_bubble(
     index: usize,
     rows: Rows,
     voices: (usize, usize),
+    marks: &[bool],
     t: Theme,
     width: Pixels,
     query: &str,
     active_match: Option<&TranscriptFindMatch>,
     source_highlight: Option<usize>,
+    // Where the source ring is in its entrance (see [`SOURCE_RING`]).
+    ring: crate::motion::Pose,
     // Strength of the bubble: 1 for stored text, 0.5 for text still being
     // spoken, in between while one is becoming the other.
     level: f32,
 ) -> AnyElement {
     let dark = t.bg.l < 0.5;
-    {
-        let utterance = rows.at(index);
-        let (same_before, same_after) = transcript_neighbours(index, rows);
-        let own = utterance.own;
-        let group: SharedString = format!("transcript-utterance-{index}").into();
-        let highlights = transcript_match_ranges(&utterance.text, query)
-            .into_iter()
-            .map(|range| {
-                (
-                    range.clone(),
-                    HighlightStyle {
-                        background_color: Some(
-                            if active_match.is_some_and(|active| {
-                                active.utterance_index == index
-                                    && active.text_range.as_ref() == Some(&range)
-                            }) {
-                                rgb(0xf4a340).into()
-                            } else {
-                                rgb(0xfde047).into()
-                            },
-                        ),
-                        color: Some(rgb(0x292929).into()),
-                        ..Default::default()
-                    },
-                )
-            });
-        let text = StyledText::new(utterance.text.clone()).with_highlights(highlights);
-        let mut bubble = div()
-            .relative()
-            .max_w_full()
-            .min_w_0()
-            .px(px(8.))
-            .py(px(6.))
-            .rounded(px(8.))
-            .when(same_before && own, |d| d.rounded_tr(px(6.)))
-            .when(same_before && !own, |d| d.rounded_tl(px(6.)))
-            .when(same_after && own, |d| d.rounded_br(px(6.)))
-            .when(same_after && !own, |d| d.rounded_bl(px(6.)))
-            .text_size(px(13.))
-            .line_height(px(17.875))
-            .bg(if dark {
-                if own { rgb(0x292929) } else { rgb(0x4e4d4b) }
-            } else if own {
-                rgba(0xe0af2f66)
-            } else {
-                rgb(0xf2f2ec)
-            })
-            .text_color(if dark {
-                if own { rgb(0xfcf2df) } else { rgb(0xfcfcf8) }
-            } else if own {
-                rgb(0x363024)
-            } else {
-                rgb(0x292929)
-            })
-            .when(!utterance.is_final || level < 1., |d| {
-                d.opacity(if utterance.is_final { level } else { level.min(0.5) })
-            })
-            .child(text);
+    if rows.at(index).is_gap() {
+        return transcript_gap_row(index, rows, t, width);
+    }
+    let utterance = rows.at(index);
+    let (same_before, same_after) = transcript_neighbours(index, rows);
+    let marked = marks.get(index).copied().unwrap_or(false);
+    let cited = source_highlight == Some(index);
+    let own = utterance.own;
+    let highlights = transcript_match_ranges(&utterance.text, query)
+        .into_iter()
+        .map(|range| {
+            (
+                range.clone(),
+                HighlightStyle {
+                    background_color: Some(
+                        if active_match.is_some_and(|active| {
+                            active.utterance_index == index
+                                && active.text_range.as_ref() == Some(&range)
+                        }) {
+                            rgb(0xf4a340).into()
+                        } else {
+                            rgb(0xfde047).into()
+                        },
+                    ),
+                    color: Some(rgb(0x292929).into()),
+                    ..Default::default()
+                },
+            )
+        });
+    let text = StyledText::new(utterance.text.clone()).with_highlights(highlights);
+    // Corners: 8 px, tightened to 6 on the side that continues the voice.
+    let corner = |joined: bool| if joined { BUBBLE_JOINED_RADIUS } else { BUBBLE_RADIUS };
+    let (top_left, top_right, bottom_left, bottom_right) = (
+        corner(same_before && !own),
+        corner(same_before && own),
+        corner(same_after && !own),
+        corner(same_after && own),
+    );
+    let mut bubble = div()
+        .relative()
+        .max_w_full()
+        .min_w_0()
+        .px(px(BUBBLE_PAD_X))
+        .py(px(BUBBLE_PAD_Y))
+        .rounded_tl(px(top_left))
+        .rounded_tr(px(top_right))
+        .rounded_bl(px(bottom_left))
+        .rounded_br(px(bottom_right))
+        .text_size(px(BUBBLE_TEXT))
+        .line_height(px(BUBBLE_LINE))
+        .bg(if dark {
+            if own { rgb(0x292929) } else { rgb(0x4e4d4b) }
+        } else if own {
+            rgba(0xe0af2f66)
+        } else {
+            rgb(0xf2f2ec)
+        })
+        .text_color(if dark {
+            if own { rgb(0xfcf2df) } else { rgb(0xfcfcf8) }
+        } else if own {
+            rgb(0x363024)
+        } else {
+            rgb(0x292929)
+        })
+        .when(!utterance.is_final || level < 1., |d| {
+            d.opacity(if utterance.is_final { level } else { level.min(0.5) })
+        })
+        .child(text);
+    if cited {
+        // An outline on the bubble's own edge, in the gold of the app's
+        // accent, then a hairline of the panel's colour between it and the
+        // fill: it reads as a selection rather than a thicker bubble, keeps
+        // the 2 pt gap to the bubbles around it and stays inside the
+        // column. It only fades in; nothing moves.
+        let ink = Hsla::from(rgb(0xe0af2f)).opacity(if dark { 0.85 } else { 0.9 } * ring.fade);
+        let inner = RING_WIDTH;
+        bubble = bubble
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded_tl(px(top_left))
+                    .rounded_tr(px(top_right))
+                    .rounded_bl(px(bottom_left))
+                    .rounded_br(px(bottom_right))
+                    .border(px(RING_WIDTH))
+                    .border_color(ink),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(inner))
+                    .left(px(inner))
+                    .right(px(inner))
+                    .bottom(px(inner))
+                    .rounded_tl(px(top_left - inner))
+                    .rounded_tr(px(top_right - inner))
+                    .rounded_bl(px(bottom_left - inner))
+                    .rounded_br(px(bottom_right - inner))
+                    .border(px(RING_GAP))
+                    .border_color(t.card.opacity(ring.fade)),
+            );
+        // Its time beside it, on its first line's box so the two baselines
+        // agree. Only the cited bubble shows one, as in the reference.
         if let Some(timestamp) = &utterance.timestamp {
             bubble = bubble.child(
                 div()
                     .absolute()
-                    .top(px(6.))
+                    .top(px(BUBBLE_PAD_Y + TIME_BASELINE))
                     .text_size(px(12.))
-                    .line_height(px(16.))
+                    .line_height(px(BUBBLE_LINE))
                     .whitespace_nowrap()
                     .text_color(t.muted)
-                    .opacity(0.)
-                    .group_hover(group.clone(), |d| d.opacity(1.))
+                    .opacity(ring.fade)
                     .when(own, |d| d.right(relative(1.)).mr(px(8.)))
                     .when(!own, |d| d.left(relative(1.)).ml(px(8.)))
                     .child(timestamp.clone()),
             );
         }
-        let label = [
-            Some(utterance.source.to_string()),
-            utterance.speaker.clone(),
-            // The time is already shown beside the bubble on hover.
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" · ");
-        let mut stack = div()
-            // Give the column a definite wrapping width. Percentage-only
-            // max-width on nested flex columns can measure the text at zero
-            // width, leaving the row's tooltip hitbox but no painted bubble.
-            .w((width - px(80.)).max(px(1.)))
-            .min_w_0()
-            .max_w_full()
-            .flex()
-            .flex_col()
-            .gap(px(2.))
-            .when(source_highlight == Some(index), |stack| {
-                stack.p(px(4.)).rounded(px(10.)).bg(if dark {
-                    rgba(0xa99afc38)
-                } else {
-                    rgba(0x9276df30)
-                })
-            })
-            .when(own, |d| d.items_end())
-            .when(!own, |d| d.items_start());
-        if transcript_names_speaker(index, rows, voices)
-            && let Some(speaker) = &utterance.speaker
-        {
-            stack = stack.child(
-                div()
-                    .px(px(4.))
-                    .text_size(px(12.))
-                    .line_height(px(16.))
-                    .text_color(t.muted)
-                    .child(speaker.clone()),
-            );
-        }
-        stack = stack.child(bubble);
-        {
-            div()
-                .id(("transcript-bubble", index))
-                .group(group)
-                .w(width - px(16.))
-                .min_w_0()
-                .flex_shrink_0()
-                .whitespace_normal()
-                .flex()
-                .mx(px(12.))
-                .py(px(1.))
-                .mt(px(
-                    if !same_before { 4. } else { 0. } + if index == 0 { 6. } else { 0. }
-                ))
-                .mb(px(if !same_after { 4. } else { 0. }
-                    + if index + 1 == rows.len() {
-                        6.
-                    } else {
-                        0.
-                    }))
-                .when(own, |d| d.pl(px(64.)).justify_end())
-                .when(!own, |d| d.pr(px(64.)).justify_start())
-                .child(stack)
-                .tooltip(move |_, cx| cx.new(|_| ToolTip::new(label.clone(), t)).into())
-                .into_any_element()
-        }
     }
+    let mut stack = div()
+        // Give the column a definite wrapping width. Percentage-only
+        // max-width on nested flex columns can measure the text at zero
+        // width, leaving the row's hitbox but no painted bubble.
+        .w((width - px(80.)).max(px(1.)))
+        .min_w_0()
+        .max_w_full()
+        .flex()
+        .flex_col()
+        .gap(px(LABEL_GAP))
+        .when(own, |d| d.items_end())
+        .when(!own, |d| d.items_start());
+    if transcript_names_speaker(index, rows, voices)
+        && let Some(speaker) = &utterance.speaker
+    {
+        stack = stack.child(
+            div()
+                .px(px(4.))
+                .text_size(px(12.))
+                .line_height(px(LABEL_LINE))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(t.muted)
+                .child(speaker.clone()),
+        );
+    }
+    stack = stack.child(bubble);
+    let (top, inside) = transcript_row_top(index, same_before, marked);
+    let row = div()
+        .id(("transcript-bubble", index))
+        .w_full()
+        .min_w_0()
+        .flex()
+        .pt(px(inside))
+        .pb(px(ROW_PAD_Y))
+        .when(own, |d| d.pl(px(64.)).justify_end())
+        .when(!own, |d| d.pr(px(64.)).justify_start())
+        .child(stack);
+    div()
+        .w(width - px(16.))
+        .min_w_0()
+        .flex_shrink_0()
+        .whitespace_normal()
+        .flex()
+        .flex_col()
+        .mx(px(12.))
+        .mt(px(top))
+        .mb(px(if !same_after { VOICE_GAP } else { 0. }
+            + if index + 1 == rows.len() { 6. } else { 0. }))
+        .when(marked, |column| {
+            column.child(
+                div()
+                    .h(px(MARK_LINE))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(12.))
+                    .line_height(px(MARK_LINE))
+                    .text_color(t.muted)
+                    // A new row's time fades in with its words and is then
+                    // at full strength, while they are spoken and after.
+                    .when(!utterance.is_final && level < 0.5, |d| d.opacity(level * 2.))
+                    .children(utterance.timestamp.clone()),
+            )
+        })
+        .child(row)
+        .into_any_element()
 }
 
 /// Deterministic formatting only: keeps the user's words and groups existing
@@ -2649,7 +2952,10 @@ pub fn local_outline(body: &str) -> String {
 
 #[cfg(test)]
 mod metadata_tests {
-    use super::{metadata_anchors, note_date_label};
+    use super::{
+        GLYPH_TAB, NOTES_LEAD, SPARKLE_LEAD_COLLAPSED, SPARKLE_TRAIL_COLLAPSED, metadata_anchors,
+        note_date_label, note_tab_widths,
+    };
     use crate::app::NoteTab;
     use chrono::NaiveDate;
 
@@ -2682,38 +2988,66 @@ mod metadata_tests {
     }
 
     #[test]
-    fn popovers_follow_the_joined_views_and_natural_metadata_width() {
-        let enhanced = metadata_anchors(1200., true, NoteTab::Enhanced, 151.);
-        assert_eq!(enhanced.details_left, 444.);
-        assert_eq!(enhanced.folder_left, 603.);
-        let raw_view = metadata_anchors(1200., true, NoteTab::Notes, 151.);
-        assert_eq!(raw_view.details_left, 444.);
-        assert_eq!(raw_view.folder_left, 603.);
-        let ungenerated = metadata_anchors(1200., false, NoteTab::Notes, 128.);
+    fn popovers_follow_the_joined_views() {
+        let enhanced = metadata_anchors(1200., Some(147.));
+        assert_eq!(enhanced.details_left, 443.);
+        let ungenerated = metadata_anchors(1200., None);
         assert_eq!(ungenerated.details_left, 293.);
-        assert_eq!(ungenerated.folder_left, 429.);
-        let longer_label = metadata_anchors(1200., true, NoteTab::Enhanced, 200.);
-        assert_eq!(longer_label.details_left, enhanced.details_left);
-        assert_eq!(longer_label.folder_left - enhanced.folder_left, 49.);
+    }
+
+    #[test]
+    fn collapsed_view_tabs_fit_their_glyphs() {
+        // "My notes" and "Enhanced" as shaped at 13 px on the note page: the
+        // reference's segments (35 | 113 and 98 | 50) less the point each
+        // label is narrower in this face, and one track width in both states.
+        let own = note_tab_widths(52.611, 58.981, true);
+        assert_eq!(
+            (
+                own.notes_collapsed,
+                own.enhanced,
+                own.notes,
+                own.enhanced_collapsed
+            ),
+            (35., 112., 97., 50.)
+        );
+        assert_eq!(own.track(NoteTab::Notes), 147.);
+        assert_eq!(own.track(NoteTab::Enhanced), 147.);
+        // The shared view ("Notes", no template chevron): each collapsed tab
+        // is only its glyph, whatever the other label's length.
+        for notes_label in [33.4, 36., 90.] {
+            let shared = note_tab_widths(notes_label, 58.981, false);
+            assert_eq!(shared.notes_collapsed, GLYPH_TAB);
+            assert_eq!(shared.enhanced_collapsed, 39.);
+            assert!(shared.notes > shared.notes_collapsed);
+            assert!(shared.enhanced > shared.enhanced_collapsed);
+        }
+        // Collapsed glyphs keep the inset the lines have from the track's
+        // start: 13.5 pt of ink (the glyph boxes carry about 2.3 pt of
+        // their own margin at the start and 2 pt at the end).
+        let lines_start = NOTES_LEAD + 2.4;
+        let sparkle_end = SPARKLE_TRAIL_COLLAPSED + 2.1;
+        assert!((lines_start - 13.5).abs() < 0.3, "{lines_start}");
+        assert!((sparkle_end - 13.5).abs() < 0.3, "{sparkle_end}");
+        // And the collapsed sparkle sits near the middle of its tab.
+        let sparkle_start = SPARKLE_LEAD_COLLAPSED + 1.0;
+        assert!((sparkle_start - sparkle_end).abs() < 1.5);
     }
 
     #[test]
     fn popovers_track_resizing_and_stay_within_compact_window_edges() {
-        let wide = metadata_anchors(1200., true, NoteTab::Enhanced, 151.);
-        let compact = metadata_anchors(760., true, NoteTab::Enhanced, 151.);
+        let wide = metadata_anchors(1200., Some(147.));
+        let compact = metadata_anchors(760., Some(147.));
         assert_eq!(wide.details_left - compact.details_left, 220.);
-        assert_eq!(wide.folder_left - compact.folder_left, 220.);
-        let narrow = metadata_anchors(500., true, NoteTab::Enhanced, 151.);
+        let narrow = metadata_anchors(500., Some(147.));
         assert!(narrow.details_left >= 12. && narrow.details_left + 280. <= 488.);
-        assert!(narrow.folder_left >= 12. && narrow.folder_left + 288. <= 488.);
     }
 }
 
 #[cfg(test)]
 mod transcript_tests {
     use super::{
-        transcript_content, transcript_find_matches, transcript_find_step, transcript_match_ranges,
-        transcript_utterances,
+        Rows, transcript_content, transcript_find_matches, transcript_find_step,
+        transcript_match_ranges, transcript_quote_target, transcript_utterances, transcript_voices,
     };
     use crate::model::Note;
     use meeting_notes_api_types::{AudioChannel, TranscriptSegmentDTO};
@@ -3010,6 +3344,58 @@ mod transcript_tests {
     }
 
     #[test]
+    fn transcript_times_read_minutes_and_hours() {
+        assert_eq!(super::transcript_seconds("00:10"), Some(10));
+        assert_eq!(super::transcript_seconds("12:34"), Some(754));
+        assert_eq!(super::transcript_seconds("1:02:03"), Some(3723));
+        assert_eq!(super::transcript_seconds("soon"), None);
+    }
+
+    #[test]
+    fn a_centred_time_marks_a_change_of_channel_at_most_once_a_minute() {
+        // A row every 20 s, the channel changing every second row.
+        let stored: Vec<_> = (0..12)
+            .map(|index| {
+                let mut row = row(&format!("Line {index}."));
+                row.own = index / 2 % 2 == 1;
+                row.key = format!("{}", row.own);
+                row.timestamp = Some(format!("{:02}:{:02}", index * 20 / 60, index * 20 % 60));
+                row
+            })
+            .collect();
+        let mut speaking = row("and then");
+        speaking.own = !stored[11].own;
+        speaking.timestamp = Some("04:00".into());
+        let speaking = [speaking];
+        let rows = super::Rows {
+            stored: &stored,
+            live: &speaking,
+        };
+        let marks = super::transcript_marks(rows);
+        let marked: Vec<usize> = (0..marks.len()).filter(|index| marks[*index]).collect();
+        // Changes at rows 2, 4, 6, 8, 10 and 12 (0:40, 1:20, 2:00, 2:40,
+        // 3:20, 4:00): the first a minute after the start is 1:20, then
+        // 2:40, then the words still being spoken at 4:00.
+        assert_eq!(marked, [4, 8, 12]);
+        // They keep it, and so their height, when they become final.
+        let mut finished = stored.clone();
+        let mut last = speaking[0].clone();
+        last.is_final = true;
+        finished.push(last);
+        let finished = super::Rows {
+            stored: &finished,
+            live: &[],
+        };
+        assert_eq!(super::transcript_marks(finished), marks);
+        // A mark depends only on what is above it.
+        let fewer = super::Rows {
+            stored: &stored[..9],
+            live: &[],
+        };
+        assert_eq!(super::transcript_marks(fewer), marks[..9]);
+    }
+
+    #[test]
     fn an_open_source_highlight_survives_text_arriving_after_and_before_it() {
         let mut rows: Vec<_> = ["First point.", "The cited passage.", "A later point."]
             .map(row)
@@ -3058,20 +3444,20 @@ mod transcript_tests {
         assert_eq!(super::transcript_neighbours(2, rows), (true, false));
         // A row's key changes with its text (its height may), not otherwise.
         let voices = super::transcript_voices(rows);
-        let key = super::transcript_key(2, rows, voices, None);
-        assert_eq!(key, super::transcript_key(2, rows, voices, None));
+        let key = super::transcript_key(2, rows, voices, &[]);
+        assert_eq!(key, super::transcript_key(2, rows, voices, &[]));
         let mut longer = speaking.clone();
         longer[0].text.push_str("ee");
         let grown = super::Rows {
             stored: &stored,
             live: &longer,
         };
-        assert_ne!(key, super::transcript_key(2, grown, voices, None));
+        assert_ne!(key, super::transcript_key(2, grown, voices, &[]));
         // Stored rows are not re-keyed by interim text changing below them,
         // except the last one, whose spacing depends on what follows.
         assert_eq!(
-            super::transcript_key(0, rows, voices, None),
-            super::transcript_key(0, grown, voices, None)
+            super::transcript_key(0, rows, voices, &[]),
+            super::transcript_key(0, grown, voices, &[])
         );
         // Finding looks at stored text only.
         assert!(transcript_find_matches(&stored, "thr").is_empty());
@@ -3127,5 +3513,61 @@ mod transcript_tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn stretches_without_transcript_are_rows_at_their_time() {
+        use meeting_notes_api_types::TranscriptGapDTO;
+        let spoken = |id: &str, start_ms: i64, text: &str| TranscriptSegmentDTO {
+            id: id.into(),
+            channel: AudioChannel::System,
+            speaker_id: "system:n:1".into(),
+            speaker_label: Some("Speaker 1".into()),
+            text: text.into(),
+            is_final: true,
+            start_ms,
+            end_ms: Some(start_ms + 2_000),
+        };
+        let gap = |channel, from_ms, to_ms| TranscriptGapDTO { channel, from_ms, to_ms };
+        let note = Note {
+            server_transcript_segments: vec![
+                spoken("a", 0, "Good morning."),
+                spoken("b", 10_000, "Shall we start?"),
+                spoken("c", 725_000, "Where were we."),
+            ],
+            transcript_gaps: vec![
+                // The network went: both channels, one row.
+                gap(AudioChannel::Mic, 723_000, 730_000),
+                gap(AudioChannel::System, 723_500, 729_000),
+                // Too short to mention.
+                gap(AudioChannel::Mic, 20_000, 20_400),
+                // After the last words.
+                gap(AudioChannel::System, 800_000, 860_000),
+            ],
+            ..Note::default()
+        };
+        let rows = transcript_utterances(&note);
+        let shown: Vec<_> = rows.iter().map(|row| (row.is_gap(), row.text.as_str())).collect();
+        assert_eq!(
+            shown,
+            [
+                (false, "Good morning."),
+                (false, "Shall we start?"),
+                (true, "Transcript missing 12:03–12:10"),
+                (false, "Where were we."),
+                (true, "Transcript missing 13:20–14:20"),
+            ]
+        );
+        assert_eq!(rows[2].timestamp.as_deref(), Some("12:03"));
+        // A gap row is not text anyone said: not a voice, not found, not cited.
+        assert_eq!(transcript_voices(Rows { stored: &rows, live: &[] }), (0, 1));
+        assert!(transcript_find_matches(&rows, "missing").is_empty());
+        assert_eq!(transcript_quote_target(&note, Some("c"), "Where", None), Ok(3));
+        // Drawn as rows of their own.
+        let rendered = transcript_content(&rows, crate::ui::Theme::new(true), gpui::px(674.), "", None, None);
+        assert_eq!(rendered.len(), 5);
+        // A note without gaps is exactly its segments.
+        let plain = Note { transcript_gaps: Vec::new(), ..note };
+        assert_eq!(transcript_utterances(&plain).len(), 3);
     }
 }

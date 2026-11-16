@@ -61,6 +61,8 @@ struct Column {
     top: f32,
     /// An item to bring into view once its position is known.
     reveal: Option<usize>,
+    /// An item to glide to the middle of the viewport (see [`centre`]).
+    centre: Option<Centre>,
     /// The caller is scrolling its container to the bottom this frame.
     to_end: bool,
     scroll: Option<ScrollHandle>,
@@ -134,6 +136,86 @@ pub fn scroll(name: &'static str) -> ScrollHandle {
 /// children are no longer one per item).
 pub fn reveal(name: &'static str, index: usize) {
     COLUMNS.with(|columns| columns.borrow_mut().entry(name).or_default().reveal = Some(index));
+}
+
+/// Glide the scroll offset until item `index` sits in the middle of the
+/// viewport, as when a source citation opens its passage. The glide is short
+/// however far away the item is (see [`GLIDE_REACH`]), follows the item if
+/// rows above it are measured meanwhile, and stops if the reader scrolls.
+/// With Reduce Motion the item is simply shown there.
+///
+/// One column can show different content at different times (one note's
+/// transcript, then another's): `owner` names what the glide is for, and
+/// [`hold_glide`] ends it as soon as the column shows anything else.
+pub fn centre(name: &'static str, index: usize, owner: u64) {
+    COLUMNS.with(|columns| {
+        let mut columns = columns.borrow_mut();
+        let column = columns.entry(name).or_default();
+        column.reveal = None;
+        column.centre = Some(Centre {
+            index,
+            owner,
+            from: 0.,
+            start: None,
+            last: 0.,
+        });
+    });
+}
+
+/// Keep a glide of the column only if it belongs to `owner`, what the column
+/// is about to show; `None` (the column is closing) ends any glide. Called
+/// before the column is built each frame.
+pub fn hold_glide(name: &'static str, owner: Option<u64>) {
+    COLUMNS.with(|columns| {
+        if let Some(column) = columns.borrow_mut().get_mut(name)
+            && column.centre.is_some_and(|centre| Some(centre.owner) != owner)
+        {
+            column.centre = None;
+        }
+    });
+}
+
+/// Whether a glide of the column is under way or waiting to start.
+#[cfg(test)]
+fn gliding(name: &'static str) -> bool {
+    COLUMNS.with(|columns| {
+        columns
+            .borrow()
+            .get(name)
+            .is_some_and(|column| column.centre.is_some())
+    })
+}
+
+/// The most a [`centre`] glide travels: anything further jumps to this
+/// distance from the item first, so a citation an hour back still lands in
+/// one quick movement instead of a long blur of text.
+pub const GLIDE_REACH: f32 = 240.;
+
+/// A glide in progress towards an item.
+#[derive(Clone, Copy, Debug)]
+struct Centre {
+    index: usize,
+    /// What the column showed when the glide was asked for.
+    owner: u64,
+    /// The offset the glide started from, once it has started.
+    from: f32,
+    start: Option<std::time::Instant>,
+    /// The offset the glide last set, to notice the reader scrolling.
+    last: f32,
+}
+
+/// The offset of a glide `t` (0..=1 of its duration) from `from` to `to`:
+/// fast away and a soft landing, never past the target (a scroll that
+/// overshoots reads as the text bouncing, and past either end of the range
+/// it would be clamped and mistaken for the reader scrolling).
+pub fn glide_at(from: f32, to: f32, t: f32) -> f32 {
+    from + (to - from) * crate::motion::exit_curve(t)
+}
+
+/// The offset that puts `item` in the middle of a viewport `viewport` tall,
+/// within a scroll range of `0..=max`.
+pub fn offset_to_centre(item: Range<f32>, viewport: f32, max: f32) -> f32 {
+    ((item.start + item.end - viewport) / 2.).clamp(0., max.max(0.))
 }
 
 /// The caller is about to scroll the column's container to its bottom (as
@@ -365,6 +447,10 @@ fn windowed(
         let mut scrolled = scrolled;
         let mut again = false;
         let Some((ids, estimate)) = estimates.as_mut() else {
+            // A plain column has no glide: it shows the item as `reveal` does.
+            if let Some(centre) = column.centre.take() {
+                column.reveal = Some(centre.index);
+            }
             // Without estimates an unmeasured item is always built.
             let heights: Vec<Option<f32>> = keys
                 .iter()
@@ -418,6 +504,13 @@ fn windowed(
             })
             .collect();
         let (new_tops, total) = tops(&heights, gap);
+        // A reader who scrolls during a glide takes over from it.
+        if let Some(centre) = column.centre
+            && centre.start.is_some()
+            && (scrolled - centre.last).abs() > 1.
+        {
+            column.centre = None;
+        }
         // Keep the reader's place: whatever was at the top of the viewport
         // in the last frame's layout is put back there.
         if !to_end && !column.laid.is_empty() {
@@ -458,6 +551,38 @@ fn windowed(
                     }
                 }
                 _ => column.reveal = None,
+            }
+        }
+        if let Some(mut centre) = column.centre.take() {
+            if let (Some(top), Some(height)) = (new_tops.get(centre.index), heights.get(centre.index)) {
+                let item = top + column.top..top + height + column.top;
+                // The range as last laid out, or as far as the column reaches
+                // when that layout has not happened yet.
+                let max = f32::from(scroll.max_offset().height)
+                    .max(column.top + total - view_height);
+                let target = offset_to_centre(item, view_height, max);
+                let now = std::time::Instant::now();
+                let duration = crate::motion::PANEL.duration();
+                let start = *centre.start.get_or_insert_with(|| {
+                    centre.from =
+                        target + (scrolled - target).clamp(-GLIDE_REACH, GLIDE_REACH);
+                    now
+                });
+                let t = if crate::motion::reduce_motion() {
+                    1.
+                } else {
+                    crate::motion::shown_at(now).saturating_duration_since(start).as_secs_f32()
+                        / duration.as_secs_f32().max(0.001)
+                };
+                let at = glide_at(centre.from, target, t.min(1.));
+                scroll.set_offset(point(scroll.offset().x, px(-at)));
+                scrolled = at;
+                centre.last = at;
+                // Until it has landed on an item whose place is measured.
+                if t < 1. || !measured[centre.index] {
+                    column.centre = Some(centre);
+                    again = true;
+                }
             }
         }
         let start = if to_end {
@@ -699,6 +824,42 @@ mod tests {
         assert_eq!(offset_to_show(900.0..940., 400., 300.), Some(640.));
         // Already in view: nothing moves.
         assert_eq!(offset_to_show(450.0..490., 400., 300.), None);
+    }
+
+    #[test]
+    fn a_cited_item_glides_to_the_middle_of_the_view() {
+        // A 40 px item at 1000 in a 300 px view: its middle at the view's.
+        assert_eq!(offset_to_centre(1000.0..1040., 300., 5000.), 870.);
+        // Near either end of the range the view stops at that end.
+        assert_eq!(offset_to_centre(20.0..60., 300., 5000.), 0.);
+        assert_eq!(offset_to_centre(4980.0..5020., 300., 4800.), 4800.);
+        // A glide starts where it was and ends exactly on its target.
+        assert_eq!(glide_at(600., 870., 0.), 600.);
+        assert_eq!(glide_at(600., 870., 1.), 870.);
+        // It moves one way only and never passes the target.
+        let mut last = 600.;
+        for step in 1..=100 {
+            let at = glide_at(600., 870., step as f32 / 100.);
+            assert!(at >= last && at <= 870., "{step}: {at}");
+            last = at;
+        }
+        // Half way through it is most of the way there.
+        assert!(glide_at(600., 870., 0.5) > 800.);
+    }
+
+    #[test]
+    fn a_glide_ends_when_its_column_shows_something_else() {
+        let name = "glide-owner-test";
+        centre(name, 3, 7);
+        hold_glide(name, Some(7));
+        assert!(gliding(name), "the same note, still open");
+        // Another note's transcript, or the same one opened again.
+        hold_glide(name, Some(8));
+        assert!(!gliding(name));
+        // The panel closing.
+        centre(name, 3, 7);
+        hold_glide(name, None);
+        assert!(!gliding(name));
     }
 
     #[test]

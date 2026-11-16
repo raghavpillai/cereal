@@ -67,8 +67,6 @@ public enum APIClientError: Error, LocalizedError, Equatable, Sendable {
     case notFound
     case unavailable
     case conflict
-    case invalidAudio
-    case audioTooLarge
     case localStorage
     case httpStatus(Int)
     case transport(URLError.Code)
@@ -85,10 +83,8 @@ public enum APIClientError: Error, LocalizedError, Equatable, Sendable {
         case .unauthorized: "The server did not accept your access token. Check your connection settings."
         case .notFound: "This note is no longer available."
         case .unavailable: "The server is temporarily unavailable. Try again shortly."
-        case .conflict: "This note changed or is still processing audio. Refresh it before trying again."
-        case .invalidAudio: "This audio file could not be read as a supported WAV recording. The original file has been kept."
-        case .audioTooLarge: "This audio chunk exceeds the server's upload limit. The recording has been kept."
-        case .localStorage: "The recording upload queue could not be saved. Your original audio has been kept on this device."
+        case .conflict: "This note changed. Refresh it before trying again."
+        case .localStorage: "The recording's files on this iPhone could not be saved or removed."
         case .httpStatus(let status): "The server could not complete the request (HTTP \(status))."
         case .transport(let code) where code == .notConnectedToInternet || code == .networkConnectionLost:
             "You're offline. Your notes will be available when the connection returns."

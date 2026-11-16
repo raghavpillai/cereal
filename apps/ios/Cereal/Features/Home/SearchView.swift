@@ -100,7 +100,7 @@ struct SearchView: View {
         mode.isDemo
             ? NoteSearch.local(store.activeNotes, query: query, currentUser: store.currentUser)
             : searchedAccount.map { account, notes in
-                NoteSearch.server(search?.hits ?? [], account: account, onThisPhone: { recording.isActive($0) || recording.hasPendingAudio($0) },
+                NoteSearch.server(search?.hits ?? [], account: account, onThisPhone: { recording.isActive($0) },
                                   title: notes.latestTitle(of:))
             } ?? []
     }

@@ -36,7 +36,8 @@ export function createAdminClient(baseUrl: string, transport: typeof fetch = glo
       if (signal?.aborted) throw new DOMException('Request canceled', 'AbortError')
       const error = result.failure
       const kind = typeof error === 'object' && error !== null && 'error' in error ? error.error : undefined
-      throw new AdminClientError(kind === 'unauthorized' ? 401 : kind === 'forbidden' ? 403 : kind === 'conflict' ? 409 : kind === 'invalid_request' ? 400 : kind === 'not_found' ? 404 : 503)
+      const message = typeof error === 'object' && error !== null && 'message' in error && typeof error.message === 'string' && kind !== undefined ? error.message : undefined
+      throw new AdminClientError(kind === 'unauthorized' ? 401 : kind === 'forbidden' ? 403 : kind === 'conflict' ? 409 : kind === 'invalid_request' ? 400 : kind === 'not_found' ? 404 : 503, message)
     }
     return result.success
   }

@@ -24,6 +24,8 @@ test("a note link previews with the site name, a generic title and an absolute i
   const privateNote = (await previews("/notes/3f0a1b7e-6f0e-4a55-9f7c-0d2c7f1f6a10"))!
   expect(meta(privateNote, "og:title")).toBe("A note in Cereal")
   expect(meta(privateNote, "og:description")).toBe("Sign in to read this note.")
+  // The chat with a note's transcript, linked from the foot of its generated notes, previews as the note does.
+  expect(await previews("/notes/3f0a1b7e-6f0e-4a55-9f7c-0d2c7f1f6a10/chat")).toBe(privateNote)
   for (const path of ["/", "/notes", "/login", "/admin", "/s", "/s/a/b", "/notes/a/b", "/assets/app.js", "/api/v1/shared/" + token]) expect(await previews(path)).toBeNull()
 })
 

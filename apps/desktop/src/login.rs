@@ -409,71 +409,7 @@ impl LoginView {
                     .child("to get started."),
             )
             .child(div().mt(px(40.)).w_full().child(controls))
-            .child(
-                div()
-                    .mt(px(32.))
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(3.))
-                    .text_size(px(13.))
-                    .line_height(px(20.))
-                    .text_color(t.muted)
-                    .child("By continuing, you agree to the")
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(5.))
-                            .items_center()
-                            .child(self.info_link(
-                                "login-terms",
-                                "Terms of Service",
-                                "This local preview does not create an account or submit data.",
-                                cx,
-                            ))
-                            .child("and")
-                            .child(self.info_link(
-                                "login-privacy",
-                                "Privacy Policy",
-                                "This local preview keeps your information on this Mac.",
-                                cx,
-                            )),
-                    ),
-            )
             .into_any_element()
-    }
-
-    fn info_link(
-        &self,
-        id: &'static str,
-        label: &'static str,
-        message: &'static str,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let t = Theme::new(self.dark_mode);
-        div()
-            .id(id)
-            .focusable()
-            .tab_stop(true)
-            .underline()
-            .cursor_pointer()
-            .map(|link| {
-                crate::motion::warms(link, crate::motion::reveal_key(id), t.muted, t.accent)
-            })
-            .focus(move |s| s.text_color(t.accent))
-            .child(label)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.inline_error = Some(message.into());
-                cx.notify();
-            }))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    this.inline_error = Some(message.into());
-                    cx.notify();
-                    cx.stop_propagation();
-                }
-            }))
     }
 
     fn waiting(&self, provider: &str, cx: &mut Context<Self>) -> AnyElement {
@@ -518,7 +454,7 @@ impl LoginView {
                             icon.with_transformation(Transformation::rotate(percentage(delta)))
                         },
                     ))
-                    .child(format!("Waiting for {provider} · local preview")),
+                    .child(format!("Waiting for {provider}")),
             )
             .child(div().mt(px(16.)).w_full().child(self.action_button(
                 "login-complete-preview",
@@ -768,7 +704,7 @@ impl Render for LoginView {
                     .text_size(px(11.))
                     .line_height(px(16.))
                     .text_color(t.muted)
-                    .child("Local sign-in preview · no account is connected"),
+                    .child("Sign-in preview"),
             )
     }
 }

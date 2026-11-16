@@ -171,7 +171,7 @@ pub fn pill(
         .border_color(t.hairline)
         .text_size(px(13.))
         .text_color(t.text)
-        .cursor_pointer()
+        .cursor_default()
         // Callers may turn a pill into a dark primary button. A neutral wash
         // reads on every fill, so that pairing survives both pointer states.
         .child(
@@ -289,7 +289,7 @@ fn tool_shell(id: ElementId, t: Theme, radius: Option<f32>) -> Stateful<Div> {
         .justify_center()
         .rounded(px(6.))
         .when(radius.is_none(), |round| round.rounded_full())
-        .cursor_pointer()
+        .cursor_default()
         .child(match radius {
             Some(radius) => feedback.radius(radius),
             None => feedback.round(),
@@ -302,6 +302,8 @@ thread_local! {
     static KEYBOARD_FOCUS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The window is in the dark theme (for colours chosen away from a `Theme`).
     static DARK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Device pixels per point of the main window's display.
+    static SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(2.) };
 }
 
 /// Record whether focus is moving by keyboard (Tab) or by pointer. Returns
@@ -312,6 +314,36 @@ pub fn set_keyboard_focus(on: bool) -> bool {
 
 pub fn set_dark(dark: bool) {
     DARK.with(|flag| flag.set(dark));
+}
+
+/// Record the main window's scale, for [`hairline`].
+pub fn set_scale(scale: f32) {
+    SCALE.with(|cell| cell.set(scale));
+}
+
+/// An edge `points` wide as a display can draw it at `scale` device pixels
+/// per point: never thinner than one device pixel, the way a browser rounds
+/// a sub-pixel border up. Half a point is one pixel on Retina and a full
+/// point at 1x, where half a pixel of coverage reads on some sides of a
+/// shape and vanishes on others.
+pub fn hairline_at(points: f32, scale: f32) -> f32 {
+    if scale.is_finite() && scale > 0. {
+        points.max(1. / scale)
+    } else {
+        points
+    }
+}
+
+/// [`hairline_at`] for the main window.
+pub fn hairline(points: f32) -> f32 {
+    hairline_at(points, SCALE.with(|cell| cell.get()))
+}
+
+/// The edge of a list card (Coming up, Settings): one device pixel of a
+/// darker grey, as in the reference, which reads as light as a 1 pt border
+/// of `t.border`. Dark mode keeps `t.border`.
+pub fn card_edge(t: Theme) -> Hsla {
+    if is_dark() { t.border } else { rgb(0xd4d3cb).into() }
 }
 
 /// Whether the app is in its dark theme, for a view that is drawn outside
@@ -580,7 +612,7 @@ pub enum Scrim {
     Palette,
     /// A dialog that only informs: a click outside dismisses it.
     Dialog,
-    /// A form holding typed input (new folder, recipe editor): darker, and
+    /// A form holding typed input: darker, and
     /// a stray click outside does not throw the input away.
     Form,
 }
@@ -635,7 +667,6 @@ fn tool_label(id: &ElementId, symbol: &str) -> Option<SharedString> {
         "sidebar-toggle" => "Hide sidebar · ⌘B",
         "open-sidebar" => "Show sidebar · ⌘B",
         "sidebar-search" | "collection-search" => "Search notes · ⌘K",
-        "new-folder" => "New folder",
         "footer-settings" => "Settings",
         "footer-window" => "Workspace menu",
         "footer-invite" => "Invite people",
@@ -662,7 +693,6 @@ fn tool_label(id: &ElementId, symbol: &str) -> Option<SharedString> {
             "keyboard" => "Keyboard shortcuts",
             "trash" => "Move to trash",
             "share" => "Share",
-            "folder" => "Folders",
             "arrow-up" => "Send message",
             "mic" => "Start recording",
             "pause" => "Pause recording",
@@ -683,7 +713,33 @@ pub fn set_popover_open(open: bool) {
     POPOVER_OPEN.with(|flag| flag.set(open));
 }
 
-fn with_tooltip(element: Stateful<Div>, label: SharedString, theme: Theme) -> Stateful<Div> {
+/// Whether a menu or popover is open, so a tooltip should stay hidden.
+pub fn popover_open() -> bool {
+    POPOVER_OPEN.with(|flag| flag.get())
+}
+
+/// The tooltip's box: 12 pt text on the inverted ink, 8 × 4 padding, 8 pt
+/// corners. Shared by GPUI's pointer tooltips and the bar's own.
+pub fn tip_box(label: SharedString, theme: Theme) -> Div {
+    div()
+        .px(px(8.))
+        .py(px(4.))
+        .rounded(px(8.))
+        .bg(theme.text)
+        .text_color(theme.bg)
+        .font_family(FONT)
+        .text_size(px(12.))
+        .line_height(px(16.))
+        .shadow_sm()
+        .child(label)
+}
+
+/// Give a control the app's tooltip, hidden while a popover is open.
+pub(crate) fn with_tooltip(
+    element: Stateful<Div>,
+    label: SharedString,
+    theme: Theme,
+) -> Stateful<Div> {
     // GPUI 0.2.2 shows these after 500 ms; the delay is the framework's.
     element.tooltip(move |_, cx| {
         cx.new(|_| ToolTip {
@@ -722,17 +778,7 @@ impl Render for ToolTip {
         if self.hidden || POPOVER_OPEN.with(|flag| flag.get()) {
             return div();
         }
-        div()
-            .px(px(8.))
-            .py(px(4.))
-            .rounded(px(8.))
-            .bg(self.theme.text)
-            .text_color(self.theme.bg)
-            .font_family(FONT)
-            .text_size(px(12.))
-            .line_height(px(16.))
-            .shadow_sm()
-            .child(self.label.clone())
+        tip_box(self.label.clone(), self.theme)
     }
 }
 
@@ -837,6 +883,15 @@ mod tests {
     use super::*;
     // `gpui::*` re-exports its own `test` attribute; these are plain unit tests.
     use std::prelude::v1::test;
+
+    #[test]
+    fn hairlines_are_never_thinner_than_a_device_pixel() {
+        assert_eq!(hairline_at(0.5, 2.), 0.5);
+        assert_eq!(hairline_at(0.5, 1.), 1.);
+        assert_eq!(hairline_at(0.75, 2.), 0.75);
+        assert_eq!(hairline_at(0.5, 3.), 0.5);
+        assert_eq!(hairline_at(0.5, 0.), 0.5);
+    }
 
     #[test]
     fn the_scroll_thumb_spans_the_track_in_proportion_and_never_leaves_it() {

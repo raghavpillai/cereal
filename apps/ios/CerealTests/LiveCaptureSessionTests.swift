@@ -9,44 +9,59 @@ import Contracts
 
 // MARK: - A stand-in for the instance
 
-/// The HTTP side of an instance, in memory: the note, its audio chunks and
-/// every request made. Shared with the scripted live socket below, which stores
-/// final segments here the way the server stores them in the note.
+/// The HTTP side of an instance, in memory: the note and every request made.
+/// Shared with the scripted live socket below, which stores final segments
+/// here the way the server stores them in the note. Generating notes writes
+/// them from the stored transcript, and refuses a note with none, as the
+/// server does.
 final class StubInstance: @unchecked Sendable {
     struct Request { let method: String; let path: String; let at: ContinuousClock.Instant }
-    struct Upload { let chunkID: String; let sequence: Int; let startMs: Int; let audio: Data; let at: ContinuousClock.Instant }
 
     static let principal = "00000000-0000-4000-8000-000000000001"
+    static let generatedNotes = "## Summary\n- Written from the live transcript"
     let noteID = UUID().uuidString.lowercased()
     private let lock = NSLock()
     private var requests: [Request] = []
-    private var uploads: [Upload] = []
-    private var chunkStates: [String: String] = [:]
     private var segments: [[String: Any]] = []
     private var revision = 0
+    private var generated: Int?
+    private var enhanced = ""
     private var recordingState = "idle"
-    /// Chunks with these sequences stay "processing" until released.
-    var heldSequences: Set<Int> = []
+    /// What the note holds besides its transcript, and whether it has been deleted.
+    private var title = "Live session"
+    private var body = ""
+    private var deleted = false
+    /// The `ifStamp` of every DELETE of the note.
+    private var deleteStamps: [String?] = []
+    var deletions: [String?] { lock.withLock { deleteStamps } }
+    func set(title: String? = nil, body: String? = nil) {
+        lock.withLock {
+            if let title { self.title = title }
+            if let body { self.body = body }
+        }
+    }
+    /// The `expectedTranscriptRevision` of every request to generate notes.
+    private var generateRequests: [Int] = []
     /// Sessions the server no longer accepts: every request with one is refused in the API's own words.
     var refusedTokens: Set<String> = []
-    /// When set, what an upload, the list of chunks, or the note itself is answered with instead.
-    var uploadStatus: Int?
-    var chunksStatus: Int?
+    /// When set, what the note itself (and its recording commands) is answered with instead.
     var noteStatus: Int?
-    func set(refused: Set<String>? = nil, upload: Int?? = nil, chunks: Int?? = nil, note: Int?? = nil) {
+    /// When set, what a request to generate notes is answered with instead.
+    var generateStatus: Int?
+    func set(refused: Set<String>? = nil, note: Int?? = nil, generate: Int?? = nil) {
         lock.withLock {
             if let refused { refusedTokens = refused }
-            if let upload { uploadStatus = upload }
-            if let chunks { chunksStatus = chunks }
             if let note { noteStatus = note }
+            if let generate { generateStatus = generate }
         }
     }
 
     var allRequests: [Request] { lock.withLock { requests } }
-    var allUploads: [Upload] { lock.withLock { uploads } }
     var transcriptRevision: Int { lock.withLock { revision } }
+    var generations: [Int] { lock.withLock { generateRequests } }
     func count(_ method: String, suffix: String) -> Int { lock.withLock { requests.filter { $0.method == method && $0.path.hasSuffix(suffix) }.count } }
-    func release() { lock.withLock { heldSequences = []; for upload in uploads { chunkStates[upload.chunkID] = "ready" } } }
+    /// Requests to any audio route. The app must make none.
+    var audioRequests: Int { lock.withLock { requests.filter { $0.path.contains("/audio") }.count } }
 
     /// What the server does with a final from the live path.
     func store(segment: [String: Any]) -> Int {
@@ -54,14 +69,10 @@ final class StubInstance: @unchecked Sendable {
     }
 
     private func noteJSON() -> [String: Any] {
-        ["id": noteID, "title": "Live session", "body": "", "enhanced": "", "date": "2026-11-14", "duration": "0:00",
+        ["id": noteID, "title": title, "body": self.body, "enhanced": enhanced, "date": "2026-11-14", "duration": "0:00",
          "createdAt": "2026-11-14T10:00:00.000Z", "updatedAt": "2026-11-14T10:00:00.000Z", "recordingState": recordingState,
-         "generationState": "idle", "transcriptRevision": revision, "generatedRevision": NSNull(), "transcriptSegments": segments]
-    }
-
-    private func chunkJSON(_ upload: Upload) -> [String: Any] {
-        ["id": upload.chunkID, "noteId": noteID, "channel": "mic", "sequence": upload.sequence, "startMs": upload.startMs,
-         "durationMs": max(1, (upload.audio.count - 44) / 32), "error": NSNull(), "state": chunkStates[upload.chunkID] ?? "queued"]
+         "generationState": generated == nil ? "idle" : "ready", "transcriptRevision": revision,
+         "generatedRevision": generated.map { $0 as Any } ?? NSNull(), "transcriptSegments": segments]
     }
 
     func respond(_ request: URLRequest, body: Data) -> (Int, Data) {
@@ -70,33 +81,44 @@ final class StubInstance: @unchecked Sendable {
         let method = request.httpMethod ?? "GET"
         requests.append(Request(method: method, path: path, at: .now))
         func json(_ value: Any) -> (Int, Data) { (200, try! JSONSerialization.data(withJSONObject: value)) }
-        func refusal(_ status: Int) -> (Int, Data) { (status, Data(#"{"error":"\#(status == 401 ? "unauthorized" : "not_found")","message":"Stub"}"#.utf8)) }
+        func refusal(_ status: Int) -> (Int, Data) {
+            let code = status == 401 ? "unauthorized" : status == 400 ? "invalid_request" : "not_found"
+            return (status, Data(#"{"error":"\#(code)","message":"Stub"}"#.utf8))
+        }
         let token = request.value(forHTTPHeaderField: "Authorization").map { String($0.dropFirst("Bearer ".count)) } ?? ""
         if refusedTokens.contains(token) { return refusal(401) }
         if path.hasSuffix("/api/auth/sign-out") { return json([String: Any]()) }
         if let noteStatus, path.hasSuffix("/notes/\(noteID)") || path.hasSuffix("/notes/\(noteID)/recording") { return refusal(noteStatus) }
-        if let chunksStatus, path.hasSuffix("/audio/chunks") { return refusal(chunksStatus) }
-        if let uploadStatus, method == "PUT", path.contains("/audio/chunks/") { return refusal(uploadStatus) }
         if path.hasSuffix("/api/v1/session") {
             return json(["user": ["id": Self.principal, "name": "Test Owner", "email": "owner@example.test", "role": "owner", "createdAt": "2026-11-12T00:00:00Z"], "expiresAt": NSNull()])
         }
-        if path.hasSuffix("/api/v1/notes") { return json([noteJSON()]) }
+        if path.hasSuffix("/api/v1/notes") { return json(deleted ? [] : [noteJSON()]) }
+        if deleted, path.contains("/notes/\(noteID)") { return refusal(404) }
+        if method == "DELETE", path.hasSuffix("/notes/\(noteID)") {
+            let stamp = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "ifStamp" }?.value
+            deleteStamps.append(stamp)
+            // As the server does: a note that is no longer as it was read is not deleted.
+            let current = "2026-11-14T10:00:00.000Z|\(revision)|\(generated.map(String.init) ?? "")"
+            guard stamp == nil || stamp == current else { return (409, Data(#"{"error":"conflict","message":"Stub"}"#.utf8)) }
+            deleted = true
+            return json(["deleted": true])
+        }
         if path.hasSuffix("/notes/\(noteID)") { return json(noteJSON()) } // GET, and PATCH from the editor
         if path.hasSuffix("/notes/\(noteID)/recording") {
             let command = ((try? JSONSerialization.jsonObject(with: body)) as? [String: Any])?["command"] as? String
             recordingState = command == "stop" ? "stopped" : "recording"
             return json(noteJSON())
         }
-        if path.hasSuffix("/audio/chunks") { return json(uploads.map(chunkJSON)) }
-        if method == "PUT", let range = path.range(of: "/audio/chunks/") {
-            let chunkID = String(path[range.upperBound...])
-            let input = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
-            let sequence = input["sequence"] as? Int ?? -1
-            let upload = Upload(chunkID: chunkID, sequence: sequence, startMs: input["startMs"] as? Int ?? -1,
-                                audio: Data(base64Encoded: input["audioBase64"] as? String ?? "") ?? Data(), at: .now)
-            if !uploads.contains(where: { $0.chunkID == chunkID }) { uploads.append(upload) }
-            chunkStates[chunkID] = heldSequences.contains(sequence) ? "processing" : "ready"
-            return json(chunkJSON(upload))
+        if method == "POST", path.hasSuffix("/notes/\(noteID)/generate") {
+            let expected = ((try? JSONSerialization.jsonObject(with: body)) as? [String: Any])?["expectedTranscriptRevision"] as? Int ?? -1
+            generateRequests.append(expected)
+            if let generateStatus { return refusal(generateStatus) }
+            // "This recording has no transcript to write notes from."
+            if segments.isEmpty { return refusal(400) }
+            if expected != revision { return (409, Data(#"{"error":"conflict","message":"Stub"}"#.utf8)) }
+            generated = revision
+            enhanced = Self.generatedNotes
+            return json(noteJSON())
         }
         return (404, Data(#"{"error":"not_found","message":"No such route in the stub"}"#.utf8))
     }
@@ -241,7 +263,7 @@ final class ScriptedLiveServer: LiveSocketConnector, @unchecked Sendable {
             revision += 1
             framesInUtterance += 1
             push(#"{"type":"ack","channel":"mic","throughSample":\#(frame.firstSample + count),"transcribedThroughMs":\#(utteranceStartMs)}"#)
-            push(#"{"type":"interim","channel":"mic","utteranceId":"\#(utterance)","rev":\#(revision),"text":"\#(words.joined(separator: " ")) \#(ScriptedLiveServer.interimMarker)","startMs":\#(utteranceStartMs),"endMs":\#(endMs),"speakerId":"mic:n:1","speakerLabel":"Speaker 1"}"#)
+            push(#"{"type":"interim","channel":"mic","utteranceId":"\#(utterance)","rev":\#(revision),"text":"\#(words.joined(separator: " ")) \#(ScriptedLiveServer.interimMarker)","startMs":\#(utteranceStartMs),"endMs":\#(endMs),"speakerId":"mic:n:1","speakerLabel":"Me"}"#)
             var finals = 0
             if framesInUtterance >= server.framesPerUtterance { finalize(endMs: endMs); finals = 1 }
             server.note(frames: 1, samples: count, interims: 1, finals: finals)
@@ -250,7 +272,7 @@ final class ScriptedLiveServer: LiveSocketConnector, @unchecked Sendable {
         private func finalize(endMs: Int) {
             let id = UUID().uuidString.lowercased()
             let text = words.joined(separator: " ").prefix(1).uppercased() + words.joined(separator: " ").dropFirst() + "."
-            let segment: [String: Any] = ["id": id, "channel": "mic", "speakerId": "mic:n:1", "speakerLabel": "Speaker 1", "text": text,
+            let segment: [String: Any] = ["id": id, "channel": "mic", "speakerId": "mic:n:1", "speakerLabel": "Me", "text": text,
                                           "isFinal": true, "startMs": utteranceStartMs, "endMs": endMs]
             let revision = server.instance.store(segment: segment)
             let json = String(decoding: try! JSONSerialization.data(withJSONObject: segment), as: UTF8.self)
@@ -290,6 +312,12 @@ final class ScriptedLiveServer: LiveSocketConnector, @unchecked Sendable {
 
 // MARK: - Harness
 
+/// Each harness's scripted live server, by the notes model of its account: a
+/// recorder shared by two harnesses streams each account to its own server.
+@MainActor enum ScriptedLiveServers {
+    static var byModel: [ObjectIdentifier: ScriptedLiveServer] = [:]
+}
+
 @MainActor
 struct LiveSessionHarness {
     let instance = StubInstance()
@@ -312,15 +340,16 @@ struct LiveSessionHarness {
             return MeetingNotesAPI(credentials: credentials, configuration: configuration)
         })
         let input = input, live = live
+        ScriptedLiveServers.byModel[ObjectIdentifier(server)] = live
         controller = existing ?? ServerRecordingController(outboxRoot: root.appendingPathComponent("outbox"),
             makeBackend: { EngineCaptureBackend(input: input) },
-            makeLiveClient: { _, _, source, configuration in
+            makeLiveClient: { server, _, source, configuration in
                 // The session is replayed faster than real time, so the stream must not be held to real-time pacing.
                 var fast = configuration
                 fast.tick = .milliseconds(2)
                 fast.catchUpFactor = 10_000
                 fast.endGrace = .milliseconds(500)
-                return LiveTranscriptClient(connector: live, source: source, configuration: fast)
+                return LiveTranscriptClient(connector: ScriptedLiveServers.byModel[ObjectIdentifier(server)] ?? live, source: source, configuration: fast)
             })
         await server.connect(instance: "https://\(host)", token: "unit-test-token")
         try #require(server.instance != nil)
@@ -341,51 +370,185 @@ struct LiveSessionHarness {
 @MainActor
 @Suite(.serialized)
 struct LiveCaptureSessionTests {
-    @Test func partsAreUploadedAsTheyAreCutAndNeverWaitForAnEarlierPartsTranscription() async throws {
-        UserDefaults.standard.set(2, forKey: "capture.partSeconds")
-        defer { UserDefaults.standard.removeObject(forKey: "capture.partSeconds") }
-        let harness = try await LiveSessionHarness()
+    @Test func stopGoesStraightToNotesWrittenFromTheLiveTranscriptAndNoAudioIsUploaded() async throws {
+        let harness = try await LiveSessionHarness(framesPerUtterance: 10)
         defer { try? FileManager.default.removeItem(at: harness.root) }
-        harness.live.refusal = .refused(status: 503) // no live model: the parts are on their own
-        harness.instance.heldSequences = [0]         // the first part's transcription never finishes
         await harness.controller.start(note: try await harness.note())
-        #expect(harness.controller.recorder.state == .recording)
-        #expect(harness.controller.error == nil)
-
-        var time = 0.0
-        for _ in 0..<7 {
-            time = harness.input.feed(format: InjectedAudio.builtIn, from: time, seconds: 1)
-            try await Task.sleep(for: .milliseconds(120))
-        }
-        // Three parts were cut at 2, 4 and 6 seconds and all three reached the server while
-        // the first is still being transcribed and the recording is still going.
-        try await waitFor("three uploads") { harness.instance.allUploads.count == 3 }
-        #expect(harness.controller.recorder.state == .recording)
-        #expect(harness.instance.allUploads.map(\.sequence) == [0, 1, 2])
-        #expect(harness.instance.allUploads.map(\.startMs) == [0, 2_000, 4_000])
-        #expect(harness.controller.hasPendingAudio(noteID: harness.instance.noteID)) // part 0 is not ready
-        // Silent fallback: one attempt at the live socket, no error, parts wording.
-        #expect(harness.live.counts.connections == 0)
-        #expect(harness.controller.error == nil)
-        #expect(harness.controller.transcript?.status == .unavailable(.notConfigured))
-        #expect(LiveStatusText.line(.unavailable(.notConfigured)) == nil)
-        #expect(harness.controller.status == "Recording on device · Transcript updates after each audio chunk")
+        let ref = try #require(harness.controller.ref(harness.instance.noteID))
+        let transcript = try #require(harness.controller.transcript)
+        _ = harness.input.feed(format: InjectedAudio.builtIn, from: 0, seconds: 2)
+        try await waitFor("live finals") { !transcript.segments.isEmpty }
+        let capture = try #require(harness.controller.recorder.currentFileURL)
+        #expect(FileManager.default.fileExists(atPath: capture.path))
 
         harness.controller.stop()
-        try await waitFor("final part and Stop") { harness.instance.allUploads.count == 4 && harness.instance.count("POST", suffix: "/recording") == 2 }
-        // Every byte of the capture was uploaded exactly once, in order.
-        let folder = harness.root.appendingPathComponent("outbox")
-        let capture = try #require(FileManager.default.enumerator(at: folder, includingPropertiesForKeys: nil)?.allObjects
-            .compactMap { $0 as? URL }.first { $0.lastPathComponent == "capture-0.wav" })
-        var joined = Data()
-        for upload in harness.instance.allUploads.sorted(by: { $0.sequence < $1.sequence }) { joined.append(upload.audio.dropFirst(44)) }
-        #expect(joined == (try Data(contentsOf: capture).dropFirst(44)))
-        #expect(joined.count == 7 * 32_000)
-        harness.instance.release()
-        try await waitFor("delivery complete") { !harness.controller.hasPendingAudio(noteID: harness.instance.noteID) && !harness.controller.isSyncing }
-        // Nothing was uploaded twice.
-        #expect(harness.instance.count("PUT", suffix: "") == 0 || Set(harness.instance.allUploads.map(\.chunkID)).count == 4)
-        #expect(harness.instance.allRequests.filter { $0.method == "PUT" }.count == 4)
+        // No syncing or delivery state: the notes are being written from the moment of Stop.
+        #expect(harness.controller.isGeneratingNotes(ref))
+        try await waitFor("notes written") { !harness.controller.isGeneratingNotes(ref) }
+        #expect(harness.controller.error == nil)
+        // Start, Stop (after the stream's last words), then one request for notes, for the transcript Stop answered with.
+        let posts = harness.instance.allRequests.filter { $0.method == "POST" }.map { $0.path.hasSuffix("/recording") ? "recording" : $0.path.hasSuffix("/generate") ? "generate" : $0.path }
+        #expect(posts == ["recording", "recording", "generate"])
+        #expect(harness.instance.generations == [harness.instance.transcriptRevision])
+        #expect(harness.live.counts.marks == ["end"])
+        // The note on screen has its notes.
+        let shown = try #require(harness.server.state.notes.first { $0.id == ref.id })
+        #expect(shown.enhanced == StubInstance.generatedNotes && shown.generatedRevision == shown.transcriptRevision)
+        #expect(!ServerRecordingController.endedWithoutTranscript(shown))
+
+        // No audio was sent anywhere but the live stream, and the capture went once the stream was done with it.
+        #expect(harness.instance.audioRequests == 0)
+        try await waitFor("capture removed") { !FileManager.default.fileExists(atPath: capture.path) }
+        #expect(harness.persistedFiles().allSatisfy { $0.pathExtension != "wav" && !$0.lastPathComponent.hasSuffix(".capture.json") })
+    }
+
+    @Test func aRecordingThatCouldNotStartLeavesNoEmptyNoteBehind() async throws {
+        let harness = try await LiveSessionHarness()
+        defer { try? FileManager.default.removeItem(at: harness.root) }
+        harness.instance.set(title: "")
+        harness.input.failsToStart = true
+        await harness.controller.start(note: try await harness.note())
+        let ref = try #require(harness.controller.ref(harness.instance.noteID))
+        #expect(harness.controller.error == "Recording could not start. Check that a microphone is available.")
+
+        // Something typed on the recording screen keeps the note, and nothing is asked of the server.
+        #expect(await harness.controller.discardIfNothingRecorded(ref, typedText: "Agenda") == false)
+        #expect(await harness.controller.discardIfNothingRecorded(ref, typedTitle: "Weekly sync") == false)
+        #expect(harness.instance.deletions.isEmpty)
+
+        // Nothing recorded and nothing typed: the note goes, and only if it is still as it was read.
+        #expect(await harness.controller.discardIfNothingRecorded(ref, typedTitle: " ", typedText: "\n"))
+        #expect(harness.instance.deletions == ["2026-11-14T10:00:00.000Z|0|"])
+        #expect(harness.server.state.notes.isEmpty)
+        #expect(harness.controller.activeNoteID == nil && harness.controller.error == nil)
+        // The server was told to stop before the note went.
+        #expect(harness.instance.count("POST", suffix: "/recording") == 2)
+    }
+
+    @Test func aNoteThatHoldsAnythingIsNeverDiscarded() async throws {
+        // Text or a title on the server's copy (typed on another device, say) keeps the note.
+        for (title, body) in [("", "Typed elsewhere"), ("Weekly sync", "")] {
+            let harness = try await LiveSessionHarness()
+            defer { try? FileManager.default.removeItem(at: harness.root) }
+            harness.instance.set(title: "")
+            harness.input.failsToStart = true
+            await harness.controller.start(note: try await harness.note())
+            harness.instance.set(title: title, body: body)
+            #expect(await harness.controller.discardIfNothingRecorded(harness.controller.ref(harness.instance.noteID)) == false)
+            #expect(harness.instance.deletions.isEmpty)
+        }
+
+        // A recording that did start, with audio and a transcript, is kept: while it runs and after Stop.
+        let harness = try await LiveSessionHarness(framesPerUtterance: 10)
+        defer { try? FileManager.default.removeItem(at: harness.root) }
+        harness.instance.set(title: "")
+        await harness.controller.start(note: try await harness.note())
+        let ref = try #require(harness.controller.ref(harness.instance.noteID))
+        _ = harness.input.feed(format: InjectedAudio.builtIn, from: 0, seconds: 2)
+        try await waitFor("live finals") { harness.controller.transcript?.segments.isEmpty == false }
+        #expect(await harness.controller.discardIfNothingRecorded(ref) == false)
+        harness.controller.stop()
+        try await waitFor("notes written") { !harness.controller.isGeneratingNotes(ref) }
+        #expect(await harness.controller.discardIfNothingRecorded(ref) == false)
+        #expect(harness.instance.deletions.isEmpty)
+
+        // The rule itself: any one thing on the note is enough to keep it.
+        func note(title: String = "", body: String = "", enhanced: String = "", duration: String = "0:00", revision: Int = 0,
+                  generated: Int? = nil, segments: [TranscriptSegmentDTO] = [], state: RecordingState = .stopped) -> NoteDTO {
+            NoteDTO(body: body, createdAt: "2026-11-14T10:00:00.000Z", date: "2026-11-14", duration: duration, enhanced: enhanced,
+                    generatedRevision: generated, generationState: .idle, id: "n", recordingState: state, title: title,
+                    transcriptRevision: revision, transcriptSegments: segments, updatedAt: "2026-11-14T10:00:00.000Z")
+        }
+        #expect(ServerRecordingController.holdsNothing(note()))
+        #expect(ServerRecordingController.holdsNothing(note(title: " New note ", state: .idle)))
+        for kept in [note(title: "Weekly sync"), note(body: "x"), note(enhanced: "## Summary"), note(duration: "0:03"),
+                     note(revision: 1), note(generated: 0), note(state: .recording)] {
+            #expect(!ServerRecordingController.holdsNothing(kept))
+        }
+        #expect(ServerRecordingController.stamp(note(revision: 3, generated: 2)) == "2026-11-14T10:00:00.000Z|3|2")
+    }
+
+    @Test func aCancellationIsNeverShownAsAnError() async throws {
+        #expect(ErrorText.shown(CancellationError()) == nil)
+        #expect(ErrorText.shown(URLError(.cancelled)) == nil)
+        #expect(ErrorText.shown(APIClientError.transport(.cancelled)) == nil)
+        #expect(ErrorText.shown(NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled)) == nil)
+        #expect(ErrorText.shown(APIClientError.notFound) == APIClientError.notFound.localizedDescription)
+        #expect(ErrorText.shown(URLError(.timedOut)) != nil)
+
+        // Starting a recording whose read of the note is cancelled says nothing, and records nothing.
+        let harness = try await LiveSessionHarness()
+        defer { try? FileManager.default.removeItem(at: harness.root) }
+        let note = try await harness.note()
+        let start = Task { await harness.controller.start(note: note) }
+        start.cancel()
+        await start.value
+        #expect(harness.controller.error == nil)
+        #expect(!harness.controller.isCapturing)
+    }
+
+    @Test func stopWithNothingTranscribedAsksForNoNotesAndSaysSo() async throws {
+        let harness = try await LiveSessionHarness()
+        defer { try? FileManager.default.removeItem(at: harness.root) }
+        // The server takes no stream for this note, so nothing is transcribed while audio is captured.
+        harness.live.refusal = .refused(status: 409)
+        await harness.controller.start(note: try await harness.note())
+        let ref = try #require(harness.controller.ref(harness.instance.noteID))
+        _ = harness.input.feed(format: InjectedAudio.builtIn, from: 0, seconds: 2)
+        try await waitFor("stream refused") { harness.controller.transcript?.status == .unavailable(.notRecording) }
+        #expect(LiveStatusText.line(.unavailable(.notRecording)) != nil)
+
+        harness.controller.stop()
+        #expect(harness.controller.isGeneratingNotes(ref))
+        try await waitFor("settled") { !harness.controller.isGeneratingNotes(ref) }
+        #expect(harness.instance.count("POST", suffix: "/recording") == 2)
+        // Generate was never asked for, nothing hangs, and the note says why it has no notes.
+        #expect(harness.instance.generations.isEmpty)
+        #expect(harness.controller.error == nil)
+        let shown = try #require(harness.server.state.notes.first { $0.id == ref.id })
+        #expect(ServerRecordingController.endedWithoutTranscript(shown))
+        #expect(ServerRecordingController.noTranscript == "No transcript was captured for this recording.")
+        #expect(harness.instance.audioRequests == 0)
+    }
+
+    @Test func notesThatCannotBeWrittenEndTheBusyStateAndSayWhy() async throws {
+        let harness = try await LiveSessionHarness(framesPerUtterance: 10)
+        defer { try? FileManager.default.removeItem(at: harness.root) }
+        harness.instance.set(generate: 503)
+        await harness.controller.start(note: try await harness.note())
+        let ref = try #require(harness.controller.ref(harness.instance.noteID))
+        _ = harness.input.feed(format: InjectedAudio.builtIn, from: 0, seconds: 3)
+        try await waitFor("live finals") { harness.controller.transcript?.segments.isEmpty == false }
+        harness.controller.stop()
+        try await waitFor("settled") { !harness.controller.isGeneratingNotes(ref) }
+        #expect(harness.instance.generations.count == 1)
+        #expect(harness.controller.error?.hasPrefix("Notes could not be generated.") == true)
+        // The note can be generated by hand: it is stopped, has a transcript and no notes for it.
+        let shown = try #require(harness.server.state.notes.first { $0.id == ref.id })
+        #expect(shown.recordingState == .stopped && shown.transcriptRevision > 0 && shown.generatedRevision == nil)
+    }
+
+    @Test func aLiveStreamTheServerTurnsAwayKeepsTryingAndLosesNothingWhenItIsTaken() async throws {
+        let harness = try await LiveSessionHarness(framesPerUtterance: 10)
+        defer { try? FileManager.default.removeItem(at: harness.root) }
+        // The provider is down when the meeting starts.
+        harness.live.refusal = .refused(status: 503)
+        await harness.controller.start(note: try await harness.note())
+        let transcript = try #require(harness.controller.transcript)
+        var time = harness.input.feed(format: InjectedAudio.builtIn, from: 0, seconds: 1)
+        try await waitFor("turned away") { transcript.status == .providerUnavailable }
+        #expect(LiveStatusText.line(.providerUnavailable) == "Live transcript paused · audio is saved on this iPhone")
+        time = harness.input.feed(format: InjectedAudio.builtIn, from: time, seconds: 1)
+        // It comes back: the stream connects and sends everything captured meanwhile, from the first sample.
+        harness.live.refusal = nil
+        try await waitFor("caught up", timeout: .seconds(10)) { harness.live.counts.samples == harness.controller.recorder.capturedFrames && transcript.status == .live }
+        #expect(harness.live.counts.connections == 1)
+        // Everything in the file so far; the converter's last few milliseconds reach it at Stop.
+        #expect(harness.controller.recorder.capturedFrames >= 2 * 16_000 - 400)
+        _ = time
+        harness.controller.stop()
+        #expect(harness.controller.recorder.capturedFrames == 2 * 16_000)
+        try await waitFor("notes") { harness.instance.generations.count == 1 }
     }
 
     @Test func aLiveSessionShowsInterimThenFinalTextAndHandsOverItsLastWordsBeforeStop() async throws {
@@ -397,7 +560,6 @@ struct LiveCaptureSessionTests {
         time = harness.input.feed(format: InjectedAudio.builtIn, from: time, seconds: 1)
         try await waitFor("interim text") { transcript.utterances.first?.text.contains(ScriptedLiveServer.interimMarker) == true }
         #expect(transcript.segments.isEmpty)
-        #expect(harness.controller.status == "Recording on device · Live transcript")
         #expect(transcript.status == .live)
         let line = try #require(transcript.lines.first?.id)
 
@@ -427,9 +589,9 @@ struct LiveCaptureSessionTests {
         #expect(transcript.utterances.isEmpty)
         #expect(transcript.segments.count == harness.live.counts.finals)
         #expect(transcript.status == .ended)
-        // The one durable part still went out: the live stream never replaces it.
-        try await waitFor("part") { harness.instance.allUploads.count == 1 }
-        #expect(harness.instance.allUploads[0].audio.count == 44 + Int(3.7 * 32_000))
+        // The notes are then written from what the stream stored.
+        try await waitFor("notes") { harness.instance.generations == [harness.instance.transcriptRevision] }
+        #expect(harness.instance.audioRequests == 0)
     }
 
     @Test func anInterruptionEndsTheStreamAtTheCaptureLengthAndALaterStopSaysNothingMore() async throws {
@@ -483,7 +645,6 @@ struct LiveCaptureSessionTests {
         var time = harness.input.feed(format: InjectedAudio.builtIn, from: 0, seconds: 2)
         try await waitFor("live") { transcript.status == .live && !transcript.utterances.isEmpty }
         try await Task.sleep(for: .milliseconds(400)) // first layout
-        let journalWritesBefore = harness.controller.outboxJournalWrites
         let before = harness.live.counts
         PerfProbe.reset()
         let began = ContinuousClock.now
@@ -496,9 +657,6 @@ struct LiveCaptureSessionTests {
             try await waitFor("stream at \(second)") { harness.live.counts.samples >= target - 1_600 }
             try await Task.sleep(for: .milliseconds(12))
         }
-        // Nineteen boundaries were crossed while recording. The twentieth lies on the very last
-        // sample, which is in the file only once Stop has drained the converter.
-        try await waitFor("parts uploaded") { harness.instance.allUploads.count == 19 }
         try await Task.sleep(for: .milliseconds(300))
         let wall = ContinuousClock.now - began
         let after = harness.live.counts
@@ -510,14 +668,13 @@ struct LiveCaptureSessionTests {
             "LiveTailFollower.body", "LiveStatusLine.body", "RecorderTimer.body", "Test.TranscriptHost.body",
             "Capture.Write", "Capture.Header", "Captures.Save",
         ].reduce(into: [String: Int]()) { $0[$1] = PerfProbe.count($1) }
-        let journalWrites = harness.controller.outboxJournalWrites - journalWritesBefore
         // Saves of the typed note during the session (opening the screen saves once, before it).
         let patches = harness.instance.allRequests.filter { $0.method == "PATCH" && $0.at > began }.count
         print("""
         LIVE-SESSION-MEASUREMENT simulated=600s wall=\(wall) interims=\(interims) finals=\(finals) frames=\(after.frames - before.frames) \
-        parts=\(harness.instance.allUploads.count) outboxJournalWrites=\(journalWrites) notePatches=\(patches) \
+        notePatches=\(patches) \
         noteReads=\(harness.instance.allRequests.filter { $0.method == "GET" && $0.path.hasSuffix("/notes/\(noteID)") && $0.at > began }.count) \
-        chunkLists=\(harness.instance.allRequests.filter { $0.method == "GET" && $0.path.hasSuffix("/audio/chunks") && $0.at > began }.count) \
+        audioRequests=\(harness.instance.audioRequests) \
         \(counts.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " "))
         """)
 
@@ -537,11 +694,11 @@ struct LiveCaptureSessionTests {
         #expect(counts["LiveStatusLine.body"]! <= 6)
 
         // Writes. The capture file grows by one small append per input buffer and one header
-        // refresh a second; the delivery journal and the capture ledger move once per part.
+        // refresh a second; the capture ledger does not move while recording.
         #expect(counts["Capture.Header"]! <= 600)
         #expect(counts["Capture.Write"]! <= 600 * 13)
-        #expect(journalWrites <= 2 * 19 + 2)
         #expect(counts["Captures.Save"]! <= 2)
+        #expect(harness.instance.audioRequests == 0)
         // Nothing the user typed was saved because of the transcript, and no interim text was written anywhere.
         #expect(patches == 0)
         for file in harness.persistedFiles() where file.pathExtension == "json" {
@@ -549,15 +706,11 @@ struct LiveCaptureSessionTests {
         }
 
         harness.controller.stop()
-        try await waitFor("Stop") { harness.instance.count("POST", suffix: "/recording") == 2 && harness.instance.allUploads.count == 20 }
+        try await waitFor("Stop and notes") { harness.instance.count("POST", suffix: "/recording") == 2 && harness.instance.generations.count == 1 }
         #expect(harness.controller.recorder.capturedFrames == 600 * 16_000)
-        // The ten minutes arrived as twenty contiguous parts that join to the capture byte for byte.
-        let uploads = harness.instance.allUploads.sorted { $0.sequence < $1.sequence }
-        #expect(uploads.map(\.startMs) == (0..<20).map { $0 * 30_000 })
-        let capture = try #require(harness.persistedFiles().first { $0.lastPathComponent == "capture-0.wav" })
-        var joined = Data()
-        for upload in uploads { joined.append(upload.audio.dropFirst(44)) }
-        #expect(joined == (try Data(contentsOf: capture).dropFirst(44)))
+        // All ten minutes reached the server through the stream alone, every sample once.
+        #expect(harness.live.counts.samples == 600 * 16_000)
+        #expect(harness.instance.audioRequests == 0)
     }
 }
 
@@ -590,15 +743,15 @@ struct LiveStatusTextTests {
         #expect(LiveStatusText.line(.ended) == nil)
         #expect(LiveStatusText.line(.catchingUp(lagMs: 4_000)) == "Catching up…")
         #expect(LiveStatusText.line(.catchingUp(lagMs: 18_000)) == "Catching up · about 18 s behind")
-        #expect(LiveStatusText.line(.providerUnavailable) == "Live transcript paused · audio is still being recorded")
-        #expect(LiveStatusText.line(.reconnecting) == "Reconnecting…")
+        #expect(LiveStatusText.line(.providerUnavailable) == "Live transcript paused · audio is saved on this iPhone")
+        #expect(LiveStatusText.line(.reconnecting) == "Reconnecting · audio is saved on this iPhone")
         #expect(LiveStatusText.line(.paused) == "Paused")
-        #expect(LiveStatusText.line(.lowDataMode) == "Live transcript is off in Low Data Mode")
-        // Not configured is not a failure and says nothing; a limit or an outage says one quiet line.
-        #expect(LiveStatusText.line(.unavailable(.notConfigured)) == nil)
-        #expect(LiveStatusText.line(.unavailable(.overLimit)) == "Live transcript unavailable · text follows from the saved audio")
-        #expect(LiveStatusText.line(.unavailable(.providerUnavailable)) == "Live transcript unavailable · text follows from the saved audio")
-        #expect(LiveStatusText.isStreaming(.live) && LiveStatusText.isStreaming(.reconnecting))
-        #expect(!LiveStatusText.isStreaming(.unavailable(.notConfigured)) && !LiveStatusText.isStreaming(.off))
+        // The stream is the only transcript: when it has ended for good, that is said, never left silent.
+        #expect(LiveStatusText.line(.unavailable(.unauthorized)) == "Live transcript stopped · sign in again to transcribe")
+        for reason in [LiveUnavailableReason.notFound, .notRecording, .replaced, .protocolError] {
+            #expect(LiveStatusText.line(.unavailable(reason)) == "Live transcript stopped · speech is no longer transcribed")
+        }
+        #expect(LiveStatusText.isStreaming(.live) && LiveStatusText.isStreaming(.reconnecting) && LiveStatusText.isStreaming(.providerUnavailable))
+        #expect(!LiveStatusText.isStreaming(.unavailable(.notRecording)) && !LiveStatusText.isStreaming(.off))
     }
 }

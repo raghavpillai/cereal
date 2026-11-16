@@ -19,7 +19,6 @@
             "type": "string",
             "enum": [
               "language",
-              "transcription",
               "live_transcription"
             ]
           }

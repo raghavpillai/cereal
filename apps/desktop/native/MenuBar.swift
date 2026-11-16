@@ -1,10 +1,10 @@
 // The parts of Cereal that belong to macOS rather than to its window: the
-// menu bar item and its menu, meeting reminders, the login item and whether
-// the app is in the Dock. Rust decides everything that is shown (see
-// `src/menubar.rs`); this file draws it and reports what was chosen.
+// menu bar item and its menu, the login item and whether the app is in the
+// Dock. Rust decides everything that is shown (see `src/menubar.rs`); this
+// file draws it and reports what was chosen. Notifications are in
+// `Notifications.swift`.
 import AppKit
 import ServiceManagement
-import UserNotifications
 
 /// Called on the main thread with a command and its argument.
 public typealias CerealShellCallback = @convention(c) @Sendable (UnsafePointer<CChar>, UnsafePointer<CChar>) -> Void
@@ -24,22 +24,6 @@ private struct ShellModel: Decodable, Sendable {
     let title: String?
     let tooltip: String
     let items: [ShellEntry]
-}
-
-private struct ReminderEntry: Decodable, Sendable {
-    let id: String
-    let title: String
-    let body: String
-    /// Seconds since 1970.
-    let fireAt: Double
-    let eventId: String
-    /// The account the event was read through. Absent before accounts.
-    let account: String?
-}
-
-private struct ReminderChange: Decodable, Sendable {
-    let remove: [String]
-    let add: [ReminderEntry]
 }
 
 /// The outlines of Cereal's mark, read from the path of its SVG icon: only
@@ -64,7 +48,7 @@ private func markOutlines(_ path: String) -> [[CGPoint]] {
 }
 
 @MainActor
-private final class MenuBar: NSObject {
+final class MenuBar: NSObject {
     static let shared = MenuBar()
     private var item: NSStatusItem?
     private var callback: CerealShellCallback?
@@ -113,7 +97,7 @@ private final class MenuBar: NSObject {
         self.item = item
     }
 
-    func update(_ model: ShellModel) {
+    fileprivate func update(_ model: ShellModel) {
         guard let item else { return }
         if let button = item.button {
             button.title = model.title.map { " " + $0 } ?? ""
@@ -194,115 +178,7 @@ private final class MenuBar: NSObject {
     }
 }
 
-/// Meeting reminders, delivered by macOS at the time Rust planned for each.
-@MainActor
-private final class Reminders: NSObject, UNUserNotificationCenterDelegate {
-    static let shared = Reminders()
-
-    /// Notifications belong to an app bundle; a bare executable has none.
-    var available: Bool {
-        Bundle.main.bundleURL.pathExtension == "app" && Bundle.main.bundleIdentifier != nil
-    }
-
-    func listen() {
-        guard available else { return }
-        UNUserNotificationCenter.current().delegate = self
-    }
-
-    private func report(_ status: UNAuthorizationStatus) {
-        let word: String
-        switch status {
-        case .authorized, .provisional: word = "granted"
-        case .denied: word = "denied"
-        default: word = "undetermined"
-        }
-        MenuBar.shared.send("notifications", word)
-    }
-
-    /// Say what macOS allows now, without asking.
-    func status() {
-        guard available else {
-            MenuBar.shared.send("notifications", "unavailable")
-            return
-        }
-        UNUserNotificationCenter.current().getNotificationSettings { settings in
-            let status = settings.authorizationStatus
-            DispatchQueue.main.async { MainActor.assumeIsolated { Reminders.shared.report(status) } }
-        }
-    }
-
-    /// Ask macOS for permission (it asks the user only the first time).
-    func request() {
-        guard available else {
-            MenuBar.shared.send("notifications", "unavailable")
-            return
-        }
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    MenuBar.shared.send("notifications", granted ? "granted" : "denied")
-                }
-            }
-        }
-    }
-
-    func apply(_ change: ReminderChange) {
-        guard available else { return }
-        let center = UNUserNotificationCenter.current()
-        if !change.remove.isEmpty {
-            center.removePendingNotificationRequests(withIdentifiers: change.remove)
-        }
-        for reminder in change.add {
-            let content = UNMutableNotificationContent()
-            content.title = reminder.title
-            content.body = reminder.body
-            content.sound = .default
-            content.userInfo = ["eventId": reminder.eventId, "account": reminder.account ?? ""]
-            let wait = reminder.fireAt - Date().timeIntervalSince1970
-            let trigger: UNNotificationTrigger
-            if wait <= 2 {
-                trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
-            } else {
-                // A date, so the reminder keeps its time across sleep.
-                let parts = Calendar.current.dateComponents(
-                    [.year, .month, .day, .hour, .minute, .second],
-                    from: Date(timeIntervalSince1970: reminder.fireAt))
-                trigger = UNCalendarNotificationTrigger(dateMatching: parts, repeats: false)
-            }
-            center.add(UNNotificationRequest(identifier: reminder.id, content: content, trigger: trigger))
-        }
-    }
-
-    func clear() {
-        guard available else { return }
-        UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
-    }
-
-    nonisolated func userNotificationCenter(
-        _ center: UNUserNotificationCenter, willPresent notification: UNNotification,
-        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
-    ) {
-        // A reminder is shown even while Cereal is the app in front.
-        completionHandler([.banner, .sound])
-    }
-
-    nonisolated func userNotificationCenter(
-        _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
-        withCompletionHandler completionHandler: @escaping () -> Void
-    ) {
-        let info = response.notification.request.content.userInfo
-        let event = info["eventId"] as? String ?? ""
-        let account = info["account"] as? String ?? ""
-        // A reminder names its account: "<account>/<event>".
-        let target = account.isEmpty ? event : account + "/" + event
-        DispatchQueue.main.async {
-            MainActor.assumeIsolated { MenuBar.shared.send("open-event", target) }
-        }
-        completionHandler()
-    }
-}
-
-private func decoded<T: Decodable>(_ type: T.Type, _ json: UnsafePointer<CChar>) -> T? {
+func decoded<T: Decodable>(_ type: T.Type, _ json: UnsafePointer<CChar>) -> T? {
     try? JSONDecoder().decode(type, from: Data(String(cString: json).utf8))
 }
 
@@ -314,7 +190,7 @@ public func cerealMenuBarInstall(
     let name = String(cString: name)
     MainActor.assumeIsolated {
         MenuBar.shared.install(markPath: path, name: name, callback: callback)
-        Reminders.shared.listen()
+        Notifications.shared.listen()
     }
 }
 
@@ -351,28 +227,6 @@ public func cerealAppSetDockVisible(_ visible: Bool) {
         }
         if !visible { NSApp.deactivate() }
     }
-}
-
-@_cdecl("cereal_notifications_status")
-public func cerealNotificationsStatus() {
-    MainActor.assumeIsolated { Reminders.shared.status() }
-}
-
-@_cdecl("cereal_notifications_request")
-public func cerealNotificationsRequest() {
-    MainActor.assumeIsolated { Reminders.shared.request() }
-}
-
-@_cdecl("cereal_notifications_apply")
-public func cerealNotificationsApply(_ json: UnsafePointer<CChar>) -> Bool {
-    guard let change = decoded(ReminderChange.self, json) else { return false }
-    MainActor.assumeIsolated { Reminders.shared.apply(change) }
-    return true
-}
-
-@_cdecl("cereal_notifications_clear")
-public func cerealNotificationsClear() {
-    MainActor.assumeIsolated { Reminders.shared.clear() }
 }
 
 /// The login item's state: 0 not registered, 1 enabled, 2 waiting for

@@ -7,13 +7,14 @@ import { InputData, JSONSchemaInput, JSONSchemaStore, quicktype } from "quicktyp
 import { MeetingsApi } from "../src/api"
 import { WireSchemas } from "../src/index"
 import { LiveWireSchemas } from "../src/live"
+import { ChatWireSchemas } from "../src/chats"
 import { pruneObsoleteSchemas } from "./generated-artifacts"
 
 const root = resolve(import.meta.dir, "../../..")
 const generated = resolve(root, "packages/contracts/generated")
 await mkdir(resolve(generated, "json-schema"), { recursive: true })
 // The live transcription socket's messages (src/live.ts) are generated with the HTTP DTOs, one root per message.
-const documents = Object.entries({ ...WireSchemas, ...LiveWireSchemas }).map(([name, schema]) => ({ name, document: Schema.toJsonSchemaDocument(schema) }))
+const documents = Object.entries({ ...WireSchemas, ...LiveWireSchemas, ...ChatWireSchemas }).map(([name, schema]) => ({ name, document: Schema.toJsonSchemaDocument(schema) }))
 for (const { name, document } of documents) {
   await writeFile(resolve(generated, "json-schema", `${name}.json`), JSON.stringify({ $schema: "https://json-schema.org/draft/2020-12/schema", ...document.schema, $defs: document.definitions }, null, 2) + "\n")
 }

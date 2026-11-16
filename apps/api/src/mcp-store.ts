@@ -2,6 +2,7 @@ import {Schema} from "effect"
 import type {Database} from "@meeting-notes/database"
 import {MeetingContextDTO,type NoteDTO} from "@meeting-notes/contracts"
 import {noteDTO} from "./prisma-repository"
+import {SUMMARY_TEXT_SQL,withoutTranscriptLink} from "./transcript-link"
 import {meetingSearchTerms,transcriptPassage} from "./meeting-search"
 
 const DEFAULT_WORKSPACE="00000000-0000-4000-8000-000000000002"
@@ -9,7 +10,7 @@ export interface McpOwnerScope {userId:string;workspaceId:string}
 export class McpStoreError extends Error {
   constructor(readonly code:"not_found"|"forbidden"|"conflict"|"invalid_arguments"|"unavailable",message:string){super(message);this.name="McpStoreError"}
 }
-const missing=()=>new McpStoreError("not_found","Meeting, folder or attachment not found in this private workspace.")
+const missing=()=>new McpStoreError("not_found","Meeting or attachment not found in this private workspace.")
 const order=[{startMs:"asc" as const},{id:"asc" as const}]
 const scoped=(scope:McpOwnerScope)=>({ownerId:scope.userId,organizationId:scope.workspaceId})
 const cursor=(value:unknown)=>Buffer.from(JSON.stringify(value)).toString("base64url")
@@ -33,7 +34,7 @@ function meetingContext(value:unknown) {
   }catch{return null}
 }
 const dateString=(value:Date)=>value.toISOString().slice(0,10)
-export interface McpMeetingSearch {query?:string;from?:string;to?:string;attendee?:string;company?:string;folderId?:string;limit:number;cursor?:string;includeTranscriptMatch?:boolean}
+export interface McpMeetingSearch {query?:string;from?:string;to?:string;attendee?:string;company?:string;limit:number;cursor?:string;includeTranscriptMatch?:boolean}
 
 /** Creation helper also used by native API writes. Existing API reads remain
  * owner-only; only MCP additionally narrows to this explicit organization. */
@@ -50,7 +51,7 @@ export function createMcpStore(db:Database) {
   }
   async function ownedNote(scope:McpOwnerScope,id:string) {
     await assertScope(scope)
-    const note=await db.note.findFirst({where:{id,...scoped(scope)},include:{transcriptSegments:{orderBy:order},meetingContext:true,attachments:{select:{id:true,name:true,mimeType:true,createdAt:true}},folderLinks:{select:{folderId:true}}}})
+    const note=await db.note.findFirst({where:{id,...scoped(scope)},include:{transcriptSegments:{orderBy:order},meetingContext:true,attachments:{select:{id:true,name:true,mimeType:true,createdAt:true}}}})
     if(!note)throw missing()
     return note
   }
@@ -62,7 +63,6 @@ export function createMcpStore(db:Database) {
     const clauses=[`n."ownerId"=${bind(scope.userId)}::uuid`,`n."organizationId"=${bind(scope.workspaceId)}::uuid`]
     if(input.from)clauses.push(`n."date">=${bind(input.from)}::date`)
     if(input.to)clauses.push(`n."date"<=${bind(input.to)}::date`)
-    if(input.folderId)clauses.push(`EXISTS(SELECT 1 FROM "MeetingFolderNote" fn JOIN "MeetingFolder" f ON f.id=fn."folderId" WHERE fn."noteId"=n.id AND f.id=${bind(input.folderId)}::uuid AND f."ownerId"=n."ownerId" AND f."organizationId"=n."organizationId")`)
     const pattern=(value:string)=>`%${value.replace(/[\\%_]/g,"\\$&")}%`
     for(const value of [input.attendee,input.company].filter((v):v is string=>!!v)){
       const parameter=bind(pattern(value))
@@ -72,7 +72,7 @@ export function createMcpStore(db:Database) {
     if(terms.length){
       const alternatives=terms.map(term=>{
         const p=bind(pattern(term))
-        return transcripts?`s.text ILIKE ${p} ESCAPE '\\'`:`(n.title ILIKE ${p} ESCAPE '\\' OR n.body ILIKE ${p} ESCAPE '\\' OR n.enhanced ILIKE ${p} ESCAPE '\\'${input.includeTranscriptMatch?` OR EXISTS(SELECT 1 FROM "TranscriptSegment" t WHERE t."noteId"=n.id AND t.text ILIKE ${p} ESCAPE '\\')`:""})`
+        return transcripts?`s.text ILIKE ${p} ESCAPE '\\'`:`(n.title ILIKE ${p} ESCAPE '\\' OR n.body ILIKE ${p} ESCAPE '\\' OR ${SUMMARY_TEXT_SQL("n")} ILIKE ${p} ESCAPE '\\'${input.includeTranscriptMatch?` OR EXISTS(SELECT 1 FROM "TranscriptSegment" t WHERE t."noteId"=n.id AND t.text ILIKE ${p} ESCAPE '\\')`:""})`
       })
       clauses.push(`(${alternatives.join(" OR ")})`)
     }else if(transcripts)return {ids:[] as string[],offset:0}
@@ -112,7 +112,7 @@ export function createMcpStore(db:Database) {
     },
     async getMeetings(scope:McpOwnerScope,ids:ReadonlyArray<string>) {
       const meetings=[]
-      for(const id of ids){const note=await ownedNote(scope,id);meetings.push({...metadata(note),privateNotes:note.body,summary:note.enhanced,generationState:note.generationState,generatedRevision:note.generatedRevision,attachments:note.attachments.map(file=>({...file,createdAt:file.createdAt.toISOString()})),folderIds:note.folderLinks.map(link=>link.folderId)})}
+      for(const id of ids){const note=await ownedNote(scope,id);meetings.push({...metadata(note),privateNotes:note.body,summary:withoutTranscriptLink(note.id,note.enhanced),generationState:note.generationState,generatedRevision:note.generatedRevision,attachments:note.attachments.map(file=>({...file,createdAt:file.createdAt.toISOString()}))})}
       return {meetings,workspaceId:scope.workspaceId,access:"private-owned-only"}
     },
     async searchTranscripts(scope:McpOwnerScope,input:McpMeetingSearch) {
@@ -141,30 +141,6 @@ export function createMcpStore(db:Database) {
         if(end<segment.text.length){nextCursor=cursor({...scope,kind:"full-transcript",noteId:id,snapshot,revision:note.transcriptRevision,index:index+row,offset:end,from});break}
       }
       return {noteId:id,title:note.title,transcriptRevision:note.transcriptRevision,segments,nextCursor,startsAroundMs:input.startMs??null,workspaceId:scope.workspaceId,speakerIdentityPolicy:"Speaker IDs are local to source channel and recording part; matching labels do not identify the same person."}
-    },
-    async listFolders(scope:McpOwnerScope) {
-      await assertScope(scope)
-      const folders=await db.meetingFolder.findMany({where:{ownerId:scope.userId,organizationId:scope.workspaceId},orderBy:[{createdAt:"asc"},{id:"asc"}],take:200,include:{_count:{select:{notes:{where:{note:scoped(scope)}}}}}})
-      return {folders:folders.map(folder=>({id:folder.id,title:folder.name,description:folder.description,noteCount:folder._count.notes,access:"private-owner-only"})),limit:200,workspaceId:scope.workspaceId}
-    },
-    async createFolder(scope:McpOwnerScope,name:string,description:string) {
-      await assertScope(scope)
-      return db.meetingFolder.create({data:{ownerId:scope.userId,organizationId:scope.workspaceId,name,description},select:{id:true,name:true,description:true}})
-    },
-    async updateFolder(scope:McpOwnerScope,id:string,input:{name?:string;description?:string}) {
-      await assertScope(scope)
-      const changed=await db.meetingFolder.updateMany({where:{id,ownerId:scope.userId,organizationId:scope.workspaceId},data:input})
-      if(!changed.count)throw missing()
-      return db.meetingFolder.findUniqueOrThrow({where:{id},select:{id:true,name:true,description:true}})
-    },
-    async folderNote(scope:McpOwnerScope,folderId:string,noteId:string,add:boolean) {
-      await assertScope(scope)
-      return db.$transaction(async tx=>{
-        if(!await tx.meetingFolder.findFirst({where:{id:folderId,ownerId:scope.userId,organizationId:scope.workspaceId}})||!await tx.note.findFirst({where:{id:noteId,...scoped(scope)},select:{id:true}}))throw missing()
-        if(add)await tx.meetingFolderNote.upsert({where:{folderId_noteId:{folderId,noteId}},create:{folderId,noteId},update:{}})
-        else await tx.meetingFolderNote.deleteMany({where:{folderId,noteId}})
-        return {folderId,noteId,inFolder:add,sharingChanged:false,access:"private-owner-only"}
-      })
     },
     async updatePrivateNotes(scope:McpOwnerScope,id:string,text:string,position:"append"|"prepend") {
       await assertScope(scope)

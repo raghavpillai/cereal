@@ -31,20 +31,25 @@ impl Cereal {
     /// Preserve capture state before assigning a new recording owner. This never
     /// generates notes, and invalidates generation callbacks from the old context.
     pub fn finish_recording_preview(&mut self, cx: &mut Context<Self>) {
-        if crate::server::enabled()
-            && self.recording.is_active()
-            && let Some(id) = self.recording.note_id
-        {
-            self.server_action(id, crate::server::Action::Recording("stop"), cx);
-        }
+        let stopped = self
+            .recording
+            .note_id
+            .filter(|_| crate::server::enabled() && self.recording.is_active());
         if let Some(capture) = self.audio_capture.take() {
             capture.request_stop();
         }
-        // The live transcript stream sends what is left and marks the end.
-        self.live_end();
+        // The live transcript stream sends what is left; the server is told
+        // the recording stopped once it has all of it (at the next launch,
+        // if the app is quitting now).
+        if stopped.is_none() {
+            self.live_end();
+        }
         if self.recording.note_id.is_some() {
             self.recording.stop();
             self.save_recording_preview(cx);
+        }
+        if let Some(id) = stopped {
+            self.live_stop(id, crate::model::PendingStop::Stop, cx);
         }
         self.recording.reset();
         self.recording_transcript_start = None;
@@ -106,6 +111,10 @@ impl Cereal {
         self.generation.cancel();
         self.regeneration_notice_dismissed = None;
         if let Some(note) = self.workspace.note_mut(id) {
+            // Recording again: a Stop still waiting for the last capture to
+            // be delivered is no longer wanted (that capture is still
+            // delivered, before the new one streams).
+            note.pending_stop = None;
             note.normalize_generation_revision();
             self.recording_transcript_start =
                 Some((note.transcript_revision, note.transcript.clone()));
@@ -185,11 +194,18 @@ impl Cereal {
         if let Some(capture) = self.audio_capture.take() {
             capture.request_stop();
         }
-        // The live transcript stream sends what is left and marks the end;
-        // the durable upload below is unchanged.
-        self.live_end();
         if let Some(id) = self.recording.note_id {
-            self.server_action(id, crate::server::Action::Recording("stop"), cx);
+            if crate::server::enabled() {
+                // On to the notes: the stream delivers what the server does
+                // not have yet ("Finishing the transcript…"), then the server
+                // is told to stop and the notes are written from the live
+                // transcript. No audio goes up.
+                self.active_tab = NoteTab::Enhanced;
+            }
+            self.live_stop(id, crate::model::PendingStop::Generate, cx);
+            self.recording_stopped_by_person(id, cx);
+        } else {
+            self.live_end();
         }
         self.recording_changed_at = Some(Instant::now());
         self.menu = None;
@@ -228,8 +244,12 @@ impl Cereal {
         let initial = monitor.snapshot();
         if let Some(note) = self.workspace.note_mut(id) {
             note.audio_captures.push(initial.clone());
-            // Unsent until an upload of it has been answered.
+            // Unsent until the server has confirmed its Stop, and owed to
+            // the server until its stream has delivered all of it.
             note.unsent_capture = crate::server::enabled();
+            if crate::server::enabled() {
+                note.live_pending.push(initial.capture_id.clone());
+            }
         }
         self.audio_capture = Some(capture);
         // Persist the immutable session directory association before any speech
@@ -278,6 +298,7 @@ impl Cereal {
                     if current && owner && this.recording.is_active() {
                         if snapshot.stats.has_audio() && this.recording.phase == Phase::Starting {
                             this.recording.activate(epoch);
+                            this.recording_went_live(id, epoch, snapshot.error_message());
                         }
                         this.recording.set_audio_levels(
                             snapshot.stats.mic.level,
@@ -286,6 +307,7 @@ impl Cereal {
                         if let Some(error) = snapshot.error_message()
                             && this.audio_error.as_ref() != Some(&error)
                         {
+                            this.notify_recording_lost(id, epoch, &error, cx);
                             this.audio_error = Some(error);
                         }
                     }
@@ -312,8 +334,8 @@ impl Cereal {
                         }
                         if current {
                             this.audio_capture = None;
-                            if owner && this.recording.is_active() {
-                                this.recording.fail(epoch);
+                            if owner && this.recording.is_active() && this.recording.fail(epoch) {
+                                this.notify_recording_stopped(id, epoch, snapshot.error_message().as_deref());
                             }
                         }
                         if (owner
@@ -377,14 +399,20 @@ impl Cereal {
             return;
         }
         if crate::server::enabled() {
-            if self.server_pending > 0 {
-                self.show_toast(
-                    "Wait for audio transcription to finish before generating notes",
-                    cx,
-                );
+            self.active_tab = NoteTab::Enhanced;
+            // A capture still being delivered is waited for: the notes are
+            // asked for once the server has all of it.
+            let owed = self.live.delivering(id)
+                || self.workspace.note(id).is_some_and(|note| !note.live_pending.is_empty());
+            if owed {
+                if let Some(note) = self.workspace.note_mut(id) {
+                    note.pending_stop = Some(crate::model::PendingStop::Generate);
+                }
+                self.live_deliver(id, None, cx);
+                cx.notify();
                 return;
             }
-            self.active_tab = NoteTab::Enhanced;
+            self.notifications_first_need(crate::notifications::Kind::Notes, cx);
             self.server_action(id, crate::server::Action::Generate, cx);
             return;
         }
@@ -477,8 +505,10 @@ impl Cereal {
             && live
             && self.recording.transcription_attention == TranscriptionAttention::Warning;
         let processing = self.generation.is_running_for(id);
-        let hover: Hsla = if t.bg.l < 0.5 {
-            rgba(0xffffff0f).into()
+        // The reference's faint highlight: 6% warm ink, or 4% white in dark.
+        let dark = t.bg.l < 0.5;
+        let hover: Hsla = if dark {
+            rgba(0xffffff0a).into()
         } else {
             rgba(0x625a220f).into()
         };
@@ -489,6 +519,10 @@ impl Cereal {
                 .workspace
                 .note(id)
                 .is_some_and(|note| !note.enhanced.trim().is_empty());
+        // A control after the indicator (Stop, Resume, Start now or Retry)
+        // joins it: the two share the capsule, each rounded concentrically
+        // on its outer side and tightly where they meet.
+        let joined = live || (!processing && !compact_complete && (scheduled.is_none() || open));
         let leading_label: SharedString = if open {
             "Hide transcript"
         } else {
@@ -498,13 +532,33 @@ impl Cereal {
         let leading = div()
             .id("show-transcript-button")
             .relative()
-            .w(px(48.))
-            .h(px(48.))
+            .w(px(if joined {
+                LEADING_JOINED
+            } else {
+                LEADING_ALONE
+            }))
+            .h(px(TILE))
             .flex_shrink_0()
-            .rounded(px(10.))
+            .map(|d| {
+                if joined {
+                    d.rounded_l(px(TILE_OUTER_RADIUS))
+                        .rounded_r(px(TILE_INNER_RADIUS))
+                } else {
+                    d.rounded_full()
+                }
+            })
             .reach()
             .cursor(CursorStyle::Arrow)
-            .child(crate::motion::tactile(hover).radius(10.))
+            .child(if joined {
+                crate::motion::tactile(hover).corners(
+                    TILE_OUTER_RADIUS,
+                    TILE_INNER_RADIUS,
+                    TILE_INNER_RADIUS,
+                    TILE_OUTER_RADIUS,
+                )
+            } else {
+                crate::motion::tactile(hover).round()
+            })
             .child(
                 div()
                     .absolute()
@@ -522,16 +576,17 @@ impl Cereal {
                                 shown,
                                 t,
                                 self.recording.audio_level(),
+                                joined,
                             )),
                             self.stage.swap(("footer-indicator", id), shown as u64),
                         )
                     }),
             )
             .child(
-                icon("chevron-down", 16., t.muted)
+                icon("footer-chevron", 16., t.muted)
                     .absolute()
-                    .left(px(28.))
-                    .top(px(16.))
+                    .left(px(chevron_left(joined)))
+                    .top(px((TILE - 16.) / 2.))
                     // One rotation value for the window, shared by the
                     // footer and in-panel capsules: it flips once when the
                     // transcript opens or closes and rests on every mount.
@@ -547,7 +602,7 @@ impl Cereal {
                             .rem_euclid(1.),
                     ))),
             )
-            .tooltip(move |_, cx| cx.new(|_| ToolTip::new(leading_label.clone(), t)).into())
+            .map(|d| self.bar_tip(d, TIP_TRANSCRIPT, leading_label.clone(), t, cx))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                     this.transcript_open = !this.transcript_open;
@@ -571,60 +626,71 @@ impl Cereal {
                         cx.notify();
                     })),
             );
-        let capsule_target = if processing || compact_complete {
-            58.
-        } else if let Some(label) = &scheduled {
-            // The label as it is drawn: 13 px in the body face.
-            let face = cx.text_system().resolve_font(&font(FONT));
-            let text: f32 = label
+        // Labels as they are drawn: 13 px in the body face.
+        let face = cx.text_system().resolve_font(&font(FONT));
+        let text_width = |label: &str| -> f32 {
+            label
                 .chars()
                 .map(|character| {
                     cx.text_system()
                         .advance(face, px(13.), character)
                         .map_or(7., |size| f32::from(size.width))
                 })
-                .sum();
-            scheduled_capsule_width(text, open)
+                .sum()
+        };
+        let trailing_label: SharedString = match phase {
+            Phase::Idle => "Start now".into(),
+            Phase::Held | Phase::Failed => "Retry".into(),
+            _ => "Resume".into(),
+        };
+        let capsule_target = if processing || compact_complete {
+            COMPACT_CAPSULE
+        } else if let Some(label) = &scheduled {
+            scheduled_capsule_width(text_width(label), open)
+        } else if live {
+            LIVE_CAPSULE
         } else {
-            capsule_width(phase)
+            labelled_capsule_width(text_width(&trailing_label))
         };
         let capsule_width = self
             .stage
             .aim(("recording-capsule", id), capsule_target, GOOEY)
-            .max(58.);
+            .max(COMPACT_CAPSULE);
         // The label only has room once the capsule is most of the way open, so
         // it fades in over the second half of the morph instead of being cut.
-        let label_fade = if capsule_target > 58. {
-            crate::motion::fade_curve(((capsule_width - 58.) / (capsule_target - 58.) - 0.5) / 0.5)
+        let label_fade = if capsule_target > COMPACT_CAPSULE {
+            crate::motion::fade_curve(
+                ((capsule_width - COMPACT_CAPSULE) / (capsule_target - COMPACT_CAPSULE) - 0.5)
+                    / 0.5,
+            )
         } else {
             1.
         };
         let mut capsule = div()
             .id("recording-capsule")
             .relative()
-            .h(px(58.))
+            .h(px(CAPSULE_HEIGHT))
             // Compact, expanded and processing are one capsule changing shape:
             // its width rides a spring between states (per note, so opening a
             // different note never animates).
             .w(px(capsule_width))
             .flex_shrink_0()
-            .p(px(4.))
+            .p(px(CAPSULE_INSET))
             .flex()
             .items_center()
-            .rounded(px(29.))
-            .border_1()
-            .border_color(t.border)
+            .rounded(px(CAPSULE_HEIGHT / 2.))
             .bg(t.card)
-            .shadow(vec![BoxShadow {
-                color: rgba(0x0000000d).into(),
-                offset: point(px(0.), px(4.)),
-                blur_radius: px(6.),
-                spread_radius: px(-2.),
-            }])
+            .when(!open && !attention, |s| bar_edge(s, t))
             .when(attention && !open, |s| {
+                // The warning tint has its own inset edge instead of the ring.
                 s.bg(rgba(0xed921233))
-                    .border(px(0.5))
-                    .border_color(t.warning_edge)
+                    .shadow(vec![BoxShadow {
+                        color: rgba(0x0000000d).into(),
+                        offset: point(px(0.), px(4.)),
+                        blur_radius: px(6.),
+                        spread_radius: px(-2.),
+                    }])
+                    .child(edge(crate::ui::hairline(0.5), 0., t.warning_edge))
                     .text_color(t.warning_ink)
             })
             .when(open, |s| {
@@ -635,11 +701,27 @@ impl Cereal {
             .child(leading);
         if live {
             capsule = capsule.child(
-                tool_tip("stop-transcript-button", "footer-stop", "Stop recording", t)
-                    .w(px(40.))
-                    .h(px(48.))
+                div()
+                    .id("stop-transcript-button")
+                    .relative()
+                    .w(px(TRAILING_MIN))
+                    .h(px(TILE))
                     .flex_shrink_0()
-                    .rounded(px(10.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .pr(px(TRAILING_END))
+                    .rounded_l(px(TILE_INNER_RADIUS))
+                    .rounded_r(px(TILE_OUTER_RADIUS))
+                    .child(crate::motion::tactile(hover).corners(
+                        TILE_INNER_RADIUS,
+                        TILE_OUTER_RADIUS,
+                        TILE_OUTER_RADIUS,
+                        TILE_INNER_RADIUS,
+                    ))
+                    .child(icon("footer-stop", 16., t.muted))
+                    .map(|d| self.bar_tip(d, TIP_STOP, "Stop recording".into(), t, cx))
+                    .reach()
                     .focusable()
                     .cursor(CursorStyle::Arrow)
                     .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
@@ -681,24 +763,22 @@ impl Cereal {
                         })),
                 );
             }
-            let label: SharedString = match phase {
-                Phase::Idle => "Start now".into(),
-                Phase::Held | Phase::Failed => "Retry".into(),
-                _ => "Resume".into(),
-            };
+            let label = trailing_label.clone();
             // A scheduled meeting offers "Start now" only in the open panel.
             if scheduled.is_none() || open {
             capsule = capsule.child(
                 div()
                     .id("start-transcript-button")
-                    .h(px(48.))
+                    .relative()
+                    .h(px(TILE))
                     .flex_1()
                     .min_w_0()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .pr(px(3.))
-                    .rounded(px(10.))
+                    .pr(px(TRAILING_END))
+                    .rounded_l(px(TILE_INNER_RADIUS))
+                    .rounded_r(px(TILE_OUTER_RADIUS))
                     .text_size(px(13.))
                     .line_height(px(16.))
                     .text_color(t.accent)
@@ -709,7 +789,12 @@ impl Cereal {
                     .opacity(if processing { 0.5 } else { label_fade })
                     .when(!processing, |s| {
                         s.focusable()
-                            .child(crate::motion::tactile(hover).radius(10.))
+                            .child(crate::motion::tactile(hover).corners(
+                                TILE_INNER_RADIUS,
+                                TILE_OUTER_RADIUS,
+                                TILE_OUTER_RADIUS,
+                                TILE_INNER_RADIUS,
+                            ))
                             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
                                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                                     this.start_recording_preview(id, cx);
@@ -769,9 +854,16 @@ impl Cereal {
 
     /// The status chip shown while notes are generated. `pose` is its
     /// presence: it grows out of its leading edge and collapses back into it.
-    pub fn render_generation_status(&self, width: Pixels, pose: crate::motion::Pose) -> AnyElement {
+    pub fn render_generation_status(
+        &self,
+        width: Pixels,
+        pose: crate::motion::Pose,
+        finishing: bool,
+    ) -> AnyElement {
         let t = self.theme();
         let label = match self.generation.phase {
+            // The stream is still delivering the end of the recording.
+            _ if finishing => "Finishing the transcript…",
             GenerationPhase::AnalyzingTranscript => "Analyzing transcript",
             // Also while the finished chip is leaving: its last words stay.
             _ => "Writing notes",
@@ -936,60 +1028,6 @@ impl Cereal {
             .into_any_element()
     }
 
-    pub fn transcription_language_settings(&self, cx: &mut Context<Self>) -> Div {
-        let t = self.theme();
-        let connected = crate::server::enabled();
-        div()
-            .w(px(220.))
-            .p(px(6.))
-            .rounded(px(POPOVER_RADIUS))
-            .border_1()
-            .border_color(t.border)
-            .bg(t.card)
-            .shadow_lg()
-            .flex()
-            .flex_col()
-            .gap(px(4.))
-            .child(
-                div()
-                    .id("english-transcription-language")
-                    .h(px(32.))
-                    .px(px(8.))
-                    .rounded(px(6.))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .text_size(px(13.))
-                    .child(if connected {
-                        crate::desktop_preferences::PROCESSING_LANGUAGE
-                    } else {
-                        "Transcription unavailable"
-                    })
-                    .when(connected, |d| {
-                        d.bg(t.hover)
-                            .child(icon("check", 14., t.accent))
-                            .cursor_pointer()
-                            .reach().on_click(cx.listener(|this, _, _, cx| {
-                                this.menu = None;
-                                cx.notify();
-                            }))
-                    }),
-            )
-            .child(
-                div()
-                    .px(px(8.))
-                    .pb(px(6.))
-                    .text_size(px(12.))
-                    .line_height(px(17.))
-                    .text_color(t.muted)
-                    .child(if connected {
-                        "Your server transcribes and writes notes in English by default."
-                    } else {
-                        "Connect to your server to transcribe recordings."
-                    }),
-            )
-    }
-
     pub fn recording_settings(&self, cx: &mut Context<Self>) -> Div {
         let t = self.theme();
         div()
@@ -1020,7 +1058,7 @@ impl Cereal {
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .cursor_pointer()
+                    .cursor_default()
                     .child(row_feedback(t, 6.))
                     .child(icon("mic", 16., t.muted))
                     .child(if self.microphone_muted {
@@ -1057,7 +1095,7 @@ impl Cereal {
                     .px(px(8.))
                     .py(px(9.))
                     .rounded(px(6.))
-                    .cursor_pointer()
+                    .cursor_default()
                     .child(row_feedback(t, 6.))
                     .child("Sound settings")
                     .reach().on_click(cx.listener(|this, _, _, cx| {
@@ -1072,79 +1110,265 @@ impl Cereal {
 /// Space between a scheduled meeting's label and what follows it.
 const SCHEDULED_LABEL_GAP: f32 = 10.;
 
-/// The capsule of a scheduled meeting: the 48 px indicator inside 4 px of
-/// padding, the label (`text` px wide), and in the open panel the 80 px
+// The recording capsule, as the reference lays it out: a 56 pt capsule with
+// 4 pt of padding round 48 pt controls. A control's hover shape is concentric
+// with the capsule on its outer side (28 − 4 = 24 pt) and 8 pt where it meets
+// its neighbour.
+const CAPSULE_HEIGHT: f32 = 56.;
+const CAPSULE_INSET: f32 = 4.;
+const TILE: f32 = CAPSULE_HEIGHT - 2. * CAPSULE_INSET;
+const TILE_OUTER_RADIUS: f32 = CAPSULE_HEIGHT / 2. - CAPSULE_INSET;
+const TILE_INNER_RADIUS: f32 = 8.;
+/// The indicator and chevron with a control after them: 4 pt padding each
+/// side, at least 48 pt.
+const LEADING_JOINED: f32 = 48.;
+/// The indicator and chevron alone: 6 pt padding each side, 49 pt.
+const LEADING_ALONE: f32 = 49.;
+/// Stop, Resume, Start now or Retry: at least 40 pt, 3 pt short of the end.
+const TRAILING_MIN: f32 = 40.;
+const TRAILING_END: f32 = 3.;
+/// Horizontal padding of a trailing label.
+const TRAILING_LABEL_PAD: f32 = 8.;
+const LIVE_CAPSULE: f32 = 2. * CAPSULE_INSET + LEADING_JOINED + TRAILING_MIN;
+const COMPACT_CAPSULE: f32 = 2. * CAPSULE_INSET + LEADING_ALONE;
+
+/// The capsule of a scheduled meeting: the 48 pt indicator inside 4 pt of
+/// padding, the label (`text` pt wide), and in the open panel the 80 pt
 /// "Start now" beside it.
 fn scheduled_capsule_width(text: f32, open: bool) -> f32 {
-    (56. + text + SCHEDULED_LABEL_GAP + if open { 80. } else { 0. }).ceil()
+    (2. * CAPSULE_INSET + LEADING_JOINED + text + SCHEDULED_LABEL_GAP + if open { 80. } else { 0. })
+        .ceil()
 }
 
-fn capsule_width(phase: Phase) -> f32 {
-    match phase {
-        Phase::Starting | Phase::Live => 98.,
-        Phase::Idle => 137.,
-        Phase::Held | Phase::Failed => 112.,
-        _ => 124.,
+/// The stopped capsule with a trailing label `text` pt wide (Resume, Start
+/// now or Retry).
+fn labelled_capsule_width(text: f32) -> f32 {
+    (2. * CAPSULE_INSET
+        + LEADING_JOINED
+        + (text + 2. * TRAILING_LABEL_PAD + TRAILING_END).max(TRAILING_MIN))
+    .ceil()
+}
+
+/// The left edge of the chevron's 16 pt frame in the indicator control. The
+/// reference lays the control out as padding, a 4 pt margin, the indicator
+/// in 22 pt with its own margins, an 8 pt gap, and the chevron pulled 10 pt
+/// back with 3 pt off its end, centred in its minimum width.
+fn chevron_left(joined: bool) -> f32 {
+    indicator_slot(joined) + 22. + 8. - 10.
+}
+
+/// Where the indicator's 22 pt slot (glyph plus its margins) starts.
+fn indicator_slot(joined: bool) -> f32 {
+    let padding = if joined { 4. } else { 6. };
+    let content = 2. * padding + 4. + 22. + 8. - 10. + 16. - 3.;
+    let width = if joined {
+        LEADING_JOINED
+    } else {
+        LEADING_ALONE
+    };
+    (width - content).max(0.) / 2. + padding + 4.
+}
+
+/// The edge of a fully rounded bar surface, as the reference draws it: a
+/// half-point hairline (a device pixel at least) just outside it, or just
+/// inside it in the dark theme, and the bottom bar's soft shadow. The
+/// hairline is an outline of its own, so it takes no room from the
+/// surface's content in either theme (a border would), and it is crisp on
+/// every side (a spread shadow antialiases unevenly at half a point).
+pub fn bar_edge<E: Styled + ParentElement>(element: E, t: Theme) -> E {
+    let width = crate::ui::hairline(0.5);
+    let out = if t.bg.l < 0.5 { 0. } else { width };
+    element
+        .shadow(vec![BoxShadow {
+            color: rgba(0x0000000d).into(),
+            offset: point(px(0.), px(4.)),
+            blur_radius: px(6.),
+            spread_radius: px(-2.),
+        }])
+        .child(edge(width, out, t.hairline))
+}
+
+/// A `width` outline of a fully rounded surface, `out` points outside its
+/// edge (0 for just inside). An overlay, so it takes no room from the
+/// surface's content.
+fn edge(width: f32, out: f32, color: Hsla) -> Div {
+    div()
+        .absolute()
+        .top(px(-out))
+        .left(px(-out))
+        .right(px(-out))
+        .bottom(px(-out))
+        .rounded_full()
+        .border(px(width))
+        .border_color(color)
+}
+
+/// The recording bar's tooltips, as the reference places them: centred above
+/// the control, 6 pt clear of it, after the pointer has rested on it for
+/// 600 ms. GPUI's own tooltips open at the pointer, below the bar, where they
+/// cover the control they explain.
+const TIP_DELAY: Duration = Duration::from_millis(600);
+const TIP_TRANSCRIPT: u64 = 1;
+const TIP_STOP: u64 = 2;
+/// The reference's 75 ms ease-out from 95%, without overshoot.
+const TIP_ENTRANCE: crate::motion::Spring = crate::motion::Spring {
+    millis: 75,
+    damping: 1.,
+};
+
+impl Cereal {
+    /// Give the control `element` (a positioned tile) the tooltip `label`,
+    /// identified by `key` among the bar's controls.
+    fn bar_tip(
+        &self,
+        element: Stateful<Div>,
+        key: u64,
+        label: SharedString,
+        t: Theme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let shown = !crate::ui::popover_open()
+            && self
+                .bar_tip
+                .is_some_and(|(tip, since)| tip == key && since.elapsed() >= TIP_DELAY);
+        let pose = self.stage.presence(("bar-tip", key), shown, TIP_ENTRANCE);
+        element
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.bar_tip = Some((key, Instant::now()));
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(TIP_DELAY).await;
+                        let _ = this.update(cx, |_, cx| cx.notify());
+                    })
+                    .detach();
+                } else if this.bar_tip.is_some_and(|(tip, _)| tip == key) {
+                    this.bar_tip = None;
+                }
+                cx.notify();
+            }))
+            // A press dismisses it until the pointer comes back.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    if this.bar_tip.is_some_and(|(tip, _)| tip == key) {
+                        this.bar_tip = None;
+                        cx.notify();
+                    }
+                }),
+            )
+            .when(pose.visible, |d| {
+                d.child(
+                    deferred(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom(relative(1.))
+                            .pb(px(6.))
+                            .flex()
+                            .justify_center()
+                            .child(crate::motion::pop(
+                                crate::ui::tip_box(label, t).whitespace_nowrap(),
+                                crate::motion::Pop {
+                                    anchor: (0.5, 1.),
+                                    scale: (0.95, 0.95),
+                                    travel: 0.,
+                                    rise: 0.,
+                                },
+                                pose,
+                            )),
+                    )
+                    .with_priority(20),
+                )
+            })
     }
 }
 
 /// Legacy footer visualizer, driven by the recording owner's audio level.
-pub fn footer_indicator(phase: Phase, theme: Theme, level: f32) -> AnyElement {
-    match phase {
-        Phase::Starting => div()
+/// Each glyph sits in the indicator control's 22 pt slot with the
+/// reference's margins for it, centred vertically in the 48 pt control.
+pub fn footer_indicator(phase: Phase, theme: Theme, level: f32, joined: bool) -> AnyElement {
+    let slot = indicator_slot(joined);
+    let place = |element: Div, margin: f32, height: f32| {
+        element
             .absolute()
-            .left(px(12.))
-            .top(px(16.))
-            .child(crate::motion::spinner(theme.muted))
-            .into_any_element(),
+            .left(px(slot + margin))
+            .top(px((TILE - height) / 2.))
+            .into_any_element()
+    };
+    match phase {
+        // A 16 pt spinner, 2.5 pt in.
+        Phase::Starting => place(div().child(crate::motion::spinner(theme.muted)), 2.5, 16.),
         // Nothing is in progress after a failure: a still glyph, not a spinner
         // that would also keep the window redrawing until the user acts.
-        Phase::Failed => icon("warning", 18., rgb(0xc08038).into())
-            .absolute()
-            .left(px(11.))
-            .top(px(15.))
-            .into_any_element(),
-        Phase::Live => div()
-            .absolute()
-            .left(px(14.))
-            .top(px(14.))
-            .child(recording_waveform(level, rgb(0xce9d00).into()))
-            .into_any_element(),
-        Phase::Held => div()
-            .absolute()
-            .left(px(12.))
-            .top(px(14.))
-            .child(icon("lock", 20., theme.muted))
-            .into_any_element(),
-        _ => icon("footer-transcript", 32., theme.muted)
-            .absolute()
-            .left(px(3.))
-            .top(px(8.))
-            .into_any_element(),
+        Phase::Failed => place(
+            div().child(icon("warning", 18., rgb(0xc08038).into())),
+            2.,
+            18.,
+        ),
+        // The 13 pt bars, 4 pt in.
+        Phase::Live => place(
+            div().child(recording_waveform(level, WAVEFORM.into())),
+            4.,
+            20.,
+        ),
+        // The reference's 20 pt policy lock, 2 pt in.
+        Phase::Held => place(div().child(icon("lock", 20., theme.muted)), 2., 20.),
+        // The 32 pt transcript glyph, pulled 6 pt out of its slot.
+        _ => place(
+            div().child(icon("footer-transcript", 32., theme.muted)),
+            -6.,
+            32.,
+        ),
     }
 }
 
-/// Target heights of the three source-width bars: quiet input settles to
-/// dots, speech grows vertically.
+/// Target heights of the three footer bars (the reference's visualizer with
+/// ten-point halves): quiet input settles to 3 pt dots, speech grows them up
+/// to 20 pt, the centre bar twice as readily as the outer two.
 pub fn waveform_heights(level: f32) -> [f32; 3] {
+    level_bars(level, 10.)
+}
+
+/// The reference app's bar mapping for three mirrored bars whose halves are
+/// `half` points tall: each bar shows `2 × min(⌊half · level / s⌋ + 1.5,
+/// half)` points, where `s` is its sensitivity (2 for the outer bars, 1 for
+/// the centre) scaled by a factor between 0.6 and 1. The reference draws that
+/// factor at random for every audio sample, which keeps speech lively. Here
+/// it is a hash of the level's bits, so the same level always gives the same
+/// bars; a steady sound stays still only because the recording model holds
+/// its shown level until the input moves by `recording::LEVEL_STEP`.
+/// Silence (and anything under about 6% for the centre bar) is three dots.
+pub fn level_bars(level: f32, half: f32) -> [f32; 3] {
     let level = if level.is_finite() {
         level.clamp(0., 1.)
     } else {
         0.
     };
-    // Whole pixels: a level that moves a bar by less than a pixel is not a
-    // change anyone can see, and must not wake the animation.
-    [0.72_f32, 1., 0.72].map(|gain| {
-        if level < 0.015 {
-            2.
-        } else {
-            (level.sqrt() * 20. * gain).clamp(3., 20.).round()
-        }
-    })
+    let sample = level.to_bits();
+    [2_f32, 1., 2.]
+        .into_iter()
+        .enumerate()
+        .map(|(bar, sensitivity)| {
+            // SplitMix32 of the sample and the bar: an even spread in 0..1.
+            let mut mix = sample ^ (bar as u32).wrapping_mul(0x9e37_79b9);
+            mix = (mix ^ (mix >> 16)).wrapping_mul(0x21f0_aaad);
+            mix = (mix ^ (mix >> 15)).wrapping_mul(0x735a_2d97);
+            mix ^= mix >> 15;
+            let factor = 0.6 + 0.4 * (mix as f32 / u32::MAX as f32);
+            2. * ((half * level / (factor * sensitivity)).floor() + 1.5).min(half)
+        })
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap_or([3.; 3])
 }
 
-/// The live waveform. Bars follow level changes on springs rather than
-/// stepping between samples, and stop redrawing once the input is steady.
+/// The level bars' green (#74bd00), as the reference draws them in the
+/// note's bar and on the floating capsule alike.
+pub const WAVEFORM: Rgba = Rgba { r: 116. / 255., g: 189. / 255., b: 0., a: 1. };
+
+/// The live waveform. Each new level eases the bars to their new heights
+/// over 300 ms, and they stop redrawing once the input is steady.
 pub fn recording_waveform(level: f32, color: Hsla) -> AnyElement {
     crate::motion::bars(
         "recording-waveform",
@@ -1181,4 +1405,43 @@ fn outline_source(body: &str, transcript: &str) -> String {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // `gpui::*` re-exports its own `test` attribute; these are plain unit tests.
+    use std::prelude::v1::test;
+
+    #[test]
+    fn capsule_controls_follow_the_reference_layout() {
+        // 56 pt capsule, 4 pt padding, 48 pt controls, concentric outer corners.
+        assert_eq!(TILE, 48.);
+        assert_eq!(TILE_OUTER_RADIUS, 24.);
+        assert_eq!(LIVE_CAPSULE, 96.);
+        assert_eq!(COMPACT_CAPSULE, 57.);
+        // Bars 13.5 pt and the chevron's frame 29.5 pt into a joined control;
+        // the transcript glyph 3.5 pt in. Alone, 4 pt and 30 pt.
+        assert_eq!(indicator_slot(true) + 4., 13.5);
+        assert_eq!(chevron_left(true), 29.5);
+        assert_eq!(indicator_slot(true) - 6., 3.5);
+        assert_eq!(indicator_slot(false) - 6., 4.);
+        assert_eq!(chevron_left(false), 30.);
+        // Resume: 8 pt either side of the label and 3 pt short of the end.
+        assert_eq!(labelled_capsule_width(48.), 4. + 48. + 67. + 4.);
+        assert_eq!(labelled_capsule_width(10.), 96.);
+    }
+
+    #[test]
+    fn footer_bars_are_dots_when_quiet_and_grow_with_the_voice() {
+        assert_eq!(waveform_heights(0.), [3.; 3]);
+        assert_eq!(waveform_heights(f32::NAN), [3.; 3]);
+        // The same level always draws the same bars.
+        assert_eq!(waveform_heights(0.4), waveform_heights(0.4));
+        let loud = waveform_heights(1.);
+        assert_eq!(loud[1], 20.);
+        assert!(loud.iter().all(|height| (3. ..=20.).contains(height)));
+        let speech = waveform_heights(0.3);
+        assert!(speech[1] > speech[0] && speech[1] > speech[2]);
+    }
 }

@@ -20,7 +20,7 @@ const later=[seg(4,"Good, that settles the crane.",70000),seg(5,"Anything else b
 const harbour=(fields:Partial<NoteDTO>={}):NoteDTO=>({id:id(1),title:"Harbour planning",body:"- berth fee is 300\n- ask about the crane",enhanced:"# Decisions\n- The crane is booked for Tuesday.",date:"2026-03-09",duration:"",createdAt:"2026-03-09T10:00:00.000Z",updatedAt:"2026-03-09T10:20:00.000Z",
   transcriptSegments:spoken,recordingState:"recording",generationState:"ready",transcriptRevision:3,generatedRevision:3,...fields})
 const ask=(message:string):ChatInput=>({message,history:[],includeSources:true})
-const silent:ProviderServices={transcribe:()=>Effect.succeed([]),generate:()=>Effect.succeed(""),chat:()=>Effect.succeed("")}
+const silent:ProviderServices={generate:()=>Effect.succeed(""),chat:()=>Effect.succeed("")}
 const signal=()=>new AbortController().signal
 const run=<A>(effect:Effect.Effect<A,unknown>)=>Effect.runPromise(effect)
 /** The citations the server issues for a note, as the streaming path prepares them. */
@@ -37,7 +37,7 @@ async function stream(repository:NotesRepositoryService,noteId:string,answer:(ci
     yield answer((note as ProviderNote&{meetingChat?:{citations:ChatCitationDTO[]}}).meetingChat!.citations)
     await during()
   }}
-  const processing=makeProcessingService(repository,{worker:false,providers}),events:ChatStreamEventDTO[]=[]
+  const processing=makeProcessingService(repository,{providers}),events:ChatStreamEventDTO[]=[]
   await Effect.runPromise(Stream.runForEach(await Effect.runPromise(processing.chatStream(noteId,ask("What was decided?"))),event=>Effect.sync(()=>{events.push(event)})))
   await processing.dispose()
   // Every event must fit the wire contract the HTTP layer encodes with.

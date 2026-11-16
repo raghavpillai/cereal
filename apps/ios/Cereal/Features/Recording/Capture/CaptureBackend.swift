@@ -23,16 +23,12 @@ protocol CaptureBackend: AnyObject {
 }
 
 /// A backend that appends to one continuous capture file whose sample count is
-/// exact at every moment. Delivery parts are cut from that file while it grows
-/// and a live stream reads it by sample index.
+/// exact at every moment. A live stream reads it by sample index, and the file
+/// is what the stream replays from after a reconnect.
 @MainActor
 protocol ContinuousCaptureBackend: CaptureBackend {
     /// Samples (16 kHz) in the capture file now.
     var capturedFrames: Int64 { get }
-    /// When set before `start`, `onPartBoundary` is called each time the
-    /// capture grows past another multiple of this many samples.
-    var partFrames: Int64? { get set }
-    var onPartBoundary: ((Int64) -> Void)? { get set }
     /// Starts the input again on whatever route is current, after the one it
     /// was using went away. The capture file and its sample position are
     /// untouched. False when there is no input left, or the capture has failed.
@@ -56,14 +52,15 @@ enum RouteChangePolicy {
 /// The one switch between the two capture implementations.
 ///
 /// The default is the engine: a single input tap that writes one continuous
-/// capture. The previous `AVAudioRecorder` path stays selectable for one
-/// release, in case a device shows a regression:
+/// capture. The previous `AVAudioRecorder` path stays selectable for the local
+/// demo, in case a device shows a regression:
 ///
 ///     defaults key   capture.legacyRecorder = YES   (app domain dev.cereal.mobile)
 ///     launch args    -capture.legacyRecorder YES
 ///
 /// The choice is read when a capture starts and applies to that capture only.
-/// Captures already on disk are delivered the way they were recorded.
+/// A recording to a server always uses the engine: its only transcript is the
+/// live stream, which reads a continuous capture.
 enum CaptureEnginePolicy {
     static let legacyRecorderKey = "capture.legacyRecorder"
 
@@ -84,8 +81,17 @@ enum CaptureEnginePolicy {
     @MainActor
     static func makeBackend() -> any CaptureBackend {
         #if DEBUG
+        if injectedAudioFile() != nil { return makeContinuousBackend() }
+        #endif
+        return usesLegacyRecorder() ? LegacyRecorderBackend() : makeContinuousBackend()
+    }
+
+    /// The engine, whatever the legacy key says: for a recording to a server.
+    @MainActor
+    static func makeContinuousBackend() -> any ContinuousCaptureBackend {
+        #if DEBUG
         if let file = injectedAudioFile() { return EngineCaptureBackend(input: FileCaptureInput(url: file)) }
         #endif
-        return usesLegacyRecorder() ? LegacyRecorderBackend() : EngineCaptureBackend()
+        return EngineCaptureBackend()
     }
 }

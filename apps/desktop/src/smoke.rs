@@ -68,12 +68,10 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
                         assert_eq!(view.screen,Screen::SearchResults,"A nonempty search submission opens its complete results page");
                         assert_eq!(view.current_note,None,"Searching does not open or edit the first matching note");
                         assert_eq!(view.search_results_query,"Native test");
-                        assert!(view.workspace.visible_notes(None,false,&view.search_results_query).iter().any(|note|note.id==id),"The results page uses the same real note search as the palette");
+                        assert!(view.workspace.visible_notes(false,&view.search_results_query).iter().any(|note|note.id==id),"The results page uses the same real note search as the palette");
                         assert!(!view.search_open);
                         view.open_note(id,cx);
-                        view.folder_input.update(cx,|input,cx|input.set_content("Smoke folder",cx));
-                        view.create_folder(cx);
-                        assert!(matches!(view.screen,Screen::Folder(_)));
+                        view.navigate(Screen::MyNotes,cx);
                         view.ask.update(cx,|input,cx|input.set_content("What did we decide about onboarding?",cx));
                         view.submit_chat(cx);
                         assert!(view.chat_messages.last().unwrap().1.contains("onboarding"));
@@ -91,41 +89,21 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
                         assert_eq!(view.chat_messages.len(),1,"Sending an edit replaces its old turn rather than appending a duplicate");
                         assert_eq!(view.chat_messages[0].0,"What about onboarding next steps?");
                         assert!(view.chat_editing.is_none());
-                        view.open_recipe_editor(None,"List the onboarding decisions.".into(),window,cx);
-                        view.save_chat_recipe(cx);
-                        assert!(view.chat_recipe_editor.is_some(),"An empty recipe name cannot be saved");
-                        view.chat_recipe_editor.as_ref().unwrap().name.update(cx,|input,cx|input.set_content("Smoke recipe",cx));
-                        view.save_chat_recipe(cx);
-                        assert_eq!(view.chat_recipes.len(),1);
-                        assert!(view.chat_recipe_editor.is_none());
-                        let recipe_id=view.chat_recipes[0].id.clone();
-                        view.open_recipe_editor(Some(recipe_id.clone()),"List the onboarding next steps.".into(),window,cx);
-                        view.chat_recipe_editor.as_ref().unwrap().name.update(cx,|input,cx|input.set_content("Smoke recipe updated",cx));
-                        view.save_chat_recipe(cx);
-                        assert_eq!(view.chat_recipes.len(),1,"Editing a recipe preserves its identity rather than adding duplicates");
-                        assert_eq!(view.chat_recipes[0].id,recipe_id);
-                        view.open_chat_recipes(window,cx);
-                        assert_eq!(view.ask.read(cx).content(),"/");
-                        view.submit_matching_chat_recipe("/smoke",cx);
-                        assert!(!view.chat_recipes_open);
-                        assert_eq!(view.chat_messages.last().unwrap().0,"List the onboarding next steps.","Saved recipes execute their actual prompt");
-                        view.open_recipe_editor(None,"/loop".into(),window,cx);
-                        view.chat_recipe_editor.as_ref().unwrap().name.update(cx,|input,cx|input.set_content("loop",cx));
-                        view.save_chat_recipe(cx);
-                        view.submit_matching_chat_recipe("/loop",cx);
-                        assert_eq!(view.chat_messages.last().unwrap().0,"/loop","A slash-prefixed recipe is submitted as text, never recursively parsed as another recipe");
+                        view.ask.update(cx,|input,cx|input.set_content("/loop",cx));
+                        view.submit_chat(cx);
+                        assert_eq!(view.chat_messages.last().unwrap().0,"/loop","A question starting with a slash is sent as it was typed");
                     },
                     4=>{
                         view.workspace.note_mut(id).unwrap().trashed=true;
-                        assert!(view.workspace.visible_notes(None,false,"Native test").is_empty());
-                        view.navigate(Screen::Trash,cx);
+                        assert!(view.workspace.visible_notes(false,"Native test").is_empty());
+                        view.open_trash(cx);
                     },
                     5=>{
                         view.workspace.note_mut(id).unwrap().trashed=false;
-                        assert_eq!(view.workspace.visible_notes(None,false,"Native test").len(),1);
+                        assert_eq!(view.workspace.visible_notes(false,"Native test").len(),1);
                         view.workspace.settings.dark_mode=true;view.navigate(Screen::Settings,cx);
                     },
-                    6=>{view.navigate(Screen::Connect,cx);},
+                    6=>{view.navigate(Screen::Chat,cx);},
                     7=>{
                         assert!(view.persist(cx));
                         view.flush_all_blocking(cx);let reloaded=Workspace::load();
@@ -367,7 +345,7 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
                         assert!(!note.needs_regeneration());
                     },
                     _=>{
-                        println!("Native smoke test passed: input events, Unicode editing, autosave, local outline, search submission, folders, chat, trash/restore, settings, reload, sign-in preview, recording start/pause/resume/stop without automatic generation, explicit analyze/write generation, transcript revision/regeneration, stale generation guards, transcript-summary loading/quotes/navigation cancellation, and rendering.");
+                        println!("Native smoke test passed: input events, Unicode editing, autosave, local outline, search submission, chat, trash/restore, settings, reload, sign-in preview, recording start/pause/resume/stop without automatic generation, explicit analyze/write generation, transcript revision/regeneration, stale generation guards, transcript-summary loading/quotes/navigation cancellation, and rendering.");
                         cx.quit();
                     }
                 }

@@ -30,12 +30,12 @@ impl Saved {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counts {
     pub notes: usize,
-    /// Device folders that hold at least one of these notes.
-    pub folders: usize,
     pub favorites: usize,
     pub chats: usize,
     pub recordings: usize,
-    /// Recordings that exist nowhere else: never confirmed by the server.
+    /// Recordings of a note the server does not have yet, or whose Stop it
+    /// has not confirmed: what was said in them may exist only here. (Audio
+    /// itself never leaves this Mac: speech is transcribed live.)
     pub never_uploaded: usize,
 }
 
@@ -47,17 +47,14 @@ impl Counts {
             chats,
             ..Self::default()
         };
-        let mut folders = std::collections::HashSet::new();
         for note in notes {
             counts.notes += 1;
             counts.favorites += usize::from(note.favorite);
-            folders.extend(note.folder_id);
             counts.recordings += note.audio_captures.len();
             if note.server_id.is_none() || note.unsent_capture {
                 counts.never_uploaded += note.audio_captures.len();
             }
         }
-        counts.folders = folders.len();
         counts
     }
 
@@ -99,26 +96,21 @@ impl Counts {
         )
     }
 
-    /// "214 notes saved here · 3 folders use them · 12 favourites · 9 chats
-    /// · 41 recordings, 3 of which were never uploaded".
+    /// "214 notes saved here · 12 favourites · 9 chats · 41 recordings, 3 of
+    /// which are not on the server yet".
     pub fn goes(&self) -> String {
         let mut text = format!(
-            "{} saved here · {} · {} · {} · {}",
+            "{} saved here · {} · {} · {}",
             plural(self.notes, "note"),
-            if self.folders == 1 {
-                "1 folder uses them".to_owned()
-            } else {
-                format!("{} folders use them", self.folders)
-            },
             plural(self.favorites, "favourite"),
             plural(self.chats, "chat"),
             plural(self.recordings, "recording"),
         );
         if self.never_uploaded > 0 {
             text.push_str(&format!(
-                ", {} of which {} never uploaded",
+                ", {} of which {} not on the server yet",
                 self.never_uploaded,
-                if self.never_uploaded == 1 { "was" } else { "were" }
+                if self.never_uploaded == 1 { "is" } else { "are" }
             ));
         }
         text
@@ -233,7 +225,6 @@ mod tests {
     fn counts_read_as_sentences_and_name_what_exists_nowhere_else() {
         let counts = Counts {
             notes: 214,
-            folders: 3,
             favorites: 12,
             chats: 9,
             recordings: 41,
@@ -242,7 +233,7 @@ mod tests {
         assert_eq!(counts.stays(), "214 notes and 41 recordings");
         assert_eq!(
             counts.goes(),
-            "214 notes saved here · 3 folders use them · 12 favourites · 9 chats · 41 recordings, 3 of which were never uploaded"
+            "214 notes saved here · 12 favourites · 9 chats · 41 recordings, 3 of which are not on the server yet"
         );
         assert_eq!(
             counts.erase_label(),
@@ -250,7 +241,6 @@ mod tests {
         );
         let one = Counts {
             notes: 1,
-            folders: 1,
             favorites: 1,
             chats: 1,
             recordings: 1,
@@ -259,7 +249,7 @@ mod tests {
         assert_eq!(one.stays(), "1 note and 1 recording");
         assert_eq!(
             one.goes(),
-            "1 note saved here · 1 folder uses them · 1 favourite · 1 chat · 1 recording, 1 of which was never uploaded"
+            "1 note saved here · 1 favourite · 1 chat · 1 recording, 1 of which is not on the server yet"
         );
         assert_eq!(one.erase_label(), "Erase, including 1 recording that exists nowhere else");
         assert_eq!(Counts::default().erase_label(), "Erase");

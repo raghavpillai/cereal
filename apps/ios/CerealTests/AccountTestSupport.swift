@@ -14,9 +14,8 @@ import Contracts
 
 @MainActor extension ServerRecordingController {
     func attach(to server: ServerNotesModel) async { await sync(with: [server]) }
-    private var only: AccountID? { deliveringAccounts.count == 1 ? deliveringAccounts[0] : nil }
+    private var only: AccountID? { knownAccounts.count == 1 ? knownAccounts[0] : nil }
     func ref(_ noteID: String) -> NoteRef? { only.map { NoteRef(account: $0, id: noteID) } }
     func start(note: NoteDTO) async { await start(note: note, in: only) }
-    func hasPendingAudio(noteID: String) -> Bool { hasPendingAudio(ref(noteID)) }
     var activeNoteID: String? { active?.id }
 }

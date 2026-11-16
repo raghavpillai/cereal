@@ -6,16 +6,14 @@ import Contracts
 @testable import Cereal
 
 /// The account rules as the app applies them: a recording that outlives its
-/// session, a note deleted on its server, the sheets, and one account looking as it always has.
+/// session, a note deleted on its server, leftovers from before, the sheets,
+/// and one account looking as it always has.
 @MainActor
 @Suite(.serialized)
 struct AccountLifecycleTests {
-    @Test func s3_aSessionThatEndsDuringARecordingKeepsTheCaptureAndUploadsAfterSignIn() async throws {
-        UserDefaults.standard.set(2, forKey: "capture.partSeconds")
-        defer { UserDefaults.standard.removeObject(forKey: "capture.partSeconds") }
-        let harness = try await LiveSessionHarness()
+    @Test func s3_aSessionThatEndsDuringARecordingKeepsItGoingAndStopsAndWritesItsNotesAfterSignIn() async throws {
+        let harness = try await LiveSessionHarness(framesPerUtterance: 10)
         defer { try? FileManager.default.removeItem(at: harness.root) }
-        harness.live.refusal = .refused(status: 503)
         let server = harness.server, controller = harness.controller
         let ref = try #require(controller.ref(harness.instance.noteID))
         let account = try #require(server.accountID)
@@ -29,11 +27,12 @@ struct AccountLifecycleTests {
             time = harness.input.feed(format: InjectedAudio.builtIn, from: time, seconds: 1)
             try await Task.sleep(for: .milliseconds(120))
         }
-        try await waitFor("the first part") { harness.instance.allUploads.count == 1 }
+        try await waitFor("live finals") { controller.transcript(for: ref)?.segments.isEmpty == false }
 
-        // The server ends the session in the middle of the meeting.
+        // The server ends the session in the middle of the meeting; the next request (Home's refresh) learns of it.
         harness.instance.set(refused: ["unit-test-token"])
-        for _ in 0..<4 {
+        await server.refresh()
+        for _ in 0..<2 {
             time = harness.input.feed(format: InjectedAudio.builtIn, from: time, seconds: 1)
             try await Task.sleep(for: .milliseconds(120))
         }
@@ -46,130 +45,123 @@ struct AccountLifecycleTests {
         let framesBefore = controller.recorder.capturedFrames
         time = harness.input.feed(format: InjectedAudio.builtIn, from: time, seconds: 1)
         #expect(controller.recorder.capturedFrames >= framesBefore + 16_000 - 400)
-        // Nothing more is sent with the refused session.
-        let sent = harness.instance.allRequests.count
-        try await Task.sleep(for: .milliseconds(300))
-        #expect(harness.instance.allRequests.count == sent)
-        #expect(harness.instance.allUploads.count == 1)
 
-        // Stop works, and finalises the local files.
+        // Stop works. Its Stop and its notes wait for the account: nothing is sent with the refused session.
+        let sent = harness.instance.allRequests.count
         controller.stop()
         #expect(controller.recorder.state == .stopped)
-        #expect(controller.recorder.capturedFrames == 8 * 16_000)
-        try await waitFor("the remaining parts to be cut") { !controller.isSyncing }
-        #expect(controller.hasPendingAudio(ref))
+        #expect(controller.recorder.capturedFrames == 6 * 16_000)
+        try await waitFor("the Stop to give up") { !controller.isGeneratingNotes(ref) }
         #expect(controller.removalBlock(for: account) == nil)
-        let staged = try AudioOutbox(instance: try #require(server.instance), principalID: StubInstance.principal, root: harness.root.appendingPathComponent("outbox"))
-            .entries(noteID: ref.id)
-        #expect(staged.map(\.sequence) == [0, 1, 2, 3] && staged.map(\.startMs) == [0, 2_000, 4_000, 6_000])
+        #expect(harness.instance.allRequests.count == sent)
         #expect(harness.instance.count("POST", suffix: "/recording") == 1) // the Stop has not reached the server
 
-        // Signing in again as the same user: the note's parts are sent with the identities they always had.
+        // Signing in again as the same user: the saved Stop goes, and the notes are written after it.
         await server.connect(instance: "https://example.test", token: "second-session")
         #expect(server.status == .ready && server.accountID == account)
         await controller.sync(with: [server])
-        try await waitFor("every part on the server") { harness.instance.allUploads.count == 4 }
-        #expect(harness.instance.allUploads.map(\.chunkID) == staged.map(\.id))
-        #expect(harness.instance.allUploads.map(\.startMs) == [0, 2_000, 4_000, 6_000])
-        try await waitFor("the saved Stop") { harness.instance.count("POST", suffix: "/recording") == 2 }
-        try await waitFor("delivery to settle") { !controller.hasPendingAudio(ref) }
-        #expect(Set(harness.instance.allUploads.map(\.chunkID)).count == 4)
+        try await waitFor("the saved Stop and the notes") {
+            harness.instance.count("POST", suffix: "/recording") == 2 && harness.instance.generations.count == 1
+        }
+        #expect(harness.instance.generations == [harness.instance.transcriptRevision])
+        #expect(harness.instance.audioRequests == 0)
+        // Once is enough: the next launch sends neither again.
+        let relaunched = ServerRecordingController(outboxRoot: harness.root.appendingPathComponent("outbox"), makeBackend: { EngineCaptureBackend(input: harness.input) })
+        await relaunched.sync(with: [server])
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(harness.instance.count("POST", suffix: "/recording") == 2 && harness.instance.generations.count == 1)
     }
 
-    @Test func v4_aRecordingIsMarkedDeletedOnTheServerOnlyWhenTheNoteItselfIsGoneAndNothingIsErased() async throws {
-        UserDefaults.standard.set(2, forKey: "capture.partSeconds")
-        defer { UserDefaults.standard.removeObject(forKey: "capture.partSeconds") }
-        let harness = try await LiveSessionHarness()
+    @Test func v4_aRecordingWhoseNoteIsGoneFromItsServerIsNotStoppedAgainOrWrittenUp() async throws {
+        let harness = try await LiveSessionHarness(framesPerUtterance: 10)
         defer { try? FileManager.default.removeItem(at: harness.root) }
-        harness.live.refusal = .refused(status: 503)
         let controller = harness.controller
         let ref = try #require(controller.ref(harness.instance.noteID))
-        // The server takes no audio for now, so the recording's parts stay on the phone.
-        harness.instance.set(upload: 503)
         await controller.start(note: try await harness.note())
-        var time = 0.0
-        for _ in 0..<3 {
-            time = harness.input.feed(format: InjectedAudio.builtIn, from: time, seconds: 1)
-            try await Task.sleep(for: .milliseconds(120))
-        }
-        controller.stop()
-        try await waitFor("delivery to give up") { !controller.isSyncing && controller.hasPendingAudio(ref) }
-        let outbox = harness.root.appendingPathComponent("outbox")
-        func audioFiles() -> [String] { harness.persistedFiles().filter { $0.pathExtension == "wav" }.map(\.lastPathComponent).sorted() }
-        let files = audioFiles()
-        #expect(files.count == 3) // the capture and its two parts
-
-        // A 404 from another endpoint, a failed upload, a server that is down: none of them says the note is gone.
-        harness.instance.set(chunks: 404)
-        controller.retry(ref)
-        try await waitFor("the retry") { !controller.isSyncing && controller.error != nil }
-        #expect(!controller.isDeletedOnServer(ref) && controller.hasPendingAudio(ref))
-
-        // The note itself answers 404: the recording is marked, and everything stays on this iPhone.
+        _ = harness.input.feed(format: InjectedAudio.builtIn, from: 0, seconds: 2)
+        try await waitFor("live finals") { controller.transcript(for: ref)?.segments.isEmpty == false }
+        // The note is deleted on the server (from another device) during the meeting.
         harness.instance.set(note: 404)
-        controller.retry(ref)
-        try await waitFor("the mark") { controller.isDeletedOnServer(ref) }
-        try await waitFor("delivery to settle") { !controller.isSyncing }
-        #expect(controller.status == ServerRecordingController.deletedOnServer)
-        #expect(controller.hasPendingAudio(ref) && audioFiles() == files)
-        let directory = try #require(try FileManager.default.contentsOfDirectory(atPath: outbox.path).first)
-        #expect(AccountStorage(root: outbox).summary(directory) == AccountDataSummary(recordings: 1, unsent: 1, deletedOnServer: 1))
-
-        // At the next launch it is asked about once, and not sent again by itself.
-        harness.instance.set(upload: .some(nil), chunks: .some(nil))
-        let puts = harness.instance.count("PUT", suffix: "")
-        let relaunched = ServerRecordingController(outboxRoot: outbox, makeBackend: { EngineCaptureBackend(input: harness.input) })
+        controller.stop()
+        try await waitFor("settled") { !controller.isGeneratingNotes(ref) && harness.instance.count("POST", suffix: "/recording") == 2 }
+        #expect(harness.instance.generations.isEmpty)
+        // There is nothing to send again at the next launch.
+        let relaunched = ServerRecordingController(outboxRoot: harness.root.appendingPathComponent("outbox"), makeBackend: { EngineCaptureBackend(input: harness.input) })
         await relaunched.sync(with: [harness.server])
-        #expect(relaunched.isDeletedOnServer(ref) && relaunched.hasPendingAudio(ref))
-        #expect(harness.instance.allUploads.isEmpty && harness.instance.count("PUT", suffix: "") == puts)
-        #expect(audioFiles() == files)
-
-        // The note is on the server again (restored there): the mark goes and its audio is delivered.
-        harness.instance.set(note: .some(nil))
-        let later = ServerRecordingController(outboxRoot: outbox, makeBackend: { EngineCaptureBackend(input: harness.input) })
-        await later.sync(with: [harness.server])
-        try await waitFor("the audio after all") { harness.instance.allUploads.count == 2 }
-        #expect(!later.isDeletedOnServer(ref))
-        #expect(AccountStorage(root: outbox).summary(directory).deletedOnServer == 0)
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(harness.instance.count("POST", suffix: "/recording") == 2 && harness.instance.generations.isEmpty)
+        #expect(harness.instance.audioRequests == 0)
     }
 
-    @Test func p1_twoAccountsEachDeliverThroughTheirOwnServerAndOutbox() async throws {
-        UserDefaults.standard.set(2, forKey: "capture.partSeconds")
-        defer { UserDefaults.standard.removeObject(forKey: "capture.partSeconds") }
+    @Test func audioLeftByAnEarlierVersionOrByARecordingThatEndedWithTheAppIsLeftUntouchedAtLaunch() async throws {
+        let harness = try await LiveSessionHarness()
+        defer { try? FileManager.default.removeItem(at: harness.root) }
+        let account = try #require(harness.server.accountID)
+        let outbox = harness.root.appendingPathComponent("outbox")
+        let directory = try AccountStorage(root: outbox).directory(account.raw)
+        let noteID = harness.instance.noteID
+        // An earlier version's delivery journal and one of its parts, never uploaded.
+        let part = UUID().uuidString.lowercased()
+        try Data(#"[{"id":"\#(part)","noteID":"\#(noteID)","channel":"mic","sequence":0,"startMs":0,"durationMs":2000,"fileName":"\#(part).wav","sourceFileName":"capture-0.wav","state":"pending"}]"#.utf8)
+            .write(to: directory.appendingPathComponent("outbox.json"))
+        try Data("RIFF".utf8).write(to: directory.appendingPathComponent("\(part).wav"))
+        // A capture of two seconds whose recording ended with the app, and the ledger that placed it.
+        let capture = try Recorder.fileURL(noteID: try #require(UUID(uuidString: noteID)), index: 0, continuous: true,
+                                           root: directory.appendingPathComponent("recordings"))
+        try (ContinuousCapture.header(dataBytes: 64_000) + Data(repeating: 0, count: 64_000)).write(to: capture)
+        try CaptureRecovery.begin(noteID: try #require(UUID(uuidString: noteID)), index: 0, startedAt: .now, audioFile: capture)
+        try Data(#"{"\#(noteID)":{"baseOffsetMs":5000,"nextSequence":1,"segments":[],"segmentOffsets":{"capture-0.wav":5000},"needsStop":false}}"#.utf8)
+            .write(to: directory.appendingPathComponent("captures.json"))
+        #expect(AccountStorage(root: outbox).summary(account.raw) == AccountDataSummary(recordings: 1, unsent: 1))
+        let before = Set(try FileManager.default.contentsOfDirectory(atPath: directory.path))
+        let captureBytes = try Data(contentsOf: capture)
+
+        let relaunched = ServerRecordingController(outboxRoot: outbox, makeBackend: { EngineCaptureBackend(input: harness.input) })
+        await relaunched.sync(with: [harness.server])
+        // No stream can send any of it now and nothing reads it, but nothing is deleted either: every file is
+        // still there as it was, and nothing was uploaded.
+        #expect(Set(try FileManager.default.contentsOfDirectory(atPath: directory.path)) == before)
+        #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent("\(part).wav").path))
+        #expect(try Data(contentsOf: capture) == captureBytes)
+        #expect(harness.instance.audioRequests == 0)
+        // The capture still placed the note's next one on its timeline: after its two seconds.
+        let ledger = try JSONDecoder().decode([String: ServerCaptureHistory].self, from: Data(contentsOf: directory.appendingPathComponent("captures.json")))
+        #expect(ledger[noteID]?.nextStartMs == 7_000)
+        #expect(relaunched.ledger(of: account) == [noteID])
+    }
+
+    @Test func p1_twoAccountsEachRecordThroughTheirOwnServer() async throws {
         // Two servers, one recorder. The second is the one recorded to.
-        let first = try await LiveSessionHarness(), second = try await LiveSessionHarness(host: "second.example.test", controller: first.controller)
+        let first = try await LiveSessionHarness(), second = try await LiveSessionHarness(framesPerUtterance: 10, host: "second.example.test", controller: first.controller)
         defer { try? FileManager.default.removeItem(at: first.root); try? FileManager.default.removeItem(at: second.root) }
         let controller = first.controller
-        first.live.refusal = .refused(status: 503)
         await controller.sync(with: [first.server, second.server])
         let a = try #require(first.server.accountID), b = try #require(second.server.accountID)
-        #expect(a != b && Set(controller.deliveringAccounts) == [a, b])
+        #expect(a != b && Set(controller.knownAccounts) == [a, b])
         let note = NoteRef(account: b, id: second.instance.noteID)
 
         await controller.start(note: try await second.note(), in: b)
         #expect(controller.recorder.state == .recording && controller.active == note)
         var time = 0.0
-        for _ in 0..<5 {
+        for _ in 0..<3 {
             time = first.input.feed(format: InjectedAudio.builtIn, from: time, seconds: 1)
             try await Task.sleep(for: .milliseconds(120))
         }
         controller.stop()
-        try await waitFor("the recording on the second server") { second.instance.allUploads.count == 3 }
-        try await waitFor("the Stop on the second server") { second.instance.count("POST", suffix: "/recording") == 2 }
-        // The first server saw nothing of it: no start, no audio, no stop.
-        #expect(first.instance.allUploads.isEmpty)
-        #expect(first.instance.count("POST", suffix: "/recording") == 0 && first.instance.count("PUT", suffix: "") == 0)
-        // Its audio is in the second account's directory and nowhere else.
-        let root = first.root.appendingPathComponent("outbox")
-        #expect(AccountStorage(root: root).summary(b.raw).recordings == 1 && AccountStorage(root: root).summary(a.raw).recordings == 0)
+        try await waitFor("the Stop and the notes on the second server") {
+            second.instance.count("POST", suffix: "/recording") == 2 && second.instance.generations.count == 1
+        }
+        // The first server saw nothing of it: no start, no stop, no notes, no stream.
+        #expect(first.instance.count("POST", suffix: "/recording") == 0 && first.instance.generations.isEmpty)
+        #expect(first.live.counts.connections == 0 && second.live.counts.connections == 1)
         #expect(controller.ledger(of: b) == [note.id] && controller.ledger(of: a).isEmpty)
         // The same note id in the first account is another note: nothing of the recording shows there.
         let twin = NoteRef(account: a, id: note.id)
-        #expect(!controller.isActive(twin) && !controller.hasPendingAudio(twin) && controller.transcript(for: twin) == nil)
-        // Only the account recorded to is held by a recording; the other can leave, and its delivery ends with it.
+        #expect(!controller.isActive(twin) && !controller.isGeneratingNotes(twin) && controller.transcript(for: twin) == nil)
+        // Only the account recorded to is held by a recording; the other can leave, and its record ends with it.
         #expect(controller.removalBlock(for: a) == nil)
         await controller.sync(with: [second.server])
-        #expect(controller.deliveringAccounts == [b])
+        #expect(controller.knownAccounts == [b])
     }
 }
 

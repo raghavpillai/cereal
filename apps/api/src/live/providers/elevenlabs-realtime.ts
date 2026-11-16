@@ -14,7 +14,10 @@
  *    cuts the word in two; the session only flushes in a pause.
  *  - Timestamps count every sample sent, silence included. The service closes a session that receives
  *    no message for 15 seconds, so a keep-alive is 100 ms of silence.
- *  - Audio sent at four times real time was transcribed normally.
+ *  - Audio sent at four times real time was transcribed normally. A backlog sent in one burst (26 s in about
+ *    100 ms) was not: the service answered with partials for its start, then `queue_overflow`, and dropped the
+ *    rest. So audio is forwarded at most `PACE` times real time (plus a short burst), however fast it arrives,
+ *    and after a `queue_overflow` no commit is trusted to have covered anything past its last word.
  *
  * The key is read on every open and used only in the upgrade request header.
  */
@@ -22,6 +25,11 @@ import type { LiveTranscriber, LiveTranscriberEvent, LiveTranscriberSession, Liv
 import { EventQueue, LiveProviderError } from "./queue"
 
 export const ELEVENLABS_LIVE_MODELS = ["scribe_v3_live", "scribe_v2_realtime"] as const
+/** How much faster than real time audio is forwarded, and how much may go at once. */
+export const PACE = 4, BURST_SECONDS = 1
+/** Audio waiting to be forwarded beyond this is a client that does not pace itself: the session is dropped
+ * (retryable), and the client replays from what is stored. */
+const MAX_QUEUED_SECONDS = 120
 const RATES = [8000, 16000, 22050, 24000, 44100, 48000]
 const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value)
 
@@ -33,6 +41,9 @@ export interface ElevenLabsRealtimeOptions {
   endpoint?: string
   /** Replaced in tests. Must accept `{ headers }` as Bun's WebSocket does. */
   webSocket?: new (url: string, options: { headers: Record<string, string> }) => WebSocket
+  /** Replaced in tests: the clock pacing reads, in milliseconds, and the pace itself. */
+  now?: () => number
+  pace?: number
 }
 
 /** Provider words to ours: spacing is folded into the word before it, audio events are dropped. */
@@ -57,19 +68,22 @@ export function makeElevenLabsRealtime(options: ElevenLabsRealtimeOptions): Live
       const key = await options.apiKey()
       if (!key) throw new LiveProviderError("not_configured", false)
       const query = new URLSearchParams({
-        model_id: options.model, audio_format: `pcm_${sampleRate}`, include_timestamps: "true",
+        model_id: options.model, audio_format: `pcm_${sampleRate}`, include_timestamps: "true", include_language_detection: "true",
         commit_strategy: diarize ? "turn_prediction" : "vad", vad_silence_threshold_secs: String(options.vadSilenceSeconds ?? 0.4),
         ...(diarize ? { diarize: "true" } : {}), ...(language ? { language_code: language } : {}),
       })
       for (const term of keyterms ?? []) query.append("keyterms", term)
       const socket = new Socket(`${options.endpoint ?? "wss://api.elevenlabs.io/v1/speech-to-text/realtime"}?${query}`, { headers: { "xi-api-key": key } })
       const events = new EventQueue<LiveTranscriberEvent>()
-      type Pending = { utterance: number; index: number | null; text: string; timed?: LiveWord[]; diarized?: LiveWord[]; at: number }
+      type Pending = { utterance: number; index: number | null; text: string; timed?: LiveWord[]; diarized?: LiveWord[]; language?: string; at: number }
       const pending: Pending[] = [], manual: number[] = []
-      let sent = 0, commits = 0, finalThrough = 0, closed = false, started = false
+      let sent = 0, commits = 0, finalThrough = 0, closed = false, started = false, overflowed = false
+      // Audio (and in-band commits) not forwarded yet, oldest first; `credit` is how many samples may go now.
+      const queue: Array<Uint8Array | "commit"> = []
+      let queuedSamples = 0, credit = sampleRate * BURST_SECONDS, creditAt = (options.now ?? performance.now.bind(performance))(), pump: ReturnType<typeof setInterval> | undefined
       let last = { text: "", start: 0, end: 0, speaker: undefined as string | undefined }, held: ReturnType<typeof setTimeout> | undefined, sweep: ReturnType<typeof setInterval> | undefined
       const seconds = (samples: number) => samples / sampleRate
-      const shut = () => { if (closed) return; closed = true; clearTimeout(held); clearInterval(sweep); events.close(); try { socket.close() } catch { /* already closed */ } }
+      const shut = () => { if (closed) return; closed = true; clearTimeout(held); clearInterval(sweep); clearInterval(pump); queue.length = 0; queuedSamples = 0; events.close(); try { socket.close() } catch { /* already closed */ } }
       const fail = (error: LiveProviderError) => { if (!closed) { events.push({ type: "error", retryable: error.retryable, reason: error.reason, ...(error.detail ? { detail: error.detail } : {}) }); shut() } }
       const drain = (force = false) => {
         while (pending.length) {
@@ -82,8 +96,9 @@ export function makeElevenLabsRealtime(options: ElevenLabsRealtimeOptions): Live
           // belongs to a flush the service did not act on, and using it would understate coverage.
           while (manual.length && lastWordEnd !== undefined && manual[0]! < lastWordEnd - 0.05) manual.shift()
           const flushedAt = manual.shift()
-          finalThrough = Math.max(finalThrough, lastWordEnd ?? 0, flushedAt ?? 0)
-          events.push({ type: "final", flushed: flushedAt !== undefined, utterance: head.utterance, text: head.text, words: list, startSec: list[0]?.startSec ?? finalThrough, endSec: list.at(-1)?.endSec ?? finalThrough, finalThroughSec: finalThrough })
+          // After an overflow the service has dropped audio: a commit only accounts for the words it returned.
+          finalThrough = Math.max(finalThrough, lastWordEnd ?? 0, overflowed ? 0 : flushedAt ?? 0)
+          events.push({ type: "final", flushed: flushedAt !== undefined, utterance: head.utterance, text: head.text, words: list, startSec: list[0]?.startSec ?? finalThrough, endSec: list.at(-1)?.endSec ?? finalThrough, finalThroughSec: finalThrough, ...(head.language ? { language: head.language } : {}) })
         }
       }
       const interim = (text: string, list: LiveWord[]) => {
@@ -108,7 +123,7 @@ export function makeElevenLabsRealtime(options: ElevenLabsRealtimeOptions): Live
           last = { text: "", start: 0, end: 0, speaker: undefined }
         } else if (type === "committed_transcript_with_timestamps") {
           const target = pending.find(item => !item.timed)
-          if (target) target.timed = words(message.words)
+          if (target) { target.timed = words(message.words); if (typeof message.language_code === "string" && message.language_code) target.language = message.language_code }
           drain()
         } else if (type === "diarized_transcript") {
           const target = pending.find(item => !item.diarized && (item.index === null || item.index === message.segment_index)) ?? pending.find(item => !item.diarized)
@@ -119,10 +134,27 @@ export function makeElevenLabsRealtime(options: ElevenLabsRealtimeOptions): Live
         } else if (type === "commit_throttled") manual.shift()
         else if (type === "auth_error" || type === "unaccepted_terms") fail(new LiveProviderError("not_configured", false, type))
         else if (type === "quota_exceeded") fail(new LiveProviderError("over_limit", false, type))
-        else if (type === "rate_limited" || type === "resource_exhausted" || type === "queue_overflow") fail(new LiveProviderError("over_limit", true, type))
+        else if (type === "queue_overflow") { overflowed = true; manual.length = 0; fail(new LiveProviderError("over_limit", true, type)) }
+        else if (type === "rate_limited" || type === "resource_exhausted") fail(new LiveProviderError("over_limit", true, type))
         else if (typeof type === "string" && (type === "error" || type.endsWith("_error") || ["session_time_limit_exceeded", "invalid_request", "chunk_size_exceeded", "insufficient_audio_activity"].includes(type))) fail(new LiveProviderError("unavailable", type !== "invalid_request", type))
       }
       const chunk = (pcm: Uint8Array, commit: boolean) => socket.send(JSON.stringify({ message_type: "input_audio_chunk", audio_base_64: Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString("base64"), commit, sample_rate: sampleRate }))
+      /** Forwards queued audio as the pace allows, splitting a piece when only part of it may go. */
+      const forward = () => {
+        if (closed) return
+        const now = (options.now ?? performance.now.bind(performance))()
+        credit = Math.min(sampleRate * BURST_SECONDS, credit + (now - creditAt) / 1000 * sampleRate * (options.pace ?? PACE)); creditAt = now
+        while (queue.length) {
+          const head = queue[0]!
+          if (head === "commit") { queue.shift(); manual.push(seconds(sent)); chunk(new Uint8Array(0), true); continue }
+          const samples = head.byteLength >> 1
+          if (credit < 1) break
+          const take = Math.min(samples, Math.floor(credit))
+          const piece = take === samples ? head : head.subarray(0, take * 2)
+          if (take === samples) queue.shift(); else queue[0] = head.subarray(take * 2)
+          chunk(piece, false); sent += take; queuedSamples -= take; credit -= take
+        }
+      }
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => reject(new LiveProviderError("unavailable", true)), 8000)
         const abort = () => reject(new LiveProviderError("unavailable", true))
@@ -145,19 +177,34 @@ export function makeElevenLabsRealtime(options: ElevenLabsRealtimeOptions): Live
         }
       }).catch(error => { shut(); throw error })
       sweep = setInterval(() => drain(), 500)
+      pump = setInterval(forward, 20)
       signal.addEventListener("abort", shut, { once: true })
       const session: LiveTranscriberSession = {
         events,
+        // Audio waiting for its pace is not a provider that stopped reading: only the socket's own buffer counts.
         get bufferedBytes() { return socket.bufferedAmount },
-        send(pcm) { if (closed || !pcm.byteLength) return; chunk(pcm, false); sent += pcm.byteLength >> 1 },
+        send(pcm) {
+          if (closed || !pcm.byteLength) return
+          queue.push(pcm.slice()); queuedSamples += pcm.byteLength >> 1
+          if (queuedSamples > sampleRate * MAX_QUEUED_SECONDS) { fail(new LiveProviderError("over_limit", true, "client_burst")); return }
+          forward()
+        },
         flush() {
           if (closed) return
           // Nothing has been sent since the session opened: there is nothing to commit, and the service
           // answers a commit without audio with an error. Confirm it locally instead.
-          if (!sent) { events.push({ type: "final", flushed: true, utterance: commits, text: "", words: [], startSec: 0, endSec: 0, finalThroughSec: 0 }); return }
-          manual.push(seconds(sent)); chunk(new Uint8Array(0), true)
+          if (!sent && !queue.length) { events.push({ type: "final", flushed: true, utterance: commits, text: "", words: [], startSec: 0, endSec: 0, finalThroughSec: 0 }); return }
+          // In band, behind the audio still waiting for its pace.
+          queue.push("commit"); forward()
         },
-        keepAlive() { if (closed) return 0; const silence = new Uint8Array(Math.round(sampleRate / 10) * 2); chunk(silence, false); sent += silence.byteLength >> 1; return 0.1 },
+        get queuedSeconds() { return queuedSamples / sampleRate },
+        keepAlive() {
+          if (closed) return 0
+          // Silence goes in order with the rest: the session places it after everything it has sent.
+          const silence = new Uint8Array(Math.round(sampleRate / 10) * 2)
+          queue.push(silence); queuedSamples += silence.byteLength >> 1; forward()
+          return 0.1
+        },
         async close() { drain(true); shut() },
       }
       return session

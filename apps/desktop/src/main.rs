@@ -4,12 +4,12 @@ mod app;
 mod audio;
 mod calendar;
 mod chat;
+mod chat_sync;
 mod chrome;
 mod desktop_preferences;
 mod device_settings;
 mod environment;
 mod fetch;
-mod folders;
 mod handoff;
 mod home;
 mod input;
@@ -23,6 +23,7 @@ mod menubar;
 mod model;
 mod motion;
 mod note;
+mod notifications;
 mod onboarding;
 mod onboarding_scene;
 mod onboarding_view;
@@ -37,6 +38,7 @@ mod smoke;
 mod store;
 mod summary;
 mod tour;
+mod trash;
 mod ui;
 mod update;
 mod update_view;
@@ -86,6 +88,7 @@ fn main() {
         if let Err(error) = desktop_preferences::apply_saved_icon() {
             eprintln!("{error}");
         }
+        audio::prepare_voice_isolation();
         input::init(cx);
         app::init(cx);
         onboarding_view::init(cx);
@@ -133,9 +136,7 @@ fn main() {
                         view.connect_server(cx);
                         view.workspace.settings.dark_mode = std::env::args().any(|a| a == "--dark")
                             || view.workspace.settings.dark_mode;
-                        let mode = std::env::args()
-                            .find_map(|a| a.strip_prefix("--view=").map(str::to_string))
-                            .unwrap_or_default();
+                        let mode = crate::audio::review_view();
                         match mode.as_str() {
                             "login" => view.navigate(app::Screen::Login, cx),
                             "login-sso" => {
@@ -193,7 +194,6 @@ fn main() {
                                 view.active_tab = app::NoteTab::Notes;
                             }
                             "chat" => view.navigate(app::Screen::Chat, cx),
-                            "connect" => view.navigate(app::Screen::Connect, cx),
                             "settings" => view.navigate(app::Screen::Settings, cx),
                             "shared" => view.navigate(app::Screen::Shared, cx),
                             "search" => view.open_search(window, cx),
@@ -206,9 +206,7 @@ fn main() {
             )
             .unwrap();
         cx.activate(true);
-        let mode = std::env::args()
-            .find_map(|a| a.strip_prefix("--view=").map(str::to_string))
-            .unwrap_or_default();
+        let mode = crate::audio::review_view();
         // `CEREAL_CAPTURE_PROBE=<seconds>` measures a short real capture
         // (see `tour::capture_probe`); the pill is shown throughout so its
         // windows are measured too.
@@ -270,7 +268,7 @@ fn main() {
             );
             tour::run(handle, cx);
         }
-        if std::env::args().any(|a| a == "--smoke-test") {
+        if cfg!(debug_assertions) && std::env::args().any(|a| a == "--smoke-test") {
             assert!(
                 crate::environment::var_os("CEREAL_DATA_DIR").is_some(),
                 "Smoke tests require an isolated CEREAL_DATA_DIR"

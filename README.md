@@ -81,7 +81,7 @@ For a server you reach over SSH, `scripts/deploy-ssh.sh` sends a commit from you
 ./scripts/deploy-ssh.sh ubuntu@notes.example.com main --release dist/release   # and publish a Mac build
 ```
 
-It dumps the database to `~/cereal-backups` first, builds the new image while the old server keeps answering, swaps in the new copy, and waits for it to report healthy. If it does not, it puts the previous copy back and prints the command to restore the dump. Migrations only go forward, so after a failed update that had already migrated, restore the dump as well. The `.env` and the published downloads are carried over; the commit that is running is in `DEPLOYED_COMMIT`.
+It dumps the database to `~/cereal-backups` first, then unpacks the commit as a new release in `~/cereal-releases` and builds its image (`meeting-notes:<commit>`) while the old server keeps answering. `~/cereal` is a link to the running release. On the server, as a job that carries on if the SSH connection drops, it points the link at the new release, starts it (migrations run first) and waits for it to report healthy. If any of that fails, including a failed migration, it prints the logs, points the link back at the previous release and starts that from its own image, without rebuilding. Migrations only go forward, so after a failed update that had already migrated, restore the dump as well; the script prints the commands. The `.env` and the published downloads are carried over; the commit that is running is in `~/cereal/DEPLOYED_COMMIT`. A deployment that is still a plain `~/cereal` folder is moved into `~/cereal-releases` at the next deploy, without stopping the server.
 
 ## Apps
 

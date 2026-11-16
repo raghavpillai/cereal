@@ -17,8 +17,8 @@ async function fixture(extra:Partial<ProviderServices>={}){
   const segment={id:crypto.randomUUID(),channel:"mic" as const,speakerId:"mic:part1:voice1",speakerLabel:"Zoë",text:"Alex will send the Cedar checklist Thursday. Launch is Friday.",startMs:1200,endMs:5000,isFinal:true}
   const note=await Effect.runPromise(owned.createNote({title:"Cedar launch review",date:"2026-11-13",enhanced:"# Next Steps\n- Alex: send checklist Thursday.",transcriptSegments:[segment]}))
   const privateNote=await Effect.runPromise(foreign.createNote({title:"Bob private account",body:"FOREIGN_ACCOUNT_SENTINEL",date:"2026-11-13"}))
-  const providers:ProviderServices={transcribe:()=>Effect.succeed([]),generate:()=>Effect.succeed("Notes"),chat:()=>Effect.succeed("Answer"),...extra}
-  const processing=makeProcessingService(root,{providers,worker:false})
+  const providers:ProviderServices={generate:()=>Effect.succeed("Notes"),chat:()=>Effect.succeed("Answer"),...extra}
+  const processing=makeProcessingService(root,{providers})
   const api=makeApiHandler(root,"unused-retrieval-operator-at-least-32-characters",{processing,principalResolver:async headers=>headers.get("authorization")==="Bearer alice"?alice:headers.get("authorization")==="Bearer bob"?bob:null})
   cleanup.push(api.dispose)
   const request=(id:string|null,includeSources=true)=>api.handler(new Request("http://localhost/api/v1/"+(id?"notes/"+id+"/chat/stream":"chat/stream"),{method:"POST",headers:{Authorization:"Bearer alice","Content-Type":"application/json"},body:JSON.stringify({message:"Find recent Cedar to-dos",history:[],includeSources,timeZone:"America/New_York"})}))
@@ -130,15 +130,6 @@ test("planner model is explicit, six-series model parameters omit unsupported te
   expect(instructions).toContain("level-one Markdown headings")
 })
 
-test("English transcription is explicit without changing source channel diarization",async()=>{
-  let form:FormData|undefined
-  const providers=makeProviderServices({elevenLabsKey:"synthetic-fixture-only",fetch:(async(_url,init)=>{form=init!.body as FormData;return Response.json({words:[]})})as typeof fetch})
-  await Effect.runPromise(providers.transcribe({audio:new Uint8Array([1,2]),channel:"system",chunkId:crypto.randomUUID(),startMs:0,durationMs:1000}))
-  expect(form!.get("language_code")).toBe("en")
-  expect(form!.get("diarize")).toBe("true")
-  expect(form!.get("use_multi_channel")).toBe("false")
-})
-
 test("nonstream completion rejects explicit length truncation rather than saving partial notes",async()=>{
   const f=await fixture(),providers=makeProviderServices({openRouterKey:"synthetic-fixture-only",fetch:(async()=>Response.json({choices:[{finish_reason:"length",message:{content:"Truncated partial summary"}}]}))as unknown as typeof fetch})
   await expect(Effect.runPromise(providers.generate(f.note))).rejects.toThrow()
@@ -158,7 +149,7 @@ test("planner transport failure falls back to actual scoped retrieval without le
 test("late matching facts survive bounded notes, summaries and long transcript segments as exact source windows",async()=>{
   const f=await fixture(),prefix="Cedar routine status remained unchanged. ".repeat(600),fact="Zephyr access code is VIOLET-314."
   const note=await Effect.runPromise(f.owned.updateNote(f.note.id,{body:prefix+fact,enhanced:prefix+fact,transcriptSegments:[{...f.segment,text:prefix+fact}]}))
-  const prepared=await prepareMeetingChat({noteId:f.note.id,input:{message:"What is the Zephyr access code?",history:[],includeSources:true},repository:f.owned,providers:{transcribe:()=>Effect.succeed([]),generate:()=>Effect.succeed(""),chat:()=>Effect.succeed("")},enrich:async note=>note,signal:new AbortController().signal,emit:()=>{}})
+  const prepared=await prepareMeetingChat({noteId:f.note.id,input:{message:"What is the Zephyr access code?",history:[],includeSources:true},repository:f.owned,providers:{generate:()=>Effect.succeed(""),chat:()=>Effect.succeed("")},enrich:async note=>note,signal:new AbortController().signal,emit:()=>{}})
   expect(prepared.note.body).toContain(fact);expect(prepared.note.enhanced).toContain(fact)
   expect(prepared.note.transcriptSegments[0]!.text).toContain(fact)
   // A document is shown from its beginning (up to 24,000 characters, the same for every question) plus the
@@ -179,13 +170,13 @@ test("search_transcripts returns real timestamped passages, empty-query isolatio
   expect(citation.segmentId).toBe(f.segment.id);expect(citation.startMs).toBe(f.segment.startMs);expect(f.segment.text.includes(citation.quote)).toBe(true)
   expect(await Effect.runPromise(f.owned.searchTranscriptSegments!({query:"",limit:20}))).toEqual([])
   const controller=new AbortController();controller.abort()
-  await expect(prepareMeetingChat({noteId:null,input:{message:"Cedar",history:[],includeSources:true},repository:f.owned,providers:{transcribe:()=>Effect.succeed([]),generate:()=>Effect.succeed(""),chat:()=>Effect.succeed("")},enrich:async note=>note,signal:controller.signal,emit:()=>{}})).rejects.toThrow()
+  await expect(prepareMeetingChat({noteId:null,input:{message:"Cedar",history:[],includeSources:true},repository:f.owned,providers:{generate:()=>Effect.succeed(""),chat:()=>Effect.succeed("")},enrich:async note=>note,signal:controller.signal,emit:()=>{}})).rejects.toThrow()
 })
 
 test("zero retained read budget reports zero passages/results and explains discarded matches",async()=>{
   const f=await fixture(),progress:ChatStreamEventDTO[]=[]
   let round=0
-  const providers:ProviderServices={transcribe:()=>Effect.succeed([]),generate:()=>Effect.succeed(""),chat:()=>Effect.succeed(""),async chatToolStep(){return round++===0?[{id:"search",name:"search_transcripts",arguments:JSON.stringify({query:"Cedar"})}]:[]}}
+  const providers:ProviderServices={generate:()=>Effect.succeed(""),chat:()=>Effect.succeed(""),async chatToolStep(){return round++===0?[{id:"search",name:"search_transcripts",arguments:JSON.stringify({query:"Cedar"})}]:[]}}
   const prepared=await prepareMeetingChat({noteId:null,input:{message:"Cedar",history:[],includeSources:true},repository:f.owned,providers,enrich:async note=>note,signal:new AbortController().signal,emit:event=>progress.push(event),readCharacterBudget:0})
   const completed=progress.find(event=>event.tool?.name==="search_transcripts"&&event.tool.status==="completed")!.tool!
   expect(completed.resultCount).toBe(0)

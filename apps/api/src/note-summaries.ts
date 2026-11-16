@@ -12,13 +12,14 @@
  * functions here are the reference and serve the memory repository.
  */
 import {Schema} from "effect"
+import {forContext} from "./transcript-link"
 import {MeetingContextDTO,NoteSearchPageDTO,NoteSummariesPageDTO,NoteSummaryDTO} from "@meeting-notes/contracts"
 import type {NoteAttendeesDTO,NoteDTO,NoteListFilter,NoteSearchExcerptDTO,NoteSearchField,NoteSearchResultDTO,NoteSearchTextPartDTO} from "@meeting-notes/contracts"
 
 export const SUMMARY_PAGE_DEFAULT=50,SUMMARY_PAGE_MAX=100,SEARCH_PAGE_DEFAULT=30,SEARCH_PAGE_MAX=50
 /** How much of each document is read to write a row's excerpt. */
 export const EXCERPT_SOURCE_CHARACTERS=1600
-const EXCERPT_CHARACTERS=150,ATTENDEES_SHOWN=4,FOLDERS_SHOWN=8,PARTS_MAXIMUM=64
+const EXCERPT_CHARACTERS=150,ATTENDEES_SHOWN=4,PARTS_MAXIMUM=64
 
 export class InvalidPageRequest extends Error {}
 
@@ -135,7 +136,7 @@ export interface NoteSummarySource {
   transcriptRevision:number;generatedRevision:number|null;hasBody:boolean;hasSummary:boolean;speakerCount:number
   /** The opening of each document, or all of it when `complete`. */
   enhanced:string;body:string;complete:boolean
-  meeting:MeetingContextDTO|null;organizationId:string|null;folders:ReadonlyArray<{id:string;name:string}>
+  meeting:MeetingContextDTO|null;organizationId:string|null
 }
 const decodeSummary=Schema.decodeUnknownSync(NoteSummaryDTO)
 export function noteSummary(source:NoteSummarySource):NoteSummaryDTO {
@@ -147,16 +148,16 @@ export function noteSummary(source:NoteSummarySource):NoteSummaryDTO {
     excerpt:noteExcerpt(source.enhanced,source.body,source.complete),
     meeting:meeting?{startAt:meeting.startAt,endAt:meeting.endAt,allDay:meeting.allDay}:null,
     attendees:attendeeSummary(meeting),organizationId:source.organizationId,
-    folders:[...source.folders].sort((a,b)=>a.name.localeCompare(b.name)||a.id.localeCompare(b.id)).slice(0,FOLDERS_SHOWN),
   })
 }
-/** What a repository without its own calendar or folder data cannot know about a note. */
-export interface NoteExtras {meeting?:MeetingContextDTO|null;organizationId?:string|null;folders?:ReadonlyArray<{id:string;name:string}>}
+/** What a repository without its own calendar data cannot know about a note. */
+export interface NoteExtras {meeting?:MeetingContextDTO|null;organizationId?:string|null}
 const spoken=(segment:NoteDTO["transcriptSegments"][number])=>segment.text.trim().length>0
 export function summarizeNote(note:NoteDTO,extras:NoteExtras={}):NoteSummaryDTO {
-  return noteSummary({...note,hasBody:note.body.trim().length>0,hasSummary:note.enhanced.trim().length>0,
+  // The preview is read without the chat link line (transcript-link.ts).
+  return noteSummary({...forContext(note),hasBody:note.body.trim().length>0,hasSummary:note.enhanced.trim().length>0,
     speakerCount:new Set(note.transcriptSegments.filter(spoken).map(segment=>`${segment.channel}:${segment.speakerId}`)).size,
-    complete:true,meeting:extras.meeting??null,organizationId:extras.organizationId??null,folders:extras.folders??[]})
+    complete:true,meeting:extras.meeting??null,organizationId:extras.organizationId??null})
 }
 /** Calendar context is saved separately from the note. This puts it on a summary that was made without it. */
 export const withMeeting=(summary:NoteSummaryDTO,meeting:MeetingContextDTO|null):NoteSummaryDTO=>({...summary,meeting:meeting?{startAt:meeting.startAt,endAt:meeting.endAt,allDay:meeting.allDay}:null,attendees:attendeeSummary(meeting)})
@@ -253,7 +254,8 @@ export function scoreNote(fields:Record<NoteSearchField,string>,input:Pick<NoteS
 }
 export function selectNoteSearch(notes:ReadonlyArray<NoteDTO>,input:NoteSearchInput,extras:(id:string)=>NoteExtras=()=>({})):NoteSearchPageDTO {
   if(!input.terms.length)return{results:[],nextCursor:null,total:0,terms:[]}
-  const scored=notes.filter(note=>matchesFilter(note,input.filter)).flatMap(note=>{
+  // Matched, and quoted, without the chat link line (transcript-link.ts).
+  const scored=notes.filter(note=>matchesFilter(note,input.filter)).map(forContext).flatMap(note=>{
     const meeting=extras(note.id).meeting??null,people=attendeeNames(meeting)
     const match=scoreNote({title:note.title.toLowerCase(),summary:note.enhanced.toLowerCase(),notes:note.body.toLowerCase(),transcript:note.transcriptSegments.map(segment=>segment.text.toLowerCase()).join("\n"),people:people.join("\n").toLowerCase()},input)
     return match?[{note,people,...match,date:note.date,createdAt:note.createdAt,id:note.id}]:[]

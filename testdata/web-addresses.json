@@ -1,0 +1,26 @@
+{
+  "about": "Which web addresses in note text become links. One rule set, shared by the web reader (apps/web/src/lib/markdown.tsx), the desktop editor (apps/desktop/src/summary.rs) and the iPhone reader (apps/ios/Packages/APIClient/Sources/APIClient/WebAddresses.swift); each runs these cases in its tests. `links` are the linked addresses exactly as they appear in `text`. An address starts at http:// or https:// (any case) that does not follow a letter or digit, and runs to white space or one of < > \" ' `. Trailing . , : ; ! ? * _ ~ are not part of it, and neither is a closing ) ] } without its opening partner inside it (as GitHub's autolinker reads them). It is linked only when its host is a plain ASCII name or address with an optional port (no user name or password, no percent signs, no other script), and when it holds no control or invisible formatting character and no backslash: such an address could show one destination and open another.",
+  "cases": [
+    { "text": "Chat with meeting transcript: https://notes.example.test/notes/51207249-97a9-4bd7-b02f-93428ffb367a/chat I CAN TYPE HERE", "links": ["https://notes.example.test/notes/51207249-97a9-4bd7-b02f-93428ffb367a/chat"] },
+    { "text": "http://127.0.0.1:47391/notes/af84e593-c6e4-4174-932e-c2039e29ca42/chat", "links": ["http://127.0.0.1:47391/notes/af84e593-c6e4-4174-932e-c2039e29ca42/chat"] },
+    { "text": "See (http://10.30.1.77:3000/notes/x), then \"https://a.example/b\".", "links": ["http://10.30.1.77:3000/notes/x", "https://a.example/b"] },
+    { "text": "https://en.wikipedia.org/wiki/Foo_(bar)", "links": ["https://en.wikipedia.org/wiki/Foo_(bar)"] },
+    { "text": "(see https://en.wikipedia.org/wiki/Foo_(bar))", "links": ["https://en.wikipedia.org/wiki/Foo_(bar)"] },
+    { "text": "[label](https://elsewhere.example)", "links": ["https://elsewhere.example"] },
+    { "text": "Ends here https://a.example/x. Then a question https://a.example/q?x=1?", "links": ["https://a.example/x", "https://a.example/q?x=1"] },
+    { "text": "**https://a.example/bold** and https://a.example/a*b*c and https://a.example/x_y", "links": ["https://a.example/bold", "https://a.example/a*b*c", "https://a.example/x_y"] },
+    { "text": "HTTPS://A.EXAMPLE/Path", "links": ["HTTPS://A.EXAMPLE/Path"] },
+    { "text": "https://[::1]:3000/notes and https://xn--pple-43d.com/", "links": ["https://[::1]:3000/notes", "https://xn--pple-43d.com/"] },
+    { "text": "Résumé → https://a.example/é", "links": ["https://a.example/é"] },
+    { "text": "https://good.example@evil.example/login", "links": [] },
+    { "text": "https://user:pass@evil.example", "links": [] },
+    { "text": "https://аpple.com/login", "links": [] },
+    { "text": "https://a.example/‮gnp.exe", "links": [] },
+    { "text": "https://a​.example/", "links": [] },
+    { "text": "https://%65vil.example/", "links": [] },
+    { "text": "https://good.example\\@evil.example/", "links": [] },
+    { "text": "http:// nothing, ftp://a.example, xhttps://a.example, javascript:alert(1), https://", "links": [] },
+    { "text": "Chat with meeting transcript: ORD ELETE", "links": [] },
+    { "text": "", "links": [] }
+  ]
+}

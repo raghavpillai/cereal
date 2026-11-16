@@ -56,6 +56,8 @@
   /* Cards are swapped by tabs as well as loaded: they fade and do not travel. */
   animation: fade-in var(--dur-snappy) var(--ease-fade) backwards;
 }
+/* A notice that ends a card leaves the card's own padding below it, as above it. */
+.admin-card > .admin-notice:last-child { margin-bottom: 0; }
 .admin-card > h2, .admin-section-title h2 { font: 400 var(--text-xl) / 1.3 var(--font-display); }
 .admin-card > h2 + p { margin-top: var(--space-2); color: var(--ink-soft); font-size: var(--text-base); }
 .admin-section-title { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--space-5); margin-bottom: var(--space-5); }
@@ -81,7 +83,9 @@
 .admin-inline-hint { display: contents; color: var(--ink-soft); font-weight: 400; }
 .admin-inline-error { color: var(--danger) !important; font-size: var(--text-sm); }
 .admin-page .admin-checkbox { flex-direction: row; align-items: flex-start; gap: 0.5625rem; margin-top: var(--space-3); color: var(--ink-soft); font-size: var(--text-sm); }
-.admin-checkbox input { flex-shrink: 0; margin: 0.1875rem 0 0; accent-color: var(--brand); }
+/* Every checkbox on these pages is 16px, as in instance settings, and sits on the first line of its label. */
+.admin-checkbox input { flex-shrink: 0; width: 1rem; height: 1rem; margin: 0.1875rem 0 0; accent-color: var(--brand); }
+.admin-checkbox + .admin-hint { margin-top: var(--space-2); padding-left: 1.5625rem; }
 .admin-save-row { display: flex; justify-content: space-between; align-items: center; gap: var(--space-5); padding: 0.25rem 0 0.75rem; }
 .admin-empty { display: grid; justify-items: center; gap: var(--space-2); padding: var(--space-10) var(--space-4); text-align: center; color: var(--ink-soft); }
 .admin-empty h3 { font: 400 var(--text-xl) / 1.35 var(--font-display); color: var(--ink); }
@@ -103,7 +107,9 @@
 @keyframes dialog-in { from { transform: translateY(var(--rise)) scale(var(--pop-panel)); } }
 .admin-dialog-title { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-4) var(--space-5) var(--space-4) var(--space-6); border-bottom: 1px solid var(--line); }
 .admin-dialog-title h2 { font: 400 var(--text-xl) / 1.3 var(--font-display); }
-.admin-dialog-title > .icon-button { font-size: 1.375rem; line-height: 1; }
+/* The close mark is the same 16px line icon as the rest of the controls, not a text glyph. */
+.admin-dialog-title > .icon-button { margin-right: -0.5rem; }
+.admin-dialog-title > .icon-button svg { width: 1rem; height: 1rem; }
 .admin-dialog-body { display: flex; flex-direction: column; gap: var(--space-4); padding: var(--space-5) var(--space-6); }
 .admin-dialog-body > p { font-size: var(--text-base); line-height: 1.6; }
 .admin-dialog-body .admin-notice { margin: 0; }
@@ -131,10 +137,11 @@
 .google-contact-option { margin-top: var(--space-5); }
 .google-connection-actions { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-4) 0; }
 .google-calendar-options { display: grid; margin-top: var(--space-3); }
-.admin-page .google-calendar-option { flex-direction: row; align-items: center; gap: 0.875rem; padding: var(--space-4) 0; border-top: 1px solid var(--line); cursor: pointer; }
+/* The box sits on the calendar's name, the first line, as every checkbox here does; the colour bar spans both lines. */
+.admin-page .google-calendar-option { flex-direction: row; align-items: flex-start; gap: 0.875rem; padding: var(--space-4) 0; border-top: 1px solid var(--line); cursor: pointer; }
 .google-calendar-option > span:nth-child(2) { display: grid; gap: 0.125rem; flex: 1; }
 .google-calendar-option strong { font-size: var(--text-base); font-weight: 400; overflow-wrap: anywhere; }
-.google-calendar-option input { width: 1.125rem; height: 1.125rem; accent-color: var(--brand); }
+.google-calendar-option input { flex-shrink: 0; width: 1rem; height: 1rem; margin: calc((1.5em - 1rem) / 2) 0 0; font-size: var(--text-base); accent-color: var(--brand); }
 
 /* Instance calendar and event panels (native-client features kept for parity). */
 .admin-provider + .admin-provider { margin-top: var(--space-5); padding-top: var(--space-5); border-top: 1px solid var(--line); }
@@ -293,6 +300,8 @@
   .admin-event-info { flex-basis: calc(100% - 1.25rem); }
   .admin-event-actions { max-width: none; width: 100%; justify-content: flex-start; padding-left: 1.0625rem; }
   .admin-dialog-title, .admin-dialog-body, .admin-dialog-actions { padding-inline: var(--space-5); }
+  /* Two answers that do not fit side by side each take the full width, rather than two ragged right-aligned pills. */
+  .admin-dialog-actions > * { flex: 1 1 0; min-width: max-content; }
   .admin-user { gap: var(--space-3); }
   .admin-user-info { min-width: 8.75rem; }
   .admin-user > .admin-text-button { margin-left: 3.25rem; }

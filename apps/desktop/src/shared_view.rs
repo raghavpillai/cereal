@@ -8,7 +8,7 @@ use crate::{
     chrome::{BackLabel, back_pill, screen_icon},
     input::{InputChanged, InputSubmitted, TextInput},
     link::{Access, AppLink, NoteLink, ServerOrigin, SharedNoteLink},
-    note::{NoteTabs, note_meta_chip, note_tab_label_width},
+    note::{NoteTabs, note_meta_chip},
     shared::{History, SharedNote, SharedNoteError, shown},
     ui::*,
 };
@@ -663,9 +663,6 @@ impl Cereal {
             self.note_view_tabs(
                 NoteTabs {
                     notes_label: "Notes",
-                    // The same 12 px either side of the icon and label as
-                    // "My notes" has.
-                    notes_width: (note_tab_label_width("Notes", window) + 45.).round(),
                     menu: false,
                 },
                 display_tab,

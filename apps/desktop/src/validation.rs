@@ -47,14 +47,12 @@ fn outline_preserves_unicode_names_punctuation_and_combining_characters() {
 #[test]
 fn new_note_edits_and_local_outline_remain_searchable_after_serialization() {
     let mut workspace = Workspace::default();
-    let folder_id = workspace.add_folder("Research".into());
     let note_id = workspace.create_note();
     let note = workspace.note_mut(note_id).unwrap();
     note.title = "Discovery with Rowan".into();
     note.body = "A quiet launch\nTODO: Share the indigo prototype".into();
     note.enhanced = local_outline(&note.body);
     note.transcript = "Rowan 00:12\nAccessibility needs a separate review.".into();
-    note.folder_id = Some(folder_id);
     note.favorite = true;
 
     // Simulate the serialization boundary used by the workspace file, without
@@ -63,7 +61,7 @@ fn new_note_edits_and_local_outline_remain_searchable_after_serialization() {
     let restored: Workspace = serde_json::from_slice(&saved).unwrap();
 
     for query in ["ROWAN", "quiet launch", "indigo prototype", "accessibility"] {
-        let results = restored.visible_notes(Some(folder_id), true, query);
+        let results = restored.visible_notes(true, query);
         assert_eq!(results.len(), 1, "missing query: {query}");
         assert_eq!(results[0].id, note_id);
     }
@@ -87,57 +85,33 @@ fn search_finds_each_text_source_but_respects_trash_and_restore() {
     note.transcript = "Speaker marker: amber".into();
 
     for query in ["topaz", "cobalt", "violet", "amber"] {
-        assert_eq!(workspace.visible_notes(None, false, query).len(), 1);
+        assert_eq!(workspace.visible_notes(false, query).len(), 1);
     }
 
     workspace.note_mut(note_id).unwrap().trashed = true;
-    assert!(workspace.visible_notes(None, false, "amber").is_empty());
+    assert!(workspace.visible_notes(false, "amber").is_empty());
     assert!(
         workspace.note(note_id).is_some(),
         "trash must retain the note"
     );
 
     workspace.note_mut(note_id).unwrap().trashed = false;
-    let restored = workspace.visible_notes(None, false, "AMBER");
+    let restored = workspace.visible_notes(false, "AMBER");
     assert_eq!(restored.len(), 1);
     assert_eq!(restored[0].id, note_id);
 }
 
 #[test]
-fn folder_and_favorite_changes_immediately_change_search_results() {
+fn favorite_changes_immediately_change_search_results() {
     let mut workspace = Workspace::default();
-    let first_folder = workspace.add_folder("Project A".into());
-    let second_folder = workspace.add_folder("Project B".into());
     let id = workspace.create_note();
     let note = workspace.note_mut(id).unwrap();
     note.title = "Shared search phrase".into();
-    note.folder_id = Some(first_folder);
 
-    assert_eq!(
-        workspace
-            .visible_notes(Some(first_folder), false, "search")
-            .len(),
-        1
-    );
-    assert!(
-        workspace
-            .visible_notes(Some(first_folder), true, "search")
-            .is_empty()
-    );
+    assert_eq!(workspace.visible_notes(false, "search").len(), 1);
+    assert!(workspace.visible_notes(true, "search").is_empty());
 
-    let note = workspace.note_mut(id).unwrap();
-    note.folder_id = Some(second_folder);
-    note.favorite = true;
+    workspace.note_mut(id).unwrap().favorite = true;
 
-    assert!(
-        workspace
-            .visible_notes(Some(first_folder), false, "search")
-            .is_empty()
-    );
-    assert_eq!(
-        workspace
-            .visible_notes(Some(second_folder), true, "search")
-            .len(),
-        1
-    );
+    assert_eq!(workspace.visible_notes(true, "search").len(), 1);
 }

@@ -1,9 +1,9 @@
 /**
- * The live sessions of this process, by note. The WebSocket route creates and feeds them; chat and the
- * batch worker consult them.
+ * The live sessions of this process, by note. The WebSocket route creates and feeds them; Stop ends them
+ * and chat consults them.
  *
  * Sessions are in memory only. Another process, or this one after a restart, sees no session: chat then
- * answers from stored segments and the worker decides from the stored ledger alone.
+ * answers from stored segments, and a reconnecting client resumes from the stored ledger.
  *
  * The hub also holds the provider sessions of a live session that ended in an orderly way, for
  * `holdMs`, so that a Resume keeps the provider's speaker identities (link.ts). A held provider session
@@ -14,11 +14,9 @@ import { Effect } from "effect"
 import type { LiveHelloMessage, LiveTranscriber } from "@meeting-notes/contracts/live"
 import { LiveCloseCode } from "@meeting-notes/contracts/live"
 import type { NotesRepositoryService } from "../repository"
-import type { Interval } from "./coverage"
 import type { ProviderLink } from "./link"
 import { LiveProviderError } from "./providers/queue"
-import { DEFAULT_LIVE_CONFIG, LiveSession, LiveSessionRefusal, type LiveConfig, type LiveHold, type LiveSnapshot, type LiveSocket } from "./session"
-import type { VoiceMatcher } from "./voices"
+import { DEFAULT_LIVE_CONFIG, LiveSession, LiveSessionRefusal, type LiveConfig, type LiveHold, type LiveSnapshot, type LiveSocket, type RecentAudio } from "./session"
 
 export interface LiveHub {
   readonly size: number
@@ -27,7 +25,6 @@ export interface LiveHub {
   /** Attaches a socket to the note's session, creating or resuming it. Throws `LiveSessionRefusal`. */
   connect(noteId: string, hello: LiveHelloMessage, socket: LiveSocket, transcriber: LiveTranscriber): Promise<LiveSession>
   active(noteId: string): boolean
-  pendingRange(noteId: string, channel: "mic" | "system"): Interval | null
   /** Finalise what has been heard (rate-limited) and wait briefly for it to be stored. */
   flush(noteId: string): Promise<void>
   snapshot(noteId: string): LiveSnapshot | null
@@ -37,7 +34,7 @@ export interface LiveHub {
   dispose(options?: { abandon?: boolean }): Promise<void>
 }
 
-export function makeLiveHub(repository: NotesRepositoryService, options: { config?: Partial<LiveConfig>; maxSessions?: number; /** The limits in force now (the admin panel sets them); read whenever one is applied, so a change needs no restart. */ limits?: () => { maxSessions?: number; holdMs?: number }; /** Tells a new provider session's voices from a note's earlier ones (voices.ts). */ voices?: VoiceMatcher } = {}): LiveHub & { /** Notes whose provider sessions are being held for a Resume. */ readonly holding: number } {
+export function makeLiveHub(repository: NotesRepositoryService, options: { config?: Partial<LiveConfig>; maxSessions?: number; /** The limits in force now (the admin panel sets them); read whenever one is applied, so a change needs no restart. */ limits?: () => { maxSessions?: number; holdMs?: number } } = {}): LiveHub & { /** Notes whose provider sessions are being held for a Resume. */ readonly holding: number } {
   const base = { ...DEFAULT_LIVE_CONFIG, ...options.config }
   const limit = () => options.limits?.().maxSessions ?? options.maxSessions ?? 20, holdMs = () => options.limits?.().holdMs ?? base.holdMs
   /** The configuration a session starts with: the hold in force at that moment. */
@@ -57,7 +54,15 @@ export function makeLiveHub(repository: NotesRepositoryService, options: { confi
       if (now - entry.keptAt >= base.keepAliveMs) { entry.keptAt = now; for (const link of entry.links) link.keepAlive() }
     }
   }
+  // The newest audio of a note's channels after its live session ended (session.ts, PRIMER_MS), kept as long as a hold.
+  const recent = new Map<string, { audio: RecentAudio; until: number }>()
   const holdFor = (noteId: string): LiveHold => ({
+    keepAudio(channel, audio) {
+      const now = performance.now()
+      for (const [key, entry] of recent) if (entry.until < now) recent.delete(key)
+      recent.set(`${noteId}:${channel}`, { audio, until: now + Math.max(holdMs(), 300_000) })
+    },
+    recentAudio(channel) { const entry = recent.get(`${noteId}:${channel}`); return entry && entry.until >= performance.now() ? entry.audio : undefined },
     take(key) {
       const entry = held.get(noteId), link = entry?.links.find(item => item.fits(key))
       if (entry && link) entry.links = entry.links.filter(item => item !== link)
@@ -83,7 +88,7 @@ export function makeLiveHub(repository: NotesRepositoryService, options: { confi
     if (sessions.size >= limit()) throw new LiveSessionRefusal(LiveCloseCode.overLimit, "Too many live sessions")
     // A recording that is running matters more than a Resume that may never come.
     for (const other of [...held.keys()]) if (other !== noteId && sessions.size + held.size >= limit()) release(other)
-    const begin = () => LiveSession.start({ noteId, hello, transcriber, store, config: configured(), hold: holdFor(noteId), ...(options.voices ? { voices: options.voices } : {}),
+    const begin = () => LiveSession.start({ noteId, hello, transcriber, store, config: configured(), hold: holdFor(noteId),
       onEnded: ended => { if (sessions.get(noteId) === ended) sessions.delete(noteId) },
       transcriptRevision: async () => (await Effect.runPromise(repository.getNote(noteId)))?.transcriptRevision ?? 0 })
     let session: LiveSession
@@ -119,7 +124,6 @@ export function makeLiveHub(repository: NotesRepositoryService, options: { confi
       return next
     },
     active: noteId => !!current(noteId),
-    pendingRange: (noteId, channel) => current(noteId)?.pendingRange(channel) ?? null,
     flush: async noteId => { await current(noteId)?.flushForChat() },
     snapshot: noteId => current(noteId)?.snapshot() ?? null,
     end: async noteId => { await connecting.get(noteId); await sessions.get(noteId)?.endAfterAudio() },

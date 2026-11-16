@@ -55,6 +55,27 @@ pub(crate) fn chat_title(question: &str) -> String {
     title
 }
 
+/// A conversation's age as the chat's lists print it: "now", "6m", "6h",
+/// "1d", "2mo"; one later than `now` (another Mac's clock) as its time of
+/// day. `None` for a time that cannot be read.
+pub(crate) fn thread_age(updated_at: &str, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let at = chrono::DateTime::parse_from_rfc3339(updated_at).ok()?;
+    let age = now.signed_duration_since(at);
+    Some(if age.num_seconds() < 0 {
+        at.with_timezone(&chrono::Local).format("%-I:%M %p").to_string()
+    } else if age.num_minutes() == 0 {
+        "now".into()
+    } else if age.num_hours() == 0 {
+        format!("{}m", age.num_minutes())
+    } else if age.num_days() == 0 {
+        format!("{}h", age.num_hours())
+    } else if age.num_days() < 30 {
+        format!("{}d", age.num_days())
+    } else {
+        format!("{}mo", age.num_days() / 30)
+    })
+}
+
 pub(crate) fn valid_citation_id(id: &str) -> bool {
     id.strip_prefix('S').is_some_and(|number| {
         number.len() <= 3
@@ -110,7 +131,6 @@ pub(crate) fn floating_workspace_chat(screen: crate::app::Screen) -> bool {
         screen,
         crate::app::Screen::Home
             | crate::app::Screen::MyNotes
-            | crate::app::Screen::Folder(_)
             | crate::app::Screen::Favorites
     )
 }
@@ -192,18 +212,30 @@ fn chat_history(
 
 /// Apply one stream event to the turn at `index`. True when the event marks
 /// the turn as interrupted.
+/// `elapsed_ms` is how long the answer has been asked for: the first of its
+/// text to arrive fixes how long it "thought".
 fn apply_stream_event(
     messages: &mut [(String, String)],
     annotations: &mut std::collections::HashMap<usize, ChatTurnAnnotations>,
     index: usize,
     event: crate::server::ChatStreamEvent,
+    elapsed_ms: u64,
 ) -> bool {
     use crate::server::ChatStreamEvent;
     let Some((_, answer)) = messages.get_mut(index) else {
         return false;
     };
     match event {
-        ChatStreamEvent::Delta(text) => answer.push_str(&text),
+        ChatStreamEvent::Delta(text) => {
+            if answer.is_empty() && !text.is_empty() {
+                annotations
+                    .entry(index)
+                    .or_default()
+                    .elapsed_ms
+                    .get_or_insert(elapsed_ms);
+            }
+            answer.push_str(&text)
+        }
         ChatStreamEvent::Done => {}
         ChatStreamEvent::Tool(tool) => annotations.entry(index).or_default().update_tool(tool),
         ChatStreamEvent::Citations(citations) => {
@@ -363,15 +395,23 @@ impl Chats<'_> {
         use crate::server::ChatStreamEvent;
         let done = matches!(event, ChatStreamEvent::Done | ChatStreamEvent::Error(_));
         let current = |active: &ActiveChat| active.epoch == epoch && active.index == index;
-        if self.thread_id.as_str() == thread && self.stream.as_ref().is_some_and(current) {
-            if apply_stream_event(self.messages, self.annotations, index, event) {
+        if let Some(active) = self.stream.as_ref().filter(|active| {
+            self.thread_id.as_str() == thread && current(active)
+        }) {
+            let elapsed = active.elapsed_ms();
+            if apply_stream_event(self.messages, self.annotations, index, event, elapsed) {
                 self.interrupted.insert(index);
             }
             if !done {
                 return Applied::Updated { loaded: true };
             }
             if let Some(active) = self.stream.take() {
-                self.annotations.entry(index).or_default().elapsed_ms = Some(active.elapsed_ms());
+                // An answer that never wrote anything thought until the end.
+                self.annotations
+                    .entry(index)
+                    .or_default()
+                    .elapsed_ms
+                    .get_or_insert(active.elapsed_ms());
             }
             let next = (!self.queue.is_empty()).then(|| self.queue.remove(0));
             return Applied::Finished {
@@ -397,8 +437,17 @@ impl Chats<'_> {
             }
             return Applied::Gone;
         };
-        if apply_stream_event(&mut archive.messages, &mut archive.annotations, index, event)
-            && !archive.interrupted.contains(&index)
+        let elapsed = self
+            .parked
+            .get(thread)
+            .map_or(0, |parked| parked.active.elapsed_ms());
+        if apply_stream_event(
+            &mut archive.messages,
+            &mut archive.annotations,
+            index,
+            event,
+            elapsed,
+        ) && !archive.interrupted.contains(&index)
         {
             archive.interrupted.push(index);
         }
@@ -407,8 +456,12 @@ impl Chats<'_> {
         }
         let mut rest = Vec::new();
         if let Some(parked) = self.parked.remove(thread) {
-            archive.annotations.entry(index).or_default().elapsed_ms =
-                Some(parked.active.elapsed_ms());
+            archive
+                .annotations
+                .entry(index)
+                .or_default()
+                .elapsed_ms
+                .get_or_insert(parked.active.elapsed_ms());
             rest = parked.queue;
         }
         archive.updated_at = Some(chrono::Utc::now().to_rfc3339());
@@ -425,7 +478,11 @@ impl Chats<'_> {
     /// arriving.
     pub fn stop(&mut self) -> Option<Vec<String>> {
         let active = self.stream.take()?;
-        self.annotations.entry(active.index).or_default().elapsed_ms = Some(active.elapsed_ms());
+        self.annotations
+            .entry(active.index)
+            .or_default()
+            .elapsed_ms
+            .get_or_insert(active.elapsed_ms());
         active
             .cancel
             .store(true, std::sync::atomic::Ordering::Release);
@@ -528,53 +585,6 @@ fn thread_account(note_id: u64) -> Option<crate::accounts::AccountId> {
     }
 }
 
-/// `recipes.json`: the person's prompts, device-level. Each account's
-/// `chats.json` keeps a copy, and is folded in here once.
-#[derive(Default, serde::Serialize, serde::Deserialize)]
-struct RecipesFile {
-    version: u32,
-    recipes: Vec<ChatRecipe>,
-    /// Accounts whose recipes have been folded in.
-    #[serde(default)]
-    seeded: Vec<String>,
-}
-
-fn valid_recipe(recipe: &ChatRecipe) -> bool {
-    !recipe.id.is_empty()
-        && !recipe.title.trim().is_empty()
-        && recipe.title.chars().count() <= 100
-        && !recipe.prompt.trim().is_empty()
-        && recipe.prompt.encode_utf16().count() <= 20_000
-}
-
-fn read_recipes_file(paths: &crate::accounts::Paths) -> RecipesFile {
-    std::fs::read(paths.recipes())
-        .ok()
-        .filter(|bytes| bytes.len() <= 4 * 1024 * 1024)
-        .and_then(|bytes| serde_json::from_slice::<RecipesFile>(&bytes).ok())
-        .filter(|file| file.version == 1)
-        .unwrap_or_default()
-}
-
-/// Fold an account's recipes into the device's, once per account: the
-/// union, with exact duplicates dropped. Returns whether anything changed.
-fn merge_recipes(device: &mut Vec<ChatRecipe>, theirs: Vec<ChatRecipe>) -> bool {
-    let mut changed = false;
-    for recipe in theirs.into_iter().filter(valid_recipe) {
-        let duplicate = device.iter().any(|known| {
-            known.id == recipe.id
-                || (known.title == recipe.title
-                    && known.prompt == recipe.prompt
-                    && known.multiple_meetings == recipe.multiple_meetings)
-        });
-        if !duplicate && device.len() < 100 {
-            device.push(recipe);
-            changed = true;
-        }
-    }
-    changed
-}
-
 /// The threads of one account's file as they are kept in memory: tagged
 /// with the account, their note ids as handles in its slot, the newest
 /// [`THREADS_PER_ACCOUNT`]. A thread about a note id that cannot be a
@@ -603,61 +613,7 @@ fn adopt_threads(
 struct HistoryFile {
     version: u32,
     sessions: Vec<ArchivedChat>,
-    #[serde(default)]
-    recipes: Vec<ChatRecipe>,
 }
-
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub struct ChatRecipe {
-    pub id: String,
-    pub title: String,
-    pub prompt: String,
-    #[serde(default)]
-    pub multiple_meetings: bool,
-}
-
-pub struct RecipeEditor {
-    pub id: Option<String>,
-    pub name: Entity<crate::input::TextInput>,
-    pub prompt: Entity<crate::input::TextInput>,
-    pub multiple_meetings: bool,
-    _subscriptions: Vec<Subscription>,
-    test_id: String,
-    test_answer: Option<String>,
-    test_annotations: ChatTurnAnnotations,
-    test_cancel: Option<Arc<AtomicBool>>,
-}
-
-impl Drop for RecipeEditor {
-    fn drop(&mut self) {
-        if let Some(cancel) = &self.test_cancel {
-            cancel.store(true, std::sync::atomic::Ordering::Release);
-        }
-    }
-}
-
-pub(crate) const BUILTIN_RECIPES: [(&str, &str, &str); 4] = [
-    (
-        "Write follow up email",
-        "Quick email to send after a meeting recapping next steps",
-        "Write a concise follow-up email recapping this meeting's decisions and next steps. Use only supported facts.",
-    ),
-    (
-        "List my todos",
-        "Your action items from the meeting",
-        "List the action items from the meeting, with their owners and deadlines where stated. Do not invent missing assignments.",
-    ),
-    (
-        "Make notes longer",
-        "Rewrite meeting notes so they are longer and more detailed",
-        "Expand these meeting notes with relevant supporting detail from the transcript. Preserve uncertainty and do not invent facts.",
-    ),
-    (
-        "Write tldr",
-        "Two bullet meeting summary for sharing with your team",
-        "Summarize this meeting in exactly two concise bullets covering the most important outcomes.",
-    ),
-];
 
 fn chat_date_group(value: Option<&str>) -> String {
     chat_date_group_at(value, chrono::Local::now())
@@ -722,62 +678,17 @@ pub fn load_history() -> Vec<ArchivedChat> {
     };
     read().unwrap_or_default()
 }
-pub fn load_recipes() -> Vec<ChatRecipe> {
-    if crate::audio::preview_mode() {
-        return vec![];
-    }
-    if crate::server::enabled() {
-        // The person's prompts are this Mac's, not an account's.
-        return crate::accounts::Paths::of_environment()
-            .map(|paths| read_recipes_file(&paths).recipes)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(valid_recipe)
-            .take(100)
-            .collect();
-    }
-    let read = || -> Option<Vec<ChatRecipe>> {
-        let path = history_path().ok()?;
-        if std::fs::metadata(&path).ok()?.len() > 4 * 1024 * 1024 {
-            return None;
-        }
-        let history: HistoryFile = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-        if history.version != 1 {
-            return None;
-        }
-        Some(
-            history
-                .recipes
-                .into_iter()
-                .filter(|r| {
-                    !r.id.is_empty()
-                        && !r.title.trim().is_empty()
-                        && r.title.chars().count() <= 100
-                        && !r.prompt.trim().is_empty()
-                        && r.prompt.encode_utf16().count() <= 20_000
-                })
-                .take(100)
-                .collect(),
-        )
-    };
-    read().unwrap_or_default()
-}
 #[cfg(test)]
-fn store_history(
-    path: &std::path::Path,
-    sessions: &[ArchivedChat],
-    recipes: &[ChatRecipe],
-) -> Result<(), String> {
-    write_history(path, &encode_history(sessions, recipes)?)
+fn store_history(path: &std::path::Path, sessions: &[ArchivedChat]) -> Result<(), String> {
+    write_history(path, &encode_history(sessions)?)
 }
 
 /// The history file's bytes. Encoding happens where the data lives; the
 /// write itself runs off the UI thread (see `store.rs`).
-fn encode_history(sessions: &[ArchivedChat], recipes: &[ChatRecipe]) -> Result<Vec<u8>, String> {
+fn encode_history(sessions: &[ArchivedChat]) -> Result<Vec<u8>, String> {
     let bytes = serde_json::to_vec(&HistoryFile {
         version: 1,
         sessions: sessions.to_vec(),
-        recipes: recipes.to_vec(),
     })
     .map_err(|_| "Could not encode chat history")?;
     if bytes.len() > 4 * 1024 * 1024 {
@@ -877,8 +788,7 @@ impl crate::app::Cereal {
         chat_source_note(&self.workspace.notes, server_id, &scope.url, Some(scope.slot))
     }
 
-    /// Read an account's saved conversations (and fold its recipes into
-    /// this Mac's, once), now that its notes are loaded.
+    /// Read an account's saved conversations, now that its notes are loaded.
     pub fn load_account_chats(
         &mut self,
         account: &crate::accounts::Account,
@@ -903,16 +813,6 @@ impl crate::app::Cereal {
         // The history shows the union, by when each was last used.
         self.chat_archives
             .sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
-        let mut recipes = read_recipes_file(paths);
-        if !recipes.seeded.iter().any(|id| id == account.id.as_str()) {
-            merge_recipes(&mut recipes.recipes, file.recipes);
-            recipes.seeded.push(account.id.as_str().to_owned());
-            recipes.version = 1;
-            if let Ok(bytes) = serde_json::to_vec_pretty(&recipes) {
-                let _ = crate::shared::write_private(&paths.recipes(), &bytes);
-            }
-            self.chat_recipes = recipes.recipes.into_iter().filter(valid_recipe).take(100).collect();
-        }
     }
 
     fn open_chat_source_note(&mut self, server_id: &str, cx: &mut Context<Self>) {
@@ -942,8 +842,6 @@ impl crate::app::Cereal {
             );
             return;
         };
-        self.stop_recipe_test(cx);
-        self.chat_recipe_editor = None;
         if citation.source == meeting_notes_api_types::ChatCitationDtoSource::Transcript {
             if !self
                 .workspace
@@ -974,59 +872,94 @@ impl crate::app::Cereal {
         }
     }
 
-    fn render_chat_tools(&self, index: usize, active: bool, cx: &mut Context<Self>) -> Div {
+    /// The one line above an answer that says how it is coming along:
+    /// "Thinking…" with the mark while nothing of the answer has arrived,
+    /// then "Thought for Ns" once it starts, "Stopped" if it was stopped.
+    /// With the meeting searches it ran, the line also opens the list of
+    /// them. `None` when there is nothing to say (an old answer with no
+    /// timing and no searches).
+    fn render_chat_status(
+        &self,
+        index: usize,
+        active: bool,
+        thinking: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
         let t = self.theme();
-        let Some(annotations) = self
-            .chat_annotations
-            .get(&index)
-            .filter(|item| !item.tools.is_empty())
-        else {
-            return div();
-        };
-        let expanded = annotations.expanded;
-        let heading = if active {
-            "Thinking…".to_owned()
-        } else if self.chat_interrupted.contains(&index) {
-            "Stopped".to_owned()
+        let annotations = self.chat_annotations.get(&index);
+        let has_tools = annotations.is_some_and(|item| !item.tools.is_empty());
+        let expanded =
+            has_tools && !thinking && annotations.is_some_and(|item| item.expanded);
+        let elapsed = annotations.and_then(|item| item.elapsed_ms);
+        let stopped = !active && self.chat_interrupted.contains(&index);
+        // Which of the three lines it is: the change from one to the next
+        // settles in rather than jumping.
+        let (state, heading) = if thinking {
+            (0, None)
+        } else if stopped {
+            (1, Some("Stopped".to_owned()))
+        } else if let Some(elapsed) = elapsed {
+            (2, Some(format!("Thought for {}s", (elapsed / 1000).max(1))))
+        } else if has_tools {
+            (3, Some("Meeting sources".to_owned()))
         } else {
-            annotations
-                .elapsed_ms
-                .map(|elapsed| format!("Thought for {}s", (elapsed / 1000).max(1)))
-                .unwrap_or_else(|| "Meeting sources".into())
+            return None;
         };
-        let mut result = div().min_w_0().flex().flex_col().gap(px(8.)).child(
-            div()
-                .id(("chat-tool-disclosure", index))
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .text_size(px(12.))
-                .text_color(t.muted)
-                .cursor_pointer()
-                .map(|link| {
-                    crate::motion::warms(
-                        link,
-                        crate::motion::reveal_key(("chat-tool-disclosure", index)),
-                        t.muted,
-                        t.text,
-                    )
-                })
-                .child(heading)
-                .child(icon("chevron-down", 12., t.muted).with_transformation(
-                    Transformation::rotate(radians(if expanded {
-                        0.
-                    } else {
-                        -std::f32::consts::FRAC_PI_2
-                    })),
-                ))
-                .reach().on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(item) = this.chat_annotations.get_mut(&index) {
-                        item.expanded = !item.expanded;
-                    }
-                    cx.notify();
-                })),
-        );
-        if expanded {
+        let swap = self.stage.swap(("chat-status", index as u64), state);
+        let line = div()
+            .id(("chat-tool-disclosure", index))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .text_size(px(12.))
+            .line_height(px(16.))
+            .text_color(t.muted)
+            .map(|line| match heading {
+                None => line.child(crate::motion::thinking_status(
+                    ("chat-thinking", self.chat_epoch),
+                    t,
+                    cx,
+                )),
+                // 3 px lower than its 16 px line, without moving the answer.
+                Some(heading) => line.pt(px(3.)).mb(px(-3.)).child(heading),
+            })
+            // While it thinks the line only says so; the searches open from
+            // it once the answer has begun.
+            .when(has_tools && !thinking, |line| {
+                line.cursor_default()
+                    .map(|link| {
+                        crate::motion::warms(
+                            link,
+                            crate::motion::reveal_key(("chat-tool-disclosure", index)),
+                            t.muted,
+                            t.text,
+                        )
+                    })
+                    .child(icon("chevron-down", 12., t.muted).with_transformation(
+                        Transformation::rotate(radians(if expanded {
+                            0.
+                        } else {
+                            -std::f32::consts::FRAC_PI_2
+                        })),
+                    ))
+                    .reach()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(item) = this.chat_annotations.get_mut(&index) {
+                            item.expanded = !item.expanded;
+                        }
+                        cx.notify();
+                    }))
+            });
+        let mut result = div()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(crate::motion::swapped(line, swap));
+        let Some(annotations) = annotations.filter(|_| expanded) else {
+            return Some(result);
+        };
+        {
             for tool in &annotations.tools {
                 let call_id = tool.call_id.clone();
                 let results_open = annotations.expanded_tools.contains(&call_id);
@@ -1062,7 +995,7 @@ impl crate::app::Cereal {
                                 row.child(format!(" ({})", tool.result_count.unwrap_or(0)))
                             })
                             .when(has_results, |row| {
-                                row.cursor_pointer().child(
+                                row.cursor_default().child(
                                     icon("chevron-down", 11., t.muted).with_transformation(
                                         Transformation::rotate(radians(if results_open {
                                             0.
@@ -1096,7 +1029,7 @@ impl crate::app::Cereal {
                                 .px(px(8.))
                                 .py(px(5.))
                                 .rounded(px(6.))
-                                .cursor_pointer()
+                                .cursor_default()
                                 .child(crate::motion::tactile(t.hover).radius(6.))
                                 .flex()
                                 .items_center()
@@ -1128,7 +1061,7 @@ impl crate::app::Cereal {
                 result = result.child(step);
             }
         }
-        result
+        Some(result)
     }
 
     fn chat_markdown(
@@ -1216,7 +1149,7 @@ impl crate::app::Cereal {
     }
 
     /// Queue the saved conversations for writing.
-    fn persist_chat_archives(&mut self) {
+    pub(crate) fn persist_chat_archives(&mut self) {
         // Preview/smoke threads exercise the same in-memory identity behavior,
         // while never reading or writing a real user's private history file.
         if crate::audio::preview_mode() {
@@ -1226,49 +1159,14 @@ impl crate::app::Cereal {
         // history to write and no account to keep it under. (A link's page
         // can be opened and left in this state.)
         if crate::server::enabled() {
-            let Some(paths) = crate::accounts::Paths::of_environment() else {
-                return;
-            };
-            // Each account's threads go to its own file, with a copy of the
-            // recipes; only accounts whose notes are loaded are written.
-            for slot in self.workspace.slots.values() {
-                if slot.state != crate::model::SlotState::Loaded {
-                    continue;
-                }
-                let threads: Vec<ArchivedChat> = self
-                    .chat_archives
-                    .iter()
-                    .filter(|chat| chat.account.as_ref() == Some(&slot.account))
-                    .cloned()
-                    .collect();
-                let keep = threads.len().saturating_sub(THREADS_PER_ACCOUNT);
-                let encoded = crate::accounts::handle::encoding_account_file(|| {
-                    encode_history(&threads[keep..], &self.chat_recipes)
-                });
-                match encoded {
-                    Ok(bytes) => {
-                        crate::store::queue_chat_history(paths.chats(&slot.account), bytes);
-                    }
-                    Err(error) => self.toast = Some(error),
-                }
-            }
-            // The recipes themselves are this Mac's.
-            let mut recipes = read_recipes_file(&paths);
-            let same = serde_json::to_value(&recipes.recipes).ok()
-                == serde_json::to_value(&self.chat_recipes).ok();
-            if !same && (!self.workspace.slots.is_empty() || paths.recipes().exists()) {
-                recipes.version = 1;
-                recipes.recipes = self.chat_recipes.clone();
-                if let Ok(bytes) = serde_json::to_vec_pretty(&recipes) {
-                    let _ = crate::shared::write_private(&paths.recipes(), &bytes);
-                }
-            }
+            // An account's threads are kept on its server only (`chat_sync.rs`):
+            // no chat file is written for it.
             return;
         }
         // Encode here, write in the background: the next render starts the
         // write (`drain_chat_history`), and identical bytes are not queued.
         match history_path().and_then(|path| {
-            encode_history(&self.chat_archives, &self.chat_recipes).map(|bytes| (path, bytes))
+            encode_history(&self.chat_archives).map(|bytes| (path, bytes))
         }) {
             Ok((path, bytes)) => {
                 crate::store::queue_chat_history(path, bytes);
@@ -1277,268 +1175,6 @@ impl crate::app::Cereal {
         }
     }
 
-    pub fn open_recipe_editor(
-        &mut self,
-        recipe_id: Option<String>,
-        prompt: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let name = recipe_id
-            .as_ref()
-            .and_then(|id| self.chat_recipes.iter().find(|r| &r.id == id))
-            .map(|r| r.title.clone())
-            .unwrap_or_default();
-        let multiple_meetings = recipe_id
-            .as_ref()
-            .and_then(|id| self.chat_recipes.iter().find(|r| &r.id == id))
-            .map(|r| r.multiple_meetings)
-            .unwrap_or(self.current_note.is_none() && !prompt.trim().is_empty());
-        let name_input = cx.new(|cx| crate::input::TextInput::new("New recipe", false, cx));
-        name_input.update(cx, |input, cx| input.set_content(name, cx));
-        let prompt_input =
-            cx.new(|cx| crate::input::TextInput::new("What should this recipe do?", true, cx));
-        prompt_input.update(cx, |input, cx| input.set_content(prompt, cx));
-        let subscriptions = vec![
-            cx.subscribe(&name_input, |_, _, _: &crate::input::InputChanged, cx| {
-                cx.notify()
-            }),
-            cx.subscribe(
-                &prompt_input,
-                |this, _, _: &crate::input::InputChanged, cx| {
-                    this.stop_recipe_test(cx);
-                    if let Some(editor) = &mut this.chat_recipe_editor {
-                        editor.test_answer = None;
-                    }
-                    cx.notify();
-                },
-            ),
-        ];
-        name_input.read(cx).focus_handle.focus(window);
-        self.chat_recipe_editor = Some(RecipeEditor {
-            id: recipe_id,
-            name: name_input,
-            prompt: prompt_input,
-            multiple_meetings,
-            _subscriptions: subscriptions,
-            test_id: uuid::Uuid::new_v4().to_string(),
-            test_answer: None,
-            test_annotations: Default::default(),
-            test_cancel: None,
-        });
-        cx.notify();
-    }
-    pub fn save_chat_recipe(&mut self, cx: &mut Context<Self>) {
-        let Some(editor) = &self.chat_recipe_editor else {
-            return;
-        };
-        let title = editor.name.read(cx).content().trim().to_owned();
-        let prompt = editor.prompt.read(cx).content().trim().to_owned();
-        if title.is_empty()
-            || title.chars().count() > 100
-            || prompt.is_empty()
-            || prompt.encode_utf16().count() > 20_000
-        {
-            self.show_toast(
-                "Enter a name (up to 100 characters) and a prompt (up to 20,000 characters)",
-                cx,
-            );
-            return;
-        }
-        if editor.id.is_none() && self.chat_recipes.len() >= 100 {
-            self.show_toast("You can save up to 100 recipes", cx);
-            return;
-        }
-        let id = editor
-            .id
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        self.chat_recipes.retain(|r| r.id != id);
-        self.chat_recipes.push(ChatRecipe {
-            id,
-            title,
-            prompt,
-            multiple_meetings: editor.multiple_meetings,
-        });
-        self.close_recipe_editor();
-        self.save_chat_history();
-        cx.notify();
-    }
-    pub fn use_chat_recipe(
-        &mut self,
-        prompt: String,
-        multiple_meetings: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if !multiple_meetings && self.current_note.is_none() {
-            self.show_toast("Open a meeting to use this recipe", cx);
-            return;
-        }
-        self.cancel_chat_edit(cx);
-        self.chat_recipes_open = false;
-        self.chat_recipe_editor = None;
-        if multiple_meetings && self.current_note.is_some() {
-            self.navigate(crate::app::Screen::Chat, cx);
-        }
-        self.ask
-            .update(cx, |input, cx| input.set_content(prompt.clone(), cx));
-        self.submit_chat_question(prompt, cx);
-    }
-    pub fn open_chat_recipes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.cancel_chat_edit(cx);
-        self.chat_history_open = false;
-        self.chat_recipes_open = true;
-        if self.current_note.is_some() {
-            self.assistant_open = true;
-            self.transcript_open = false;
-        }
-        self.ask.update(cx, |input, cx| input.set_content("/", cx));
-        self.ask.read(cx).focus_handle.focus(window);
-        cx.notify();
-    }
-    pub fn close_chat_recipes(&mut self, cx: &mut Context<Self>) {
-        self.chat_recipes_open = false;
-        if self.ask.read(cx).content().starts_with('/') {
-            self.ask.update(cx, |input, cx| input.set_content("", cx));
-        }
-        cx.notify();
-    }
-    pub fn submit_matching_chat_recipe(&mut self, query: &str, cx: &mut Context<Self>) {
-        let query = query.trim_start_matches('/').trim().to_lowercase();
-        let selected = self
-            .chat_recipes
-            .iter()
-            .find(|r| {
-                query.is_empty()
-                    || r.title.to_lowercase().contains(&query)
-                    || r.prompt.to_lowercase().contains(&query)
-            })
-            .map(|r| (r.prompt.clone(), r.multiple_meetings))
-            .or_else(|| {
-                BUILTIN_RECIPES
-                    .iter()
-                    .find(|(title, description, _)| {
-                        query.is_empty()
-                            || title.to_lowercase().contains(&query)
-                            || description.to_lowercase().contains(&query)
-                    })
-                    .map(|(_, _, prompt)| ((*prompt).to_owned(), self.current_note.is_none()))
-            });
-        if let Some((prompt, multiple)) = selected {
-            self.use_chat_recipe(prompt, multiple, cx);
-        } else {
-            self.show_toast("No matching recipe", cx);
-        }
-    }
-    pub fn test_chat_recipe(&mut self, cx: &mut Context<Self>) {
-        if !crate::server::enabled() {
-            self.show_toast("Connect to your server to test a recipe", cx);
-            return;
-        }
-        let Some(editor) = &self.chat_recipe_editor else {
-            return;
-        };
-        if editor.test_cancel.is_some() {
-            return;
-        }
-        let prompt = editor.prompt.read(cx).content().trim().to_owned();
-        if prompt.is_empty() || prompt.encode_utf16().count() > 20_000 {
-            self.show_toast("Enter a prompt of up to 20,000 characters", cx);
-            return;
-        }
-        let note = if editor.multiple_meetings {
-            None
-        } else {
-            self.current_note
-                .and_then(|id| self.workspace.note(id).cloned())
-        };
-        if !editor.multiple_meetings && note.is_none() {
-            self.show_toast("Open a meeting to test a single-meeting recipe", cx);
-            return;
-        }
-        let cancel = Arc::new(AtomicBool::new(false));
-        let editor = self.chat_recipe_editor.as_mut().unwrap();
-        let test_id = uuid::Uuid::new_v4().to_string();
-        editor.test_id = test_id.clone();
-        editor.test_answer = Some(String::new());
-        editor.test_annotations = Default::default();
-        editor.test_cancel = Some(cancel.clone());
-        let scope = self.chat_scope().map(|account| account.id);
-        let receiver = crate::server::stream_chat_with_model(note, scope, prompt, vec![], cancel, self.selected_chat_model.clone());
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            loop {
-                let event = match receiver.try_recv() {
-                    Ok(event) => event,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(25))
-                            .await;
-                        continue;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        crate::server::ChatStreamEvent::Error(
-                            "Recipe test was interrupted. Try again.".into(),
-                        )
-                    }
-                };
-                let done = matches!(
-                    event,
-                    crate::server::ChatStreamEvent::Done | crate::server::ChatStreamEvent::Error(_)
-                );
-                let keep = this
-                    .update(cx, |this, cx| {
-                        let Some(editor) = this.chat_recipe_editor.as_mut().filter(|editor| {
-                            editor.test_id == test_id && editor.test_cancel.is_some()
-                        }) else {
-                            return false;
-                        };
-                        let answer = editor.test_answer.get_or_insert_default();
-                        match event {
-                            crate::server::ChatStreamEvent::Delta(text) => answer.push_str(&text),
-                            crate::server::ChatStreamEvent::Error(error) => {
-                                if answer.is_empty() {
-                                    *answer = error;
-                                }
-                            }
-                            crate::server::ChatStreamEvent::Done => {}
-                            crate::server::ChatStreamEvent::Tool(tool) => {
-                                editor.test_annotations.update_tool(tool)
-                            }
-                            crate::server::ChatStreamEvent::Citations(citations) => {
-                                editor.test_annotations.citations = citations
-                            }
-                        }
-                        if done {
-                            editor.test_cancel = None;
-                        }
-                        cx.notify();
-                        !done
-                    })
-                    .unwrap_or(false);
-                if !keep {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-    pub fn stop_recipe_test(&mut self, cx: &mut Context<Self>) {
-        if let Some(editor) = &mut self.chat_recipe_editor {
-            if let Some(cancel) = editor.test_cancel.take() {
-                cancel.store(true, std::sync::atomic::Ordering::Release);
-            }
-            editor.test_id = uuid::Uuid::new_v4().to_string();
-            if editor
-                .test_answer
-                .as_ref()
-                .is_some_and(|answer| answer.is_empty())
-            {
-                editor.test_answer = Some("Test stopped.".into());
-            }
-        }
-        cx.notify();
-    }
     pub fn restore_archived_chat(
         &mut self,
         archive_id: &str,
@@ -1590,8 +1226,6 @@ impl crate::app::Cereal {
 
     pub fn restore_note_chat(&mut self, id: u64, cx: &mut Context<Self>) {
         self.cancel_chat_edit(cx);
-        self.chat_recipes_open = false;
-        self.chat_recipe_editor = None;
         if let Some(chat) = self.chats().thread_for_note(id) {
             self.chat_messages = chat.messages;
             self.chat_interrupted = chat.interrupted.into_iter().collect();
@@ -1617,9 +1251,6 @@ impl crate::app::Cereal {
             .update(cx, |input, cx| input.set_placeholder(placeholder, cx));
     }
     pub fn close_chat_surface(&mut self, cx: &mut Context<Self>) {
-        if self.chat_recipes_open {
-            self.close_chat_recipes(cx);
-        }
         self.assistant_open = false;
         self.chat_history_open = false;
         let placeholder = if self.chat_messages.is_empty() {
@@ -1681,8 +1312,6 @@ impl crate::app::Cereal {
     }
     pub fn clear_chat(&mut self, cx: &mut Context<Self>) {
         self.chat_editing = None;
-        self.chat_recipes_open = false;
-        self.chat_recipe_editor = None;
         self.stop_chat_stream(cx);
         self.chat_queue.clear();
         self.save_chat_history();
@@ -1755,6 +1384,27 @@ impl crate::app::Cereal {
     /// answer that is arriving. False when it could be neither sent nor
     /// queued (a toast says why).
     fn try_start_chat(&mut self, question: String, cx: &mut Context<Self>) -> bool {
+        self.try_start_chat_from(question, None, cx)
+    }
+
+    /// Debug builds: send `question` and take its answer from `script`
+    /// instead of a server, for captures of an answer as it arrives.
+    #[cfg(debug_assertions)]
+    pub(crate) fn start_scripted_chat(
+        &mut self,
+        question: String,
+        script: std::sync::mpsc::Receiver<crate::server::ChatStreamEvent>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.try_start_chat_from(question, Some(script), cx)
+    }
+
+    fn try_start_chat_from(
+        &mut self,
+        question: String,
+        script: Option<std::sync::mpsc::Receiver<crate::server::ChatStreamEvent>>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if question.encode_utf16().count() > 20_000 {
             self.show_toast("Messages can contain up to 20,000 characters", cx);
             return false;
@@ -1786,6 +1436,8 @@ impl crate::app::Cereal {
         if owner.is_some() && note.is_none() {
             return false;
         }
+        // An edited or retried question replaces the saved exchange it was.
+        let replacing = self.chat_editing.is_some();
         self.apply_chat_edit();
         let thread = self.chat_thread_id.clone();
         let Some(begun) = self.chats().begin(&thread, question.clone(), Vec::new()) else {
@@ -1810,7 +1462,7 @@ impl crate::app::Cereal {
         } else {
             self.chat_to_bottom();
         }
-        self.spawn_chat_stream(thread, begun, note, question, cx);
+        self.spawn_chat_stream(thread, begun, note, question, replacing, script, cx);
         cx.notify();
         true
     }
@@ -1823,8 +1475,11 @@ impl crate::app::Cereal {
         begun: Begun,
         note: Option<crate::model::Note>,
         question: String,
+        replace: bool,
+        script: Option<std::sync::mpsc::Receiver<crate::server::ChatStreamEvent>>,
         cx: &mut Context<Self>,
     ) {
+        let saved = self.chat_thread_turn(&thread, begun.index, replace);
         let Begun {
             epoch,
             index,
@@ -1833,14 +1488,17 @@ impl crate::app::Cereal {
             ..
         } = begun;
         let scope = self.chat_scope().map(|account| account.id);
-        let receiver = crate::server::stream_chat_with_model(
-            note,
-            scope,
-            question,
-            history,
-            cancel.clone(),
-            self.selected_chat_model.clone(),
-        );
+        let receiver = script.unwrap_or_else(|| {
+            crate::server::stream_chat_with_model(
+                note,
+                scope,
+                question,
+                history,
+                cancel.clone(),
+                self.selected_chat_model.clone(),
+                saved,
+            )
+        });
         cx.spawn(async move |this, cx| {
             loop {
                 let event = match receiver.try_recv() {
@@ -1894,6 +1552,7 @@ impl crate::app::Cereal {
                 loaded: true, next, ..
             } => {
                 self.save_chat_history();
+                self.chat_turn_saved(thread, cx);
                 if let Some(question) = next
                     && !self.try_start_chat(question.clone(), cx)
                 {
@@ -1918,6 +1577,7 @@ impl crate::app::Cereal {
                     self.continue_parked_chat(thread, question, rest, cx);
                 }
                 self.persist_chat_archives();
+                self.chat_turn_saved(thread, cx);
                 cx.notify();
                 false
             }
@@ -1948,7 +1608,7 @@ impl crate::app::Cereal {
             },
         };
         if let Some(begun) = self.chats().begin(thread, question.clone(), rest) {
-            self.spawn_chat_stream(thread.to_owned(), begun, note, question, cx);
+            self.spawn_chat_stream(thread.to_owned(), begun, note, question, false, None, cx);
         }
     }
 
@@ -2088,8 +1748,7 @@ impl crate::app::Cereal {
         if compact {
             // The note's panel (also the assistant over Home, beside the
             // sidebar) is at most 682 px wide and 16 px inside the window
-            // on each side; its turns have 16 px of padding and the bubble
-            // a further 10 px at its trailing edge.
+            // on each side; its turns have 16 px of padding.
             let beside = if self.current_note.is_none() {
                 192. * self.sidebar_level
             } else {
@@ -2130,23 +1789,21 @@ impl crate::app::Cereal {
         let turn_hover = crate::motion::reveal_key(("chat-turn", index));
         let shown = crate::motion::revealed(turn_hover);
         let active = self.chat_stream.as_ref().is_some_and(|a| a.index == index);
-        let has_tools = self
-            .chat_annotations
-            .get(&index)
-            .is_some_and(|item| !item.tools.is_empty());
+        let thinking = active && answer.is_empty();
         div()
             .id(("chat-turn", index))
             .child(crate::motion::hover_probe(turn_hover))
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(px(16.))
+            // In a panel the parts of a turn sit closer: 10 px, which puts
+            // the status line 45 px under the question as in the reference.
+            .gap(px(if compact { 10. } else { 16. }))
             .mb(px(24.))
             .child(
                 div()
                     .flex()
                     .justify_end()
-                    .when(compact, |d| d.pr(px(10.)))
                     .child(
                         div()
                             .max_w(px(widest_question))
@@ -2164,7 +1821,6 @@ impl crate::app::Cereal {
                 div()
                     .flex()
                     .justify_end()
-                    .when(compact, |d| d.pr(px(10.)))
                     .gap(px(4.))
                     .h(px(22.))
                     .child(
@@ -2177,23 +1833,6 @@ impl crate::app::Cereal {
                         .size(px(24.))
                         .opacity(shown)
                         .on_click(cx.listener(move |this, _, _, cx| this.retry_chat(index, cx))),
-                    )
-                    .child(
-                        tool_tip(
-                            ("recipe-chat-question", index),
-                            "recipe",
-                            "Save as recipe",
-                            t,
-                        )
-                        .size(px(24.))
-                        .opacity(shown)
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
-                                if let Some((question, _)) = this.chat_messages.get(index) {
-                                    this.open_recipe_editor(None, question.clone(), window, cx);
-                                }
-                            },
-                        )),
                     )
                     .child(
                         tool_tip(("copy-chat-question", index), "copy", "Copy text", t)
@@ -2217,13 +1856,10 @@ impl crate::app::Cereal {
                             })),
                     ),
             )
-            .when(has_tools, |container| {
-                container.child(self.render_chat_tools(index, active, cx))
-            })
-            .child(if active && answer.is_empty() {
-                crate::motion::thinking_status(("chat-thinking", self.chat_epoch), t, cx)
-            } else {
-                self.chat_markdown(index, answer, compact, cx)
+            // One status line, whether or not the answer searched meetings.
+            .children(self.render_chat_status(index, active, thinking, cx))
+            .when(!thinking, |container| {
+                container.child(self.chat_markdown(index, answer, compact, cx))
             })
             .when_some(
                 self.chat_annotations
@@ -2333,32 +1969,206 @@ impl crate::app::Cereal {
         focused: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        self.render_chat_composer(focused, false, cx)
+    }
+
+    /// The model the next question goes to, as its picker button shows it.
+    fn chat_model_label(&self) -> String {
+        self.chat_models
+            .iter()
+            .find(|choice| Some(crate::server::chat_model_key(choice)) == self.selected_chat_model)
+            .map(|choice| choice.model.clone())
+            .unwrap_or_else(|| "Auto".into())
+    }
+
+    /// The model picker's button: the model the next question goes to and
+    /// a chevron. The list of the server's models opens from it; without a
+    /// server there is only the instance default ("Auto").
+    pub(crate) fn render_chat_model_button(
+        &self,
+        id: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let t = self.theme();
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .text_size(px(13.))
+            .line_height(px(18.))
+            .text_color(t.muted)
+            .child(self.chat_model_label())
+            .child(icon("chevron-down", 12., t.muted))
+            .cursor_default()
+            .reach()
+            .on_click(cx.listener(|this, _, _, cx| {
+                if crate::server::enabled() {
+                    this.chat_model_picker_open = !this.chat_model_picker_open;
+                    cx.notify();
+                }
+            }))
+    }
+
+    /// The list of models, growing out of the model button and folding back
+    /// into it: above the composer's trailing end, or (`below`) under the
+    /// leading end of the Chat page's composer.
+    pub(crate) fn render_chat_model_picker(
+        &self,
+        shown: bool,
+        below: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let t = self.theme();
+        let picker = self.stage.presence(
+            ("chat-model-picker", 0),
+            self.chat_model_picker_open && shown,
+            crate::motion::SNAPPY,
+        );
+        if !picker.visible {
+            return None;
+        }
+        let option = |id: ElementId, label: String| {
+            div()
+                .id(id)
+                .px(px(10.))
+                .py(px(9.))
+                .rounded(px(6.))
+                .cursor_default()
+                .text_size(px(12.))
+                .text_color(t.text)
+                .child(crate::motion::tactile(t.hover).radius(6.))
+                .child(label)
+        };
+        let list = div()
+            .id("chat-model-options")
+            .absolute()
+            .map(|list| {
+                if below {
+                    list.top(px(84.)).left(px(8.))
+                } else {
+                    list.bottom(px(68.)).right(px(8.))
+                }
+            })
+            .w(px(290.))
+            .max_h(px(280.))
+            .overflow_y_scroll()
+            .p(px(6.))
+            .rounded(px(12.))
+            .border_1()
+            .border_color(t.border)
+            .bg(t.card)
+            .shadow_lg()
+            .occlude()
+            .child(
+                option("chat-model-auto".into(), "Auto · Instance default".into())
+                    .reach()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.selected_chat_model = None;
+                        this.chat_model_picker_open = false;
+                        cx.notify();
+                    })),
+            )
+            .children(self.chat_models.iter().enumerate().map(|(index, choice)| {
+                let key = crate::server::chat_model_key(choice);
+                option(("chat-model-option", index).into(), choice.model.clone())
+                    .reach()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.selected_chat_model = Some(key.clone());
+                        this.chat_model_picker_open = false;
+                        cx.notify();
+                    }))
+            }));
+        Some(crate::motion::pop(
+            list,
+            crate::motion::Pop::menu(if below { (0., 0.) } else { (1., 1.) }),
+            picker,
+        ))
+    }
+
+    /// The composer pill. `folded` is Home's bar at rest (not focused,
+    /// nothing typed): only the field shows, and the model, attachment and
+    /// voice controls grow in at its trailing end when it is focused.
+    pub fn render_chat_composer(
+        &self,
+        focused: bool,
+        folded: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let t = self.theme();
         let active = self.chat_stream.is_some();
         let can_send = !self.ask.read(cx).content().trim().is_empty() && !active;
         let composer_hover = crate::motion::reveal_key("chat-composer-pill");
-        // The model list grows out of its button and folds back into it.
-        let picker = self.stage.presence(
-            ("chat-model-picker", 0),
-            self.chat_model_picker_open,
+        let controls = self.stage.presence(
+            ("chat-composer-controls", 0),
+            !folded,
             crate::motion::SNAPPY,
         );
+        let cluster = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .h(px(32.))
+            .when(self.chat_editing.is_none(), |d| {
+                d.child(self.render_chat_model_button("chat-configured-model", cx).mr(px(2.)))
+            })
+            .child(
+                tool_tip(
+                    "chat-attachment",
+                    "paperclip",
+                    "Attachments are not available yet",
+                    t,
+                )
+                .size(px(32.))
+                .opacity(crate::ui::DISABLED),
+            )
+            .child(if active {
+                // A quiet round button with a dark square, as in the
+                // reference: the answer arriving is what holds the eye.
+                round_tool("stop-chat-stream", "stop", "Stop response", t)
+                    .size(px(32.))
+                    .rounded_full()
+                    .bg(t.hover)
+                    .text_color(t.text)
+                    .on_click(cx.listener(|this, _, _, cx| this.stop_chat_stream(cx)))
+            } else if can_send {
+                round_tool("send-chat-stream", "arrow-up", "Send · Enter", t)
+                    .size(px(32.))
+                    .rounded_full()
+                    .bg(if self.chat_editing.is_some() {
+                        rgb(0x835e00).into()
+                    } else {
+                        t.text
+                    })
+                    .text_color(if self.chat_editing.is_some() {
+                        rgb(0xfcfcf8).into()
+                    } else {
+                        t.bg
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.submit_chat(cx)))
+            } else {
+                round_tool(
+                    "chat-voice-input",
+                    "mic",
+                    "Voice input is not configured",
+                    t,
+                )
+                .size(px(32.))
+                .rounded_full()
+                .bg(t.hover)
+                .opacity(crate::ui::DISABLED)
+            });
         div()
             .id("chat-composer-pill")
             .relative()
-            .when(picker.visible, |d| d.child(crate::motion::pop(
-                div().id("chat-model-options").absolute().bottom(px(68.)).right(px(8.)).w(px(290.)).max_h(px(280.)).overflow_y_scroll().p(px(6.)).rounded(px(12.)).border_1().border_color(t.border).bg(t.card).shadow_lg().occlude()
-                    .child(div().id("chat-model-auto").px(px(10.)).py(px(9.)).rounded(px(6.)).cursor_pointer().text_size(px(12.)).text_color(t.text).child(crate::motion::tactile(t.hover).radius(6.)).child("Auto · Instance default").reach().on_click(cx.listener(|this, _, _, cx| { this.selected_chat_model = None; this.chat_model_picker_open = false; cx.notify(); })))
-                    .children(self.chat_models.iter().enumerate().map(|(index, choice)| { let key = crate::server::chat_model_key(choice);
-                        div().id(("chat-model-option",index)).px(px(10.)).py(px(9.)).rounded(px(6.)).cursor_pointer().text_size(px(12.)).text_color(t.text).child(crate::motion::tactile(t.hover).radius(6.)).child(choice.model.clone()).reach().on_click(cx.listener(move |this, _, _, cx| { this.selected_chat_model = Some(key.clone()); this.chat_model_picker_open = false; cx.notify(); }))
-                    })),
-                crate::motion::Pop::menu((1., 1.)),
-                picker,
-            )))
+            .children(self.render_chat_model_picker(!folded, false, cx))
             .w_full()
-            .min_h(px(59.))
+            // 58 px tall at rest, the field 21 px in from the leading edge
+            // and the round button 10 px from the trailing one (measured
+            // against the reference at 1.25 px per point).
+            .min_h(px(58.))
             .max_h(px(170.))
-            .pl(px(16.))
+            .pl(px(21.))
             .pr(px(10.))
             .py(px(12.))
             .rounded_full()
@@ -2374,13 +2184,20 @@ impl crate::app::Cereal {
             })
             .bg(t.card)
             .child(crate::motion::hover_probe(composer_hover))
-            .when(focused, |d| {
-                d.shadow(vec![BoxShadow {
+            .shadow(if focused {
+                vec![BoxShadow {
                     color: t.accent.opacity(0.13),
                     offset: point(px(0.), px(0.)),
                     blur_radius: px(0.),
                     spread_radius: px(3.),
-                }])
+                }]
+            } else {
+                vec![BoxShadow {
+                    color: rgba(0x2929290a).into(),
+                    offset: point(px(0.), px(2.)),
+                    blur_radius: px(5.),
+                    spread_radius: px(0.),
+                }]
             })
             .flex()
             .items_center()
@@ -2392,76 +2209,19 @@ impl crate::app::Cereal {
                     .min_w_0()
                     .max_h(px(130.))
                     .overflow_y_scroll()
-                    .text_size(px(15.))
+                    .text_size(px(14.))
                     .line_height(px(22.))
                     .child(self.ask.clone()),
             )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .h(px(32.))
-                    .when(self.chat_editing.is_none(), |d| {
-                        d.child(
-                            div()
-                                .id("chat-configured-model")
-                                .flex()
-                                .items_center()
-                                .gap(px(5.))
-                                .text_size(px(12.))
-                                .text_color(t.muted)
-                                .child(self.chat_models.iter().find(|choice| Some(crate::server::chat_model_key(choice)) == self.selected_chat_model).map(|choice| choice.model.clone()).unwrap_or_else(|| "Auto".into()))
-                                .child(icon("chevron-down", 12., t.muted))
-                                .cursor_pointer()
-                                .reach().on_click(cx.listener(|this, _, _, cx| { if crate::server::enabled() { this.chat_model_picker_open = !this.chat_model_picker_open; cx.notify(); } })),
-                        )
-                    })
-                    .child(
-                        tool_tip(
-                            "chat-attachment",
-                            "paperclip",
-                            "Attachments are not available yet",
-                            t,
-                        )
-                        .size(px(26.))
-                        .opacity(crate::ui::DISABLED),
-                    )
-                    .child(if active {
-                        round_tool("stop-chat-stream", "stop", "Stop response", t)
-                            .size(px(32.))
-                            .rounded_full()
-                            .bg(t.text)
-                            .text_color(t.bg)
-                            .on_click(cx.listener(|this, _, _, cx| this.stop_chat_stream(cx)))
-                    } else if can_send {
-                        round_tool("send-chat-stream", "arrow-up", "Send · Enter", t)
-                            .size(px(32.))
-                            .rounded_full()
-                            .bg(if self.chat_editing.is_some() {
-                                rgb(0x835e00).into()
-                            } else {
-                                t.text
-                            })
-                            .text_color(if self.chat_editing.is_some() {
-                                rgb(0xfcfcf8).into()
-                            } else {
-                                t.bg
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| this.submit_chat(cx)))
-                    } else {
-                        round_tool(
-                            "chat-voice-input",
-                            "mic",
-                            "Voice input is not configured",
-                            t,
-                        )
-                        .size(px(32.))
-                        .rounded_full()
-                        .bg(t.hover)
-                        .opacity(crate::ui::DISABLED)
-                    }),
-            )
+            // Focused, the controls grow in from the trailing edge; they
+            // leave the same way when the bar folds.
+            .when(controls.visible, |d| {
+                d.child(crate::motion::pop(
+                    cluster,
+                    crate::motion::Pop::chip((1., 0.5)),
+                    controls,
+                ))
+            })
     }
 
     pub fn render_chat_edit_banner(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -2488,616 +2248,6 @@ impl crate::app::Cereal {
                     .size(px(22.))
                     .on_click(cx.listener(|this, _, _, cx| this.cancel_chat_edit(cx))),
             )
-    }
-
-    pub fn render_chat_recipe_suggestions(&self, cx: &mut Context<Self>) -> Div {
-        let t = self.theme();
-        let mut row = div()
-            .flex()
-            .items_center()
-            .flex_wrap()
-            .gap(px(6.))
-            .py(px(8.));
-        for (index, (title, _, prompt)) in BUILTIN_RECIPES.iter().enumerate().take(3) {
-            row = row.child(
-                pill(("chat-builtin-recipe", index), *title, "recipe", t)
-                    .h(px(28.))
-                    .text_size(px(12.))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.use_chat_recipe((*prompt).into(), this.current_note.is_none(), cx)
-                    })),
-            );
-        }
-        row.child(div().flex_1()).child(
-            div()
-                .id("all-chat-recipes")
-                .h(px(28.))
-                .px(px(4.))
-                .flex()
-                .items_center()
-                .gap(px(4.))
-                .text_size(px(12.))
-                .map(|link| {
-                    crate::motion::warms(
-                        link,
-                        crate::motion::reveal_key("all-chat-recipes"),
-                        t.muted,
-                        t.text,
-                    )
-                })
-                .child("All recipes")
-                .child(icon("chevron-right", 12., t.muted))
-                .reach().on_click(cx.listener(|this, _, window, cx| this.open_chat_recipes(window, cx))),
-        )
-    }
-
-    pub fn render_chat_recipes_header(&self, cx: &mut Context<Self>) -> Div {
-        let t = self.theme();
-        div()
-            .h(px(40.))
-            .flex_shrink_0()
-            .px(px(28.))
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .child(
-                div()
-                    .text_size(px(14.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Recipes"),
-            )
-            .child(div().flex_1())
-            .child(
-                pill("create-chat-recipe", "Create recipe", "plus", t)
-                    .h(px(28.))
-                    .text_size(px(12.))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_recipe_editor(None, String::new(), window, cx)
-                    })),
-            )
-            .child(
-                tool_tip("close-chat-recipes", "close", "Close recipes", t)
-                    .size(px(24.))
-                    .on_click(cx.listener(|this, _, _, cx| this.close_chat_recipes(cx))),
-            )
-    }
-
-    pub fn render_chat_recipes(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        let t = self.theme();
-        let query = self
-            .ask
-            .read(cx)
-            .content()
-            .trim_start_matches('/')
-            .trim()
-            .to_lowercase();
-        let mut list = div()
-            .id("chat-recipes-list")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .px(px(16.))
-            .py(px(12.))
-            .flex()
-            .flex_col();
-        if !self.chat_recipes.is_empty() {
-            list = list.child(
-                div()
-                    .px(px(8.))
-                    .py(px(6.))
-                    .text_size(px(12.))
-                    .text_color(t.muted)
-                    .child("My recipes"),
-            );
-            for recipe in self.chat_recipes.iter().filter(|r| {
-                query.is_empty()
-                    || r.title.to_lowercase().contains(&query)
-                    || r.prompt.to_lowercase().contains(&query)
-            }) {
-                let id = recipe.id.clone();
-                let edit_id = id.clone();
-                let delete_id = id.clone();
-                let prompt = recipe.prompt.clone();
-                let edit_prompt = prompt.clone();
-                let multiple = recipe.multiple_meetings;
-                let recipe_hover = crate::motion::reveal_key(("saved-recipe", &id));
-                let shown = crate::motion::revealed(recipe_hover);
-                list = list.child(
-                    div()
-                        .id(SharedString::from(format!("saved-recipe-{id}")))
-                        .cursor_pointer()
-                        .h(px(60.))
-                        .flex_shrink_0()
-                        .px(px(8.))
-                        .rounded(px(10.))
-                        .child(
-                            crate::motion::tactile(t.hover)
-                                .radius(10.)
-                                .reveals(recipe_hover),
-                        )
-                        .flex()
-                        .items_center()
-                        .gap(px(12.))
-                        .child(icon("recipe", 20., t.muted))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .gap(px(3.))
-                                .child(recipe.title.clone())
-                                .child(small(
-                                    if multiple {
-                                        "Multiple meetings"
-                                    } else {
-                                        "Single meeting"
-                                    },
-                                    t,
-                                )),
-                        )
-                        .child(
-                            tool_tip(
-                                SharedString::from(format!("edit-recipe-{id}")),
-                                "edit",
-                                "Edit recipe",
-                                t,
-                            )
-                            .size(px(26.))
-                            .opacity(shown)
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    this.open_recipe_editor(
-                                        Some(edit_id.clone()),
-                                        edit_prompt.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                },
-                            )),
-                        )
-                        .child(
-                            tool_tip(
-                                SharedString::from(format!("delete-recipe-{id}")),
-                                "trash",
-                                "Delete recipe",
-                                t,
-                            )
-                            .size(px(26.))
-                            .opacity(shown)
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.chat_recipes.retain(|r| r.id != delete_id);
-                                    this.save_chat_history();
-                                    cx.notify();
-                                },
-                            )),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.use_chat_recipe(prompt.clone(), multiple, cx)
-                        })),
-                );
-            }
-        }
-        list = list.child(
-            div()
-                .px(px(8.))
-                .py(px(6.))
-                .text_size(px(12.))
-                .text_color(t.muted)
-                .child("All recipes"),
-        );
-        for (index, (title, description, prompt)) in
-            BUILTIN_RECIPES
-                .iter()
-                .enumerate()
-                .filter(|(_, (title, description, _))| {
-                    query.is_empty()
-                        || title.to_lowercase().contains(&query)
-                        || description.to_lowercase().contains(&query)
-                })
-        {
-            list = list.child(
-                div()
-                    .id(("builtin-recipe-row", index))
-                    .cursor_pointer()
-                    .h(px(60.))
-                    .flex_shrink_0()
-                    .px(px(8.))
-                    .rounded(px(10.))
-                    .child(crate::motion::tactile(t.hover).radius(10.))
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .child(icon("recipe", 20., t.muted))
-                    .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap(px(3.))
-                            .child(*title)
-                            .child(small(*description, t)),
-                    )
-                    .reach().on_click(cx.listener(move |this, _, _, cx| {
-                        this.use_chat_recipe((*prompt).into(), this.current_note.is_none(), cx)
-                    })),
-            );
-        }
-        list
-    }
-
-    pub fn render_chat_recipes_surface(
-        &self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        div()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .items_center()
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(672.))
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .child(self.render_chat_recipes_header(cx))
-                    .child(self.render_chat_recipes(cx)),
-            )
-            .child(div().w_full().max_w(px(672.)).px(px(8.)).pb(px(8.)).child(
-                self.render_chat_composer_focused(
-                    self.ask.read(cx).focus_handle.is_focused(window),
-                    cx,
-                ),
-            ))
-            .into_any_element()
-    }
-
-    /// Close the recipe editor from inside it (Escape, Cancel, Save, the
-    /// close button). It is kept just long enough to be drawn leaving; any
-    /// running test is cancelled now rather than when it is finally dropped.
-    pub fn close_recipe_editor(&mut self) {
-        if let Some(editor) = self.chat_recipe_editor.take() {
-            if let Some(cancel) = &editor.test_cancel {
-                cancel.store(true, std::sync::atomic::Ordering::Release);
-            }
-            self.recipe_editor_leaving = Some(editor);
-        }
-    }
-
-    pub fn render_chat_recipe_editor(
-        &self,
-        pose: crate::motion::Pose,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some(editor) = self
-            .chat_recipe_editor
-            .as_ref()
-            .or(self.recipe_editor_leaving.as_ref())
-        else {
-            return div().into_any_element();
-        };
-        let t = self.theme();
-        let valid = !editor.name.read(cx).content().trim().is_empty()
-            && editor.name.read(cx).content().chars().count() <= 100
-            && !editor.prompt.read(cx).content().trim().is_empty()
-            && editor.prompt.read(cx).content().encode_utf16().count() <= 20_000;
-        let editing = editor.id.is_some();
-        let multiple = editor.multiple_meetings;
-        let testable = editor.test_cancel.is_none()
-            && !editor.prompt.read(cx).content().trim().is_empty()
-            && editor.prompt.read(cx).content().encode_utf16().count() <= 20_000
-            && (multiple || self.current_note.is_some());
-        let preview = editor.test_answer.as_ref().map(|answer| {
-            div()
-                .mt(px(12.))
-                .p(px(12.))
-                .rounded(px(8.))
-                .border_1()
-                .border_color(t.border)
-                .flex()
-                .flex_col()
-                .gap(px(10.))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child("Test result")
-                        .child(div().flex_1())
-                        .when(editor.test_cancel.is_some(), |d| {
-                            d.child(
-                                tool_tip("stop-recipe-test", "stop", "Stop recipe test", t)
-                                    .size(px(24.))
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.stop_recipe_test(cx)),
-                                    ),
-                            )
-                        }),
-                )
-                .child(if answer.is_empty() && editor.test_cancel.is_some() {
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .text_color(t.muted)
-                        .child(crate::motion::spinner(t.muted))
-                        .child("Thinking…")
-                } else {
-                    self.sourced_chat_markdown(
-                        answer,
-                        true,
-                        editor.test_annotations.citations.clone(),
-                        cx,
-                    )
-                })
-                .into_any_element()
-        });
-        let mut scope = div().w_full().min_w_0().flex().gap(px(8.));
-        for (is_multiple, title, description) in [
-            (
-                false,
-                "Single meeting",
-                "Use this recipe during or after an individual meeting",
-            ),
-            (
-                true,
-                "Multiple meetings",
-                "Use this recipe across your meeting notes",
-            ),
-        ] {
-            scope = scope.child(
-                div()
-                    .id(if is_multiple {
-                        "recipe-scope-multiple"
-                    } else {
-                        "recipe-scope-single"
-                    })
-                    .flex_1()
-                    .min_w_0()
-                    .h(px(84.))
-                    .p(px(16.))
-                    .rounded(px(12.))
-                    .border_1()
-                    .border_color(t.border)
-                    .bg(if multiple == is_multiple {
-                        t.card
-                    } else {
-                        t.sidebar
-                    })
-                    .cursor_pointer()
-                    .child(crate::motion::tactile(t.hover).radius(12.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(icon(
-                                if is_multiple { "folder" } else { "file" },
-                                16.,
-                                t.muted,
-                            ))
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .line_height(px(16.))
-                            .text_color(t.muted)
-                            .child(description),
-                    )
-                    .reach().on_click(cx.listener(move |this, _, _, cx| {
-                        this.stop_recipe_test(cx);
-                        if let Some(editor) = &mut this.chat_recipe_editor {
-                            editor.multiple_meetings = is_multiple;
-                            editor.test_answer = None;
-                        }
-                        cx.notify();
-                    })),
-            );
-        }
-        let dialog = div()
-            .id("chat-recipe-editor")
-            .occlude()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .w((window.viewport_size().width - px(120.))
-                .min(px(1080.))
-                .max(px(300.)))
-            .h((window.viewport_size().height - px(126.))
-                .min(px(714.))
-                .max(px(360.)))
-            .rounded(px(12.))
-            .border_1()
-            .border_color(t.border)
-            .bg(t.sidebar)
-            .shadow_xl()
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .h(px(48.))
-                    .flex_shrink_0()
-                    .px(px(16.))
-                    .border_b_1()
-                    .border_color(t.border)
-                    .bg(t.bg)
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .child(icon("recipe", 16., t.muted))
-                    .child(if editing { "Edit recipe" } else { "New recipe" })
-                    .child(div().flex_1())
-                    .child(
-                        tool_tip("close-recipe-editor", "close", "Close recipe", t)
-                            .size(px(26.))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.close_recipe_editor();
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .id("recipe-editor-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .child(
-                        div()
-                            .w_full()
-                            .max_w(px(540.))
-                            .px(px(16.))
-                            .py(px(12.))
-                            .flex()
-                            .flex_col()
-                            .gap(px(8.))
-                            .child(small("Recipe name", t))
-                            .child(
-                                div()
-                                    .h(px(36.))
-                                    .px(px(10.))
-                                    .rounded(px(8.))
-                                    .border_1()
-                                    .border_color(
-                                        if editor.name.read(cx).focus_handle.is_focused(window) {
-                                            t.accent
-                                        } else {
-                                            t.border
-                                        },
-                                    )
-                                    .bg(t.card)
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(8.))
-                                    .child(icon("recipe", 16., t.muted))
-                                    .child(div().flex_1().child(editor.name.clone())),
-                            )
-                            .child(div().mt(px(8.)).child(small("Made for", t)))
-                            .child(scope)
-                            .child(div().mt(px(16.)).child(small("Prompt", t)))
-                            .child(
-                                div()
-                                    .h(px(269.))
-                                    .p(px(10.))
-                                    .rounded(px(8.))
-                                    .border_1()
-                                    .border_color(t.border)
-                                    .bg(t.card)
-                                    .flex()
-                                    .flex_col()
-                                    .child(
-                                        div()
-                                            .id("recipe-prompt-scroll")
-                                            .flex_1()
-                                            .min_h_0()
-                                            .overflow_y_scroll()
-                                            .line_height(px(20.))
-                                            .child(editor.prompt.clone()),
-                                    )
-                                    .child(
-                                        pill("test-chat-recipe", "Test recipe", "chevron-right", t)
-                                            .h(px(24.))
-                                            .text_size(px(12.))
-                                            .mt(px(8.))
-                                            .w(px(106.))
-                                            .opacity(if testable {
-                                                1.
-                                            } else {
-                                                crate::ui::DISABLED
-                                            })
-                                            .when(testable, |d| {
-                                                d.on_click(cx.listener(|this, _, _, cx| {
-                                                    this.test_chat_recipe(cx)
-                                                }))
-                                            }),
-                                    ),
-                            )
-                            .when_some(preview, |d, preview| d.child(preview)),
-                    ),
-            )
-            .child(
-                div()
-                    .h(px(44.))
-                    .flex_shrink_0()
-                    .px(px(12.))
-                    .border_t_1()
-                    .border_color(t.border)
-                    .bg(t.bg)
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .id("cancel-save-recipe")
-                            .h(px(26.))
-                            .px(px(12.))
-                            .rounded_full()
-                            .border_1()
-                            .border_color(t.border)
-                            .flex()
-                            .items_center()
-                            .text_size(px(12.))
-                            .cursor_pointer()
-                            .child(crate::motion::tactile(t.hover).round())
-                            .child("Cancel")
-                            .reach().on_click(cx.listener(|this, _, _, cx| {
-                                this.close_recipe_editor();
-                                cx.notify();
-                            })),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .id("save-chat-recipe")
-                            .h(px(26.))
-                            .px(px(12.))
-                            .rounded_full()
-                            .bg(t.text)
-                            .text_color(t.bg)
-                            .opacity(if valid { 1. } else { crate::ui::DISABLED })
-                            .flex()
-                            .items_center()
-                            .text_size(px(12.))
-                            .child("Save")
-                            .when(valid, |d| {
-                                d.cursor_pointer()
-                                    .child(
-                                        crate::motion::tactile(crate::ui::neutral_wash(0.14))
-                                            .round(),
-                                    )
-                                    .reach().on_click(
-                                        cx.listener(|this, _, _, cx| this.save_chat_recipe(cx)),
-                                    )
-                            }),
-                    ),
-            );
-        div()
-            .id("recipe-editor-backdrop")
-            .occlude()
-            .absolute()
-            .inset_0()
-            .bg(crate::ui::scrim(crate::ui::Scrim::Form, pose.fade))
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(crate::motion::pop(dialog, crate::motion::Pop::DIALOG, pose))
-            .into_any_element()
     }
 
     /// The recent-chats button: open the list, or close it.
@@ -3190,7 +2340,7 @@ impl crate::app::Cereal {
                     .h(px(30.))
                     .rounded(px(7.))
                     .text_size(px(13.))
-                    .cursor_pointer()
+                    .cursor_default()
                     .flex()
                     .items_center()
                     .gap(px(8.))
@@ -3212,7 +2362,7 @@ impl crate::app::Cereal {
     pub fn chat_can_scroll_down(&self) -> bool {
         // The button is 28 px and floats over the end of the conversation.
         // With less hidden than it would itself cover, it only gets in the
-        // way (it sat on the recipe chips after a first answer).
+        // way.
         self.chat_scroll.max_offset().height + self.chat_scroll.offset().y > px(44.)
     }
     pub fn render_chat_scroll_down(&self, cx: &mut Context<Self>) -> Div {
@@ -3289,9 +2439,6 @@ impl crate::app::Cereal {
     }
 
     pub fn render_context_chat(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        if self.chat_recipes_open {
-            return self.render_chat_recipes_surface(window, cx);
-        }
         let t = self.theme();
         let note = self.current_note.and_then(|id| self.workspace.note(id));
         let mut content = div()
@@ -3522,7 +2669,7 @@ fn table_separator(line: &str) -> bool {
 
 /// Formatting ranges are byte offsets, matching GPUI's shaped-text contract.
 /// Unmatched delimiters stay visible while an actual streamed reply is incomplete.
-fn inline(source: &str, theme: Theme) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
+pub(crate) fn inline(source: &str, theme: Theme) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
     let mut output = String::new();
     let mut highlights = Vec::new();
     let mut at = 0;
@@ -3825,7 +2972,7 @@ fn markdown_with_inline(
 #[cfg(test)]
 mod tests {
     use super::{
-        ArchivedChat, Block, ChatRecipe, HistoryFile, archived_thread_scope, blocks,
+        ArchivedChat, Block, HistoryFile, archived_thread_scope, blocks,
         follow_up_prompt, inline, linked_inline, store_history, upsert_chat_archive,
     };
     use super::{
@@ -3901,7 +3048,6 @@ mod tests {
         for screen in [
             Screen::Home,
             Screen::MyNotes,
-            Screen::Folder(4),
             Screen::Favorites,
         ] {
             assert!(super::floating_workspace_chat(screen));
@@ -4195,19 +3341,10 @@ mod tests {
             annotations: Default::default(),
             updated_at: Some("2026-11-13T12:00:00Z".into()),
         }];
-        let recipes = vec![ChatRecipe {
-            id: "recipe-one".into(),
-            title: "Café action items".into(),
-            prompt: "List the café action items 🦊.".into(),
-            multiple_meetings: true,
-        }];
-        store_history(&path, &sessions, &recipes).unwrap();
+        store_history(&path, &sessions).unwrap();
         let stored: HistoryFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(stored.sessions[0].note_id, 41);
         assert_eq!(stored.sessions[0].messages[0].1, "Mira.");
-        assert_eq!(stored.recipes[0].title, "Café action items");
-        assert_eq!(stored.recipes[0].prompt, "List the café action items 🦊.");
-        assert!(stored.recipes[0].multiple_meetings);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -4217,7 +3354,7 @@ mod tests {
             );
         }
         std::fs::write(&path, b"corrupt existing data").unwrap();
-        assert!(store_history(&path, &sessions, &[]).is_err());
+        assert!(store_history(&path, &sessions).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"corrupt existing data");
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -4272,14 +3409,23 @@ mod tests {
             "A new thread can intentionally select its initial scope"
         );
     }
+
     #[test]
-    fn old_chat_history_without_recipes_loads_and_single_meeting_is_the_legacy_default() {
-        let stored: HistoryFile = serde_json::from_str(r#"{"version":1,"sessions":[]}"#).unwrap();
-        assert!(stored.recipes.is_empty());
-        let recipe: ChatRecipe =
-            serde_json::from_str(r#"{"id":"old","title":"Notes","prompt":"List the decisions"}"#)
-                .unwrap();
-        assert!(!recipe.multiple_meetings);
+    fn thread_ages_read_as_the_lists_print_them() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-16T18:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let ago = |minutes: i64| (now - chrono::Duration::minutes(minutes)).to_rfc3339();
+        assert_eq!(super::thread_age(&ago(0), now).as_deref(), Some("now"));
+        assert_eq!(super::thread_age(&ago(6), now).as_deref(), Some("6m"));
+        assert_eq!(super::thread_age(&ago(6 * 60 + 5), now).as_deref(), Some("6h"));
+        assert_eq!(super::thread_age(&ago(26 * 60), now).as_deref(), Some("1d"));
+        assert_eq!(super::thread_age(&ago(65 * 24 * 60), now).as_deref(), Some("2mo"));
+        assert_eq!(super::thread_age("", now), None);
+    }
+
+    #[test]
+    fn an_archived_thread_without_a_date_is_listed_as_earlier() {
         let old: ArchivedChat = serde_json::from_str(
             r#"{"id":"legacy","note_id":41,"title":"Notes","messages":[],"interrupted":[]}"#,
         )
@@ -4457,6 +3603,29 @@ mod stream_tests {
         assert!(desk.stream.is_none() && desk.interrupted.is_empty());
         // A late event of the finished stream changes nothing.
         assert_eq!(desk.chats().event(&thread, turn.epoch, turn.index, Delta("x".into())), Applied::Gone);
+    }
+
+    #[test]
+    fn thinking_ends_when_the_first_of_the_answer_arrives_and_its_time_is_kept() {
+        let mut desk = Desk::on_note(0);
+        let (thread, turn) = desk.send("List recent todos").unwrap();
+        // Nothing of the answer yet: no time, so the turn says "Thinking…".
+        desk.chats().event(&thread, turn.epoch, turn.index, Delta(String::new()));
+        assert!(desk.annotations.get(&0).and_then(|item| item.elapsed_ms).is_none());
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        desk.chats().event(&thread, turn.epoch, turn.index, Delta("Here ".into()));
+        let thought = desk.annotations[&0].elapsed_ms.expect("set by the first text");
+        assert!(thought >= 30);
+        // Writing the rest takes longer, but the answer thought for as long
+        // as it took to start.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        desk.chats().event(&thread, turn.epoch, turn.index, Delta("they are.".into()));
+        desk.chats().event(&thread, turn.epoch, turn.index, Done);
+        assert_eq!(desk.annotations[&0].elapsed_ms, Some(thought));
+        // An answer that never wrote anything thought until it ended.
+        let (thread, turn) = desk.send("And the decisions?").unwrap();
+        desk.chats().event(&thread, turn.epoch, turn.index, Done);
+        assert!(desk.annotations[&1].elapsed_ms.is_some());
     }
 
     #[test]
@@ -4663,7 +3832,7 @@ mod account_tests {
         assert_eq!(threads[1].note_id, handle::handle(1, 7).unwrap());
         assert!(threads.iter().all(|chat| chat.account.as_ref() == Some(&a)));
         // Written back: file ids, and the account is implied by the file.
-        let bytes = handle::encoding_account_file(|| encode_history(&threads, &[])).unwrap();
+        let bytes = handle::encoding_account_file(|| encode_history(&threads)).unwrap();
         let file: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(file["sessions"][0]["note_id"], 0);
         assert_eq!(file["sessions"][1]["note_id"], 7);
@@ -4692,18 +3861,4 @@ mod account_tests {
         assert_eq!(kept[0].id, "a-10");
     }
 
-    #[test]
-    fn recipes_become_this_macs_once_without_duplicates() {
-        let recipe = |id: &str, title: &str| ChatRecipe {
-            id: id.into(),
-            title: title.into(),
-            prompt: "List the action items.".into(),
-            multiple_meetings: false,
-        };
-        let mut device = vec![recipe("r1", "Action items")];
-        // The same recipe again (by id, or exactly the same text) is not added.
-        assert!(!merge_recipes(&mut device, vec![recipe("r1", "Action items"), recipe("r9", "Action items")]));
-        assert!(merge_recipes(&mut device, vec![recipe("r2", "Decisions")]));
-        assert_eq!(device.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["r1", "r2"]);
-    }
 }

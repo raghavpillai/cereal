@@ -7,8 +7,10 @@ private final class LifecycleObservers: @unchecked Sendable {
     deinit { tokens.forEach(NotificationCenter.default.removeObserver) }
 }
 
-/// On-device demo/capture store. Server notes live in ServerNotesModel and never
-/// import these fictional fixtures or local recording files automatically.
+/// The on-device demo's store, for debug QA only (`-screen` launches). Server
+/// notes live in ServerNotesModel. A release build has no demo: its store is
+/// empty and never reads or writes the disk, so a `notes.json` and recordings
+/// left by an earlier version stay exactly as they were.
 @MainActor
 @Observable
 final class NoteStore {
@@ -37,7 +39,16 @@ final class NoteStore {
     /// True while typed text is in memory but not yet in the file.
     var hasUnsavedDraft: Bool { draftPending }
 
-    init(fileURL: URL? = nil, recordingsRoots: [URL]? = nil, draftDelay: Duration = .milliseconds(400)) {
+    /// The store this build uses: the demo's file in debug builds, nothing on disk in release.
+    static func forThisBuild() -> NoteStore {
+        #if DEBUG
+        NoteStore()
+        #else
+        NoteStore(onDisk: false)
+        #endif
+    }
+
+    init(fileURL: URL? = nil, recordingsRoots: [URL]? = nil, draftDelay: Duration = .milliseconds(400), onDisk: Bool = true) {
         self.draftDelay = draftDelay
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -45,6 +56,8 @@ final class NoteStore {
         self.recordingsRoots = recordingsRoots ?? (fileURL.map {
             [$0.deletingLastPathComponent().appendingPathComponent("recordings", isDirectory: true)]
         } ?? CaptureRecovery.defaultRoots)
+        // Off disk: nothing is read, recovered or written.
+        guard onDisk else { persistenceBlocked = true; return }
         Signpost.interval("Launch.StoreLoad") { load() }
         // No edit may be lost: write a pending draft before the app can be suspended or ended.
         for name in [UIApplication.willResignActiveNotification, UIApplication.didEnterBackgroundNotification, UIApplication.willTerminateNotification] {

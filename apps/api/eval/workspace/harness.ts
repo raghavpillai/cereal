@@ -48,7 +48,7 @@ export async function runWorkspaceChat(target:Target,workspace:LargeWorkspace,in
   if(!postgresEnabled())return runChat(target,workspace.notes,null,input,workspace.contexts)
   const repository=await postgresRepository(workspace),metered=meter(target.transport,"answer")
   const providers=makeProviderServices({languageProvider:target.provider,languageModel:target.model,toolModel:target.model,fetch:metered.transport,...(target.stub?{openRouterKey:"stub",openAiKey:"stub",anthropicKey:"stub"}:{})})
-  const processing=makeProcessingService(repository,{worker:false,providers,meetingContext:id=>Effect.succeed(workspace.contexts.get(id)??null)})
+  const processing=makeProcessingService(repository,{providers,meetingContext:id=>Effect.succeed(workspace.contexts.get(id)??null)})
   const started=performance.now(),tools:Execution["tools"]=[]
   let output="",first:number|null=null,error:string|undefined,done=false,citations:Execution["citations"]=[]
   try{

@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/EvidenceStreamEventDTO",
+  "$defs": {
+    "UUID": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|[fF]{8}-[fF]{4}-[fF]{4}-[fF]{4}-[fF]{12})$",
+      "format": "uuid",
+      "description": "UUID encoded as a string"
+    },
+    "EvidenceQuoteDTO": {
+      "type": "object",
+      "properties": {
+        "segmentId": {
+          "$ref": "#/$defs/UUID"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "speakerLabel": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "startMs": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        }
+      },
+      "required": [
+        "segmentId",
+        "text",
+        "speakerLabel",
+        "startMs"
+      ],
+      "additionalProperties": true
+    },
+    "EvidenceDTO": {
+      "type": "object",
+      "properties": {
+        "summary": {
+          "type": "string",
+          "maxLength": 1000000
+        },
+        "quotes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvidenceQuoteDTO"
+          },
+          "maxItems": 8
+        },
+        "transcriptRevision": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        }
+      },
+      "required": [
+        "summary",
+        "quotes",
+        "transcriptRevision"
+      ],
+      "additionalProperties": true
+    },
+    "EvidenceStreamEventDTO": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "delta",
+            "done",
+            "error"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 1000000
+        },
+        "evidence": {
+          "$ref": "#/$defs/EvidenceDTO"
+        }
+      },
+      "required": [
+        "type",
+        "text"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

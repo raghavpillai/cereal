@@ -9,7 +9,6 @@ use std::{
 };
 
 pub const SOUND_SETTINGS_URL: &str = "x-apple.systempreferences:com.apple.Sound-Settings.extension";
-pub const PROCESSING_LANGUAGE: &str = "English";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -199,6 +198,14 @@ pub struct MeetingPreferences {
     pub events_without_participants: bool,
     /// A notification one minute before a meeting starts.
     pub scheduled_notifications: bool,
+    /// A notification when a note's generated notes are ready (or could
+    /// not be made) while Cereal is not the app in front.
+    pub notes_notifications: bool,
+    /// A notification when a recording stops on its own or loses an input.
+    pub recording_notifications: bool,
+    /// A notification when an account's session ends and it needs signing
+    /// in to again.
+    pub account_notifications: bool,
     /// The capsule that floats at the screen's edge while recording.
     pub live_indicator: bool,
     /// Calendars left out of "Coming up" and the menu on this Mac, as
@@ -208,6 +215,9 @@ pub struct MeetingPreferences {
     /// The scheme of the reminder identifiers registered with macOS (see
     /// `menubar::REMINDER_SCHEME`). 0 before reminders carried their account.
     pub reminder_scheme: u32,
+    /// Apple's voice isolation on the microphone of every recording (see
+    /// `audio::CaptureOptions`); system audio is never processed.
+    pub voice_isolation: bool,
 }
 impl Default for MeetingPreferences {
     fn default() -> Self {
@@ -215,9 +225,13 @@ impl Default for MeetingPreferences {
             menu_bar_events: true,
             events_without_participants: true,
             scheduled_notifications: false,
+            notes_notifications: true,
+            recording_notifications: true,
+            account_notifications: true,
             live_indicator: true,
             hidden_calendars: Vec::new(),
             reminder_scheme: 0,
+            voice_isolation: true,
         }
     }
 }
@@ -383,6 +397,14 @@ mod tests {
         let defaults: MeetingPreferences = read_as(&path).unwrap();
         assert!(defaults.menu_bar_events && defaults.events_without_participants);
         assert!(defaults.live_indicator && !defaults.scheduled_notifications);
+        // Notices that answer something happening on its own are on until
+        // turned off; macOS is asked for permission when one is first needed.
+        assert!(
+            defaults.notes_notifications
+                && defaults.recording_notifications
+                && defaults.account_notifications
+        );
+        assert!(defaults.voice_isolation);
         let saved = MeetingPreferences {
             menu_bar_events: false,
             scheduled_notifications: true,
@@ -394,7 +416,15 @@ mod tests {
         // A file from a later version, with a setting this one does not
         // know, still loads.
         fs::write(&path, br#"{"menu_bar_events":false,"later":1}"#).unwrap();
-        assert!(!read_as::<MeetingPreferences>(&path).unwrap().menu_bar_events);
+        let older = read_as::<MeetingPreferences>(&path).unwrap();
+        assert!(!older.menu_bar_events);
+        // A file from before the notices had settings has them on.
+        assert!(older.notes_notifications && older.recording_notifications);
+        // A file saved before the voice isolation setting turns it on; one
+        // with it turned off keeps it off.
+        assert!(older.voice_isolation);
+        fs::write(&path, br#"{"voice_isolation":false}"#).unwrap();
+        assert!(!read_as::<MeetingPreferences>(&path).unwrap().voice_isolation);
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
@@ -407,8 +437,7 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    fn defaults_match_actual_processing_and_sound_target() {
-        assert_eq!(PROCESSING_LANGUAGE, "English");
+    fn the_sound_settings_target_is_the_sound_pane() {
         assert_eq!(
             SOUND_SETTINGS_URL,
             "x-apple.systempreferences:com.apple.Sound-Settings.extension"

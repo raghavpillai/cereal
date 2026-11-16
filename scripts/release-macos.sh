@@ -33,7 +33,9 @@ for name in certificate.p12 key-password asc-key.json; do
   [[ "$(stat -f %Lp "$signing/$name")" =~ ^[46]00$ ]] || fail "$name must be readable by its owner only (chmod 600)"
 done
 
-work="$(mktemp -d -t cereal-release)"
+# The real path: mktemp answers /var/folders/…, but mount reports /private/var/folders/…, and the cleanup
+# compares the two.
+work="$(cd "$(mktemp -d -t cereal-release)" && pwd -P)"
 keychain="$work/signing.keychain-db"
 keychain_password="$(openssl rand -hex 24)"
 saved_keychains=()
@@ -41,11 +43,17 @@ while IFS= read -r line; do
   line="${line#"${line%%[![:space:]]*}"}"; line="${line#\"}"; line="${line%\"}"
   [[ -n "$line" ]] && saved_keychains+=("$line")
 done < <(security list-keychains -d user)
+# Runs on every exit. It never changes the exit status: a finished release stays a success even when
+# the temporary folder cannot be removed.
 cleanup() {
   security list-keychains -d user -s "${saved_keychains[@]}" >/dev/null 2>&1 || true
   security delete-keychain "$keychain" >/dev/null 2>&1 || true
-  mount | grep -qF " $work/" && return 0  # an image still mounted inside: leave the folder, never fail the release here
-  rm -rf "$work"
+  if mount | grep -F " on $work/" >/dev/null; then
+    printf 'release-macos: an image is still mounted in %s; leaving that folder\n' "$work" >&2
+  else
+    rm -rf "$work" 2>/dev/null || printf 'release-macos: could not remove %s\n' "$work" >&2
+  fi
+  return 0
 }
 trap cleanup EXIT
 

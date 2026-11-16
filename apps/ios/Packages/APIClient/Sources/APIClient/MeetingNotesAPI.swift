@@ -196,9 +196,10 @@ public struct MeetingNotesAPI: Sendable {
         return try await send("PATCH", route: ["notes", id], body: JSONEncoder().encode(input))
     }
 
-    public func deleteNote(id: String) async throws -> DeletedDTO {
+    /// `ifStamp` (`NoteStamp.of`): the note is deleted only if it is still as it was read; otherwise `conflict`.
+    public func deleteNote(id: String, ifStamp: String? = nil) async throws -> DeletedDTO {
         try validate(id)
-        return try await send("DELETE", route: ["notes", id])
+        return try await send("DELETE", route: ["notes", id], query: ifStamp.map { [URLQueryItem(name: "ifStamp", value: $0)] } ?? [])
     }
 
     public func recording(noteID: String, command: Command) async throws -> NoteDTO {
@@ -206,34 +207,15 @@ public struct MeetingNotesAPI: Sendable {
         return try await send("POST", route: ["notes", noteID, "recording"], body: JSONEncoder().encode(RecordingCommandDTO(command: command)))
     }
 
-    public func uploadAudio(noteID: String, chunkID: String, channel: AudioChannel, sequence: Int, startMs: Int, wav: Data) async throws -> AudioChunkDTO {
-        try validate(noteID)
-        try validate(chunkID)
-        guard sequence >= 0, startMs >= 0 else { throw APIClientError.invalidAudio }
-        guard wav.count <= 20 * 1024 * 1024 else { throw APIClientError.audioTooLarge }
-        guard wav.count >= 44, wav.prefix(4) == Data("RIFF".utf8), wav[8..<12] == Data("WAVE".utf8) else { throw APIClientError.invalidAudio }
-        let input = UploadAudioChunkInput(audioBase64: wav.base64EncodedString(), channel: channel, sequence: sequence, startMs: startMs)
-        return try await send("PUT", route: ["notes", noteID, "audio", "chunks", chunkID], body: JSONEncoder().encode(input), timeout: 120)
-    }
-
-    public func audioChunks(noteID: String) async throws -> [AudioChunkDTO] {
-        try validate(noteID)
-        return try await send("GET", route: ["notes", noteID, "audio", "chunks"])
-    }
-
-    public func retryAudio(noteID: String, chunkID: String) async throws -> AudioChunkDTO {
-        try validate(noteID)
-        try validate(chunkID)
-        return try await send("POST", route: ["notes", noteID, "audio", "chunks", chunkID, "retry"])
-    }
-
     public func generate(noteID: String, expectedTranscriptRevision: Int) async throws -> NoteDTO {
         try validate(noteID)
         return try await send("POST", route: ["notes", noteID, "generate"], body: JSONEncoder().encode(GenerateNotesCommandDTO(expectedTranscriptRevision: expectedTranscriptRevision)), timeout: 240)
     }
 
+    /// A model this build cannot read (a provider added on a newer server) is left out instead of failing the list.
     public func chatModels() async throws -> ChatModelsDTO {
-        try await send("GET", route: ["models", "chat"])
+        let list: ReadableChatModels = try await send("GET", route: ["models", "chat"])
+        return ChatModelsDTO(models: list.models)
     }
 
     public func chat(noteID: String, message: String, history: [ChatMessageDTO], model: String? = nil) async throws -> ChatAnswerDTO {
@@ -266,9 +248,57 @@ public struct MeetingNotesAPI: Sendable {
         try transportState.check()
         if let noteID { try validate(noteID) }
         let route = ["api", "v1"] + (noteID.map { ["notes", $0] } ?? []) + ["chat", "stream"]
+        return try eventStream(route: route, body: JSONEncoder().encode(ChatInput(history: history, includeSources: includeSources, message: message, model: model, timeZone: TimeZone.current.identifier)))
+    }
+
+    // MARK: Saved chats (`/api/v1/chats`): the signed-in person's own threads, on every device.
+
+    /// Threads newest first. `noteID` limits them to one note's, `workspace` to those across all notes.
+    public func chatThreads(noteID: String? = nil, workspace: Bool = false, limit: Int = 20, cursor: String? = nil) async throws -> ChatThreadsPageDTO {
+        if let noteID { try validate(noteID) }
+        var query = try Self.page(limit: limit, cursor: cursor)
+        if let noteID { query.append(URLQueryItem(name: "noteId", value: noteID.lowercased())) }
+        else if workspace { query.append(URLQueryItem(name: "scope", value: "workspace")) }
+        return try await send("GET", route: ["chats"], query: query)
+    }
+
+    public func chatThread(id: String) async throws -> ChatThreadDTO {
+        try validate(id)
+        return try await send("GET", route: ["chats", id.lowercased()])
+    }
+
+    /// Idempotent with an `id`: the same id again answers the thread as it is.
+    public func createChatThread(_ input: CreateChatThreadInput) async throws -> ChatThreadDTO {
+        try await send("POST", route: ["chats"], body: JSONEncoder().encode(input))
+    }
+
+    /// Store an exchange this device already has. The same exchange again changes nothing.
+    public func appendChatTurn(threadID: String, _ input: AppendChatTurnInput) async throws -> ChatThreadDTO {
+        try validate(threadID)
+        return try await send("POST", route: ["chats", threadID.lowercased(), "turns"], body: JSONEncoder().encode(input))
+    }
+
+    public func renameChatThread(id: String, title: String) async throws -> ChatThreadDTO {
+        try validate(id)
+        return try await send("PATCH", route: ["chats", id.lowercased()], body: JSONEncoder().encode(UpdateChatThreadInput(title: title)))
+    }
+
+    public func deleteChatThread(id: String) async throws -> DeletedDTO {
+        try validate(id)
+        return try await send("DELETE", route: ["chats", id.lowercased()])
+    }
+
+    /// Ask exchange `input.turn` of a saved thread. The server saves the question and the answer as it arrives.
+    public func chatThreadEvents(threadID: String, _ input: ChatThreadStreamInput) throws -> AsyncThrowingStream<ChatStreamEventDTO, Error> {
+        try transportState.check()
+        try validate(threadID)
+        return try eventStream(route: ["api", "v1", "chats", threadID.lowercased(), "stream"], body: JSONEncoder().encode(input))
+    }
+
+    private func eventStream(route: [String], body: Data) throws -> AsyncThrowingStream<ChatStreamEventDTO, Error> {
         var request = URLRequest(url: credentials.instance.endpoint(route))
         request.httpMethod = "POST"
-        request.httpBody = try JSONEncoder().encode(ChatInput(history: history, includeSources: includeSources, message: message, model: model, timeZone: TimeZone.current.identifier))
+        request.httpBody = body
         request.timeoutInterval = 240
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -285,6 +315,7 @@ public struct MeetingNotesAPI: Sendable {
                     case 200..<300: break
                     case 401, 403: onUnauthorized?(); throw APIClientError.unauthorized
                     case 404: throw APIClientError.notFound
+                    case 409: throw APIClientError.conflict
                     case 503: throw APIClientError.unavailable
                     default: throw APIClientError.httpStatus(response.statusCode)
                     }
@@ -414,7 +445,6 @@ public struct MeetingNotesAPI: Sendable {
         case 401, 403: onUnauthorized?(); throw APIClientError.unauthorized
         case 404: throw APIClientError.notFound
         case 409: throw APIClientError.conflict
-        case 413: throw APIClientError.audioTooLarge
         case 503: throw APIClientError.unavailable
         default: throw APIClientError.httpStatus(response.statusCode)
         }
@@ -513,5 +543,17 @@ extension MeetingNotesAPI {
         try transportState.check()
         return LiveTranscriptClient(connector: URLSessionLiveConnector(request: try liveTranscriptRequest(noteID: noteID)),
                                     source: source, configuration: configuration)
+    }
+}
+
+/// `ChatModelsDTO` read one model at a time, keeping the ones whose provider this build knows.
+struct ReadableChatModels: Decodable, Sendable {
+    let models: [LanguageModelSelection]
+    private enum CodingKeys: String, CodingKey { case models }
+    private struct Entry: Decodable { let model: LanguageModelSelection?
+        init(from decoder: Decoder) throws { model = try? LanguageModelSelection(from: decoder) } }
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        models = try container.decode([Entry].self, forKey: .models).compactMap(\.model)
     }
 }

@@ -1,11 +1,12 @@
 import { Context, Effect } from "effect"
-import type { AudioChunkDTO, TranscriptSegmentDTO, CreateNoteInput, ImportNoteInput, MeetingContextDTO, NoteDTO, ShareDTO, SharedNoteDTO, UpdateNoteInput } from "@meeting-notes/contracts"
+import type { TranscriptSegmentDTO, CreateNoteInput, ImportNoteInput, MeetingContextDTO, NoteDTO, ShareDTO, SharedNoteDTO, UpdateNoteInput } from "@meeting-notes/contracts"
 import {clampCreatedAt,importedSegmentId,matchesStamp,type DeletePreconditions} from "./note-import"
 import {selectMeetings,selectTranscriptPassages,type MeetingSearchInput,type TranscriptSearchInput,type TranscriptSearchHit} from "./meeting-search"
 import type {NoteSearchPageDTO,NoteSummariesPageDTO} from "@meeting-notes/contracts"
 import type {NoteListInput,NoteSearchInput} from "./note-summaries"
-import {makeMemoryLiveRepository,type ChunkResolution,type FinishChunkOptions,type LiveRepository} from "./live/repository"
+import {makeMemoryLiveRepository,type LiveRepository} from "./live/repository"
 import {isDefaultNoteTitle} from "./meeting-context-errors"
+import {rehomedTranscriptLink,withTranscriptLink} from "./transcript-link"
 
 export class RepositoryError extends Error {
   readonly _tag = "RepositoryError"
@@ -15,14 +16,6 @@ export interface StoredShare {
   readonly metadata: ShareDTO
   readonly tokenHash: string
   readonly snapshot: SharedNoteDTO
-}
-export interface StoredAudioChunk extends AudioChunkDTO {
-  readonly hash: string
-  readonly durationMs: number
-  readonly lease: string | null
-  readonly leaseUntil: string | null
-  /** How a ready part was accounted for (live coverage ledger); absent on rows written before it existed. */
-  readonly resolution?: ChunkResolution | null
 }
 /** One import request: the note as sent, the SHA-256 of that request, and the one clock reading the note's
  * `importedAt` and `updatedAt` are both written from. */
@@ -34,12 +27,7 @@ export interface NotesRepositoryService {
   /** Request-facing adapters must be scoped to a stable account ID. */
   readonly forUser: (userId: string, organizationId?: string) => NotesRepositoryService
   readonly recording: (id: string, command: "start" | "stop" | "resume") => Effect.Effect<NoteDTO | null, RepositoryError>
-  readonly listAudioChunks: (noteId: string) => Effect.Effect<ReadonlyArray<StoredAudioChunk>, RepositoryError>
-  readonly putAudioChunk: (chunk: StoredAudioChunk) => Effect.Effect<StoredAudioChunk | null, RepositoryError>
-  readonly retryAudioChunk: (noteId: string, id: string) => Effect.Effect<StoredAudioChunk | null, RepositoryError>
-  readonly claimAudioChunk: (now: string) => Effect.Effect<StoredAudioChunk | null, RepositoryError>
-  readonly finishAudioChunk: (id: string, lease: string, segments: ReadonlyArray<TranscriptSegmentDTO>, error: string | null, options?: FinishChunkOptions) => Effect.Effect<boolean, RepositoryError>
-  /** Live transcription storage, for the trusted session and worker only (see live/repository.ts).
+  /** Live transcription storage, for the trusted live session only (see live/repository.ts).
    * Request-scoped repositories leave it out. */
   readonly live?: LiveRepository
   readonly beginGeneration: (id: string, revision: number, runId: string) => Effect.Effect<NoteDTO | null, RepositoryError>
@@ -73,6 +61,9 @@ export interface NotesRepositoryService {
   readonly findShare: (tokenHash: string) => Effect.Effect<StoredShare | null, RepositoryError>
   readonly revokeShare: (id: string, now: string) => Effect.Effect<ShareDTO | null, RepositoryError>
 }
+/** What a repository adds to the notes it saves. `transcriptLink`: the chat link line for a note's
+ * generated notes (transcript-link.ts), or null for none. Left out, generated notes are saved as written. */
+export interface RepositoryOptions { readonly transcriptLink?: (noteId: string) => string | null }
 export class NotesRepository extends Context.Service<NotesRepository, NotesRepositoryService>()("MeetingNotesRepository") {}
 
 export const BOOTSTRAP_OWNER_ID = "00000000-0000-4000-8000-000000000001"
@@ -108,11 +99,6 @@ export function scopeRepository(repository: NotesRepositoryService, userId: stri
     deleteNoteIf: (id, preconditions) => note(id, () => repository.deleteNoteIf(id, preconditions), "missing" as const),
     ...(repository.takeImportedContext ? { takeImportedContext: repository.takeImportedContext } : {}),
     recording: (id, command) => note(id, () => repository.recording(id, command), null),
-    listAudioChunks: id => note(id, () => repository.listAudioChunks(id), []),
-    putAudioChunk: chunk => note(chunk.noteId, () => repository.putAudioChunk(chunk), null),
-    retryAudioChunk: (noteId, id) => note(noteId, () => repository.retryAudioChunk(noteId, id), null),
-    claimAudioChunk: () => Effect.succeed(null),
-    finishAudioChunk: () => Effect.succeed(false),
     beginGeneration: (id, revision, runId) => note(id, () => repository.beginGeneration(id, revision, runId), null),
     finishGeneration: (id, revision, runId, enhanced, title) => note(id, () => repository.finishGeneration(id, revision, runId, enhanced, title), null),
     listShares: id => note(id, () => repository.listShares(id), []),
@@ -144,11 +130,12 @@ export function transcriptContentKey(segments: ReadonlyArray<NoteDTO["transcript
 }
 
 /** Deterministic adapter used to test the real HTTP layer without a live database. */
-export function makeMemoryRepository(seed: ReadonlyArray<NoteDTO> = [], clock: () => Date = () => new Date()): NotesRepositoryService {
+export function makeMemoryRepository(seed: ReadonlyArray<NoteDTO> = [], clock: () => Date = () => new Date(), options: RepositoryOptions = {}): NotesRepositoryService {
   const notes = new Map(seed.map((note) => [note.id, structuredClone(note)]))
+  // The chat link line last added to each note's generated notes (see transcript-link.ts).
+  const transcriptLinks = new Map<string, string>()
   const owners = new Map(seed.map(note => [note.id, BOOTSTRAP_OWNER_ID]))
   const shares = new Map<string, StoredShare>()
-  const chunks = new Map<string, StoredAudioChunk>()
   const generationRuns = new Map<string,string>()
   // What an import wrote, to recognise the same request again; and its meeting context until the context store takes it.
   const imports = new Map<string,{digest:string;importedAt:string;transcriptRevision:number;generatedRevision:number|null}>()
@@ -161,8 +148,11 @@ export function makeMemoryRepository(seed: ReadonlyArray<NoteDTO> = [], clock: (
     // The same rule as PostgreSQL's primary key: a derived segment id that some note already holds is a conflict.
     const derived = new Set(input.transcriptSegments.map(segment => importedSegmentId(id, segment.id)))
     for (const other of notes.values()) if (other.transcriptSegments.some(segment => derived.has(segment.id))) return { outcome: "conflict" }
+    // A note moved from another server with its chat link unedited: the link points here.
+    const rehomed = rehomedTranscriptLink(id, input.enhanced, options.transcriptLink?.(id) ?? null)
+    if (rehomed.remembered) transcriptLinks.set(id, rehomed.remembered)
     const note: NoteDTO = {
-      id, title: input.title, body: input.body, enhanced: input.enhanced, date: input.date, duration: input.duration,
+      id, title: input.title, body: input.body, enhanced: rehomed.enhanced, date: input.date, duration: input.duration,
       createdAt: clampCreatedAt(input.createdAt, now).toISOString(), updatedAt: at, importedAt: at,
       transcriptSegments: input.transcriptSegments.map(segment => ({ ...segment, id: importedSegmentId(id, segment.id) })).sort((a, b) => a.startMs - b.startMs),
       recordingState: input.recordingState, generationState: input.generated ? "ready" : "idle", transcriptRevision, generatedRevision,
@@ -173,7 +163,7 @@ export function makeMemoryRepository(seed: ReadonlyArray<NoteDTO> = [], clock: (
     return { outcome: "created", note: structuredClone(note) }
   }
   const clone = <T>(value: T): T => structuredClone(value)
-  const liveState = makeMemoryLiveRepository({ notes, chunks, clock })
+  const liveState = makeMemoryLiveRepository({ notes, clock })
   const repository: NotesRepositoryService = {
     live: liveState.live,
     forUser: userId => scopeRepository(repository, userId, {
@@ -187,10 +177,8 @@ export function makeMemoryRepository(seed: ReadonlyArray<NoteDTO> = [], clock: (
     takeImportedContext: noteId => { const context = importedContexts.get(noteId); importedContexts.delete(noteId); return context },
     deleteNoteIf: (id, preconditions) => Effect.flatMap(Effect.sync(() => {
       const note = notes.get(id); if (!note) return "missing" as const
-      const parts = [...chunks.values()].filter(chunk => chunk.noteId === id)
-      return note.recordingState === "recording" || parts.some(chunk => chunk.state !== "ready")
-        || preconditions.stamp && !matchesStamp(preconditions.stamp, { updatedAt: Date.parse(note.updatedAt), transcriptRevision: note.transcriptRevision, generatedRevision: note.generatedRevision })
-        || preconditions.chunks !== undefined && preconditions.chunks !== parts.length ? "conflict" as const : "deleted" as const
+      return note.recordingState === "recording"
+        || preconditions.stamp && !matchesStamp(preconditions.stamp, { updatedAt: Date.parse(note.updatedAt), transcriptRevision: note.transcriptRevision, generatedRevision: note.generatedRevision }) ? "conflict" as const : "deleted" as const
     }), decision => decision === "deleted" ? Effect.map(repository.deleteNote(id), () => decision) : Effect.succeed(decision)),
     recording: (id, command) => Effect.sync(() => {
       const n = notes.get(id)
@@ -199,44 +187,18 @@ export function makeMemoryRepository(seed: ReadonlyArray<NoteDTO> = [], clock: (
       const next: NoteDTO = { ...n, ...(command!=="stop"&&n.generationState==="writing_notes"?{generationState:"idle" as const}:{}), recordingState: command === "stop" ? "stopped" : "recording", updatedAt: clock().toISOString() }
       notes.set(id, next); return clone(next)
     }),
-    listAudioChunks: (noteId) => Effect.sync(() => clone([...chunks.values()].filter(c => c.noteId === noteId).sort((a,b) => a.sequence-b.sequence))),
-    putAudioChunk: (chunk) => Effect.sync(() => {
-      if (!notes.has(chunk.noteId)) return null
-      const existing = chunks.get(chunk.id) ?? [...chunks.values()].find(c => c.noteId === chunk.noteId && c.channel === chunk.channel && c.sequence === chunk.sequence)
-      if (existing) return existing.id === chunk.id && existing.hash === chunk.hash && existing.noteId === chunk.noteId && existing.channel === chunk.channel && existing.sequence === chunk.sequence && existing.startMs === chunk.startMs ? clone(existing) : null
-      chunks.set(chunk.id, clone(chunk)); const note=notes.get(chunk.noteId)!;if(note.generationState==="writing_notes"){generationRuns.delete(chunk.noteId);notes.set(chunk.noteId,{...note,generationState:"idle"})} return clone(chunk)
-    }),
-    retryAudioChunk: (noteId, id) => Effect.sync(() => {
-      const c = chunks.get(id); if (!c || c.noteId !== noteId) return null
-      const next: StoredAudioChunk = c.state === "failed" ? { ...c, state: "queued", error: null, lease: null, leaseUntil: null } : c
-      chunks.set(id, next); return clone(next)
-    }),
-    claimAudioChunk: (now) => Effect.sync(() => {
-      const c = [...chunks.values()].find(c => c.state === "queued" || c.state === "processing" && (c.leaseUntil ?? "") <= now)
-      if (!c) return null
-      const next: StoredAudioChunk = { ...c, state: "processing", error: null, lease: crypto.randomUUID(), leaseUntil: new Date(Date.parse(now)+180000).toISOString() }
-      chunks.set(c.id, next); return clone(next)
-    }),
-    finishAudioChunk: (id, lease, segments, error, options) => Effect.sync(() => {
-      const c = chunks.get(id); if (!c || c.state !== "processing" || c.lease !== lease) return false
-      const n = notes.get(c.noteId); if (!n) return false
-      const replaced = error === null && options?.replaceLive ? liveState.replaceLiveWithin(c, n.transcriptSegments) : { kept: n.transcriptSegments, removed: 0 }
-      const merged = [...replaced.kept, ...clone(segments)].sort((a,b) => a.startMs-b.startMs)
-      const end = Math.max(0,...merged.map(s => s.endMs ?? s.startMs), ...[...chunks.values()].filter(x => x.noteId===n.id && (x.state === "ready" || x.id===id && error===null)).map(x=>x.startMs+x.durationMs))
-      const duration = `${Math.floor(end/60000)}:${String(Math.floor(end/1000)%60).padStart(2,"0")}`
-      notes.set(n.id,{...n,transcriptSegments:merged,transcriptRevision:n.transcriptRevision+(segments.some(s=>s.text.trim())||replaced.removed?1:0),duration,updatedAt:clock().toISOString()})
-      chunks.set(id,{...c,state:error===null?"ready":"failed",error,lease:null,leaseUntil:null,...(error===null?{resolution:options?.resolution??"batch"}:{})}); return true
-    }),
     beginGeneration: (id, revision, runId) => Effect.sync(() => {
       const n = notes.get(id)
-      if (!n || n.transcriptRevision!==revision || n.recordingState==="recording" || ["analyzing_transcript","writing_notes"].includes(n.generationState) || [...chunks.values()].some(c=>c.noteId===id && c.state!=="ready")) return null
+      if (!n || n.transcriptRevision!==revision || n.recordingState==="recording" || ["analyzing_transcript","writing_notes"].includes(n.generationState)) return null
       const next: NoteDTO = {...n,generationState:"writing_notes",updatedAt:clock().toISOString()};notes.set(id,next);generationRuns.set(id,runId);return clone(next)
     }),
     finishGeneration: (id, revision, runId, enhanced, title) => Effect.sync(() => {
       const n=notes.get(id);if(!n || generationRuns.get(id)!==runId)return null
       generationRuns.delete(id)
-      if(n.transcriptRevision!==revision||n.recordingState==="recording"||[...chunks.values()].some(c=>c.noteId===id&&c.state!=="ready")){notes.set(id,{...n,generationState:"idle"});return null}
-      const next:NoteDTO={...n,generationState:enhanced===null?"failed":"ready",...(enhanced===null?{}:{enhanced,generatedRevision:revision,...(title&&isDefaultNoteTitle(n.title)?{title}:{})}),updatedAt:clock().toISOString()};notes.set(id,next);return clone(next)
+      if(n.transcriptRevision!==revision||n.recordingState==="recording"){notes.set(id,{...n,generationState:"idle"});return null}
+      const linked=enhanced===null?null:withTranscriptLink({noteId:id,generated:enhanced,previous:n.enhanced,remembered:transcriptLinks.get(id)??null,line:options.transcriptLink?.(id)??null})
+      if(linked?.remembered)transcriptLinks.set(id,linked.remembered)
+      const next:NoteDTO={...n,generationState:enhanced===null?"failed":"ready",...(linked===null?{}:{enhanced:linked.enhanced,generatedRevision:revision,...(title&&isDefaultNoteTitle(n.title)?{title}:{})}),updatedAt:clock().toISOString()};notes.set(id,next);return clone(next)
     }),
     listNotes: () => Effect.sync(() => clone([...notes.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)))),
     getNote: (id) => Effect.sync(() => clone(notes.get(id) ?? null)),
@@ -264,7 +226,6 @@ export function makeMemoryRepository(seed: ReadonlyArray<NoteDTO> = [], clock: (
       return clone(updated)
     }),
     deleteNote: (id) => Effect.sync(() => {
-      for (const [chunkId, chunk] of chunks) if (chunk.noteId === id) chunks.delete(chunkId)
       for (const [hash, share] of shares) if (share.metadata.noteId === id) shares.delete(hash)
       liveState.forget(id)
       imports.delete(id); importedContexts.delete(id)

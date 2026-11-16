@@ -30,6 +30,16 @@
         "googleClientSecretSet": {
           "type": "boolean"
         },
+        "googleClientSecretHint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "googleRedirectUris": {
           "type": "array",
           "items": {

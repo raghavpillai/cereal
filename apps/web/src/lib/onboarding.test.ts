@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { AdminSettingsDTO, ModelCatalogDTO } from '@meeting-notes/contracts'
-import { googleClientProblem, googleDestination, googleFailure, googleRedirectAddresses, proveWithGoogle, startGoogleClaim, startGoogleSwitch, claimFailure, claimServer, initialLanguageProvider, initialModels, modelLabel, modelsPatch, needsOnboarding, ownerProblem, plausibleKey, resumeStep, serverAddress, serverHost, setupCode, setupLanding, stepsFor, suggestLanguageModel } from './onboarding'
+import { compatiblePatch, LANGUAGE_PROVIDERS, PROVIDER_HINTS, googleClientProblem, googleDestination, googleFailure, googleRedirectAddresses, proveWithGoogle, startGoogleClaim, startGoogleSwitch, claimFailure, claimServer, initialLanguageProvider, initialModels, modelLabel, modelsPatch, needsOnboarding, ownerProblem, plausibleKey, resumeStep, serverAddress, serverHost, setupCode, setupLanding, stepsFor, suggestLanguageModel } from './onboarding'
 
 const code = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
 const steps = { owner: true, name: false, language: false, speech: false, models: false, signIn: false, storage: false }
@@ -8,7 +8,7 @@ const providers = (...on: string[]): AdminSettingsDTO['providers'] => (['openrou
 const settings = (over: Partial<AdminSettingsDTO> = {}): AdminSettingsDTO => ({
   instanceName: 'Cereal', languageModel: 'openai/gpt-6-sol', instanceLogo: null, providers: providers(),
   chatModels: [{ provider: 'openrouter', model: 'openai/gpt-6-sol' }], generationModel: { provider: 'openrouter', model: 'openai/gpt-6-sol' },
-  transcriptionModel: { provider: 'elevenlabs', model: 'scribe_v3' }, liveTranscriptionModel: { provider: 'elevenlabs', model: 'scribe_v3_live' },
+  liveTranscriptionModel: { provider: 'elevenlabs', model: 'scribe_v3_live' },
   openRouterConfigured: false, elevenLabsConfigured: false, openRouterSource: 'none', elevenLabsSource: 'none', calendarRefreshMinutes: 15, calendarLookAheadDays: 30,
   onboarding: { completedAt: null, steps }, updatedAt: null, ...over,
 })
@@ -177,27 +177,39 @@ describe('setup flow helpers', () => {
     expect(suggestLanguageModel('anthropic', catalog('anthropic', 'claude-haiku-5', 'claude-sonnet-5', 'claude-opus-4'), 'openai/gpt-6-sol')?.model).toBe('claude-sonnet-5')
     expect(suggestLanguageModel('openrouter', catalog('openrouter', 'meta/llama-4', 'openai/gpt-5', 'openai/gpt-5-mini'), 'openai/gpt-6-sol')?.model).toBe('openai/gpt-5')
     expect(suggestLanguageModel('openai', undefined, 'openai/gpt-6-sol')).toBeNull()
-    expect(suggestLanguageModel('openai', { ...catalog('openai'), models: [{ id: 'gpt-transcribe', name: 'T', capabilities: ['transcription'] }] }, 'openai/gpt-6-sol')).toBeNull()
+    expect(suggestLanguageModel('openai', { ...catalog('openai'), models: [{ id: 'scribe_v3_live', name: 'T', capabilities: ['live_transcription'] }] }, 'openai/gpt-6-sol')).toBeNull()
   })
 
   test('the Models step keeps choices that work and replaces ones whose provider has no key', () => {
     // OpenRouter connected: the defaults already work.
     const routed = settings({ providers: providers('openrouter', 'elevenlabs') })
-    expect(initialModels(routed, {})).toEqual({ chat: routed.chatModels[0]!, notes: routed.generationModel, speech: routed.transcriptionModel, live: routed.liveTranscriptionModel! })
+    expect(initialModels(routed, {})).toEqual({ chat: routed.chatModels[0]!, notes: routed.generationModel, live: routed.liveTranscriptionModel! })
     // Only Anthropic connected: the OpenRouter defaults cannot run, so both language jobs move to Claude.
     const claude = settings({ providers: providers('anthropic', 'elevenlabs') })
     const draft = initialModels(claude, { anthropic: catalog('anthropic', 'claude-haiku-5', 'claude-sonnet-5') })
     expect(draft.chat).toEqual({ provider: 'anthropic', model: 'claude-sonnet-5' })
     expect(draft.notes).toEqual({ provider: 'anthropic', model: 'claude-sonnet-5' })
-    expect(draft.speech).toEqual({ provider: 'elevenlabs', model: 'scribe_v3' })
-    // Live transcription that was turned off stays off.
-    expect(initialModels(settings({ liveTranscriptionModel: null }), {}).live).toBeNull()
-    // Continue stores all four, keeps other enabled chat models whose provider still has a key, and drops repeats.
+    // Continue stores all three (never a batch speech model, never live off), keeps other enabled chat models whose
+    // provider still has a key, and drops repeats.
     const several = settings({ providers: providers('openrouter', 'anthropic'), chatModels: [{ provider: 'openrouter', model: 'openai/gpt-6-sol' }, { provider: 'anthropic', model: 'claude-sonnet-5' }, { provider: 'openai', model: 'gpt-6-sol' }] })
-    expect(modelsPatch({ ...initialModels(several, {}), chat: { provider: 'anthropic', model: 'claude-sonnet-5' }, live: null }, several)).toEqual({
-      chatModels: [{ provider: 'anthropic', model: 'claude-sonnet-5' }], generationModel: several.generationModel, transcriptionModel: several.transcriptionModel, liveTranscriptionModel: null,
+    expect(modelsPatch({ ...initialModels(several, {}), chat: { provider: 'anthropic', model: 'claude-sonnet-5' }, live: { provider: 'elevenlabs', model: 'scribe_v2_realtime' } }, several)).toEqual({
+      chatModels: [{ provider: 'anthropic', model: 'claude-sonnet-5' }], generationModel: several.generationModel, liveTranscriptionModel: { provider: 'elevenlabs', model: 'scribe_v2_realtime' },
     })
     expect(modelsPatch(initialModels(several, {}), several).chatModels).toEqual([{ provider: 'openrouter', model: 'openai/gpt-6-sol' }, { provider: 'anthropic', model: 'claude-sonnet-5' }])
+  })
+
+  test('an OpenAI-compatible server is the fourth choice; Continue saves its address, its model, and a key only when typed', () => {
+    expect(LANGUAGE_PROVIDERS).toEqual(['openrouter', 'openai', 'anthropic', 'openai_compatible'])
+    expect(PROVIDER_HINTS.openai_compatible.blurb).toBe('Ollama, vLLM, LM Studio, or any /v1 API')
+    const before = settings({ providers: providers('anthropic'), chatModels: [{ provider: 'anthropic', model: 'claude-sonnet-5' }, { provider: 'openai', model: 'gpt-6-sol' }] })
+    expect(compatiblePatch({ baseUrl: ' http://10.0.0.5:11434/v1 ', key: '', model: ' llama3.2:3b ' }, before)).toEqual({
+      openAiCompatibleBaseUrl: 'http://10.0.0.5:11434/v1',
+      chatModels: [{ provider: 'openai_compatible', model: 'llama3.2:3b' }, { provider: 'anthropic', model: 'claude-sonnet-5' }],
+      generationModel: { provider: 'openai_compatible', model: 'llama3.2:3b' },
+    })
+    expect(compatiblePatch({ baseUrl: 'https://api.together.xyz/v1', key: ' tok-123 ', model: 'meta/llama' }, before)).toMatchObject({ openAiCompatibleApiKey: 'tok-123' })
+    // A server whose chosen chat model is on that server opens on it.
+    expect(initialLanguageProvider(settings({ providers: [...providers('anthropic'), { id: 'openai_compatible', configured: true, source: 'stored' }], chatModels: [{ provider: 'openai_compatible', model: 'llama3.2:3b' }] }))).toBe('openai_compatible')
   })
 
   test('small labels: a model by its catalog name, the server by its address', () => {

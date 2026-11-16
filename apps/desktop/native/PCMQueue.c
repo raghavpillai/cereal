@@ -31,6 +31,9 @@ SOFTWARE.
 #include <math.h>
 #include <time.h>
 
+/* Frames the level is measured over: one microphone callback, about 90 ms. */
+#define MN_LEVEL_WINDOW_FRAMES 4096u
+
 /* Bounded single-producer/single-consumer storage, allocated before capture starts.
  * Audio callbacks never allocate, wait, dispatch work, or write to disk. */
 struct MNPCMQueue {
@@ -40,6 +43,9 @@ struct MNPCMQueue {
     _Atomic uint64_t write_index, read_index;
     _Atomic uint64_t received, written, dropped;
     _Atomic float level;
+    /* Producer-only: the squares and frames gathered towards the next level. */
+    double level_squares;
+    uint32_t level_frames;
     _Atomic double uptime;
     _Atomic bool accepting;
     _Atomic uint32_t invalid_format;
@@ -127,8 +133,17 @@ static void push_impl(MNPCMQueue *q, const AudioBufferList *abl, uint32_t frames
         } else atomic_fetch_add(&q->dropped, count);
         offset += count;
     }
-    float level = (float)sqrt(squares/safe_frames)*25.0f;
-    atomic_store(&q->level, fminf(level, 1.0f));
+    /* The level is the loudness of about the last tenth of a second, not of
+     * one callback: a microphone callback is 4096 frames, but a system-audio
+     * one is around 10 ms, too short for a steady sound to read steadily. */
+    q->level_squares += squares;
+    q->level_frames += safe_frames;
+    if (q->level_frames >= MN_LEVEL_WINDOW_FRAMES) {
+        float level = (float)sqrt(q->level_squares/q->level_frames)*25.0f;
+        atomic_store(&q->level, fminf(level, 1.0f));
+        q->level_squares = 0;
+        q->level_frames = 0;
+    }
 }
 void mn_pcm_push(MNPCMQueue *q, const AudioBufferList *abl, uint32_t frames,
                  uint32_t flags, uint32_t bits, double uptime) {

@@ -22,13 +22,13 @@ function fixture(title: ProviderServices["title"] | null = () => Effect.succeed(
   const repository = makeMemoryRepository()
   const calls = { generate: 0, title: [] as Array<{ note: ProviderNote; notes: string }> }
   const providers: ProviderServices = {
-    transcribe: () => Effect.succeed([]),
+    
     generate: () => Effect.sync(() => { calls.generate++; return NOTES }),
     chat: () => Effect.succeed(""),
     ...(title ? { title: (note, notes) => { calls.title.push({ note, notes }); return title(note, notes) } } : {}),
     ...overrides,
   }
-  const processing = makeProcessingService(repository, { providers, worker: false })
+  const processing = makeProcessingService(repository, { providers})
   const api = makeApiHandler(repository, token, { processing })
   cleanup.push(api.dispose)
   const request = (path: string, method = "GET", body?: unknown) => api.handler(new Request(`http://localhost/api/v1${path}`, {
@@ -339,7 +339,7 @@ describe("the title request", () => {
       return Response.json({ choices: [{ message: { content: bodies.length === 1 ? NOTES : "\"Flour supplier switch to Windrush.\"" } }] })
     }) as typeof fetch
     const providers = makeProviderServices({ openRouterKey: "fixture-not-a-real-key", languageModel: "openai/gpt-4o-mini", fetch: transport })
-    const repository = makeMemoryRepository(), processing = makeProcessingService(repository, { providers, worker: false })
+    const repository = makeMemoryRepository(), processing = makeProcessingService(repository, { providers})
     cleanup.push(processing.dispose)
     const created = await Effect.runPromise(repository.createNote({ title: "", transcriptSegments: note.transcriptSegments }))
     const generated = await Effect.runPromise(processing.generate(created.id, created.transcriptRevision))
@@ -364,7 +364,7 @@ describe("the title request", () => {
     for (const answer of [() => new Response("upstream failed", { status: 500 }), () => Response.json({ choices: [{ finish_reason: "length", message: { content: "Flour supplier" } }] }), () => Response.json({ choices: [{ message: { content: "  " } }] }), () => { throw new Error("connection reset") }]) {
       let requests = 0
       const transport = (async () => ++requests === 1 ? Response.json({ choices: [{ message: { content: NOTES } }] }) : answer()) as unknown as typeof fetch
-      const repository = makeMemoryRepository(), processing = makeProcessingService(repository, { providers: makeProviderServices({ openRouterKey: "fixture-not-a-real-key", languageModel: "openai/gpt-4o-mini", fetch: transport }), worker: false })
+      const repository = makeMemoryRepository(), processing = makeProcessingService(repository, { providers: makeProviderServices({ openRouterKey: "fixture-not-a-real-key", languageModel: "openai/gpt-4o-mini", fetch: transport })})
       cleanup.push(processing.dispose)
       const created = await Effect.runPromise(repository.createNote({ title: "", transcriptSegments: note.transcriptSegments }))
       expect(await Effect.runPromise(processing.generate(created.id, created.transcriptRevision))).toMatchObject({ title: "", enhanced: NOTES, generationState: "ready" })

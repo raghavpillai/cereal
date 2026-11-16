@@ -423,7 +423,7 @@ extension View {
 
 /// Native toolbars adapt to ordinary iPhone navigation and Duo's vertical rail.
 /// `standalone` is the single circular control at the head of the trailing
-/// controls (Folders on Home); `rail` is the grouped capsule after it; and
+/// controls (the sidebar button on Home); `rail` is the grouped capsule after it; and
 /// `leading` is the back control. The document stays in the safe area;
 /// floating recording/chat controls remain independent of navigation so a fold
 /// never replaces their state owners.
@@ -853,7 +853,7 @@ private func railLabel(_ symbol: String) -> String {
     case "clock.arrow.circlepath": "Chat history"
     case "magnifyingglass": "Search"
     case "gearshape": "Connection settings"
-    case "folder": "Folders"
+    case "sidebar.left": "Sidebar"
     case "ellipsis": "More options"
     default: symbol
     }
@@ -908,7 +908,7 @@ struct InlineProgress: View {
 
 // MARK: - Meta chips
 
-/// The date/attendees capsule and the folder circle under a note title.
+/// The date/attendees capsule under a note title.
 /// Outlined rather than filled, 36 pt tall, hanging 4 pt outside the text
 /// column like the Home tiles (measured from the reference).
 struct NoteMetaChips: View {
@@ -916,7 +916,6 @@ struct NoteMetaChips: View {
     let attendeeCount: Int
     var showCalendarIcon = true
     var onMetadata: (() -> Void)? = nil
-    private static let outline = Color.white.opacity(0.10)
 
     var body: some View {
         HStack(spacing: 10) {
@@ -928,19 +927,6 @@ struct NoteMetaChips: View {
             } else {
                 metadataCapsule
             }
-
-            Button {} label: {
-                Image(systemName: "folder.badge.plus")
-                    .font(.system(size: 15))
-                    .foregroundStyle(Theme.textSecondary)
-                    .frame(width: 36, height: 36)
-                    .overlay(Circle().strokeBorder(Self.outline, lineWidth: 1))
-            }
-            .buttonStyle(.plain)
-            .disabled(true)
-            .accessibilityLabel("Add to folder")
-            .accessibilityHint("Folder organization is not available yet.")
-            .accessibilityIdentifier("note-folder-unavailable")
         }
         .padding(.leading, -HomeMetrics.tileOutdent)
     }

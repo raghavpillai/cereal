@@ -179,13 +179,14 @@ export async function claimServer(code: string, owner: OwnerDraft, signal?: Abor
 }
 
 /** The providers a person can pick for notes and chat, in the order they are offered. */
-export const LANGUAGE_PROVIDERS = ['openrouter', 'openai', 'anthropic'] as const
+export const LANGUAGE_PROVIDERS = ['openrouter', 'openai', 'anthropic', 'openai_compatible'] as const
 export type LanguageProvider = typeof LANGUAGE_PROVIDERS[number]
 export const PROVIDER_HINTS: Record<LanguageProvider | 'elevenlabs', { blurb: string; keyHint: string; keysUrl: string }> = {
   openrouter: { blurb: 'All models, one key', keyHint: 'sk-or-…', keysUrl: 'https://openrouter.ai/keys' },
   openai: { blurb: 'GPT models', keyHint: 'sk-…', keysUrl: 'https://platform.openai.com/api-keys' },
   anthropic: { blurb: 'Claude models', keyHint: 'sk-ant-…', keysUrl: 'https://console.anthropic.com/settings/keys' },
-  elevenlabs: { blurb: 'Scribe speech to text', keyHint: 'sk_…', keysUrl: 'https://elevenlabs.io/app/settings/api-keys' },
+  openai_compatible: { blurb: 'Ollama, vLLM, LM Studio, or any /v1 API', keyHint: 'Leave blank if the server needs none', keysUrl: '' },
+  elevenlabs: { blurb: 'Shows the words while you record, with speaker labels', keyHint: 'sk_…', keysUrl: 'https://elevenlabs.io/app/settings/api-keys' },
 }
 const configured = (settings: AdminSettingsDTO, provider: AIProvider) => settings.providers.some(status => status.id === provider && status.configured)
 /** The provider the step opens on: one that already has a key, else OpenRouter. */
@@ -226,11 +227,14 @@ export function suggestLanguageModel(provider: LanguageProvider, catalog: ModelC
   return { provider, model: [...models].sort((a, b) => rank(provider, b) - rank(provider, a) || a.id.localeCompare(b.id))[0]!.id }
 }
 
+/** The live model a server uses until another is chosen. */
+const DEFAULT_LIVE: NonNullable<AdminSettingsDTO['liveTranscriptionModel']> = { provider: 'elevenlabs', model: 'scribe_v3_live' }
 export interface ModelsDraft {
   chat: LanguageModelSelection; notes: LanguageModelSelection
-  speech: AdminSettingsDTO['transcriptionModel']; live: NonNullable<AdminSettingsDTO['liveTranscriptionModel']> | null
+  /** Always set: transcription is live, and live transcription cannot be turned off. */
+  live: NonNullable<AdminSettingsDTO['liveTranscriptionModel']>
 }
-/** The four choices as the Models step opens: what the server has, except that a chat or notes model whose
+/** The three choices as the Models step opens: what the server has, except that a chat or notes model whose
  * provider has no key is replaced by a suggestion from the provider that was just connected. */
 export function initialModels(settings: AdminSettingsDTO, catalogs: Partial<Record<AIProvider, ModelCatalogDTO | undefined>>): ModelsDraft {
   const connected = LANGUAGE_PROVIDERS.filter(provider => configured(settings, provider))
@@ -243,16 +247,25 @@ export function initialModels(settings: AdminSettingsDTO, catalogs: Partial<Reco
   return {
     chat: usable(chat) ? chat : fallback() ?? chat,
     notes: usable(settings.generationModel) ? settings.generationModel : fallback() ?? settings.generationModel,
-    speech: settings.transcriptionModel,
-    live: settings.liveTranscriptionModel ?? null,
+    live: settings.liveTranscriptionModel ?? DEFAULT_LIVE,
   }
 }
-/** What Continue saves on the Models step: all four, so the choice is stored even when the defaults were kept.
- * Other chat models already enabled stay enabled, after the chosen default. */
+/** What Continue saves on the Models step: all three, so the choice is stored even when the defaults were kept.
+ * Other chat models already enabled stay enabled, after the chosen default. There is no batch speech-to-text model to
+ * choose: transcription is live only. */
 export function modelsPatch(draft: ModelsDraft, settings: AdminSettingsDTO) {
   const key = (model: LanguageModelSelection) => `${model.provider}:${model.model}`
   const others = settings.chatModels.slice(1).filter(model => key(model) !== key(draft.chat) && settings.providers.some(status => status.id === model.provider && status.configured))
-  return { chatModels: [draft.chat, ...others], generationModel: draft.notes, transcriptionModel: draft.speech, liveTranscriptionModel: draft.live }
+  return { chatModels: [draft.chat, ...others], generationModel: draft.notes, liveTranscriptionModel: draft.live }
+}
+/** What Continue on "Notes and chat" saves for an OpenAI-compatible server: its address, a key only when one was typed,
+ * and the model as the chat and notes model (it is the only model that server is known to have). The server checks the
+ * model, from the server's list or with a test request, before anything is stored. */
+export function compatiblePatch(draft: { baseUrl: string; key: string; model: string }, settings: AdminSettingsDTO) {
+  const chosen: LanguageModelSelection = { provider: 'openai_compatible', model: draft.model.trim() }
+  const key = (model: LanguageModelSelection) => `${model.provider}:${model.model}`
+  const others = settings.chatModels.filter(model => key(model) !== key(chosen) && settings.providers.some(status => status.id === model.provider && status.configured)).slice(0, 19)
+  return { openAiCompatibleBaseUrl: draft.baseUrl.trim(), ...(draft.key.trim() ? { openAiCompatibleApiKey: draft.key.trim() } : {}), chatModels: [chosen, ...others], generationModel: chosen }
 }
 
 /** A model's name for a small card: the catalog's name when it is loaded, else the identifier without its vendor. */

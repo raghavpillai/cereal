@@ -14,28 +14,44 @@ use std::{
 pub struct CaptureOptions {
     pub microphone: bool,
     pub system: bool,
+    /// Apple's voice isolation on the microphone (never on system audio).
+    /// Settings › Voice isolation; on unless turned off there.
+    pub voice_isolation: bool,
 }
 impl Default for CaptureOptions {
     fn default() -> Self {
         Self {
             microphone: true,
             system: true,
+            voice_isolation: true,
         }
     }
 }
+/// Channel flag for the native capture: isolate the voice in the microphone.
+const VOICE_ISOLATION: u32 = 8;
 impl CaptureOptions {
     fn flags(self) -> u32 {
-        u32::from(self.microphone) | (u32::from(self.system) << 1)
+        u32::from(self.microphone)
+            | (u32::from(self.system) << 1)
+            | if self.microphone && self.voice_isolation {
+                VOICE_ISOLATION
+            } else {
+                0
+            }
     }
     pub fn production() -> Self {
         let args: Vec<_> = std::env::args().collect();
-        if args
+        // `--no-voice-isolation` records the raw microphone whatever the
+        // setting says (for comparing the two with `--audio-probe`).
+        let voice_isolation = crate::desktop_preferences::meeting().voice_isolation
+            && !args.iter().any(|a| a == "--no-voice-isolation");
+        let channels = if args
             .iter()
             .any(|a| a == "--audio-mic-only" || a == "--mic-only")
         {
             Self {
-                microphone: true,
                 system: false,
+                ..Self::default()
             }
         } else if args
             .iter()
@@ -43,10 +59,14 @@ impl CaptureOptions {
         {
             Self {
                 microphone: false,
-                system: true,
+                ..Self::default()
             }
         } else {
             Self::default()
+        };
+        Self {
+            voice_isolation,
+            ..channels
         }
     }
 }
@@ -72,6 +92,16 @@ pub struct ChannelStats {
     pub paths: Vec<String>,
     pub last_buffer_uptime: f64,
     pub self_process_excluded: bool,
+    /// Microphone: "on", "off", "unavailable" (no voice isolation for this
+    /// Mac or sample rate) or "failed" (it stopped; raw audio carried on).
+    /// Empty for system audio and captures from before it existed.
+    pub voice_isolation: String,
+    /// The delay of the voice isolation unit (about 92 ms at 48 kHz). It is
+    /// taken off natively: mic frame n is still what was heard at frame n.
+    pub processing_latency_ms: f64,
+    /// Microphone frames the audio engine dropped before Cereal saw them
+    /// (made up with silence, so the timeline holds; also in `dropped_frames`).
+    pub input_gap_frames: u64,
 }
 impl ChannelStats {
     fn initial(requested: bool) -> Self {
@@ -162,6 +192,24 @@ pub struct Capture {
     monitor: CaptureMonitor,
     stop: mpsc::Sender<()>,
 }
+
+/// The captures this process is recording now, by ID.
+fn running() -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
+    static RUNNING: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    RUNNING
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+impl CaptureManifest {
+    /// Its files will not grow any more: it finished, or nothing records it
+    /// (the process that did quit or crashed before finishing it).
+    pub fn settled(&self) -> bool {
+        self.completed() || !running().contains(&self.capture_id)
+    }
+}
 impl Capture {
     pub fn start(note_id: u64, root: &Path, options: CaptureOptions) -> Result<Self, String> {
         // On disk a note is always named by its file id: the directory
@@ -194,6 +242,7 @@ impl Capture {
                 system: ChannelStats::initial(options.system),
             },
         };
+        running().insert(manifest.capture_id.clone());
         let monitor = CaptureMonitor(Arc::new(Mutex::new(manifest)));
         let state = monitor.clone();
         let (stop, receiver) = mpsc::channel();
@@ -204,7 +253,10 @@ impl Capture {
                 Some(source) => fixture::run(state, receiver, &source),
                 None => run_capture(state, receiver, options),
             })
-            .map_err(|e| format!("Cannot start audio worker: {e}"))?;
+            .map_err(|e| {
+                running().remove(&monitor.snapshot().capture_id);
+                format!("Cannot start audio worker: {e}")
+            })?;
         Ok(Self { monitor, stop })
     }
     pub fn monitor(&self) -> CaptureMonitor {
@@ -501,7 +553,10 @@ fn finish(state: &CaptureMonitor, error: Option<String>) {
     if let Err(error) = write_manifest(&manifest) {
         manifest.error = Some(error);
     }
+    let capture_id = manifest.capture_id.clone();
     *state.0.lock().unwrap_or_else(|e| e.into_inner()) = manifest;
+    // Final on disk and in memory: from here it is settled.
+    running().remove(&capture_id);
 }
 fn private_directory(path: &Path) -> Result<(), String> {
     let mut builder = fs::DirBuilder::new();
@@ -535,6 +590,18 @@ fn write_manifest(manifest: &CaptureManifest) -> Result<(), String> {
         .map_err(|e| format!("Cannot finalize audio manifest: {e}"))
 }
 
+/// Loads voice isolation in the background (when the setting is on), so a
+/// recording starting or resuming never waits for the model. Returns at once.
+pub fn prepare_voice_isolation() {
+    if preview_mode() || !crate::desktop_preferences::meeting().voice_isolation {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    unsafe {
+        mn_voice_isolation_prepare();
+    }
+}
+
 #[cfg(target_os = "macos")]
 struct NativeCapture(*mut std::ffi::c_void);
 #[cfg(target_os = "macos")]
@@ -556,6 +623,7 @@ unsafe extern "C" {
         capacity: usize,
     ) -> usize;
     fn mn_audio_destroy(handle: *mut std::ffi::c_void);
+    fn mn_voice_isolation_prepare();
 }
 #[cfg(target_os = "macos")]
 impl NativeCapture {
@@ -756,10 +824,26 @@ pub fn preview_mode() -> bool {
     // Asked dozens of times per render; the arguments never change.
     static PREVIEW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *PREVIEW.get_or_init(|| {
-        std::env::args()
-            .any(|a| a.starts_with("--view=") || a == "--smoke-test" || a == "--motion-tour")
-            || cfg!(test)
+        std::env::args().any(|a| {
+            // The review views and the smoke test exist in debug builds
+            // only; the motion tour also runs on release builds, for the
+            // benchmark (`bench/run.sh`), and needs an isolated data
+            // directory.
+            (cfg!(debug_assertions) && (a.starts_with("--view=") || a == "--smoke-test"))
+                || a == "--motion-tour"
+        }) || cfg!(test)
     })
+}
+
+/// `--view=<name>`: one of the review views (debug builds only). A release
+/// build always opens the app itself, which needs a server.
+pub fn review_view() -> String {
+    if !cfg!(debug_assertions) {
+        return String::new();
+    }
+    std::env::args()
+        .find_map(|a| a.strip_prefix("--view=").map(str::to_string))
+        .unwrap_or_default()
 }
 
 #[cfg(target_os = "macos")]
@@ -798,7 +882,7 @@ pub fn probe_from_args(args: &[String]) -> Option<Result<bool, String>> {
                     .cloned()
             })
             .ok_or(
-                "Usage: --audio-probe OUTPUT_DIRECTORY [--seconds 5] [--mic-only|--system-only]",
+                "Usage: --audio-probe OUTPUT_DIRECTORY [--seconds 5] [--mic-only|--system-only] [--no-voice-isolation]",
             )?;
         let seconds = args
             .iter()
@@ -862,6 +946,33 @@ pub fn probe_from_args(args: &[String]) -> Option<Result<bool, String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn voice_isolation_is_a_microphone_flag_that_stats_report() {
+        let flags = |microphone, system, voice_isolation| {
+            CaptureOptions {
+                microphone,
+                system,
+                voice_isolation,
+            }
+            .flags()
+        };
+        assert!(CaptureOptions::default().voice_isolation);
+        assert_eq!(CaptureOptions::default().flags(), 1 | 2 | VOICE_ISOLATION);
+        assert_eq!(flags(true, true, false), 3);
+        // Never asked for without a microphone: system audio is never processed.
+        assert_eq!(flags(false, true, true), 2);
+        // A listening check stays unprocessed, so the welcome hears the raw mic.
+        assert_eq!(LEVELS_ONLY & VOICE_ISOLATION, 0);
+        let stats: NativeStats = serde_json::from_value(serde_json::json!({"version":1,"phase":"recording","requested_channels":11,"mic":{"state":"recording","voice_isolation":"on","processing_latency_ms":92.5,"dropped_frames":4800,"input_gap_frames":4800},"system":{"state":"recording","voice_isolation":"off"}})).unwrap();
+        assert_eq!(stats.mic.voice_isolation, "on");
+        assert_eq!(stats.mic.processing_latency_ms, 92.5);
+        assert_eq!((stats.mic.dropped_frames, stats.mic.input_gap_frames), (4800, 4800));
+        assert_eq!(stats.system.processing_latency_ms, 0.);
+        // A manifest written before voice isolation still reads.
+        let old: ChannelStats =
+            serde_json::from_value(serde_json::json!({"state":"stopped"})).unwrap();
+        assert!(old.voice_isolation.is_empty());
+    }
     #[test]
     fn a_listening_check_reads_levels_arrivals_and_refusals() {
         let stats: NativeStats = serde_json::from_value(serde_json::json!({"version":1,"phase":"partial","requested_channels":3,"mic":{"state":"recording","level":0.42,"frames_received":4800},"system":{"state":"failed","error":{"code":"permission_denied","message":"Denied","os_status":0}}})).unwrap();

@@ -155,19 +155,39 @@ private func account(_ address: String, id: AccountID = accountA, ready: Bool = 
         #expect(LinkNavigation.pathAfterSignIn([shared, .sharedWithMe], account: own) == [])
     }
 
+    @Test func everyLaunchStartsOnTheServerAndForgetsTheDebugDemo() {
+        // A new install, and one that an earlier version left in the demo, both open on the server.
+        let standard = UserDefaults.standard, saved = standard.object(forKey: "cereal.serverMode")
+        defer { standard.set(saved, forKey: "cereal.serverMode") }
+        standard.removeObject(forKey: "cereal.serverMode")
+        #expect(!ConnectionMode().isDemo)
+        // What an earlier version wrote for "Use local demo".
+        standard.set(false, forKey: "cereal.serverMode")
+        #expect(!ConnectionMode().isDemo)
+        // The debug demo is for the run that asked for it; nothing remembers it.
+        let qa = ConnectionMode()
+        qa.isDemo = true
+        qa.previewLabel = "QA preview"
+        qa.isDemo = false
+        #expect(qa.previewLabel == nil)
+        #expect(!ConnectionMode().isDemo)
+    }
+
     @Test func theRouterFollowsLinksInBothModes() throws {
         let name = "link-navigation-" + UUID().uuidString
         let defaults = try #require(UserDefaults(suiteName: name))
         defer { defaults.removePersistentDomain(forName: name) }
-        let mode = ConnectionMode(defaults: defaults)
-        #expect(mode.isDemo)
+        // The debug QA demo, which a `-screen` launch opens. Release builds have no demo.
+        let mode = ConnectionMode()
+        #expect(!mode.isDemo)
+        mode.isDemo = true
         let accounts = AccountsModel(defaults: defaults, credentials: MemoryAccountStore(),
                                      storage: AccountStorage(root: FileManager.default.temporaryDirectory.appendingPathComponent(name)))
         let router = Router()
         router.path = [.search]
         router.showConnection = true
 
-        // Signed out, in the local demo: a shared note's page (which asks for a sign-in)
+        // Signed out, in the debug demo: a shared note's page (which asks for a sign-in)
         // opens over the current screen and the mode is untouched.
         let shared = try sharedLink()
         router.open(.shared(shared), accounts: accounts, mode: mode)

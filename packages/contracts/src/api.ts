@@ -4,11 +4,12 @@ import {ModelCatalogInput,ModelCatalogDTO,ChatModelsDTO} from "./index"
 import {NoteListFilter,NoteSummariesPageDTO,NoteSearchPageDTO} from "./index"
 import {AuthMethodsDTO,AppHandoffInput,AppHandoffDTO,AppHandoffExchangeInput,AppHandoffTokenDTO} from "./index"
 import {DownloadsDTO} from "./index"
+import {ChatThreadsPageDTO,ChatThreadDTO,CreateChatThreadInput,AppendChatTurnInput,UpdateChatThreadInput,ChatThreadStreamInput} from "./chats"
 import {ImportNoteInput,ImportedNoteDTO} from "./index"
 import {StorageTestInput,StorageTestDTO} from "./index"
 import {OnboardingStepInput,GoogleVerificationInput,GoogleVerificationStartDTO,GoogleVerificationStatusDTO,SwitchToPasswordInput} from "./index"
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, HttpApiSecurity, OpenApi } from "effect/http-api"
-import { OrganizationDTO, OrganizationsDTO, OrganizationMemberDTO, OrganizationInvitationDTO, OrganizationDetailsDTO, OrganizationInvitationsDTO, CreateOrganizationInput, UpdateOrganizationInput, SetActiveOrganizationInput, InviteOrganizationMemberInput, UpdateOrganizationMemberRoleInput, ManualParticipantInput, GoogleStatusDTO, GoogleConnectInput, GoogleConnectDTO, GoogleCalendarsDTO, GoogleCalendarDTO, UpdateGoogleCalendarInput, NoteContextDTO, UpdateNoteContextInput, AuthSessionDTO, UsersDTO, UserDTO, CreateUserInput, UpdateUserRoleInput, CalendarPreferencesDTO, CalendarEventsDTO, CalendarsDTO, CalendarDTO, CreateCalendarInput, UpdateCalendarInput, AdminSettingsDTO, UpdateAdminSettingsInput, Timestamp, ChatStreamEventDTO, EvidenceRequestDTO, EvidenceDTO, AudioChunkDTO, AudioChunksDTO, UploadAudioChunkInput, RecordingCommandDTO, GenerateNotesCommandDTO, ChatInput, ChatAnswerDTO, CreateNoteInput, CreateShareInput, CreatedShareDTO, DeletedDTO, HealthDTO, NoteDTO, NotesDTO, SharedNoteDTO, ShareDTO, SharesDTO, UUID, UpdateNoteInput } from "./index"
+import { OrganizationDTO, OrganizationsDTO, OrganizationMemberDTO, OrganizationInvitationDTO, OrganizationDetailsDTO, OrganizationInvitationsDTO, CreateOrganizationInput, UpdateOrganizationInput, SetActiveOrganizationInput, InviteOrganizationMemberInput, UpdateOrganizationMemberRoleInput, ManualParticipantInput, GoogleStatusDTO, GoogleConnectInput, GoogleConnectDTO, GoogleCalendarsDTO, GoogleCalendarDTO, UpdateGoogleCalendarInput, NoteContextDTO, UpdateNoteContextInput, AuthSessionDTO, UsersDTO, UserDTO, CreateUserInput, UpdateUserRoleInput, CalendarPreferencesDTO, CalendarEventsDTO, CalendarsDTO, CalendarDTO, CreateCalendarInput, UpdateCalendarInput, AdminSettingsDTO, UpdateAdminSettingsInput, Timestamp, ChatStreamEventDTO, EvidenceRequestDTO, EvidenceDTO, EvidenceStreamEventDTO, RecordingCommandDTO, GenerateNotesCommandDTO, ChatInput, ChatAnswerDTO, CreateNoteInput, CreateShareInput, CreatedShareDTO, DeletedDTO, HealthDTO, NoteDTO, NotesDTO, SharedNoteDTO, ShareDTO, SharesDTO, UUID, UpdateNoteInput } from "./index"
 
 export const Unauthorized = Schema.Struct({ error: Schema.Literal("unauthorized"), message: Schema.String }).pipe(HttpApiSchema.status(401))
 export const Forbidden = Schema.Struct({ error: Schema.Literal("forbidden"), message: Schema.String }).pipe(HttpApiSchema.status(403))
@@ -28,7 +29,6 @@ const errors = [Unauthorized, Forbidden, Conflict, NotFound, InvalidRequest, Una
 const PageLimit = Schema.String.check(Schema.isPattern(/^[1-9][0-9]{0,2}$/))
 /** `updatedAt|transcriptRevision|generatedRevision` of the note as the caller last read it; the last part is empty for a note without generated notes. */
 const NoteStamp = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128))
-const ChunkCount = Schema.String.check(Schema.isPattern(/^(0|[1-9][0-9]{0,8})$/))
 const PageCursor = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512), Schema.isPattern(/^[A-Za-z0-9_-]+$/))
 
 export interface PrincipalData {id:string;name:string;email:string;role:"owner"|"admin"|"user";source:"bootstrap"|"session";expiresAt:string|null;createdAt:string;sessionId?:string}
@@ -118,6 +118,15 @@ export const MeetingsApi = HttpApi.make("MeetingNotesApi")
     .add(HttpApiEndpoint.get("listCalendarEvents", "/api/v1/calendar/events", { query: { from: Schema.optionalKey(Timestamp), to: Schema.optionalKey(Timestamp) }, success: CalendarEventsDTO, error: errors }))
     .add(HttpApiEndpoint.post("createCalendarEventNote", "/api/v1/calendar/events/:id/note", { params: { id: UUID }, success: NoteDTO, error: errors }))
     .add(HttpApiEndpoint.post("chatWorkspaceStream", "/api/v1/chat/stream", { payload: ChatInput, success: HttpApiSchema.StreamSse({ data: ChatStreamEventDTO, keepAlive: "10 seconds" }), error: errors }))
+    // Saved conversations (src/chats.ts): the signed-in person's own, never anyone else's, whatever their role.
+    // Another person's thread answers 404, the same as one that does not exist.
+    .add(HttpApiEndpoint.get("listChatThreads", "/api/v1/chats", { query: { limit: Schema.optionalKey(PageLimit), cursor: Schema.optionalKey(PageCursor), noteId: Schema.optionalKey(UUID), scope: Schema.optionalKey(Schema.Literals(["all", "workspace"])) }, success: ChatThreadsPageDTO, error: errors }))
+    .add(HttpApiEndpoint.post("createChatThread", "/api/v1/chats", { payload: CreateChatThreadInput, success: ChatThreadDTO, error: errors }))
+    .add(HttpApiEndpoint.get("getChatThread", "/api/v1/chats/:id", { params: { id: UUID }, success: ChatThreadDTO, error: errors }))
+    .add(HttpApiEndpoint.patch("updateChatThread", "/api/v1/chats/:id", { params: { id: UUID }, payload: UpdateChatThreadInput, success: ChatThreadDTO, error: errors }))
+    .add(HttpApiEndpoint.delete("deleteChatThread", "/api/v1/chats/:id", { params: { id: UUID }, success: DeletedDTO, error: errors }))
+    .add(HttpApiEndpoint.post("appendChatTurn", "/api/v1/chats/:id/turns", { params: { id: UUID }, payload: AppendChatTurnInput, success: ChatThreadDTO, error: errors }))
+    .add(HttpApiEndpoint.post("streamChatThread", "/api/v1/chats/:id/stream", { params: { id: UUID }, payload: ChatThreadStreamInput, success: HttpApiSchema.StreamSse({ data: ChatStreamEventDTO, keepAlive: "10 seconds" }), error: errors }))
     .add(HttpApiEndpoint.get("listNotes", "/api/v1/notes", { success: NotesDTO, error: errors }))
     .add(HttpApiEndpoint.get("listNoteSummaries", "/api/v1/notes/summaries", { query: { limit: Schema.optionalKey(PageLimit), cursor: Schema.optionalKey(PageCursor), filter: Schema.optionalKey(NoteListFilter) }, success: NoteSummariesPageDTO, error: errors }))
     .add(HttpApiEndpoint.get("searchNotes", "/api/v1/notes/search", { query: { q: Schema.String.check(Schema.isMaxLength(200)), limit: Schema.optionalKey(PageLimit), cursor: Schema.optionalKey(PageCursor), filter: Schema.optionalKey(NoteListFilter) }, success: NoteSearchPageDTO, error: errors }))
@@ -128,20 +137,18 @@ export const MeetingsApi = HttpApi.make("MeetingNotesApi")
     // answers 200 with the same note; any other use of an id that exists (somebody else's note, another body, a
     // note changed since) answers one and the same 409. At most 50,000 segments and 24 MB (413 beyond).
     .add(HttpApiEndpoint.post("importNote", "/api/v1/notes/import", { payload: ImportNoteInput, success: ImportedNoteDTO, error: [...errors, PayloadTooLarge] }))
-    // With `ifStamp` or `ifChunks` the note is deleted only if it is still what the caller read: 409 when the
-    // stamp differs, the number of audio parts differs, a part is not ready, or the note is recording.
-    .add(HttpApiEndpoint.delete("deleteNote", "/api/v1/notes/:id", { params: { id: UUID }, query: { ifStamp: Schema.optionalKey(NoteStamp), ifChunks: Schema.optionalKey(ChunkCount) }, success: DeletedDTO, error: errors }))
+    // With `ifStamp` the note is deleted only if it is still what the caller read: 409 when the stamp differs or
+    // the note is recording.
+    .add(HttpApiEndpoint.delete("deleteNote", "/api/v1/notes/:id", { params: { id: UUID }, query: { ifStamp: Schema.optionalKey(NoteStamp) }, success: DeletedDTO, error: errors }))
     .add(HttpApiEndpoint.get("listShares", "/api/v1/notes/:id/shares", { params: { id: UUID }, success: SharesDTO, error: errors }))
     .add(HttpApiEndpoint.post("createShare", "/api/v1/notes/:id/shares", { params: { id: UUID }, payload: CreateShareInput, success: CreatedShareDTO, error: errors }))
     .add(HttpApiEndpoint.delete("revokeShare", "/api/v1/shares/:id", { params: { id: UUID }, success: ShareDTO, error: errors }))
     .add(HttpApiEndpoint.post("recording", "/api/v1/notes/:id/recording", { params: { id: UUID }, payload: RecordingCommandDTO, success: NoteDTO, error: errors }))
-    .add(HttpApiEndpoint.put("uploadAudioChunk", "/api/v1/notes/:id/audio/chunks/:chunkId", { params: { id: UUID, chunkId: UUID }, payload: UploadAudioChunkInput, success: AudioChunkDTO, error: errors }))
-    .add(HttpApiEndpoint.get("listAudioChunks", "/api/v1/notes/:id/audio/chunks", { params: { id: UUID }, success: AudioChunksDTO, error: errors }))
-    .add(HttpApiEndpoint.post("retryAudioChunk", "/api/v1/notes/:id/audio/chunks/:chunkId/retry", { params: { id: UUID, chunkId: UUID }, success: AudioChunkDTO, error: errors }))
     .add(HttpApiEndpoint.post("generateNotes", "/api/v1/notes/:id/generate", { params: { id: UUID }, payload: GenerateNotesCommandDTO, success: NoteDTO, error: errors }))
     .add(HttpApiEndpoint.post("chat", "/api/v1/notes/:id/chat", { params: { id: UUID }, payload: ChatInput, success: ChatAnswerDTO, error: errors }))
     .add(HttpApiEndpoint.post("chatStream", "/api/v1/notes/:id/chat/stream", { params: { id: UUID }, payload: ChatInput, success: HttpApiSchema.StreamSse({ data: ChatStreamEventDTO, keepAlive: "10 seconds" }), error: errors }))
     .add(HttpApiEndpoint.post("evidence", "/api/v1/notes/:id/evidence", { params: { id: UUID }, payload: EvidenceRequestDTO, success: EvidenceDTO, error: errors }))
+    .add(HttpApiEndpoint.post("evidenceStream", "/api/v1/notes/:id/evidence/stream", { params: { id: UUID }, payload: EvidenceRequestDTO, success: HttpApiSchema.StreamSse({ data: EvidenceStreamEventDTO, keepAlive: "10 seconds" }), error: errors }))
     .middleware(OwnerAuth))
   .annotate(OpenApi.Title, "Cereal API")
   .annotate(OpenApi.Version, "1.0.0")

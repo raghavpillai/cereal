@@ -5,22 +5,23 @@ import type { AdminSettingsDTO, AIProvider, OnboardingStep } from '@meeting-note
 import { AdminClientError, type AdminClient } from '../../lib/admin-client'
 import { authClient } from '../../lib/auth-client'
 import { getDownloads } from '../../lib/downloads'
-import { instanceDraft, providerKeyFields, providerNames, storageDraft, storagePatch, storageProblem, storageTestInput, type SignInDraft, type StorageDraft } from '../../lib/instance-settings'
-import { claimServer, fetchGoogleVerification, googleClientProblem, googleFailure, GOOGLE_STUCK_HINT, proveWithGoogle, startGoogleClaim, initialLanguageProvider, initialModels, modelLabel, modelsPatch, OPTIONAL_STEPS, ownerProblem, plausibleKey, resumeStep, serverAddress, serverHost, setupCode, STEP_TITLES, stepsFor, type LanguageProvider, type ModelsDraft, type StepId } from '../../lib/onboarding'
+import { compatibleBaseUrlProblem } from '@meeting-notes/contracts/compatible'
+import { instanceDraft, plausibleModelId, providerKeyFields, providerNames, savedKeyText, storageDraft, tidyBaseUrl, storagePatch, storageProblem, storageTestInput, type SignInDraft, type StorageDraft } from '../../lib/instance-settings'
+import { claimServer, compatiblePatch, suggestLanguageModel, fetchGoogleVerification, googleClientProblem, googleFailure, GOOGLE_STUCK_HINT, proveWithGoogle, startGoogleClaim, initialLanguageProvider, initialModels, modelLabel, modelsPatch, OPTIONAL_STEPS, ownerProblem, plausibleKey, resumeStep, serverAddress, serverHost, setupCode, STEP_TITLES, stepsFor, type LanguageProvider, type ModelsDraft, type StepId } from '../../lib/onboarding'
 import { modelLogo, type CatalogState } from '../admin/settings-panel'
 import type { Transport } from '@meeting-notes/contracts/transport'
 import { TransportWarning } from '../kit/transport-notice'
 import { rememberSetup } from '../../lib/session-probe'
 import { reducedMotion, StepDots, type BuddyHandle, type Mood } from './kit'
 import { LittleScreen, type ScreenView } from './screens'
-import { AppsFields, ClaimFields, LanguageFields, ModelFields, NameFields, SignInFields, SpeechFields, StorageFields, type DownloadsState, type KeyCheck, type OwnerFields, type OwnerProblems, type StorageTest } from './steps'
+import { AppsFields, ClaimFields, LanguageFields, ModelFields, NameFields, SignInFields, SpeechFields, StorageFields, type CompatibleCheck, type DownloadsState, type KeyCheck, type OwnerFields, type OwnerProblems, type StorageTest } from './steps'
 import '../../onboarding.css'
 
 const HELP: Record<StepId, string> = {
   claim: 'Paste the setup code from the machine Cereal runs on, then choose the one way people will sign in. You go first, and become the owner.',
   name: 'This is what your team sees in the apps and on the sign-in page.',
-  language: 'Pick who writes your notes and answers questions about them, then paste its API key.',
-  speech: 'ElevenLabs turns what was said into a transcript. Paste its API key.',
+  language: 'Pick who writes your notes and answers questions about them, then paste its API key, or point Cereal at your own model server.',
+  speech: 'ElevenLabs writes the transcript live while you record. Paste its API key.',
   models: 'These are good defaults for the keys you added. Keep them, or pick your own.',
   signIn: 'Say whose Google accounts may join. You can change this from the admin panel at any time.',
   storage: 'Recordings stay on this server unless you would rather keep them in a bucket.',
@@ -35,6 +36,8 @@ interface Drafts {
   owner: OwnerFields
   name: string; logo: string | null
   provider: LanguageProvider; languageKey: string; speechKey: string
+  /** The OpenAI-compatible server as typed; its optional key is `languageKey`. */
+  compatibleBaseUrl: string; compatibleModel: string
   models: ModelsDraft | null
   signIn: SignInDraft; storage: StorageDraft
 }
@@ -43,13 +46,17 @@ const draftsFor = (settings: AdminSettingsDTO | null): Omit<Drafts, 'owner'> => 
   name: settings && (settings.onboarding?.steps.name || settings.instanceName !== 'Cereal') ? settings.instanceName : '',
   logo: settings?.instanceLogo ?? null,
   provider: settings ? initialLanguageProvider(settings) : 'openrouter', languageKey: '', speechKey: '',
+  compatibleBaseUrl: settings?.openAiCompatible?.baseUrl ?? '',
+  compatibleModel: settings?.chatModels[0]?.provider === 'openai_compatible' ? settings.chatModels[0].model : '',
   models: null,
   signIn: settings ? instanceDraft(settings).signIn ?? EMPTY_SIGN_IN : EMPTY_SIGN_IN,
   storage: settings?.storage ? storageDraft(settings.storage) : EMPTY_STORAGE,
 })
 
-export function Onboarding({ client, initial, expired: sessionEnded, finished, transport }: {
+export function Onboarding({ client, initial, expired: sessionEnded, finished, transport, viewerEmail }: {
   client: AdminClient
+  /** The signed-in owner's address when setup is resumed: the claim step, which normally supplies it, is not shown then. */
+  viewerEmail?: string
   /** How the server is reached: the claim step says so when it is plain HTTP on a public address. */
   transport?: Transport
   /** An unclaimed server starts at "Claim this server"; a claimed one resumes at its first unfinished step,
@@ -64,7 +71,7 @@ export function Onboarding({ client, initial, expired: sessionEnded, finished, t
   const [claiming] = useState(initial.kind === 'claim')
   const [settings, setSettings] = useState<AdminSettingsDTO | null>(initial.kind === 'ready' ? initial.settings : null)
   const [step, setStep] = useState<StepId>(() => initial.kind === 'claim' ? 'claim' : initial.fromStart ? 'name' : resumeStep(initial.settings.onboarding!.steps))
-  const [drafts, setDrafts] = useState<Drafts>(() => ({ owner: { code: '', method: 'password', name: '', email: '', password: '', clientId: '', clientSecret: '' }, ...draftsFor(initial.kind === 'ready' ? initial.settings : null) }))
+  const [drafts, setDrafts] = useState<Drafts>(() => ({ owner: { code: '', method: 'password', name: '', email: viewerEmail ?? '', password: '', clientId: '', clientSecret: '' }, ...draftsFor(initial.kind === 'ready' ? initial.settings : null) }))
   // "Who may join" is a step only where people sign in with Google: known from the server once claimed, from the choice before.
   const google = settings ? settings.signIn?.google === true : drafts.owner.method === 'google'
   const steps = useMemo(() => stepsFor(claiming, google), [claiming, google])
@@ -115,13 +122,14 @@ export function Onboarding({ client, initial, expired: sessionEnded, finished, t
   useEffect(() => { if (wait <= 0) return; const timer = window.setTimeout(() => setWait(seconds => seconds - 1), 1000); return () => window.clearTimeout(timer) }, [wait])
 
   /** Runs one request for the current step. A session that ended goes back to sign-in; anything else is said calmly under the fields. */
-  const attempt = useCallback(async <T,>(work: (signal: AbortSignal) => Promise<T>, failure = 'That could not be saved. Check the values and try again.'): Promise<T | undefined> => {
+  /** With `explained`, a refusal the server put in words (an OpenAI-compatible server it could not reach, a model it did not accept) is shown as the server said it. */
+  const attempt = useCallback(async <T,>(work: (signal: AbortSignal) => Promise<T>, failure = 'That could not be saved. Check the values and try again.', explained = false): Promise<T | undefined> => {
     const controller = new AbortController(); requests.current.add(controller)
     try { return await work(controller.signal) }
     catch (error) {
       if (controller.signal.aborted || !alive.current) return undefined
       if (error instanceof AdminClientError && error.status === 401) { expired(); return undefined }
-      setProblem(error instanceof AdminClientError && error.status >= 500 ? 'The server could not finish this. Try again in a moment.' : failure)
+      setProblem(explained && error instanceof AdminClientError && error.status === 400 && error.serverMessage ? error.serverMessage : error instanceof AdminClientError && error.status >= 500 ? 'The server could not finish this. Try again in a moment.' : failure)
       buddy.current?.wobble()
       return undefined
     } finally { requests.current.delete(controller) }
@@ -131,6 +139,18 @@ export function Onboarding({ client, initial, expired: sessionEnded, finished, t
   const configured = useCallback((provider: AIProvider) => !!settings?.providers.some(status => status.id === provider && status.configured), [settings])
   const languageCheck = useKeyCheck(client, drafts.provider, drafts.languageKey, step === 'language', configured(drafts.provider), setCatalogs, buddy, expired)
   const speechCheck = useKeyCheck(client, 'elevenlabs', drafts.speechKey, step === 'speech', configured('elevenlabs'), setCatalogs, buddy, expired)
+  const compatibleCheck = useCompatibleCheck(client, drafts.compatibleBaseUrl, drafts.provider === 'openai_compatible' ? drafts.languageKey : '', step === 'language' && drafts.provider === 'openai_compatible', setCatalogs, buddy, expired)
+  const savedText = useCallback((provider: AIProvider) => savedKeyText(settings?.providers.find(status => status.id === provider)), [settings])
+  // The saved key is only ever sent to the address it was saved with; for another address it has to be typed again.
+  const compatibleSameAddress = tidyBaseUrl(drafts.compatibleBaseUrl) === (settings?.openAiCompatible?.baseUrl ?? '')
+  const compatibleKeyText = settings?.openAiCompatible?.apiKeySet ? compatibleSameAddress ? `${settings.openAiCompatible.apiKeyHint ?? 'A key'} is saved. Type a new key to replace it` : 'The saved key is only sent to the saved address. Type it again if this server needs one' : null
+  // A model is suggested from the server's list once it answers, unless one was typed or chosen already.
+  const compatibleModels = compatibleCheck.models
+  useEffect(() => {
+    if (!compatibleModels.length || drafts.compatibleModel.trim() || !settings) return
+    const suggestion = suggestLanguageModel('openai_compatible', { provider: 'openai_compatible', models: compatibleModels.map(id => ({ id, name: id, capabilities: ['language'] })), fetchedAt: '', notice: null }, settings.languageModel)
+    if (suggestion) update({ compatibleModel: suggestion.model })
+  }, [compatibleModels, drafts.compatibleModel, settings, update])
 
   /* ── Model catalogs for the Models step ────────────────────────────────── */
   const loadCatalog = useCallback(async (provider: AIProvider, refresh = false) => {
@@ -245,7 +265,17 @@ export function Onboarding({ client, initial, expired: sessionEnded, finished, t
           if (saved) { buddy.current?.nod(); forward() }
           return
         }
-        case 'language': case 'speech': {
+        case 'language': if (drafts.provider === 'openai_compatible') {
+          const saved = await attempt(async signal => {
+            await client.updateSettings(compatiblePatch({ baseUrl: drafts.compatibleBaseUrl, key: drafts.languageKey, model: drafts.compatibleModel }, settings), signal)
+            return record('language', 'done', signal)
+          }, 'The server did not accept that address, key or model. Check them and try again.', true)
+          if (!saved) return
+          update({ languageKey: '', models: null, compatibleBaseUrl: saved.openAiCompatible?.baseUrl ?? drafts.compatibleBaseUrl })
+          buddy.current?.nod(); forward(); return
+        }
+        // falls through
+        case 'speech': {
           const provider: AIProvider = step === 'language' ? drafts.provider : 'elevenlabs', key = (step === 'language' ? drafts.languageKey : drafts.speechKey).trim()
           const saved = await attempt(async signal => {
             if (key) await client.updateSettings({ [providerKeyFields[provider]]: key }, signal)
@@ -307,20 +337,24 @@ export function Onboarding({ client, initial, expired: sessionEnded, finished, t
 
   /* ── What each step can do right now ───────────────────────────────────── */
   const canContinue = step === 'claim' ? wait === 0 && !waiting
-    : step === 'language' ? languageCheck.state === 'connected'
+    : step === 'language' ? (drafts.provider === 'openai_compatible'
+      ? !compatibleBaseUrlProblem(drafts.compatibleBaseUrl) && plausibleModelId(drafts.compatibleModel) && compatibleCheck.state !== 'checking'
+      : languageCheck.state === 'connected')
     : step === 'speech' ? speechCheck.state === 'connected'
     : step === 'models' ? drafts.models !== null
     : true
   const waitingOn = step === 'claim' && wait > 0 ? `Try again in ${wait}s`
-    : (step === 'language' && languageCheck.state === 'checking') || (step === 'speech' && speechCheck.state === 'checking') ? 'Checking…' : null
+    : (step === 'language' && (drafts.provider === 'openai_compatible' ? compatibleCheck.state : languageCheck.state) === 'checking') || (step === 'speech' && speechCheck.state === 'checking') ? 'Checking…' : null
 
   const fields = (which: StepId): ReactNode => {
     switch (which) {
       case 'claim': return <ClaimFields value={drafts.owner} disabled={busy || accepted} problems={ownerProblems} googleNeedsHttps={googleNeedsHttps} origin={origin} change={next => { update({ owner: { ...drafts.owner, ...next } }); setOwnerProblems({}); setProblem(null) }} />
       case 'name': return <NameFields name={drafts.name} logo={drafts.logo} problem={nameProblem} change={next => { update(next); setNameProblem(null) }} />
-      case 'language': return <LanguageFields provider={drafts.provider} keyValue={drafts.languageKey} check={languageCheck} saved={configured} change={next => { update({ ...(next.provider ? { provider: next.provider } : {}), ...(next.key !== undefined ? { languageKey: next.key } : {}) }); setProblem(null) }} />
-      case 'speech': return <SpeechFields keyValue={drafts.speechKey} check={speechCheck} saved={configured('elevenlabs')} change={speechKey => { update({ speechKey }); setProblem(null) }} />
-      case 'models': return settings && <ModelFields draft={drafts.models} settings={settings} catalogs={catalogs} available={configured} load={loadCatalog} change={models => { update({ models }); setProblem(null) }} />
+      case 'language': return <LanguageFields provider={drafts.provider} keyValue={drafts.languageKey} check={languageCheck} saved={configured} savedText={savedText}
+        compatible={{ baseUrl: drafts.compatibleBaseUrl, model: drafts.compatibleModel }} compatibleCheck={compatibleCheck} compatibleKeyText={compatibleKeyText}
+        change={next => { update({ ...(next.provider ? { provider: next.provider } : {}), ...(next.key !== undefined ? { languageKey: next.key } : {}), ...(next.baseUrl !== undefined ? { compatibleBaseUrl: next.baseUrl } : {}), ...(next.model !== undefined ? { compatibleModel: next.model } : {}) }); setProblem(null) }} />
+      case 'speech': return <SpeechFields keyValue={drafts.speechKey} check={speechCheck} saved={configured('elevenlabs')} savedText={savedText('elevenlabs')} change={speechKey => { update({ speechKey }); setProblem(null) }} />
+      case 'models': return settings && <ModelFields draft={drafts.models} catalogs={catalogs} available={configured} load={loadCatalog} change={models => { update({ models }); setProblem(null) }} />
       case 'signIn': return signInSaved && <SignInFields draft={drafts.signIn} owner={drafts.owner.email} change={signIn => { update({ signIn }); setProblem(null) }} />
       case 'storage': return storageSaved && <StorageFields draft={drafts.storage} saved={storageSaved} test={storageTest} runTest={() => void runStorageTest()} problem={storageTrouble}
         change={next => { update({ storage: { ...drafts.storage, ...next } }); setStorageTest({ state: 'idle' }); setProblem(null) }} />
@@ -354,19 +388,18 @@ export function Onboarding({ client, initial, expired: sessionEnded, finished, t
 
   /* ── The little screen ─────────────────────────────────────────────────── */
   const data = (provider: AIProvider) => catalogs[provider]?.data
-  const lookup = { openrouter: data('openrouter'), openai: data('openai'), anthropic: data('anthropic'), elevenlabs: data('elevenlabs') }
-  const modelCards = drafts.models ?? (settings ? { chat: settings.chatModels[0]!, notes: settings.generationModel, speech: settings.transcriptionModel, live: settings.liveTranscriptionModel ?? null } : null)
+  const lookup = { openrouter: data('openrouter'), openai: data('openai'), anthropic: data('anthropic'), elevenlabs: data('elevenlabs'), openai_compatible: data('openai_compatible') }
+  const modelCards = drafts.models ?? (settings ? { chat: settings.chatModels[0]!, notes: settings.generationModel, live: settings.liveTranscriptionModel ?? { provider: 'elevenlabs' as const, model: 'scribe_v3_live' } } : null)
   const view: ScreenView = {
     step, host: serverHost(origin),
     instanceName: step === 'claim' ? '' : drafts.name, instanceLogo: drafts.logo,
     claim: { accepted, owner: drafts.owner.name, method: drafts.owner.method, email: drafts.owner.email.trim(), waiting },
-    language: { provider: drafts.provider, state: languageCheck.state === 'idle' ? 'waiting' : languageCheck.state },
+    language: { provider: drafts.provider, state: (() => { const state = drafts.provider === 'openai_compatible' ? compatibleCheck.state : languageCheck.state; return state === 'idle' ? 'waiting' : state })() },
     speech: { state: speechCheck.state === 'idle' ? 'waiting' : speechCheck.state },
     models: modelCards ? [
       { role: 'Chat', logo: modelLogo(modelCards.chat.provider, modelCards.chat.model), name: modelLabel(modelCards.chat, lookup) },
       { role: 'Meeting notes', logo: modelLogo(modelCards.notes.provider, modelCards.notes.model), name: modelLabel(modelCards.notes, lookup) },
-      { role: 'Speech to text', logo: modelCards.speech.provider, name: modelLabel(modelCards.speech, lookup) },
-      { role: 'Live transcription', logo: modelCards.live ? modelCards.live.provider : null, name: modelCards.live ? modelLabel(modelCards.live, lookup) : 'Off', live: !!modelCards.live },
+      { role: 'Live transcription', logo: modelCards.live.provider, name: modelLabel(modelCards.live, lookup), live: true },
     ] : [],
     signIn: { password: !google, google, allowed: [...(drafts.owner.email ? [drafts.owner.email] : []), ...drafts.signIn.allowedEmails] },
     storage: { backend: drafts.storage.backend, bucket: drafts.storage.bucket, test: storageTest.state === 'testing' ? 'testing' : storageTest.state === 'done' ? (storageTest.result.ok ? 'ok' : 'failed') : 'idle' },
@@ -423,4 +456,44 @@ function useKeyCheck(client: AdminClient, provider: AIProvider, key: string, act
   if (!typed) return saved ? { state: 'connected' } : { state: 'idle' }
   if (!worthAsking) return { state: 'idle' }
   return answer?.subject === subject ? answer.check : { state: 'checking' }
+}
+
+/** How long a valid address (or key) has to stay as it is before the server is asked about it. Leaving the field or
+ * pressing Enter asks at once. Long enough that a pause while typing does not send a half-typed address. */
+const COMPATIBLE_SETTLE_MS = 1500
+/** Asks an OpenAI-compatible server for its models through the same request the admin panel uses: when the address
+ * field is left or Enter is pressed, or once a valid address (and key) has stayed unchanged for a while. A request for
+ * anything no longer on screen is cancelled, and its answer dropped. */
+function useCompatibleCheck(client: AdminClient, baseUrl: string, key: string, active: boolean,
+  keep: (update: (old: Partial<Record<AIProvider, CatalogState>>) => Partial<Record<AIProvider, CatalogState>>) => void,
+  buddy: { current: BuddyHandle | null }, expired: () => void): CompatibleCheck {
+  const [answer, setAnswer] = useState<{ subject: string; check: CompatibleCheck } | null>(null)
+  const address = baseUrl.trim(), typedKey = key.trim(), subject = `${address}\n${typedKey}`, worthAsking = !!address && !compatibleBaseUrlProblem(address)
+  // What was asked last (so leaving the field after the request went does not ask again), and what the person
+  // committed to by leaving the field or pressing Enter (asked without waiting).
+  const asked = useRef<string | null>(null), [committed, setCommitted] = useState<string | null>(null)
+  const now = committed === subject
+  const commit = useCallback(() => { if (worthAsking && asked.current !== subject) setCommitted(subject) }, [subject, worthAsking])
+  useEffect(() => {
+    if (!active || !worthAsking) return
+    const controller = new AbortController()
+    let answered = false
+    const timer = window.setTimeout(async () => {
+      asked.current = subject
+      try {
+        const catalog = await client.getModelCatalog({ provider: 'openai_compatible', baseUrl: address, ...(typedKey ? { apiKey: typedKey } : {}) }, controller.signal)
+        if (controller.signal.aborted) return
+        keep(old => ({ ...old, openai_compatible: { data: catalog, busy: false } }))
+        answered = true; setAnswer({ subject, check: { state: 'connected', models: catalog.models.map(model => model.id) } }); buddy.current?.hop()
+      } catch (error) {
+        if (controller.signal.aborted) return
+        if (error instanceof AdminClientError && error.status === 401) { expired(); return }
+        answered = true; setAnswer({ subject, check: { state: 'failed', models: [], message: (error instanceof AdminClientError ? error.serverMessage : undefined) ?? 'The server did not answer. Check the address and that it is running.' } }); buddy.current?.wobble()
+      }
+    }, now ? 0 : COMPATIBLE_SETTLE_MS)
+    // A change of address or key cancels the wait and any request already sent for the old one.
+    return () => { window.clearTimeout(timer); controller.abort(); if (!answered && asked.current === subject) asked.current = null }
+  }, [active, address, buddy, client, expired, keep, now, subject, typedKey, worthAsking])
+  if (!worthAsking) return { state: 'idle', models: [], commit }
+  return answer?.subject === subject ? { ...answer.check, commit } : { state: 'checking', models: [], commit }
 }

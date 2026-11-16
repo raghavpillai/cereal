@@ -9,8 +9,8 @@
 //! no transcript is re-parsed, no note is copied and nothing is saved.
 use crate::{
     app::Cereal,
-    live::{Channel, Event, Interim, Phase, Session, Source, SpeakerMerge},
-    model::Note,
+    live::{Channel, Delivery, Event, Interim, Phase, Session, Source, SpeakerMerge, SpeakerRelabel},
+    model::{Note, PendingStop},
     note::TranscriptUtterance,
     recording::TranscriptionAttention,
 };
@@ -35,8 +35,10 @@ const MAX_INTERIM_CHARS: usize = 2_000;
 const SAVE_EVERY: Duration = Duration::from_secs(10);
 /// A reconnect shorter than this is not mentioned.
 const RECONNECT_GRACE: Duration = Duration::from_millis(1500);
-/// How long the note about a skipped stretch stays up.
-const GAP_NOTICE: Duration = Duration::from_secs(8);
+/// A first connection that takes longer than this is mentioned.
+const CONNECT_GRACE: Duration = Duration::from_secs(5);
+/// A stretch without transcript shorter than this is not shown as missing.
+pub const GAP_SHOWN_MS: i64 = 1_000;
 /// After a socket becomes ready the server first re-sends the finals it
 /// stored while none was attached. Only if the note is still behind the
 /// revision it announced once those have had this long to arrive is the note
@@ -58,14 +60,10 @@ struct Stream {
     /// Tells this stream's events from those of another stream of its note.
     id: u64,
     note: u64,
+    capture_id: String,
     session: Session,
-}
-
-/// The uploader of the recording's durable parts (see
-/// `server::PartUploads`): it runs for as long as the capture does.
-struct Parts {
-    note: u64,
-    uploads: crate::server::PartUploads,
+    /// What the stream said came of its capture.
+    delivered: Option<Delivery>,
 }
 
 /// What the transcript views show of the stream, besides its text.
@@ -84,7 +82,6 @@ pub struct LiveTranscript {
     session: Option<Stream>,
     /// Stopped recordings whose streams are still delivering their last text.
     ending: Vec<Stream>,
-    parts: Option<Parts>,
     /// Text still being spoken, oldest first.
     interim: Vec<Interim>,
     /// Who last spoke on each channel (microphone, system) as far as this
@@ -100,7 +97,11 @@ pub struct LiveTranscript {
     phase: Phase,
     behind: u64,
     phase_since: Option<Instant>,
-    gap_at: Option<Instant>,
+    /// The newest stretch of this recording that will have no transcript
+    /// (note-timeline milliseconds): said until another recording starts.
+    skipped: Option<(u64, u64)>,
+    /// Notes whose pending Stop has been sent and not answered yet.
+    pub stopping: std::collections::HashSet<u64>,
     /// The transcript revision the server announced when the socket became
     /// ready, and when to hold the note against it.
     resync: Option<(u64, Instant)>,
@@ -126,6 +127,21 @@ impl LiveTranscript {
     pub fn streams(&self, note: u64) -> bool {
         self.session.as_ref().is_some_and(|stream| stream.note == note)
             || self.ending.iter().any(|stream| stream.note == note)
+    }
+
+    /// Whether a stream of `note` still owes the server part of its capture.
+    pub fn delivering(&self, note: u64) -> bool {
+        self.session
+            .iter()
+            .chain(&self.ending)
+            .any(|stream| stream.note == note && stream.delivered.is_none())
+    }
+
+    /// A stopped recording of `note` is still being delivered.
+    pub fn finishing(&self, note: u64) -> bool {
+        self.ending
+            .iter()
+            .any(|stream| stream.note == note && stream.delivered.is_none())
     }
 
     pub fn revision(&self) -> u64 {
@@ -224,13 +240,15 @@ impl LiveTranscript {
     /// provider is unavailable. Nothing while everything is simply working,
     /// and nothing at all when live transcription is not in use.
     pub fn status(&self, note: u64) -> Option<LiveStatus> {
-        if self.note != Some(note) {
-            return None;
-        }
-        self.status_at(Instant::now())
+        self.status_of(note, Instant::now())
     }
 
+    /// The status line of the recording this state belongs to, as of `now`.
     fn status_at(&self, now: Instant) -> Option<LiveStatus> {
+        self.status_of(self.note?, now)
+    }
+
+    fn status_of(&self, note: u64, now: Instant) -> Option<LiveStatus> {
         let quiet = |text: String| {
             Some(LiveStatus {
                 text: text.into(),
@@ -238,23 +256,36 @@ impl LiveTranscript {
             })
         };
         let since = |at: Option<Instant>| at.map_or(Duration::MAX, |at| now.duration_since(at));
-        match self.phase {
+        let ours = self.note == Some(note);
+        let live = match self.phase {
+            _ if !ours => None,
             Phase::ProviderUnavailable => Some(LiveStatus {
-                text: "Live transcript unavailable · still recording audio".into(),
+                text: "Live transcript unavailable · audio is saved on this Mac".into(),
                 warning: true,
             }),
             Phase::CatchingUp if self.behind >= 5 => {
                 quiet(format!("Transcript about {} s behind", self.behind))
             }
             Phase::CatchingUp => quiet("Catching up…".into()),
+            // Audio is not reaching the server: it waits in the capture's
+            // files and is sent when the connection is back.
             Phase::Reconnecting if since(self.phase_since) >= RECONNECT_GRACE => {
-                quiet("Reconnecting · still recording audio".into())
+                quiet("Reconnecting · audio is saved on this Mac".into())
             }
-            _ if since(self.gap_at) < GAP_NOTICE => {
-                quiet("Skipped ahead · the gap fills in within a minute".into())
+            Phase::Connecting if since(self.phase_since) >= CONNECT_GRACE => {
+                quiet("Reconnecting · audio is saved on this Mac".into())
             }
             _ => None,
-        }
+        };
+        live.or_else(|| {
+            self.finishing(note)
+                .then(|| quiet("Finishing the transcript…".into()))
+                .flatten()
+        })
+        .or_else(|| {
+            let (from, to) = self.skipped.filter(|_| ours)?;
+            quiet(format!("Couldn't transcribe {}", gap_span(from, to)))
+        })
     }
 
     /// Whether the note has to be read again from the server: it is still
@@ -290,7 +321,7 @@ impl LiveTranscript {
         self.phase = Phase::Off;
         self.behind = 0;
         self.phase_since = None;
-        self.gap_at = None;
+        self.skipped = None;
         self.resync = None;
         self.shown = None;
         self.said = None;
@@ -344,6 +375,37 @@ impl LiveTranscript {
                     Applied::Nothing
                 }
             }
+            Event::Relabels(relabels) => {
+                if relabel_speakers(note, &relabels) {
+                    Applied::Speakers
+                } else {
+                    Applied::Nothing
+                }
+            }
+            Event::Gap {
+                channel,
+                from_ms,
+                to_ms,
+            } => {
+                // Kept with the note, for the transcript to show where it is
+                // missing; and said on the status line of this recording.
+                let added = note.add_transcript_gaps([meeting_notes_api_types::TranscriptGapDTO {
+                    channel: audio_channel(channel),
+                    from_ms: from_ms as i64,
+                    to_ms: to_ms as i64,
+                }]);
+                if self.note == Some(note.id) && to_ms.saturating_sub(from_ms) >= GAP_SHOWN_MS as u64 {
+                    let (from, to) = self.skipped.map_or((from_ms, to_ms), |(at, until)| {
+                        // The newest stretch, joined to the one before it
+                        // when they touch (the server and the stream both
+                        // say a skip).
+                        if from_ms <= until && to_ms >= at { (at.min(from_ms), until.max(to_ms)) } else { (from_ms, to_ms) }
+                    });
+                    self.skipped = Some((from, to));
+                    return Applied::Gap;
+                }
+                if added { Applied::Gap } else { Applied::Nothing }
+            }
             event => self.apply_passing(current, event, now),
         }
     }
@@ -353,7 +415,11 @@ impl LiveTranscript {
     /// does not mark the workspace as changed five times a second).
     fn apply_passing(&mut self, current: bool, event: Event, now: Instant) -> Applied {
         match event {
-            Event::Final { .. } | Event::Speakers(_) => Applied::Nothing,
+            Event::Final { .. }
+            | Event::Speakers(_)
+            | Event::Relabels(_)
+            | Event::Gap { .. }
+            | Event::Delivered(_) => Applied::Nothing,
             Event::Status(phase, behind) => {
                 if !current || (self.phase, self.behind) == (phase, behind) {
                     return Applied::Nothing;
@@ -425,14 +491,6 @@ impl LiveTranscript {
                 }
                 Applied::Interim
             }
-            Event::Gap { .. } => {
-                if current {
-                    self.gap_at = Some(now);
-                    Applied::Status
-                } else {
-                    Applied::Nothing
-                }
-            }
             // The owner of the stream lets go of it.
             Event::Ended => Applied::Nothing,
         }
@@ -462,6 +520,8 @@ enum Applied {
     Final(Option<u64>),
     /// Stored speakers were relabelled.
     Speakers,
+    /// A stretch without transcript was added to the note.
+    Gap,
     Status,
 }
 
@@ -568,53 +628,23 @@ fn add_segment(note: &mut Note, segment: TranscriptSegmentDTO, revision: u64) ->
     !known
 }
 
-/// Take in the transcript as the server has it, read after it finished a
-/// durable part: this is how a stretch the live stream missed is filled in
-/// while the meeting is still going. Segments the note lacks are inserted at
-/// their place on the timeline; stored text never changes, so what the note
-/// already has stays as it is. Returns whether the note changed.
-///
-/// A read that is at least as new as everything the note has seen is the
-/// whole truth, so a segment the note has and the read does not was retired
-/// by the server and goes. An older read (a final arrived on the stream
-/// after it was taken) can only add.
-pub(crate) fn merge_remote(
-    note: &mut Note,
-    remote: Vec<TranscriptSegmentDTO>,
-    revision: u64,
-) -> bool {
-    use std::collections::HashSet;
-    let mut changed = false;
-    if revision >= note.transcript_revision {
-        let kept: HashSet<&str> = remote.iter().map(|segment| segment.id.as_str()).collect();
-        let before = note.server_transcript_segments.len();
-        note.server_transcript_segments
-            .retain(|segment| kept.contains(segment.id.as_str()));
-        changed |= note.server_transcript_segments.len() != before;
+/// The label the server gives speaker `id` when no segment says it: on the
+/// microphone `mic:n:1` is "Me" and `mic:n:<k>` is "Room speaker <k - 1>"
+/// (other people in the room); on system audio `system:n:<n>` is
+/// "Speaker <n>".
+fn speaker_label_of(id: &str) -> Option<String> {
+    let mut parts = id.split(':');
+    let (channel, kind, number) = (parts.next()?, parts.next()?, parts.next()?);
+    if kind != "n" || parts.next().is_some() {
+        return None;
     }
-    let known: HashSet<String> = note
-        .server_transcript_segments
-        .iter()
-        .map(|segment| segment.id.clone())
-        .collect();
-    for segment in remote {
-        if known.contains(&segment.id) {
-            continue;
-        }
-        let at = note
-            .server_transcript_segments
-            .iter()
-            .rposition(|stored| stored.start_ms <= segment.start_ms)
-            .map_or(0, |at| at + 1);
-        note.server_transcript_segments.insert(at, segment);
-        changed = true;
+    let number: u32 = number.parse().ok().filter(|_| number.chars().all(|c| c.is_ascii_digit()))?;
+    match (channel, number) {
+        ("mic", 1) => Some("Me".into()),
+        ("mic", k) if k > 1 => Some(format!("Room speaker {}", k - 1)),
+        ("system", n) => Some(format!("Speaker {n}")),
+        _ => None,
     }
-    if changed {
-        note.normalize_generation_revision();
-        note.transcript = plain_text(&note.server_transcript_segments);
-    }
-    note.transcript_revision = note.transcript_revision.max(revision);
-    changed
 }
 
 /// The provider decided two of its speakers are one: stored segments of
@@ -627,15 +657,7 @@ fn merge_speakers(note: &mut Note, merges: &[SpeakerMerge]) -> bool {
             .iter()
             .find(|segment| segment.speaker_id == merge.to)
             .map(|segment| segment.speaker_label.clone())
-            // `<channel>:n:<number>` is "Speaker <number>".
-            .unwrap_or_else(|| {
-                merge
-                    .to
-                    .rsplit(':')
-                    .next()
-                    .filter(|number| !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()))
-                    .map(|number| format!("Speaker {number}"))
-            });
+            .unwrap_or_else(|| speaker_label_of(&merge.to));
         for segment in &mut note.server_transcript_segments {
             if segment.speaker_id == merge.from {
                 segment.speaker_id = merge.to.clone();
@@ -648,6 +670,59 @@ fn merge_speakers(note: &mut Note, merges: &[SpeakerMerge]) -> bool {
         note.transcript = plain_text(&note.server_transcript_segments);
     }
     changed
+}
+
+/// A note-timeline position as the transcript shows times: minutes and
+/// seconds.
+pub(crate) fn clock(ms: u64) -> String {
+    format!("{:02}:{:02}", ms / 60_000, ms / 1000 % 60)
+}
+
+/// A stretch of the note's timeline, "12:03–12:10".
+pub(crate) fn gap_span(from_ms: u64, to_ms: u64) -> String {
+    format!("{}–{}", clock(from_ms), clock(to_ms.max(from_ms)))
+}
+
+/// The server moved stored segments to another speaker, by segment id
+/// (after any merges). Text and times are untouched.
+fn relabel_speakers(note: &mut Note, relabels: &[SpeakerRelabel]) -> bool {
+    let mut changed = false;
+    for relabel in relabels {
+        for segment in &mut note.server_transcript_segments {
+            if segment.id == relabel.segment_id
+                && (segment.speaker_id != relabel.speaker_id
+                    || segment.speaker_label.as_deref() != Some(relabel.speaker_label.as_str()))
+            {
+                segment.speaker_id = relabel.speaker_id.clone();
+                segment.speaker_label = Some(relabel.speaker_label.clone());
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        note.transcript = plain_text(&note.server_transcript_segments);
+    }
+    changed
+}
+
+/// The captures of `note` that have not all reached the server, in the
+/// order they were recorded.
+pub(crate) fn undelivered_captures(note: &Note) -> Vec<crate::audio::CaptureManifest> {
+    note.audio_captures
+        .iter()
+        .filter(|capture| note.live_pending.contains(&capture.capture_id))
+        .cloned()
+        .collect()
+}
+
+/// The Stop that is due for `note` now: one is pending, and every capture
+/// has been delivered (`delivering` is whether a stream of it still owes
+/// the server audio).
+pub(crate) fn stop_due(note: &Note, delivering: bool) -> Option<PendingStop> {
+    if delivering || !note.live_pending.is_empty() {
+        return None;
+    }
+    note.pending_stop
 }
 
 impl Cereal {
@@ -665,8 +740,8 @@ impl Cereal {
     }
 
     /// The server has note `id` in the recording state: follow its capture.
-    /// Tried once per recording; an instance without live transcription
-    /// refuses the socket and the recording carries on exactly as before.
+    /// Started once per recording; while live transcription is unavailable
+    /// the stream keeps trying for as long as the recording runs.
     pub fn live_connect(&mut self, id: u64, cx: &mut Context<Self>) {
         if self.recording.note_id != Some(id) || !self.recording.is_active() {
             return;
@@ -692,7 +767,7 @@ impl Cereal {
             ..Note::default()
         };
         let capture_id = pending.capture_id.clone();
-        let uploaded = note.clone();
+        let pending_capture = capture_id.clone();
         // The stream belongs to the note's account: it stops when that
         // account's epoch moves (its session ended or was replaced, or it
         // was signed out of). The capture itself is local and carries on.
@@ -707,19 +782,9 @@ impl Cereal {
         self.live.session = Some(Stream {
             id: self.live.streams,
             note: id,
+            capture_id: pending_capture,
             session,
-        });
-        // The capture's durable parts go up as they are completed, whether
-        // or not this server transcribes live: they are what fills a stretch
-        // the stream missed, and on a server without live transcription they
-        // are the transcript.
-        self.live.parts = Some(Parts {
-            note: id,
-            uploads: crate::server::PartUploads::start(
-                uploaded,
-                pending.capture_id.clone(),
-                Source::Monitor(pending.monitor.clone()),
-            ),
+            delivered: None,
         });
         self.live_watch(cx);
     }
@@ -728,18 +793,137 @@ impl Cereal {
     /// rest of the capture and collect its last finals, in the background.
     pub fn live_end(&mut self) {
         self.live.capture = None;
-        // The part uploader stops where it is; the upload after Stop sends
-        // whatever it had not, under the same identities.
-        self.live.parts = None;
         if let Some(stream) = self.live.session.take() {
             stream.session.end();
             self.live.ending.push(stream);
         }
-        if self.live.phase != Phase::Off || self.live.gap_at.is_some() {
+        if self.live.phase != Phase::Off {
             self.live.phase = Phase::Off;
             self.live.behind = 0;
-            self.live.gap_at = None;
             self.live.revision = self.live.revision.wrapping_add(1);
+        }
+    }
+
+    /// The recording of note `id` stopped here (Stop, a new note, the app
+    /// quitting): the capture stops at once, and the server is told so only
+    /// once the stream has delivered every captured sample, however long the
+    /// backlog (see [`Cereal::live_deliver`]). A capture whose stream never
+    /// got going, or gave up, is streamed now from its monitor. Until then the note says
+    /// "Finishing the transcript…". `stop` is what is owed then; a pending
+    /// Generate is never reduced to a plain Stop.
+    pub fn live_stop(&mut self, id: u64, stop: PendingStop, cx: &mut Context<Self>) {
+        let current = self
+            .live
+            .capture
+            .as_ref()
+            .filter(|pending| pending.note == id)
+            .map(|pending| (pending.capture_id.clone(), pending.monitor.clone()));
+        self.live_end();
+        if !crate::server::enabled() {
+            return;
+        }
+        if let Some(note) = self.workspace.note_mut(id) {
+            note.pending_stop = Some(match (note.pending_stop, stop) {
+                (Some(PendingStop::Generate), _) | (_, PendingStop::Generate) => PendingStop::Generate,
+                _ => PendingStop::Stop,
+            });
+        }
+        self.live_deliver(id, current, cx);
+    }
+
+    /// Stream every capture of note `id` that has not all reached the
+    /// server and has no stream yet, each from where the server is, then
+    /// tell the server the pending Stop once nothing is owed. Used after
+    /// Stop (`current` is the capture that has just stopped, if its stream
+    /// never got going), and when the note's account is ready, at launch
+    /// among others: a quit or a crash before the delivery finished is
+    /// finished then, from the files on disk.
+    pub fn live_deliver(
+        &mut self,
+        id: u64,
+        current: Option<(String, crate::audio::CaptureMonitor)>,
+        cx: &mut Context<Self>,
+    ) {
+        if !crate::server::enabled() {
+            return;
+        }
+        let Some(note) = self.workspace.note(id) else {
+            return;
+        };
+        let running: Vec<String> = self
+            .live
+            .session
+            .iter()
+            .chain(&self.live.ending)
+            .filter(|stream| stream.note == id)
+            .map(|stream| stream.capture_id.clone())
+            .collect();
+        let captures: Vec<_> = undelivered_captures(note)
+            .into_iter()
+            .filter(|capture| !running.contains(&capture.capture_id))
+            .collect();
+        let target = Note {
+            id,
+            server_id: note.server_id.clone(),
+            server_url: note.server_url.clone(),
+            audio_captures: note.audio_captures.clone(),
+            ..Note::default()
+        };
+        let started = !captures.is_empty();
+        for capture in captures {
+            let capture_id = capture.capture_id.clone();
+            let source = match &current {
+                // Still being finalised by this launch's writer.
+                Some((current, monitor)) if *current == capture_id => Source::Monitor(monitor.clone()),
+                _ => Source::Saved(capture),
+            };
+            let account = crate::accounts::note_epoch(id);
+            let target = target.clone();
+            let resolved = capture_id.clone();
+            let session = Session::start(
+                id,
+                source,
+                move || crate::server::live_target(&target, &resolved),
+                move || crate::accounts::note_epoch(id) == account,
+            );
+            session.end();
+            self.live.streams += 1;
+            self.live.ending.push(Stream {
+                id: self.live.streams,
+                note: id,
+                capture_id,
+                session,
+                delivered: None,
+            });
+        }
+        if started {
+            self.live_watch(cx);
+            cx.notify();
+        }
+        self.live_stop_if_delivered(id, cx);
+    }
+
+    /// Send the pending Stop of note `id` if nothing is owed any more.
+    pub fn live_stop_if_delivered(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(stop) = self
+            .workspace
+            .note(id)
+            .and_then(|note| stop_due(note, self.live.delivering(id)))
+        else {
+            return;
+        };
+        if self.recording.note_id == Some(id) && self.recording.is_active() {
+            return; // Recording again: the Stop is for later.
+        }
+        if self.live.stopping.contains(&id) {
+            return;
+        }
+        let action = match stop {
+            PendingStop::Generate => crate::server::Action::Generate,
+            PendingStop::Stop => crate::server::Action::Recording("stop"),
+        };
+        if self.server_action_sent(id, action, cx) {
+            self.live.stopping.insert(id);
         }
     }
 
@@ -809,32 +993,24 @@ impl Cereal {
             );
         }
         let mut redraw = Redraw::Nothing;
+        let mut settled = Vec::new();
         for (stream, note_id, current, event) in events {
-            redraw = redraw.max(if event == Event::Ended {
-                self.live_ended(stream, note_id)
-            } else {
-                self.live_event(note_id, current, event, cx)
+            redraw = redraw.max(match event {
+                Event::Ended => {
+                    settled.push(note_id);
+                    self.live_ended(stream, note_id)
+                }
+                Event::Delivered(delivery) => {
+                    settled.push(note_id);
+                    self.live_delivered(stream, note_id, delivery, cx)
+                }
+                event => self.live_event(note_id, current, event, cx),
             });
         }
-        // A durable part was transcribed: take in whatever of the server's
-        // transcript the note does not have yet.
-        let transcribed: Vec<_> = self
-            .live
-            .parts
-            .iter()
-            .flat_map(|parts| parts.uploads.events.try_iter().map(|event| (parts.note, event)))
-            .collect();
-        for (note_id, event) in transcribed {
-            let crate::server::PartEvent::Transcript { revision, segments } = event;
-            let merged = self
-                .workspace
-                .note_mut(note_id)
-                .is_some_and(|note| merge_remote(note, segments, revision));
-            if merged {
-                self.forget_utterances();
-                self.live_save_later(cx);
-                redraw = Redraw::Window;
-            }
+        // A Stop that was waiting for these streams goes out now.
+        settled.dedup();
+        for note in settled {
+            self.live_stop_if_delivered(note, cx);
         }
         // Text the stream stored while this client was not listening, and
         // could not re-send: the ordinary save reads the note back.
@@ -853,10 +1029,8 @@ impl Cereal {
         }
         self.live_redraw(redraw, cx);
         let keep = self.live.session.is_some()
-            || self.live.parts.is_some()
             || !self.live.ending.is_empty()
-            || self.live.phase == Phase::Reconnecting
-            || self.live.gap_at.is_some_and(|at| at.elapsed() < GAP_NOTICE);
+            || matches!(self.live.phase, Phase::Reconnecting | Phase::Connecting);
         if !keep {
             self.live.watching = false;
         }
@@ -890,6 +1064,27 @@ impl Cereal {
         }
     }
 
+    /// A stream said what came of its capture: every sample is on the
+    /// server, or the server will take no more of it. Either way nothing is
+    /// owed for it any more.
+    fn live_delivered(&mut self, stream: u64, note_id: u64, delivery: Delivery, cx: &mut Context<Self>) -> Redraw {
+        let mut capture = None;
+        for open in self.live.session.iter_mut().chain(self.live.ending.iter_mut()) {
+            if open.id == stream {
+                open.delivered = Some(delivery);
+                capture = Some(open.capture_id.clone());
+            }
+        }
+        let Some(capture) = capture else {
+            return Redraw::Nothing;
+        };
+        if let Some(note) = self.workspace.note_mut(note_id) {
+            note.live_pending.retain(|pending| *pending != capture);
+        }
+        self.persist(cx);
+        Redraw::Window
+    }
+
     /// A stream's thread has finished: let go of it, and of interim text
     /// that no stream is left to finalise.
     fn live_ended(&mut self, stream: u64, note_id: u64) -> Redraw {
@@ -915,7 +1110,10 @@ impl Cereal {
         cx: &mut Context<Self>,
     ) -> Redraw {
         let now = Instant::now();
-        let applied = if matches!(event, Event::Final { .. } | Event::Speakers(_)) {
+        let applied = if matches!(
+            event,
+            Event::Final { .. } | Event::Speakers(_) | Event::Relabels(_) | Event::Gap { .. }
+        ) {
             match self.workspace.note_mut(note_id) {
                 Some(note) => self.live.apply(note, current, event, now),
                 None => Applied::Nothing,
@@ -940,6 +1138,11 @@ impl Cereal {
                 Redraw::Window
             }
             Applied::Speakers => {
+                self.forget_utterances();
+                self.live_save_later(cx);
+                Redraw::Window
+            }
+            Applied::Gap => {
                 self.forget_utterances();
                 self.live_save_later(cx);
                 Redraw::Window
@@ -1239,11 +1442,12 @@ mod tests {
         assert_eq!(live.apply(&mut note, true, Event::Status(Phase::ProviderUnavailable, 0), start), Applied::Status);
         let status = live.status_at(start).unwrap();
         assert!(status.warning && status.text.starts_with("Live transcript unavailable"));
-        // A gap is noted for a few seconds, then the line is empty again.
+        // A stretch that could not be transcribed is said, and stays said
+        // (see `a_skipped_stretch_is_kept_with_the_note_and_said_until_another_recording`).
         live.apply(&mut note, true, Event::Status(Phase::Live, 0), start);
-        live.apply(&mut note, true, Event::Gap { channel: Channel::Mic, from_ms: 1, to_ms: 2 }, start);
-        assert!(live.status_at(start + Duration::from_secs(1)).unwrap().text.starts_with("Skipped ahead"));
-        assert_eq!(live.status_at(start + Duration::from_secs(9)), None);
+        live.apply(&mut note, true, Event::Gap { channel: Channel::Mic, from_ms: 1_000, to_ms: 9_000 }, start);
+        assert!(live.status_at(start + Duration::from_secs(1)).unwrap().text.starts_with("Couldn't transcribe"));
+        assert!(live.status_at(start + Duration::from_secs(9)).is_some());
         // Another note never shows this one's status.
         assert_eq!(live.status(8), None);
     }
@@ -1278,524 +1482,26 @@ mod tests {
         assert_eq!(live.apply(&mut note, true, merge, now), Applied::Nothing);
     }
 
+    /// A voice merged into one no stored segment names yet is labelled as the
+    /// server labels it: the microphone's own voice is "Me", never "Speaker 1".
     #[test]
-    fn a_durable_part_fills_a_gap_at_its_place_on_the_timeline() {
+    fn a_voice_merged_into_the_microphone_s_own_is_me() {
         let mut note = Note { id: 7, ..Note::default() };
         let mut live = live(&note);
         let now = Instant::now();
-        // The stream delivered 0-2 s and 6-8 s; it missed what lies between.
-        for (id, start) in [("a", 0), ("b", 1_000), ("e", 6_000), ("f", 7_000)] {
-            let stored = segment(id, AudioChannel::Mic, 1, start, id);
-            live.apply(&mut note, true, finalise(id, 4, stored), now);
-        }
-        let ids = |note: &Note| -> Vec<String> {
-            note.server_transcript_segments.iter().map(|s| s.id.clone()).collect()
-        };
-        // The server transcribed the part covering the gap and stored two
-        // segments; its transcript is read at revision 6.
-        let mut remote = note.server_transcript_segments.clone();
-        remote.insert(2, segment("c", AudioChannel::Mic, 1, 2_000, "c"));
-        remote.insert(3, segment("d", AudioChannel::Mic, 1, 4_000, "d"));
-        assert!(merge_remote(&mut note, remote.clone(), 6));
-        assert_eq!(ids(&note), ["a", "b", "c", "d", "e", "f"]);
-        assert_eq!(note.transcript_revision, 6);
-        assert_eq!(note.transcript, plain_text(&note.server_transcript_segments));
-        // The same read again changes nothing: no duplicates.
-        assert!(!merge_remote(&mut note, remote.clone(), 6));
-        assert_eq!(ids(&note).len(), 6);
-        // A final arrives on the stream; an older read that lacks it must
-        // not take it away.
-        live.apply(&mut note, true, finalise("g", 7, segment("g", AudioChannel::Mic, 1, 8_000, "g")), now);
-        assert!(!merge_remote(&mut note, remote.clone(), 6));
-        assert_eq!(ids(&note), ["a", "b", "c", "d", "e", "f", "g"]);
-        // A read that is newer than everything here is the whole truth: a
-        // segment the server retired goes, one it added comes.
-        let mut newer: Vec<_> = note.server_transcript_segments.clone();
-        newer.retain(|segment| segment.id != "d");
-        newer.push(segment("h", AudioChannel::System, 1, 8_500, "h"));
-        assert!(merge_remote(&mut note, newer, 9));
-        assert_eq!(ids(&note), ["a", "b", "c", "e", "f", "g", "h"]);
-        assert_eq!(note.transcript_revision, 9);
-        // An empty note takes a read whole (a server without live
-        // transcription: the parts are the transcript).
-        let mut empty = Note { id: 8, ..Note::default() };
-        assert!(merge_remote(&mut empty, remote, 6));
-        assert_eq!(ids(&empty), ["a", "b", "c", "d", "e", "f"]);
-    }
-
-    /// A local server that is both halves of what a recording talks to: the
-    /// live socket (`.../live`) and the HTTP endpoints for durable parts.
-    /// It keeps the two honest with each other the way the real server does:
-    /// audio the socket turned into text is "covered", and when a part
-    /// arrives only what the socket did not cover is transcribed from it.
-    mod fake {
-        use std::{
-            collections::HashMap,
-            io::{Read, Write},
-            net::{TcpListener, TcpStream},
-            sync::{Arc, Mutex},
-            time::{Duration, Instant},
-        };
-        use tungstenite::Message;
-
-        pub const NOTE: &str = "419d65d1-7a2c-44ca-84cc-ad489522d561";
-        const RATE: u64 = 16_000;
-
-        #[derive(Clone)]
-        pub struct Chunk {
-            pub id: String,
-            pub sequence: u64,
-            pub start_ms: u64,
-            pub duration_ms: u64,
-            pub ready: bool,
-        }
-
-        #[derive(Default)]
-        pub struct State {
-            pub recording: bool,
-            pub revision: i64,
-            /// `(id, start ms, end ms, text)`, in the order they were stored.
-            pub segments: Vec<(String, u64, u64, String)>,
-            pub chunks: Vec<Chunk>,
-            /// How many times each part was sent.
-            pub puts: HashMap<String, usize>,
-            /// Parts refused for clashing with another part's number.
-            pub conflicts: usize,
-            /// Sample ranges the socket turned into stored text.
-            pub covered: Vec<(u64, u64)>,
-            /// Where the socket's not yet finalised audio starts.
-            pending_from: u64,
-            next_sample: u64,
-            pub live_over: bool,
-            pub sockets: usize,
-            pub gaps: Vec<(u64, u64)>,
-            outage_until: Option<Instant>,
-        }
-
-        impl State {
-            fn store(&mut self, start_ms: u64, end_ms: u64, origin: &str) -> serde_json::Value {
-                self.revision += 1;
-                let id = uuid::Uuid::new_v5(
-                    &uuid::Uuid::NAMESPACE_URL,
-                    format!("{origin}:{start_ms}:{end_ms}").as_bytes(),
-                )
-                .to_string();
-                let text = format!("{origin} {start_ms}-{end_ms}");
-                self.segments.push((id, start_ms, end_ms, text));
-                self.segment_json(self.segments.len() - 1)
-            }
-
-            fn segment_json(&self, index: usize) -> serde_json::Value {
-                let (id, start, end, text) = &self.segments[index];
-                serde_json::json!({"id": id, "channel": "mic", "speakerId": "mic:n:1", "speakerLabel": "Speaker 1",
-                    "text": text, "isFinal": true, "startMs": start, "endMs": end})
-            }
-
-            fn note_json(&self) -> serde_json::Value {
-                let mut order: Vec<usize> = (0..self.segments.len()).collect();
-                order.sort_by_key(|index| self.segments[*index].1);
-                serde_json::json!({
-                    "id": NOTE, "title": "Gap", "body": "", "enhanced": "", "date": "2026-11-14", "duration": "0:00",
-                    "createdAt": "2026-11-14T10:00:00.000Z", "updatedAt": "2026-11-14T10:00:00.000Z",
-                    "generatedRevision": null, "generationState": "idle",
-                    "recordingState": if self.recording { "recording" } else { "stopped" },
-                    "transcriptRevision": self.revision,
-                    "transcriptSegments": order.into_iter().map(|index| self.segment_json(index)).collect::<Vec<_>>(),
-                })
-            }
-
-            fn chunk_json(chunk: &Chunk) -> serde_json::Value {
-                serde_json::json!({"id": chunk.id, "noteId": NOTE, "channel": "mic", "sequence": chunk.sequence,
-                    "startMs": chunk.start_ms, "durationMs": chunk.duration_ms,
-                    "state": if chunk.ready { "ready" } else { "queued" }, "error": null})
-            }
-
-            /// The batch worker: a part is decided once the socket is no
-            /// longer working on any of it, and only the audio the socket
-            /// did not turn into text is transcribed from it.
-            fn settle(&mut self) {
-                let working_from = self.pending_from * 1000 / RATE;
-                for index in 0..self.chunks.len() {
-                    let chunk = self.chunks[index].clone();
-                    let end = chunk.start_ms + chunk.duration_ms;
-                    if chunk.ready || !(self.live_over || end <= working_from) {
-                        continue;
-                    }
-                    let mut at = chunk.start_ms;
-                    let mut covered: Vec<(u64, u64)> = self
-                        .covered
-                        .iter()
-                        .map(|(from, to)| (from * 1000 / RATE, to * 1000 / RATE))
-                        .collect();
-                    covered.sort();
-                    let mut missing = Vec::new();
-                    for (from, to) in covered {
-                        if to <= at || from >= end {
-                            continue;
-                        }
-                        if from > at {
-                            missing.push((at, from));
-                        }
-                        at = at.max(to);
-                    }
-                    if at < end {
-                        missing.push((at, end));
-                    }
-                    for (from, to) in missing {
-                        self.store(from, to, "batch");
-                    }
-                    self.chunks[index].ready = true;
-                }
-            }
-        }
-
-        pub struct Server {
-            pub url: String,
-            pub state: Arc<Mutex<State>>,
-        }
-
-        /// `drop_after` samples into the first socket it is cut, and no
-        /// socket is accepted for `outage`; `window_ms` is the resume window
-        /// every `ready` announces.
-        pub fn serve(drop_after: u64, outage: Duration, window_ms: u64) -> Server {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let url = format!("http://{}", listener.local_addr().unwrap());
-            let state = Arc::new(Mutex::new(State { recording: true, ..State::default() }));
-            let shared = state.clone();
-            std::thread::spawn(move || {
-                for stream in listener.incoming() {
-                    let Ok(stream) = stream else { return };
-                    let state = shared.clone();
-                    std::thread::spawn(move || {
-                        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-                        let mut head = [0u8; 512];
-                        let peeked = stream.peek(&mut head).unwrap_or(0);
-                        if String::from_utf8_lossy(&head[..peeked]).contains("/live ") {
-                            socket(stream, &state, drop_after, outage, window_ms);
-                        } else {
-                            http(stream, &state);
-                        }
-                    });
-                }
-            });
-            Server { url, state }
-        }
-
-        fn socket(stream: TcpStream, state: &Mutex<State>, drop_after: u64, outage: Duration, window_ms: u64) {
-            let first = {
-                let mut state = state.lock().unwrap();
-                if state.outage_until.is_some_and(|until| Instant::now() < until) {
-                    return; // The network is down: the upgrade never completes.
-                }
-                state.sockets += 1;
-                state.sockets == 1
-            };
-            let Ok(mut socket) = tungstenite::accept(stream) else { return };
-            let say = |socket: &mut tungstenite::WebSocket<TcpStream>, value: serde_json::Value| {
-                socket.send(Message::text(value.to_string())).is_ok()
-            };
-            let Ok(Message::Text(_hello)) = socket.read() else { return };
-            let accept = {
-                let mut state = state.lock().unwrap();
-                // Audio taken but not finalised before the drop is lost to
-                // the stream; it resumes after it.
-                state.pending_from = state.next_sample;
-                state.next_sample
-            };
-            say(&mut socket, serde_json::json!({"type": "ready", "sessionId": "0b1c2d3e-0000-4000-8000-0000000000aa",
-                "provider": "fake", "model": "fake-live", "streams": [{"channel": "mic", "acceptFromSample": accept}],
-                "resumeWindowMs": window_ms, "transcriptRevision": state.lock().unwrap().revision}));
-            loop {
-                let Ok(message) = socket.read() else { return };
-                match message {
-                    Message::Binary(bytes) => {
-                        let first_sample = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
-                        let count = (bytes.len() as u64 - 12) / 2;
-                        let mut replies = Vec::new();
-                        let cut = {
-                            let mut state = state.lock().unwrap();
-                            if first_sample > state.next_sample {
-                                // A jump forward is a declared gap.
-                                let (from, to) = (state.next_sample * 1000 / RATE, first_sample * 1000 / RATE);
-                                state.gaps.push((from, to));
-                                replies.push(serde_json::json!({"type": "gap", "channel": "mic", "fromMs": from, "toMs": to, "reason": "resume_window_exceeded"}));
-                                state.pending_from = first_sample;
-                            }
-                            state.next_sample = state.next_sample.max(first_sample + count);
-                            // One stored segment per second of audio heard.
-                            while state.next_sample - state.pending_from >= RATE {
-                                let (from, to) = (state.pending_from, state.pending_from + RATE);
-                                state.covered.push((from, to));
-                                state.pending_from = to;
-                                let segment = state.store(from * 1000 / RATE, to * 1000 / RATE, "live");
-                                replies.push(serde_json::json!({"type": "final", "utteranceId": segment["id"], "transcriptRevision": state.revision, "segment": segment}));
-                            }
-                            replies.push(serde_json::json!({"type": "ack", "channel": "mic", "throughSample": state.next_sample, "transcribedThroughMs": state.pending_from * 1000 / RATE}));
-                            state.settle();
-                            let cut = first && state.next_sample >= drop_after;
-                            if cut {
-                                state.outage_until = Some(Instant::now() + outage);
-                            }
-                            cut
-                        };
-                        for reply in replies {
-                            if !say(&mut socket, reply) {
-                                return;
-                            }
-                        }
-                        if cut {
-                            return; // Dropped without a close frame.
-                        }
-                    }
-                    Message::Text(text) if text.as_str().contains(r#""kind":"end""#) => {
-                        let last = {
-                            let mut state = state.lock().unwrap();
-                            let (from, to) = (state.pending_from, state.next_sample);
-                            let last = (to > from).then(|| {
-                                state.covered.push((from, to));
-                                state.pending_from = to;
-                                let segment = state.store(from * 1000 / RATE, to * 1000 / RATE, "live");
-                                serde_json::json!({"type": "final", "utteranceId": segment["id"], "transcriptRevision": state.revision, "segment": segment})
-                            });
-                            state.live_over = true;
-                            state.settle();
-                            last
-                        };
-                        if let Some(last) = last {
-                            say(&mut socket, last);
-                        }
-                        let _ = socket.close(None);
-                        while socket.read().is_ok() {}
-                        return;
-                    }
-                    Message::Close(_) => return,
-                    _ => {}
-                }
-            }
-        }
-
-        fn http(mut stream: TcpStream, state: &Mutex<State>) {
-            let mut head = Vec::new();
-            let mut byte = [0u8; 1];
-            while !head.ends_with(b"\r\n\r\n") {
-                if stream.read_exact(&mut byte).is_err() {
-                    return;
-                }
-                head.push(byte[0]);
-            }
-            let head = String::from_utf8_lossy(&head).into_owned();
-            let length: usize = head
-                .lines()
-                .find_map(|line| line.to_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap()))
-                .unwrap_or(0);
-            if head.to_lowercase().contains("expect: 100-continue") {
-                let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
-            }
-            let mut body = vec![0u8; length];
-            if stream.read_exact(&mut body).is_err() {
-                return;
-            }
-            let mut request = head.split_whitespace();
-            let (method, path) = (request.next().unwrap_or(""), request.next().unwrap_or(""));
-            let chunks = format!("/api/v1/notes/{NOTE}/audio/chunks");
-            let (status, reply) = {
-                let mut state = state.lock().unwrap();
-                state.settle();
-                match (method, path) {
-                    ("GET", path) if path == chunks => (
-                        200,
-                        serde_json::Value::Array(state.chunks.iter().map(State::chunk_json).collect()),
-                    ),
-                    ("PUT", path) if path.starts_with(&chunks) => {
-                        let id = path.rsplit('/').next().unwrap().to_owned();
-                        let part: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                        let (sequence, start_ms) = (part["sequence"].as_u64().unwrap(), part["startMs"].as_u64().unwrap());
-                        // A PCM16 WAV: 44 bytes of header, then two bytes a sample.
-                        let encoded = part["audioBase64"].as_str().unwrap().len() as u64;
-                        let duration_ms = (encoded / 4 * 3 - 44) / 2 * 1000 / RATE;
-                        *state.puts.entry(id.clone()).or_default() += 1;
-                        let same = state.chunks.iter().position(|chunk| chunk.id == id);
-                        let clash = state.chunks.iter().any(|chunk| chunk.id != id && chunk.sequence == sequence);
-                        match same {
-                            Some(index) if state.chunks[index].sequence == sequence && state.chunks[index].start_ms == start_ms => {
-                                (200, State::chunk_json(&state.chunks[index]))
-                            }
-                            _ if same.is_some() || clash => {
-                                state.conflicts += 1;
-                                (409, serde_json::json!({"error": "conflict", "message": "Chunk ID or sequence already exists with different audio or metadata"}))
-                            }
-                            _ => {
-                                state.chunks.push(Chunk { id, sequence, start_ms, duration_ms, ready: false });
-                                state.settle();
-                                (200, State::chunk_json(state.chunks.last().unwrap()))
-                            }
-                        }
-                    }
-                    ("POST", path) if path.ends_with("/recording") => {
-                        // Stop ends the live session: nothing more will come from it.
-                        state.recording = false;
-                        state.live_over = true;
-                        state.settle();
-                        (200, state.note_json())
-                    }
-                    _ => (200, state.note_json()),
-                }
-            };
-            let reply = reply.to_string();
-            let _ = write!(
-                stream,
-                "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
-                reply.len()
-            );
-        }
-    }
-
-    /// The whole of a recording that loses its socket for longer than the
-    /// resume window: the stream skips ahead, the part covering what it
-    /// skipped is uploaded while the meeting is still going and fills the gap
-    /// in the transcript before Stop, and Stop sends only the parts that had
-    /// not gone up yet.
-    #[test]
-    fn a_dropped_socket_beyond_the_resume_window_is_healed_from_a_part_before_stop() {
-        use crate::live::tests::{Fixture, tone};
-        use crate::live::{Resolved, Session, Target};
-        // One second in, the socket is cut and stays down for 6.5 s; the
-        // server will replay at most 2 s.
-        let server = fake::serve(16_000, Duration::from_millis(6_500), 2_000);
-        let mut fixture = Fixture::new("heal");
-        let mut mic = fixture.add(Channel::Mic, "mic.wav", 16_000);
-        let root = fixture.directory.join("storage");
-        std::fs::create_dir_all(&root).unwrap();
-        let capture_id = fixture.manifest.capture_id.clone();
-        let local = 0x6a70_0000 + std::process::id() as u64;
-        let mut note = Note {
-            id: local,
-            server_id: Some(fake::NOTE.into()),
-            server_url: Some(server.url.clone()),
-            audio_captures: vec![fixture.manifest.clone()],
-            ..Note::default()
-        };
-        // Two-second parts, so a test meeting of fourteen seconds has seven.
-        crate::server::testing::set_part_seconds(&server.url, &root, &note, &capture_id, 2);
-        let target = Target {
-            endpoint: crate::accounts::client::LiveEndpoint::for_test(
-                crate::server::testing::live_url(&server.url, fake::NOTE),
-                "fictional-part-upload-owner-token-0000",
-            ),
-            capture_id: capture_id.clone(),
-            base_ms: 0,
-        };
-        let session = Session::start(local, fixture.source(), move || Resolved::Ready(target.clone()), || true);
-        let parts = crate::server::testing::part_uploads(&server.url, &root, note.clone(), &capture_id, fixture.source());
-        let mut live = live(&note);
-        let started = Instant::now();
-        let audio = tone(16_000, 330., 0, 16_000 * 14);
-        let (mut written, mut gap_seen, mut healed_at, mut ended) = (0usize, false, None, false);
-        let covered = |note: &Note, from: i64, to: i64| {
-            // Every millisecond of [from, to) is inside some stored segment.
-            let mut at = from;
-            for segment in &note.server_transcript_segments {
-                if segment.start_ms <= at && segment.end_ms.unwrap_or(0) > at {
-                    at = segment.end_ms.unwrap();
-                }
-            }
-            at >= to
-        };
-        let pump = |note: &mut Note, live: &mut LiveTranscript, gap_seen: &mut bool, ended: &mut bool| {
-            for event in session.events.try_iter() {
-                *gap_seen |= matches!(event, Event::Gap { .. });
-                *ended |= event == Event::Ended;
-                live.apply(note, true, event, Instant::now());
-            }
-            for event in parts.uploads_events() {
-                let crate::server::PartEvent::Transcript { revision, segments } = event;
-                merge_remote(note, segments, revision);
-            }
-        };
-        // The meeting: fourteen seconds of audio arriving in real time.
-        while written < audio.len() {
-            let due = (started.elapsed().as_millis() as usize * 16).min(audio.len());
-            if due > written {
-                mic.append(&audio[written..due]);
-                written = due;
-            }
-            pump(&mut note, &mut live, &mut gap_seen, &mut ended);
-            if healed_at.is_none() && gap_seen {
-                let gap = server.state.lock().unwrap().gaps[0];
-                if covered(&note, gap.0 as i64, gap.1 as i64) {
-                    healed_at = Some(started.elapsed());
-                }
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        // What was true while the meeting was still being recorded.
-        let (gap, sent_before_stop) = {
-            let state = server.state.lock().unwrap();
-            assert_eq!(state.gaps.len(), 1, "one gap: {:?}", state.gaps);
-            (state.gaps[0], state.chunks.len())
-        };
-        assert!(gap_seen, "the stream reported the gap");
-        // The socket was cut at 1 s (or a frame later) and came back near
-        // the end of what had been captured by then (half the 2 s resume
-        // window before it), and that was the only skip.
-        assert!((1_000..=1_300).contains(&gap.0) && gap.1 >= 3_000, "gap {gap:?}");
-        let healed_at = healed_at.expect("the gap was filled from a durable part before Stop");
-        assert!(sent_before_stop >= 5, "{sent_before_stop} parts went up during the meeting");
-        // The filled-in text sits where it belongs: the transcript is in
-        // time order with no segment twice.
-        let starts: Vec<i64> = note.server_transcript_segments.iter().map(|s| s.start_ms).collect();
-        assert!(starts.windows(2).all(|pair| pair[0] <= pair[1]), "{starts:?}");
-        assert!(note.server_transcript_segments.iter().any(|s| s.text.starts_with("batch")));
-        // Stop: the capture is finalised, the stream ends, the uploader lets
-        // go, and the serial worker's Stop sends what is left.
-        fixture.finish();
-        note.audio_captures = vec![fixture.manifest.clone()];
-        session.end();
-        parts.stop();
-        let stopped = crate::server::testing::stop_recording(&server.url, &root, &note).expect("Stop");
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while !ended && Instant::now() < deadline {
-            pump(&mut note, &mut live, &mut gap_seen, &mut ended);
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(ended, "the stream ended");
-        let state = server.state.lock().unwrap();
-        // Seven two-second parts, each sent exactly once: the ones that went
-        // up during the meeting were not sent again after Stop.
-        assert_eq!(state.chunks.len(), 7, "{:?}", state.chunks.iter().map(|c| (c.start_ms, c.duration_ms)).collect::<Vec<_>>());
-        assert!(state.puts.values().all(|count| *count == 1), "{:?}", state.puts);
-        assert_eq!(state.conflicts, 0);
-        assert!(state.chunks.iter().all(|chunk| chunk.ready));
-        let mut sequences: Vec<u64> = state.chunks.iter().map(|chunk| chunk.sequence).collect();
-        sequences.sort();
-        assert_eq!(sequences, (0..7).collect::<Vec<u64>>());
-        let mut positions: Vec<(u64, u64)> = state.chunks.iter().map(|c| (c.start_ms, c.duration_ms)).collect();
-        positions.sort();
-        assert_eq!(positions, (0..7).map(|part| (part * 2_000, 2_000)).collect::<Vec<_>>());
-        // Every millisecond of the meeting was transcribed exactly once:
-        // by the stream or from a part, never both and never neither.
-        let mut spans: Vec<(u64, u64)> = state.segments.iter().map(|(_, from, to, _)| (*from, *to)).collect();
-        spans.sort();
-        assert_eq!(spans.first().unwrap().0, 0);
-        assert_eq!(spans.last().unwrap().1, 14_000);
-        for pair in spans.windows(2) {
-            assert_eq!(pair[0].1, pair[1].0, "no hole and no overlap: {spans:?}");
-        }
-        // What the window holds is what the server holds: the same segments,
-        // once each (the note Stop returns is merged like any other read).
-        merge_remote(&mut note, stopped.transcript_segments.clone(), stopped.transcript_revision as u64);
-        let mut here: Vec<&str> = note.server_transcript_segments.iter().map(|s| s.id.as_str()).collect();
-        let mut there: Vec<&str> = state.segments.iter().map(|(id, ..)| id.as_str()).collect();
-        assert_eq!(here.len(), there.len());
-        here.sort();
-        there.sort();
-        here.dedup();
-        assert_eq!(here, there);
-        assert!(live.interim.is_empty());
-        eprintln!(
-            "gap {} to {} ms filled {:.1} s into a 14 s meeting; {sent_before_stop} of 7 parts sent before Stop",
-            gap.0, gap.1, healed_at.as_secs_f32()
-        );
+        live.apply(&mut note, true, finalise("a", 1, segment("a", AudioChannel::Mic, 2, 1_000, "a")), now);
+        let merge = Event::Speakers(vec![SpeakerMerge { from: "mic:n:2".into(), to: "mic:n:1".into() }]);
+        assert_eq!(live.apply(&mut note, true, merge, now), Applied::Speakers);
+        assert_eq!(note.server_transcript_segments[0].speaker_id, "mic:n:1");
+        assert_eq!(note.server_transcript_segments[0].speaker_label.as_deref(), Some("Me"));
+        // Other voices in the room, and on system audio, as the server
+        // names them.
+        let merge = Event::Speakers(vec![SpeakerMerge { from: "mic:n:1".into(), to: "mic:n:3".into() }]);
+        live.apply(&mut note, true, merge, now);
+        assert_eq!(note.server_transcript_segments[0].speaker_label.as_deref(), Some("Room speaker 2"));
+        assert_eq!(speaker_label_of("system:n:4").as_deref(), Some("Speaker 4"));
+        assert_eq!(speaker_label_of("mic:n:0"), None);
+        assert_eq!(speaker_label_of("mic:3f1c:speaker_1"), None);
     }
 
     #[test]
@@ -1820,5 +1526,99 @@ mod tests {
         // A stream that is finishing does not ask at all.
         live.apply(&mut note, false, Event::Revision(99), now);
         assert!(!live.resync_due(&note, now + RESYNC_AFTER * 3));
+    }
+
+    #[test]
+    fn a_skipped_stretch_is_kept_with_the_note_and_said_until_another_recording() {
+        use meeting_notes_api_types::TranscriptGapDTO;
+        let mut note = Note { id: 7, ..Note::default() };
+        let mut live = live(&note);
+        let now = Instant::now();
+        let gap = |from_ms, to_ms| Event::Gap { channel: Channel::Mic, from_ms, to_ms };
+        assert_eq!(live.apply(&mut note, true, gap(723_000, 730_000), now), Applied::Gap);
+        // The server says the skip the stream made: one stretch.
+        live.apply(&mut note, true, gap(723_000, 730_000), now);
+        let stretch = TranscriptGapDTO { channel: AudioChannel::Mic, from_ms: 723_000, to_ms: 730_000 };
+        assert_eq!(note.transcript_gaps, [stretch.clone()]);
+        // Said for as long as this recording's state is shown, not for 8 s.
+        let said = |live: &LiveTranscript, at: Duration| live.status_of(7, now + at).map(|status| status.text.to_string());
+        assert_eq!(said(&live, Duration::from_secs(3_600)).as_deref(), Some("Couldn't transcribe 12:03–12:10"));
+        // While nothing reaches the server, that is said first, with where
+        // the audio is.
+        live.apply(&mut note, true, Event::Status(Phase::Reconnecting, 0), now);
+        assert_eq!(said(&live, Duration::from_secs(2)).as_deref(), Some("Reconnecting · audio is saved on this Mac"));
+        live.apply(&mut note, true, Event::Status(Phase::ProviderUnavailable, 0), now);
+        assert_eq!(said(&live, Duration::ZERO).as_deref(), Some("Live transcript unavailable · audio is saved on this Mac"));
+        live.apply(&mut note, true, Event::Status(Phase::Live, 0), now);
+        assert_eq!(said(&live, Duration::ZERO).as_deref(), Some("Couldn't transcribe 12:03–12:10"));
+        // A short stretch is kept but not said; one that touches the last is
+        // joined to it.
+        live.apply(&mut note, true, gap(731_000, 731_400), now);
+        live.apply(&mut note, true, gap(730_000, 735_000), now);
+        assert_eq!(said(&live, Duration::ZERO).as_deref(), Some("Couldn't transcribe 12:03–12:15"));
+        assert_eq!(note.transcript_gaps, [TranscriptGapDTO { to_ms: 735_000, ..stretch }]);
+        // Another recording starts afresh; the note keeps its stretch.
+        live.begin(8);
+        assert_eq!(said(&live, Duration::ZERO), None);
+        assert_eq!(note.transcript_gaps.len(), 1);
+    }
+
+    #[test]
+    fn relabels_move_stored_segments_to_the_speaker_the_server_names() {
+        let mut note = Note { id: 7, ..Note::default() };
+        let mut live = live(&note);
+        let now = Instant::now();
+        live.apply(&mut note, true, finalise("a", 1, segment("a", AudioChannel::Mic, 1, 1_000, "Hello.")), now);
+        live.apply(&mut note, true, finalise("b", 2, segment("b", AudioChannel::Mic, 1, 3_000, "Hi.")), now);
+        let relabel = Event::Relabels(vec![SpeakerRelabel {
+            segment_id: "b".into(),
+            speaker_id: "mic:n:2".into(),
+            speaker_label: "Room speaker 1".into(),
+        }]);
+        assert_eq!(live.apply(&mut note, true, relabel.clone(), now), Applied::Speakers);
+        assert_eq!(note.server_transcript_segments[0].speaker_id, "mic:n:1");
+        assert_eq!(note.server_transcript_segments[1].speaker_id, "mic:n:2");
+        assert_eq!(note.server_transcript_segments[1].speaker_label.as_deref(), Some("Room speaker 1"));
+        assert!(note.transcript.contains("Room speaker 1  00:03\nHi."), "{}", note.transcript);
+        // Said again: nothing changes.
+        assert_eq!(live.apply(&mut note, true, relabel, now), Applied::Nothing);
+    }
+
+    #[test]
+    fn the_stop_waits_for_every_capture_to_be_delivered() {
+        let manifest = |id: &str| crate::audio::CaptureManifest {
+            version: 1,
+            capture_id: id.into(),
+            note_id: 7,
+            directory: "/x".into(),
+            manifest_path: "/x/manifest.json".into(),
+            started_at: "2026-11-16T10:00:00Z".into(),
+            finished_at: None,
+            stats: Default::default(),
+            error: None,
+        };
+        let mut note = Note {
+            id: 7,
+            audio_captures: vec![manifest("one"), manifest("two"), manifest("three")],
+            live_pending: vec!["one".into(), "three".into()],
+            pending_stop: Some(PendingStop::Generate),
+            ..Note::default()
+        };
+        let owed: Vec<_> = undelivered_captures(&note).into_iter().map(|capture| capture.capture_id).collect();
+        assert_eq!(owed, ["one", "three"]);
+        assert_eq!(stop_due(&note, false), None);
+        note.live_pending.clear();
+        assert_eq!(stop_due(&note, true), None, "a stream still owes the server");
+        assert_eq!(stop_due(&note, false), Some(PendingStop::Generate));
+        note.pending_stop = None;
+        assert_eq!(stop_due(&note, false), None);
+        // What a quit leaves on disk is read back as it was.
+        note.pending_stop = Some(PendingStop::Stop);
+        note.live_pending = vec!["two".into()];
+        let saved: serde_json::Value = serde_json::to_value(&note).unwrap();
+        assert_eq!((saved["pendingStop"].as_str(), saved["livePending"][0].as_str()), (Some("stop"), Some("two")));
+        let read: Note = serde_json::from_value(saved).unwrap();
+        assert_eq!((read.pending_stop, read.live_pending), (Some(PendingStop::Stop), vec!["two".to_string()]));
+        assert!(note.has_unsent_work());
     }
 }

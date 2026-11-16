@@ -37,8 +37,6 @@ pub struct NoteSummaryDTO {
 
     pub excerpt: String,
 
-    pub folders: Vec<NoteFolderRefDTO>,
-
     pub generated_revision: Option<i64>,
 
     pub generation_state: GenerationState,
@@ -83,13 +81,6 @@ pub struct NoteAttendeeDTO {
     pub name: String,
 
     pub short_name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct NoteFolderRefDTO {
-    pub id: String,
-
-    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -193,6 +184,9 @@ pub struct ModelCatalogInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+
     pub provider: Id,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -207,6 +201,9 @@ pub enum Id {
     Elevenlabs,
 
     Openai,
+
+    #[serde(rename = "openai_compatible")]
+    OpenaiCompatible,
 
     Openrouter,
 }
@@ -239,8 +236,6 @@ pub enum Capability {
 
     #[serde(rename = "live_transcription")]
     LiveTranscription,
-
-    Transcription,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -261,6 +256,9 @@ pub enum LanguageModelSelectionProvider {
     Anthropic,
 
     Openai,
+
+    #[serde(rename = "openai_compatible")]
+    OpenaiCompatible,
 
     Openrouter,
 }
@@ -854,11 +852,13 @@ pub struct AdminSettingsDTO {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live_max_sessions: Option<i64>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub live_transcription_model: Option<LiveTranscriptionModelSelection>,
+    pub live_transcription_model: LiveTranscriptionModelSelection,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub onboarding: Option<OnboardingDTO>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_ai_compatible: Option<OpenAiCompatibleSettingsDTO>,
 
     pub open_router_configured: bool,
 
@@ -871,8 +871,6 @@ pub struct AdminSettingsDTO {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage: Option<StorageSettingsDTO>,
-
-    pub transcription_model: TranscriptionModelSelection,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unused_environment: Option<Vec<String>>,
@@ -939,8 +937,21 @@ pub struct OnboardingStepsDTO {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenAiCompatibleSettingsDTO {
+    pub api_key_hint: Option<String>,
+
+    pub api_key_set: bool,
+
+    pub base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderStatusDTO {
     pub configured: bool,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 
     pub id: Id,
 
@@ -955,6 +966,9 @@ pub struct SignInSettingsDTO {
     pub google: bool,
 
     pub google_client_id: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub google_client_secret_hint: Option<String>,
 
     pub google_client_secret_set: bool,
 
@@ -983,6 +997,9 @@ pub struct StorageSettingsDTO {
 
     pub region: Option<String>,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret_access_key_hint: Option<String>,
+
     pub secret_access_key_set: bool,
 
     pub source: StorageSettingsDtoSource,
@@ -1004,21 +1021,6 @@ pub enum StorageSettingsDtoSource {
     Environment,
 
     Stored,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TranscriptionModelSelection {
-    pub model: String,
-
-    pub provider: TranscriptionModelSelectionProvider,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TranscriptionModelSelectionProvider {
-    Elevenlabs,
-
-    Openai,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1067,6 +1069,12 @@ pub struct UpdateAdminSettingsInput {
     pub open_ai_api_key: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_ai_compatible_api_key: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_ai_compatible_base_url: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub open_router_api_key: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1074,9 +1082,6 @@ pub struct UpdateAdminSettingsInput {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage: Option<UpdateStorageSettingsInput>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcription_model: Option<TranscriptionModelSelection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1233,58 +1238,6 @@ pub struct CalendarEventDTO {
     pub time_zone: Option<String>,
 
     pub title: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UploadAudioChunkInput {
-    pub audio_base64: String,
-
-    pub channel: AudioChannel,
-
-    pub sequence: i64,
-
-    pub start_ms: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AudioChannel {
-    Mic,
-
-    System,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AudioChunkDTO {
-    pub channel: AudioChannel,
-
-    pub duration_ms: i64,
-
-    pub error: Option<String>,
-
-    pub id: String,
-
-    pub note_id: String,
-
-    pub sequence: i64,
-
-    pub start_ms: i64,
-
-    pub state: AudioChunkState,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AudioChunkState {
-    Failed,
-
-    Processing,
-
-    Queued,
-
-    Ready,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1448,6 +1401,17 @@ pub struct EvidenceRequestDTO {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceStreamEventDTO {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<EvidenceDTO>,
+
+    pub text: String,
+
+    #[serde(rename = "type")]
+    pub evidence_stream_event_dto_type: EvidenceStreamEventDtoType,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EvidenceDTO {
     pub quotes: Vec<EvidenceQuoteDTO>,
@@ -1467,6 +1431,16 @@ pub struct EvidenceQuoteDTO {
     pub start_ms: i64,
 
     pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceStreamEventDtoType {
+    Delta,
+
+    Done,
+
+    Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1508,6 +1482,14 @@ pub struct TranscriptSegmentDTO {
     pub start_ms: i64,
 
     pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioChannel {
+    Mic,
+
+    System,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1600,11 +1582,24 @@ pub struct NoteDTO {
 
     pub title: String,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcript_gaps: Option<Vec<TranscriptGapDTO>>,
+
     pub transcript_revision: i64,
 
     pub transcript_segments: Vec<TranscriptSegmentDTO>,
 
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptGapDTO {
+    pub channel: AudioChannel,
+
+    pub from_ms: i64,
+
+    pub to_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2092,6 +2087,9 @@ pub enum LiveFinalMessageType {
 pub struct LiveSpeakersMessage {
     pub merges: Vec<LiveSpeakerMerge>,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relabels: Option<Vec<LiveSpeakerRelabel>>,
+
     #[serde(rename = "type")]
     pub live_speakers_message_type: LiveSpeakersMessageType,
 }
@@ -2107,6 +2105,16 @@ pub struct LiveSpeakerMerge {
     pub from: String,
 
     pub to: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveSpeakerRelabel {
+    pub segment_id: String,
+
+    pub speaker_id: String,
+
+    pub speaker_label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2215,4 +2223,185 @@ pub enum LiveErrorCode {
 #[serde(rename_all = "snake_case")]
 pub enum LiveErrorMessageType {
     Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatThreadDTO {
+    pub created_at: String,
+
+    pub id: String,
+
+    pub messages: Vec<ChatThreadMessageDTO>,
+
+    pub note_id: Option<String>,
+
+    pub title: Option<String>,
+
+    pub title_source: Option<ChatThreadTitleSource>,
+
+    pub turn_count: i64,
+
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatThreadMessageDTO {
+    pub citations: Vec<ChatCitationDTO>,
+
+    pub content: String,
+
+    pub created_at: String,
+
+    pub elapsed_ms: Option<i64>,
+
+    pub error: Option<String>,
+
+    pub id: String,
+
+    pub model: Option<String>,
+
+    pub role: ChatMessageDtoRole,
+
+    pub status: ChatThreadMessageStatus,
+
+    pub tools: Vec<ChatToolProgressDTO>,
+
+    pub turn: i64,
+
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatThreadMessageStatus {
+    Complete,
+
+    Failed,
+
+    Interrupted,
+
+    Streaming,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatThreadTitleSource {
+    Generated,
+
+    Question,
+
+    User,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatThreadsPageDTO {
+    pub next_cursor: Option<String>,
+
+    pub threads: Vec<ChatThreadSummaryDTO>,
+
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatThreadSummaryDTO {
+    pub created_at: String,
+
+    pub id: String,
+
+    pub note_id: Option<String>,
+
+    pub title: Option<String>,
+
+    pub title_source: Option<ChatThreadTitleSource>,
+
+    pub turn_count: i64,
+
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateChatThreadInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note_id: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppendChatTurnInput {
+    pub answer: ChatTurnAnswerInput,
+
+    pub question: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replace: Option<bool>,
+
+    pub turn: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatTurnAnswerInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub citations: Option<Vec<ChatCitationDTO>>,
+
+    pub content: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<i64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    pub status: ChatTurnAnswerStatus,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ChatToolProgressDTO>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatTurnAnswerStatus {
+    Complete,
+
+    Failed,
+
+    Interrupted,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateChatThreadInput {
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatThreadStreamInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_sources: Option<bool>,
+
+    pub message: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replace: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_zone: Option<String>,
+
+    pub turn: i64,
 }

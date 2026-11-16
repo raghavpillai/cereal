@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { X } from 'lucide-react'
 import { AdminClientError } from '../../lib/client-error'
 
 export function Notice({ children, error = false }: { children: ReactNode; error?: boolean }) {
@@ -85,7 +86,7 @@ export function Modal({ title, busy, children, close }: { title: string; busy: b
   }, [])
   useLayoutEffect(() => { const element = dialog.current; return () => { if (element) fadeOutCopy(element) } }, [])
   return <dialog ref={dialog} className="admin-dialog" aria-label={title} onCancel={event => { event.preventDefault(); if (!busy) close() }}>
-    <div className="admin-dialog-title"><h2>{title}</h2><button type="button" className="icon-button" aria-label={`Close ${title.toLowerCase()}`} disabled={busy} onClick={close}>×</button></div>
+    <div className="admin-dialog-title"><h2>{title}</h2><button type="button" className="icon-button" aria-label={`Close ${title.toLowerCase()}`} disabled={busy} onClick={close}><X aria-hidden="true" /></button></div>
     {children}
   </dialog>
 }

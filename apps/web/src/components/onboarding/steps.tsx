@@ -1,8 +1,9 @@
 /** The left side of each setup step: its fields. The flow (onboarding.tsx) owns what is typed, what was
  * checked and what Continue does; these only draw the inputs and report changes. */
 import { useRef, useState, type ReactNode } from 'react'
-import type { AdminSettingsDTO, AIProvider, LanguageModelSelection, LiveTranscriptionModelSelection, StorageTestDTO, TranscriptionModelSelection } from '@meeting-notes/contracts'
-import { addAllowedEmails, bucketReady, defaultLiveModel, providerNames, type SignInDraft, type StorageDraft } from '../../lib/instance-settings'
+import type { AdminSettingsDTO, AIProvider, LanguageModelSelection, LiveTranscriptionModelSelection, StorageTestDTO } from '@meeting-notes/contracts'
+import { compatibleBaseUrlProblem } from '@meeting-notes/contracts/compatible'
+import { addAllowedEmails, bucketReady, plausibleModelId, providerNames, teamDomain, withTeamDomain, type SignInDraft, type StorageDraft } from '../../lib/instance-settings'
 import { macDetails, type Downloads } from '../../lib/downloads'
 import { googleRedirectAddresses, LANGUAGE_PROVIDERS, PROVIDER_HINTS, type LanguageProvider, type ModelsDraft, type SignInMethod } from '../../lib/onboarding'
 import { ModelPicker, type CatalogState } from '../admin/settings-panel'
@@ -97,38 +98,76 @@ export function NameFields({ name, logo, change, problem }: { name: string; logo
 }
 
 /* ── 3 and 4. A provider key, checked as it is pasted ────────────────────── */
-function KeyField({ provider, value, change, check, saved }: { provider: AIProvider; value: string; change: (key: string) => void; check: KeyCheck; saved: boolean }) {
+function KeyField({ provider, value, change, check, saved, savedText }: { provider: AIProvider; value: string; change: (key: string) => void; check: KeyCheck; saved: boolean
+  /** How the saved key reads: "sk-or-v1-…a1b2 is saved. Type a new key to replace it". */ savedText?: string | null }) {
   const hints = PROVIDER_HINTS[provider as LanguageProvider | 'elevenlabs']
   const hint: ReactNode = check.state === 'connected'
     ? <span className="onb-connected">Connected{check.count ? ` · ${check.count} ${check.count === 1 ? 'model' : 'models'} available` : saved && !value ? ' · key saved' : ''}</span>
     : check.state === 'checking' ? `Checking with ${providerNames[provider]}…`
     : <>Encrypted on your server and never shown again. <a href={hints.keysUrl} target="_blank" rel="noopener noreferrer">Get a key</a></>
   return <Field label={`${providerNames[provider]} API key`} type="password" name={`${provider}-key`} autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={1000}
-    value={value} onChange={event => change(event.target.value)} placeholder={saved ? 'Leave blank to keep the saved key' : hints.keyHint}
+    value={value} onChange={event => change(event.target.value)} placeholder={saved ? savedText ?? 'Leave blank to keep the saved key' : hints.keyHint}
     state={keyFieldState(check)} problem={check.state === 'failed' ? check.message : null} hint={hint} />
 }
-export function LanguageFields({ provider, keyValue, change, check, saved }: {
-  provider: LanguageProvider; keyValue: string; change: (next: { provider?: LanguageProvider; key?: string }) => void; check: KeyCheck; saved: (provider: AIProvider) => boolean
+/** What the OpenAI-compatible server said when asked for its models. */
+export type CompatibleCheck = { state: 'idle' | 'checking' | 'connected' | 'failed'; models: readonly string[]; message?: string
+  /** Asks the server now, without waiting for the typing to settle: leaving the address or key field, or Enter. */
+  commit?: () => void }
+export interface CompatibleDraft { baseUrl: string; model: string }
+export function LanguageFields({ provider, keyValue, change, check, saved, savedText, compatible, compatibleCheck, compatibleKeyText }: {
+  provider: LanguageProvider; keyValue: string; change: (next: { provider?: LanguageProvider; key?: string; baseUrl?: string; model?: string }) => void; check: KeyCheck; saved: (provider: AIProvider) => boolean
+  savedText: (provider: AIProvider) => string | null
+  compatible: CompatibleDraft; compatibleCheck: CompatibleCheck; /** How its saved key reads, when one is saved. */ compatibleKeyText: string | null
 }) {
   return <div className="onb-fields">
-    <div className="onb-choices is-three" role="radiogroup" aria-label="Provider for notes and chat">
+    <div className="onb-choices is-four" role="radiogroup" aria-label="Provider for notes and chat">
       {LANGUAGE_PROVIDERS.map(id => <Choice key={id} name="language-provider" value={id} checked={provider === id} onChange={() => change({ provider: id, key: '' })}
         title={providerNames[id]} detail={PROVIDER_HINTS[id].blurb} icon={<ProviderLogo provider={id} />} />)}
     </div>
-    <KeyField key={provider} provider={provider} value={keyValue} change={key => change({ key })} check={check} saved={saved(provider)} />
+    {provider === 'openai_compatible'
+      ? <CompatibleFields key={provider} draft={compatible} keyValue={keyValue} check={compatibleCheck} keyText={compatibleKeyText} change={change} />
+      : <KeyField key={provider} provider={provider} value={keyValue} change={key => change({ key })} check={check} saved={saved(provider)} savedText={savedText(provider)} />}
   </div>
 }
-export function SpeechFields({ keyValue, change, check, saved }: { keyValue: string; change: (key: string) => void; check: KeyCheck; saved: boolean }) {
+/** An OpenAI-compatible server: where its API starts, a key if it wants one, and the model to use. The model list
+ * comes from the server; when it lists nothing (or cannot be reached yet) the name can be typed. */
+function CompatibleFields({ draft, keyValue, check, keyText, change }: { draft: CompatibleDraft; keyValue: string; check: CompatibleCheck; keyText: string | null; change: (next: { key?: string; baseUrl?: string; model?: string }) => void }) {
+  const urlProblem = draft.baseUrl.trim() ? compatibleBaseUrlProblem(draft.baseUrl) : null
+  const modelProblem = draft.model.trim() && !plausibleModelId(draft.model) ? 'A model name is letters, digits and . _ : / - only, as the server writes it.' : null
+  const listed = check.models.length
+  const addressHint: ReactNode = check.state === 'connected'
+    ? <span className="onb-connected">Connected{` · ${listed} ${listed === 1 ? 'model' : 'models'} available`}</span>
+    : check.state === 'checking' ? 'Asking the server for its models…'
+    : 'Where its API starts. Requests go to …/chat/completions and …/models there.'
+  const modelHint = listed ? `Pick one of the ${listed} it lists, or type a name.`
+    : check.state === 'connected' || check.state === 'failed' ? 'Type the model name the server uses. Continue tries it once before saving.'
+    : 'Fills in once the server lists its models. You can also type one.'
+  return <>
+    <Field label="Server address" name="compatible-base-url" type="url" inputMode="url" autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={2048} placeholder="http://localhost:11434/v1"
+      value={draft.baseUrl} onChange={event => change({ baseUrl: event.target.value })} onBlur={() => check.commit?.()}
+      // Enter asks the server first; once it has answered, Enter continues as usual.
+      onKeyDown={event => { if (event.key === 'Enter' && check.state !== 'connected' && check.state !== 'failed' && !urlProblem && draft.baseUrl.trim()) { event.preventDefault(); check.commit?.() } }}
+      problem={urlProblem ?? (check.state === 'failed' ? check.message : null)}
+      state={check.state === 'connected' ? 'good' : check.state === 'checking' ? 'checking' : 'idle'} hint={addressHint} />
+    <Field label="API key (optional)" type="password" name="compatible-key" autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={1000}
+      value={keyValue} onChange={event => change({ key: event.target.value })} onBlur={() => check.commit?.()} placeholder={keyText ?? 'Leave blank if the server needs none'}
+      hint="Ollama and LM Studio need none. A key is encrypted on your server and never shown again." />
+    <Field label="Model" name="compatible-model" list="onb-compatible-models" autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={150} placeholder="llama3.2:3b"
+      value={draft.model} onChange={event => change({ model: event.target.value })} problem={modelProblem} hint={modelHint} />
+    <datalist id="onb-compatible-models">{check.models.map(id => <option key={id} value={id} />)}</datalist>
+  </>
+}
+export function SpeechFields({ keyValue, change, check, saved, savedText }: { keyValue: string; change: (key: string) => void; check: KeyCheck; saved: boolean; savedText: string | null }) {
   return <div className="onb-fields">
-    <div className="onb-provider-line"><span className="onb-choice-icon" aria-hidden="true"><ProviderLogo provider="elevenlabs" /></span><span><strong>ElevenLabs Scribe</strong><small>Transcripts with speaker labels, live while you record</small></span></div>
-    <KeyField provider="elevenlabs" value={keyValue} change={change} check={check} saved={saved} />
+    <div className="onb-provider-line"><span className="onb-choice-icon" aria-hidden="true"><ProviderLogo provider="elevenlabs" /></span><span><strong>ElevenLabs Scribe Live</strong><small>{PROVIDER_HINTS.elevenlabs.blurb}</small></span></div>
+    <KeyField provider="elevenlabs" value={keyValue} change={change} check={check} saved={saved} savedText={savedText} />
   </div>
 }
 
 /* ── 5. Models ───────────────────────────────────────────────────────────── */
-export function ModelFields({ draft, change, catalogs, available, load, settings }: {
+export function ModelFields({ draft, change, catalogs, available, load }: {
   draft: ModelsDraft | null; change: (next: ModelsDraft) => void; catalogs: Partial<Record<AIProvider, CatalogState>>
-  available: (provider: AIProvider) => boolean; load: (provider: AIProvider, refresh?: boolean) => Promise<void>; settings: AdminSettingsDTO
+  available: (provider: AIProvider) => boolean; load: (provider: AIProvider, refresh?: boolean) => Promise<void>
 }) {
   if (!draft) return <div className="onb-fields"><p className="onb-quiet" role="status"><span className="spinner" aria-hidden="true" />Loading the models your keys can use…</p></div>
   const row = (label: string, help: string, picker: ReactNode) => <div className="onb-model-row"><span className="onb-model-label"><strong>{label}</strong><small>{help}</small></span>{picker}</div>
@@ -136,14 +175,8 @@ export function ModelFields({ draft, change, catalogs, available, load, settings
   return <div className="onb-fields onb-models instance-settings">
     {row('Chat', 'Answers questions about your meetings', <ModelPicker value={draft.chat} kind="language" catalogs={catalogs} available={available} load={load} label="Chat model" change={model => change({ ...draft, chat: model as LanguageModelSelection })} />)}
     {row('Meeting notes', 'Writes the notes after a meeting', <ModelPicker value={draft.notes} kind="language" catalogs={catalogs} available={available} load={load} label="Meeting notes model" change={model => change({ ...draft, notes: model as LanguageModelSelection })} />)}
-    {row('Speech to text', 'Turns recordings into transcripts', <ModelPicker value={draft.speech} kind="transcription" catalogs={catalogs} available={available} load={load} label="Speech-to-text model" change={model => change({ ...draft, speech: model as TranscriptionModelSelection })} />)}
-    <div className="onb-model-row">
-      <span className="onb-model-label"><strong>Live transcription</strong><small>Shows the words while a meeting is recorded</small></span>
-      <div className="onb-live">
-        <Switch checked={draft.live !== null} onChange={on => change({ ...draft, live: on ? settings.liveTranscriptionModel ?? defaultLiveModel : null })} label={draft.live ? 'On' : 'Off'} />
-        {draft.live && <ModelPicker value={draft.live} kind="live_transcription" catalogs={catalogs} available={available} load={load} label="Live transcription model" change={model => change({ ...draft, live: model as LiveTranscriptionModelSelection })} />}
-      </div>
-    </div>
+    {/* Transcription is live and always on; the only choice is which live model. */}
+    {row('Live transcription', 'Shows the words while a meeting is recorded', <ModelPicker value={draft.live} kind="live_transcription" catalogs={catalogs} available={available} load={load} label="Live transcription model" change={model => change({ ...draft, live: model as LiveTranscriptionModelSelection })} />)}
   </div>
 }
 
@@ -155,9 +188,12 @@ export function SignInFields({ draft, change, owner }: { draft: SignInDraft; cha
     setEntryProblem(result.problem)
     if (!result.problem) { change({ ...draft, allowedEmails: result.list }); setEntry('') }
   }
+  const domain = teamDomain(owner)
   return <div className="onb-fields">
+    {domain && <div className="onb-field is-switch"><Switch checked={draft.allowedEmails.includes('@' + domain)} onChange={on => change({ ...draft, allowedEmails: withTeamDomain(draft.allowedEmails, domain, on) })}
+      label={`Anyone at ${domain} can join`} hint={`Any ${domain} Google Workspace account gets in on its first sign-in. Someone whose personal Google account uses an address at ${domain} needs their own entry.`} /></div>}
     <div className="onb-field">
-      <label htmlFor="onb-allowed">Email address or domain</label>
+      <label htmlFor="onb-allowed">{domain ? 'Other email addresses or domains' : 'Email address or domain'}</label>
       <div className="onb-add">
         <input id="onb-allowed" className="input" type="text" inputMode="email" autoComplete="off" autoCapitalize="none" spellCheck={false} placeholder="someone@example.com or @example.com" value={entry}
           aria-invalid={entryProblem ? true : undefined} aria-describedby={entryProblem ? 'onb-allowed-problem' : 'onb-allowed-hint'}
@@ -194,7 +230,7 @@ export function StorageFields({ draft, change, saved, test, runTest, problem }: 
       {text('Endpoint', 'endpoint', 'Leave blank for Amazon S3', 2048)}
       <div className="onb-pair">
         {text('Access key ID', 'accessKeyId', '', 128)}
-        <Field label="Secret access key" type="password" name="storage-secret" autoComplete="off" maxLength={512} placeholder={saved.secretAccessKeySet ? 'Leave blank to keep it' : ''} value={draft.secretAccessKey} onChange={event => change({ secretAccessKey: event.target.value })} />
+        <Field label="Secret access key" type="password" name="storage-secret" autoComplete="off" maxLength={512} placeholder={saved.secretAccessKeySet ? `${saved.secretAccessKeyHint ?? 'A secret'} is saved. Type a new one to replace it` : ''} value={draft.secretAccessKey} onChange={event => change({ secretAccessKey: event.target.value })} />
       </div>
       <div className="onb-pair">{text('Folder prefix (optional)', 'prefix', 'cereal/', 200)}<div className="onb-field is-switch"><Switch checked={draft.forcePathStyle} onChange={forcePathStyle => change({ forcePathStyle })} label="Path-style addresses" hint="MinIO and most self-hosted stores" /></div></div>
     </div></div>

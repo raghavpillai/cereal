@@ -41,7 +41,6 @@ export const mcpScopeDescriptions: Record<string, { label: string; detail: strin
   'profile:read': { label: 'Read your profile', detail: 'See your name and profile information.' },
   'account:read': { label: 'Read account and workspaces', detail: 'See your account and the workspaces you belong to.' },
   'notes:write': { label: 'Change notes', detail: 'Create and update your meeting notes.', write: true },
-  'folders:write': { label: 'Manage folders', detail: 'Create folders and organize your notes.', write: true },
   'account:write': { label: 'Switch your active workspace', detail: 'Change the active workspace for your account, including other connected clients.', write: true },
   offline_access: { label: 'Stay connected', detail: 'Keep access until you disconnect this app.' },
 }

@@ -30,7 +30,8 @@ SOFTWARE.
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* flags: microphone=1, system output=2. macOS 14.2+. All paths UTF-8.
+/* flags: microphone=1, system output=2, levels only (no files)=4, voice isolation
+ * on the microphone=8. macOS 14.2+. All paths UTF-8.
  * start returns immediately; inspect independent channel states through poll.
  * JSON methods return required bytes INCLUDING NUL; insufficient buffers are left empty.
  * stop is synchronous, idempotent, cancels startup, drains writers, and keeps final stats.

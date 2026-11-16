@@ -13,7 +13,7 @@ import { makeWebHandler } from "./static"
 import { appleAppSiteAssociation, makeLinkPreviews } from "./app-links"
 import { DOWNLOAD_FILES_PATH, makeDownloads } from "./downloads"
 import { readAppVersion } from "./version"
-import { audioKey, makeStorage } from "./storage"
+import { makeStorage } from "./storage"
 import {Effect} from "effect"
 import {createMcpStore} from "./mcp-store"
 import {createMcpToolExecutor} from "./mcp-tools"
@@ -22,7 +22,8 @@ import {MCP_PATH,LEGACY_MCP_PATH} from "./mcp-auth"
 import {makeLiveHub} from "./live/hub"
 import {makeLiveEndpoint,type LiveConnection} from "./live/route"
 import {makeLiveTranscriberResolver} from "./live/configuration"
-import {makeNoteVoiceMatcher} from "./live/voices"
+import {chatTitler,makeChatsService,makePrismaChatStore} from "./chats"
+import {transcriptLinkLine} from "./transcript-link"
 
 const databaseUrl = process.env.DATABASE_URL
 const adminToken = process.env.ADMIN_API_TOKEN
@@ -31,9 +32,10 @@ if (!databaseUrl || !adminToken || adminToken.length < 32 || adminToken.startsWi
 }
 const port = Number(process.env.PORT ?? 3000)
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid PORT")
-const { repository, database, ready, close } = makePrismaRepository(databaseUrl)
-const secretBox = await loadSecretBox(process.env.SETTINGS_KEY_FILE ?? resolve(process.env.AUDIO_STORAGE_DIR ?? ".local/audio", "../state/settings.key"))
 const publicBaseURL = process.env.PUBLIC_BASE_URL ?? "http://localhost:" + port
+// Generated notes end with a link to chat with the meeting's transcript on this server's public address.
+const { repository, database, ready, close } = makePrismaRepository(databaseUrl, { transcriptLink: noteId => transcriptLinkLine(publicBaseURL, noteId) })
+const secretBox = await loadSecretBox(process.env.SETTINGS_KEY_FILE ?? resolve(process.env.AUDIO_STORAGE_DIR ?? ".local/audio", "../state/settings.key"))
 const administration = makeAdministrationService(makePrismaCalendarStore(database), secretBox, { worker: true, baseURL: publicBaseURL })
 // Settings that used to come from the environment (provider keys, default models, live limits, the iPhone app's
 // identifiers) are made on the admin panel. An existing deployment's values are taken into the database once,
@@ -47,16 +49,14 @@ const refreshLiveLimits = async () => { try { const limits = await administratio
 await refreshLiveLimits()
 setInterval(() => void refreshLiveLimits(), 5000).unref()
 const providers = settingsAwareProviders(administration)
-// Recorded audio and published app builds: on local disk (these two directories) or in an S3-compatible bucket,
+// Audio parts of older recordings (removed with their note; new recordings keep no audio on the server) and published app builds: on local disk (these two directories) or in an S3-compatible bucket,
 // as the admin panel says. The setting is read for every operation, so a change needs no restart.
 const audioDir = resolve(process.env.AUDIO_STORAGE_DIR ?? ".local/audio")
 const storage = makeStorage({ audioDir, downloadsDir: process.env.DOWNLOADS_DIR || "/data/downloads", configuration: () => administration.storageConfiguration() })
 // The hold is how long a note's provider sessions are kept after Stop so a Resume keeps its speaker labels
 // (0 turns it off). A held session is billed for keep-alive audio only but occupies one of the provider's
-// concurrent sessions per channel. After the hold, voices are told apart from the note's stored audio by
-// the batch recogniser (live/voices.ts).
-const liveHub = makeLiveHub(repository, { limits: () => liveLimits,
-  voices: makeNoteVoiceMatcher(repository, providers.transcribe, audioDir, (noteId, hash) => storage.audio.bytes(audioKey(noteId, hash))) })
+// concurrent sessions per channel. After the hold, voices carry over as live/speakers.ts describes.
+const liveHub = makeLiveHub(repository, { limits: () => liveLimits })
 const processing = makeProcessingService(repository, { providers, live: liveHub, storage, storageDir: audioDir })
 const authSecret=process.env.BETTER_AUTH_SECRET || await loadAuthenticationSecret(resolve(process.env.SETTINGS_KEY_FILE ?? resolve(process.env.AUDIO_STORAGE_DIR ?? ".local/audio", "../state/settings.key"), "../auth.key"))
 // Tests only: a stand-in for Google's sign-in endpoints. Refused unless both it and this server are loopback HTTP,
@@ -84,7 +84,9 @@ const appVersion = readAppVersion()
 /** The iPhone app's App Store ID as the admin panel has it now. */
 const appStoreId = async () => (await administration.apps()).iosAppStoreId
 const downloads = makeDownloads({ directory: process.env.DOWNLOADS_DIR || "/data/downloads", version: appVersion, iosAppStoreId: appStoreId, storage: storage.downloads })
-const api = makeApiHandler(repository, adminToken, { processing, administration, authentication, google, mcpStore, noteParticipants:makeNoteParticipantsService(database), downloads, storage })
+// Saved conversations, per person; a thread is named by the same model request that names an untitled meeting.
+const chats = makeChatsService(makePrismaChatStore(database), { title: chatTitler(providers.title) })
+const api = makeApiHandler(repository, adminToken, { processing, administration, authentication, google, mcpStore, noteParticipants:makeNoteParticipantsService(database), downloads, storage, chats })
 const web = makeWebHandler(process.env.WEB_DIST ?? resolve(import.meta.dir, "../../web/dist/client"), { head: makeLinkPreviews({ origin: new URL(publicBaseURL).origin, iosAppStoreId: appStoreId }) })
 const live = makeLiveEndpoint({ repository, hub: liveHub, resolvePrincipal: headers => authentication.resolve(headers), isTrustedOrigin: origin => authentication.isTrustedOrigin(origin), transcriber: makeLiveTranscriberResolver(administration) })
 const server = Bun.serve<LiveConnection>({

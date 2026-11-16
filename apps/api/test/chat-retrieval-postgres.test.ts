@@ -34,7 +34,7 @@ describe.skipIf(!enabled)("bounded owner-scoped Prisma meeting retrieval",()=>{
   })
   test("forged model read IDs cannot escape scope or supply citation metadata",async()=>{
     let round=0
-    const providers:ProviderServices={transcribe:()=>Effect.succeed([]),generate:()=>Effect.succeed(""),chat:()=>Effect.succeed(""),async chatToolStep(){return round++===0?[{id:"forged",name:"get_meetings",arguments:JSON.stringify({noteIds:[privateId]})}]:[]}}
+    const providers:ProviderServices={generate:()=>Effect.succeed(""),chat:()=>Effect.succeed(""),async chatToolStep(){return round++===0?[{id:"forged",name:"get_meetings",arguments:JSON.stringify({noteIds:[privateId]})}]:[]}}
     const prepared=await prepareMeetingChat({noteId:null,input:{message:"Cedar to-dos",history:[],includeSources:true},repository:a!,providers,enrich:async note=>note,signal:new AbortController().signal,emit:()=>{}})
     expect(JSON.stringify(prepared)).not.toContain("FOREIGN_POSTGRES_SENTINEL")
     expect(prepared.citations.some(c=>c.noteId===privateId)).toBe(false)

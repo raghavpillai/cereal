@@ -13,7 +13,7 @@ describe.skipIf(!enabled)("citation validity through the scoped Prisma repositor
   const resources=enabled?makePrismaRepository(process.env.DATABASE_URL!):null,db=resources?.database
   const alice=crypto.randomUUID(),bob=crypto.randomUUID(),one=crypto.randomUUID(),two=crypto.randomUUID()
   const inOne=resources?.repository.forUser(alice,one),inTwo=resources?.repository.forUser(alice,two),bobInOne=resources?.repository.forUser(bob,one)
-  const silent:ProviderServices={transcribe:()=>Effect.succeed([]),generate:()=>Effect.succeed(""),chat:()=>Effect.succeed("")}
+  const silent:ProviderServices={generate:()=>Effect.succeed(""),chat:()=>Effect.succeed("")}
   const signal=()=>new AbortController().signal
   const segment=(text:string,startMs:number)=>({id:crypto.randomUUID(),channel:"mic" as const,speakerId:"mic:fixture:speaker_1",speakerLabel:"Speaker 1",text,isFinal:true,startMs,endMs:startMs+4000})
   const spoken=[segment("The berth fee is three hundred a night.",0),segment("We booked the crane for Tuesday.",6000),segment("Ines will confirm the harbour pilot by Friday.",12000)]

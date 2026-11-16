@@ -1,16 +1,19 @@
 import { Effect, Schema } from "effect"
 import { createDatabase, type Database } from "@meeting-notes/database"
 import { NoteDTO, SharedNoteDTO, type ShareDTO, type CreateNoteInput } from "@meeting-notes/contracts"
-import { BOOTSTRAP_OWNER_ID, RepositoryError, scopeRepository, transcriptContentKey, withoutPlaceholderTitle, type ImportNoteCommand, type ImportNoteResult, type NotesRepositoryService, type StoredShare, type StoredAudioChunk } from "./repository"
+import { BOOTSTRAP_OWNER_ID, RepositoryError, scopeRepository, transcriptContentKey, withoutPlaceholderTitle, type ImportNoteCommand, type ImportNoteResult, type NotesRepositoryService, type RepositoryOptions, type StoredShare, } from "./repository"
+import {SUMMARY_TEXT_SQL,rehomedTranscriptLink,withTranscriptLink} from "./transcript-link"
 import {IMPORT_TRANSACTION_MS,clampCreatedAt,importedSegmentId,matchesStamp} from "./note-import"
 import {isDefaultNoteTitle} from "./meeting-context-errors"
 import {meetingSearchTerms,transcriptPassage} from "./meeting-search"
 import {DEFAULT_ORGANIZATION_ID} from "./organizations"
-import {makePrismaLiveRepository,replaceLiveWithin} from "./live/prisma-repository"
+import {makePrismaLiveRepository} from "./live/prisma-repository"
+import {visibleGaps} from "./live/repository"
 import {makePrismaNoteSummaries} from "./note-summaries-store"
 
 type DbNote = Awaited<ReturnType<Database["note"]["findMany"]>>[number] & {
   transcriptSegments?: ReadonlyArray<{ id: string; channel: "mic" | "system"; speakerId: string; speakerLabel: string | null; text: string; isFinal: boolean; startMs: number; endMs: number | null }>
+  liveGaps?: ReadonlyArray<{ channel: "mic" | "system"; fromMs: number; toMs: number }>
 }
 export const noteDTO = (note: DbNote): NoteDTO => Schema.decodeUnknownSync(NoteDTO)({
   id: note.id, title: note.title, body: note.body, enhanced: note.enhanced, date: note.date.toISOString().slice(0, 10), duration: note.duration,
@@ -18,19 +21,20 @@ export const noteDTO = (note: DbNote): NoteDTO => Schema.decodeUnknownSync(NoteD
   recordingState: note.recordingState, generationState: note.generationState, transcriptRevision: note.transcriptRevision, generatedRevision: note.generatedRevision,
   // Only a note that was imported says so: every other note reads exactly as it did before the field existed.
   ...(note.importedAt ? { importedAt: note.importedAt.toISOString() } : {}),
+  ...(note.liveGaps?.length && visibleGaps(note.liveGaps).length ? { transcriptGaps: visibleGaps(note.liveGaps) } : {}),
 })
 type DbShare = Awaited<ReturnType<Database["sharedNote"]["findMany"]>>[number]
 const shareDTO = (share: DbShare): ShareDTO => ({ id: share.id, noteId: share.noteId, createdAt: share.createdAt.toISOString(), expiresAt: share.expiresAt?.toISOString() ?? null, revokedAt: share.revokedAt?.toISOString() ?? null })
 const storedShare = (share: DbShare): StoredShare => ({ metadata: shareDTO(share), tokenHash: share.tokenHash, snapshot: Schema.decodeUnknownSync(SharedNoteDTO)(share.snapshot) })
-const include = { transcriptSegments: { orderBy: { startMs: "asc" as const } } }
+const include = { transcriptSegments: { orderBy: { startMs: "asc" as const } }, liveGaps: { select: { channel: true, fromMs: true, toMs: true } } }
 const attempt = <A>(operation: string, task: () => Promise<A>) => Effect.tryPromise({ try: task, catch: () => new RepositoryError(operation) })
 
-type DbAudioChunk = Awaited<ReturnType<Database["audioChunk"]["findMany"]>>[number]
-const chunkDTO = (c: DbAudioChunk): StoredAudioChunk => ({id:c.id,noteId:c.noteId,channel:c.channel,sequence:c.sequence,startMs:c.startMs,durationMs:c.durationMs,hash:c.hash,state:c.state as StoredAudioChunk["state"],error:c.error,lease:c.lease,leaseUntil:c.leaseUntil?.toISOString()??null,resolution:c.resolution as StoredAudioChunk["resolution"]})
 
 /** Prisma remains behind the Effect repository boundary; generated entities never cross the API. */
-export function makePrismaRepository(databaseUrl: string) {
+export function makePrismaRepository(databaseUrl: string, options: RepositoryOptions = {}) {
   const db = createDatabase(databaseUrl)
+  // A note moved from another server with its chat link unedited: the link points here (transcript-link.ts).
+  const rehomed = (id: string, enhanced: string) => { const moved = rehomedTranscriptLink(id, enhanced, options.transcriptLink?.(id) ?? null); return { enhanced: moved.enhanced, transcriptLink: moved.remembered } }
   // A new note follows the user's selected workspace, without widening the
   // existing native API's private owner boundary. Validate membership afresh.
   const workspaceFor = async (ownerId: string, organizationId: string | undefined, operation: string): Promise<string | null> => {
@@ -67,7 +71,7 @@ export function makePrismaRepository(databaseUrl: string) {
       return await db.$transaction(async tx => {
         const row = await tx.note.create({ data: {
           id, ownerId, organizationId: organization,
-          title: input.title, body: input.body, enhanced: input.enhanced, date: new Date(`${input.date}T00:00:00.000Z`), duration: input.duration,
+          title: input.title, body: input.body, ...rehomed(id, input.enhanced), date: new Date(`${input.date}T00:00:00.000Z`), duration: input.duration,
           createdAt: clampCreatedAt(input.createdAt, now), updatedAt: now, importedAt: now, importDigest: digest,
           recordingState: input.recordingState, generationState: input.generated ? "ready" : "idle", transcriptRevision, generatedRevision,
         } })
@@ -101,8 +105,10 @@ export function makePrismaRepository(databaseUrl: string) {
       listNotes: () => attempt("listNotes", async () => (await db.note.findMany({ where: { ownerId: userId,...(organizationId?{organizationId}:{}) }, include, orderBy: { updatedAt: "desc" } })).map(noteDTO)),
       searchNotes: input => attempt("searchNotes",async()=>{
         const terms=meetingSearchTerms(input.query)
+        // The generated notes are searched without their chat link line (transcript-link.ts), which Prisma cannot express.
+        const summarized=terms.length?(await db.$queryRawUnsafe<Array<{id:string}>>(`SELECT n."id" FROM "Note" n WHERE n."ownerId"=$1::uuid${organizationId?` AND n."organizationId"=$2::uuid`:""} AND (${terms.map((_,at)=>`strpos(lower(${SUMMARY_TEXT_SQL("n")}),lower($${at+(organizationId?3:2)}::text))>0`).join(" OR ")})`,userId,...(organizationId?[organizationId]:[]),...terms)).map(row=>row.id):[]
         const rows=await db.note.findMany({where:{ownerId:userId,...(organizationId?{organizationId}:{}),...(input.from||input.to?{date:{...(input.from?{gte:new Date(input.from+"T00:00:00Z")}:{}),...(input.to?{lte:new Date(input.to+"T00:00:00Z")}:{})}}:{}),
-          ...(terms.length?{OR:terms.flatMap(term=>[{title:{contains:term,mode:"insensitive" as const}},{body:{contains:term,mode:"insensitive" as const}},{enhanced:{contains:term,mode:"insensitive" as const}},{transcriptSegments:{some:{text:{contains:term,mode:"insensitive" as const}}}}])}:{})},
+          ...(terms.length?{OR:[...terms.flatMap(term=>[{title:{contains:term,mode:"insensitive" as const}},{body:{contains:term,mode:"insensitive" as const}},{transcriptSegments:{some:{text:{contains:term,mode:"insensitive" as const}}}}]),...(summarized.length?[{id:{in:summarized}}]:[])]}:{})},
           orderBy:[{date:"desc"},{updatedAt:"desc"}],take:Math.max(1,Math.min(20,input.limit))})
         // Search returns bounded metadata; a separate scoped read retrieves the
         // transcript only for selected meetings. No global transcript concatenation.
@@ -125,49 +131,19 @@ export function makePrismaRepository(databaseUrl: string) {
       const n=await tx.note.findUnique({where:{id},include});if(!n || command==="start"&&n.recordingState==="stopped" || command==="resume"&&n.recordingState==="idle")return null
       return noteDTO(await tx.note.update({where:{id},data:{...(command!=="stop"?{generationRun:null,...(n.generationState==="writing_notes"?{generationState:"idle"}:{})}:{}),recordingState:command==="stop"?"stopped":"recording"},include}))
     })),
-    listAudioChunks: noteId => attempt("listAudioChunks", async()=> (await db.audioChunk.findMany({where:{noteId},orderBy:[{sequence:"asc"},{channel:"asc"}]})).map(chunkDTO)),
-    putAudioChunk: chunk => attempt("putAudioChunk",()=>db.$transaction(async tx=>{
-      await tx.$queryRaw`SELECT "id" FROM "Note" WHERE "id" = ${chunk.noteId}::uuid FOR UPDATE`
-      if(!await tx.note.findUnique({where:{id:chunk.noteId}}))return null
-      const c=await tx.audioChunk.findFirst({where:{OR:[{id:chunk.id},{noteId:chunk.noteId,channel:chunk.channel,sequence:chunk.sequence}]}})
-      if(c)return c.id===chunk.id&&c.hash===chunk.hash&&c.noteId===chunk.noteId&&c.channel===chunk.channel&&c.sequence===chunk.sequence&&c.startMs===chunk.startMs?chunkDTO(c):null
-      await tx.note.updateMany({where:{id:chunk.noteId,generationState:"writing_notes"},data:{generationState:"idle",generationRun:null}})
-      return chunkDTO(await tx.audioChunk.create({data:{id:chunk.id,noteId:chunk.noteId,channel:chunk.channel,sequence:chunk.sequence,startMs:chunk.startMs,durationMs:chunk.durationMs,hash:chunk.hash}}))
-    })),
-    retryAudioChunk: (noteId,id)=>attempt("retryAudioChunk",async()=>{
-      await db.audioChunk.updateMany({where:{id,noteId,state:"failed"},data:{state:"queued",error:null,lease:null,leaseUntil:null}})
-      const c=await db.audioChunk.findFirst({where:{id,noteId}});return c?chunkDTO(c):null
-    }),
-    claimAudioChunk: now=>attempt("claimAudioChunk",()=>db.$transaction(async tx=>{
-      const rows=await tx.$queryRaw<Array<{id:string}>>`SELECT "id" FROM "AudioChunk" WHERE "state"='queued' OR ("state"='processing' AND "leaseUntil" <= ${new Date(now)}) ORDER BY "createdAt" ASC LIMIT 1 FOR UPDATE SKIP LOCKED`
-      const id=rows[0]?.id;if(!id)return null
-      return chunkDTO(await tx.audioChunk.update({where:{id},data:{state:"processing",error:null,lease:crypto.randomUUID(),leaseUntil:new Date(Date.parse(now)+180000)}}))
-    })),
-    finishAudioChunk: (id,lease,segments,error,options)=>attempt("finishAudioChunk",()=>db.$transaction(async tx=>{
-      const initial=await tx.audioChunk.findUnique({where:{id}});if(!initial)return false
-      await tx.$queryRaw`SELECT "id" FROM "Note" WHERE "id" = ${initial.noteId}::uuid FOR UPDATE`
-      const c=await tx.audioChunk.findUnique({where:{id}});if(!c||c.state!=="processing"||c.lease!==lease)return false
-      // Live text inside a part is removed only when the batch result has to stand for the whole part.
-      const removed=error===null&&options?.replaceLive?await replaceLiveWithin(tx,c):0
-      const n=await tx.note.findUnique({where:{id:c.noteId},include});if(!n)return false
-      if(segments.length)await tx.transcriptSegment.createMany({data:segments.map(s=>({...s,noteId:c.noteId}))})
-      await tx.audioChunk.update({where:{id},data:{state:error===null?"ready":"failed",error,lease:null,leaseUntil:null,...(error===null?{resolution:options?.resolution??"batch"}:{})}})
-      const ready=await tx.audioChunk.findMany({where:{noteId:c.noteId,state:"ready"},select:{startMs:true,durationMs:true}})
-      const end=Math.max(0,...ready.map(c=>c.startMs+c.durationMs),...n.transcriptSegments.map(s=>s.endMs??s.startMs),...segments.map(s=>s.endMs??s.startMs))
-      await tx.note.update({where:{id:c.noteId},data:{...(segments.some(s=>s.text.trim())||removed?{transcriptRevision:{increment:1}}:{}),duration:`${Math.floor(end/60000)}:${String(Math.floor(end/1000)%60).padStart(2,"0")}`}})
-      return true
-    })),
     beginGeneration: (id,revision,runId)=>attempt("beginGeneration",()=>db.$transaction(async tx=>{
       await tx.$queryRaw`SELECT "id" FROM "Note" WHERE "id" = ${id}::uuid FOR UPDATE`
-      const n=await tx.note.findUnique({where:{id},include});if(!n||n.transcriptRevision!==revision||n.recordingState==="recording"||(["analyzing_transcript","writing_notes"].includes(n.generationState)&&n.updatedAt.getTime()>Date.now()-180000)||await tx.audioChunk.count({where:{noteId:id,state:{not:"ready"}}}))return null
+      const n=await tx.note.findUnique({where:{id},include});if(!n||n.transcriptRevision!==revision||n.recordingState==="recording"||(["analyzing_transcript","writing_notes"].includes(n.generationState)&&n.updatedAt.getTime()>Date.now()-180000))return null
       return noteDTO(await tx.note.update({where:{id},data:{generationState:"writing_notes",generationRun:runId},include}))
     })),
     finishGeneration: (id,revision,runId,enhanced,title)=>attempt("finishGeneration",()=>db.$transaction(async tx=>{
       await tx.$queryRaw`SELECT "id" FROM "Note" WHERE "id" = ${id}::uuid FOR UPDATE`
       const n=await tx.note.findUnique({where:{id},include});if(!n||n.generationRun!==runId)return null
-      if(n.transcriptRevision!==revision||n.recordingState==="recording"||await tx.audioChunk.count({where:{noteId:id,state:{not:"ready"}}})){await tx.note.update({where:{id},data:{generationState:"idle",generationRun:null}});return null}
+      if(n.transcriptRevision!==revision||n.recordingState==="recording"){await tx.note.update({where:{id},data:{generationState:"idle",generationRun:null}});return null}
       // The row is locked: `n.title` is the title as it is now. One the person or a calendar event has given the note is kept.
-      return noteDTO(await tx.note.update({where:{id},data:{generationRun:null,generationState:enhanced===null?"failed":"ready",...(enhanced===null?{}:{enhanced,generatedRevision:revision,...(title&&isDefaultNoteTitle(n.title)?{title}:{})})},include}))
+      // The same holds for `n.enhanced`: the notes about to be replaced, where the chat link line is looked for.
+      const linked=enhanced===null?null:withTranscriptLink({noteId:id,generated:enhanced,previous:n.enhanced,remembered:n.transcriptLink,line:options.transcriptLink?.(id)??null})
+      return noteDTO(await tx.note.update({where:{id},data:{generationRun:null,generationState:enhanced===null?"failed":"ready",...(linked===null?{}:{enhanced:linked.enhanced,transcriptLink:linked.remembered,generatedRevision:revision,...(title&&isDefaultNoteTitle(n.title)?{title}:{})})},include}))
     })),
 
     listNotes: () => attempt("listNotes", async () => (await db.note.findMany({ include, orderBy: { updatedAt: "desc" } })).map(noteDTO)),
@@ -193,16 +169,14 @@ export function makePrismaRepository(databaseUrl: string) {
     })),
     deleteNote: (id) => attempt("deleteNote", async () => (await db.note.deleteMany({ where: { id } })).count > 0),
     importNote: command => importNoteForUser(BOOTSTRAP_OWNER_ID, command),
-    // The row lock is the one every write to a note takes (edits, recording commands, new audio parts,
+    // The row lock is the one every write to a note takes (edits, recording commands, live text,
     // generation), so nothing can change between the comparison and the delete.
     deleteNoteIf: (id, preconditions) => attempt("deleteNoteIf", () => db.$transaction(async tx => {
       await tx.$queryRaw`SELECT "id" FROM "Note" WHERE "id" = ${id}::uuid FOR UPDATE`
       const note = await tx.note.findUnique({ where: { id }, select: { updatedAt: true, transcriptRevision: true, generatedRevision: true, recordingState: true } })
       if (!note) return "missing" as const
-      const parts = await tx.audioChunk.findMany({ where: { noteId: id }, select: { state: true } })
-      if (note.recordingState === "recording" || parts.some(part => part.state !== "ready")
-        || preconditions.stamp && !matchesStamp(preconditions.stamp, { updatedAt: note.updatedAt.getTime(), transcriptRevision: note.transcriptRevision, generatedRevision: note.generatedRevision })
-        || preconditions.chunks !== undefined && preconditions.chunks !== parts.length) return "conflict" as const
+      if (note.recordingState === "recording"
+        || preconditions.stamp && !matchesStamp(preconditions.stamp, { updatedAt: note.updatedAt.getTime(), transcriptRevision: note.transcriptRevision, generatedRevision: note.generatedRevision })) return "conflict" as const
       await tx.note.delete({ where: { id } })
       return "deleted" as const
     })),

@@ -7,7 +7,7 @@ import { calendarDraft, calendarPatch, calendarProblem, eventWindow, formatEvent
 
 const settings: AdminSettingsDTO = {
   instanceLogo: null, providers: [{id:'openrouter',configured:true,source:'environment'},{id:'elevenlabs',configured:true,source:'stored'},{id:'openai',configured:false,source:'none'},{id:'anthropic',configured:false,source:'none'}],
-  chatModels: [{provider:'openrouter',model:'openai/gpt-4o-mini'}], generationModel: {provider:'openrouter',model:'openai/gpt-4o-mini'}, transcriptionModel: {provider:'elevenlabs',model:'scribe_v3'},
+  chatModels: [{provider:'openrouter',model:'openai/gpt-4o-mini'}], generationModel: {provider:'openrouter',model:'openai/gpt-4o-mini'}, liveTranscriptionModel: {provider:'elevenlabs',model:'scribe_v3_live'},
   instanceName: 'Cereal', languageModel: 'openai/gpt-4o-mini', openRouterConfigured: true, elevenLabsConfigured: true,
   openRouterSource: 'environment', elevenLabsSource: 'stored', calendarRefreshMinutes: 15, calendarLookAheadDays: 14, updatedAt: null,
 }

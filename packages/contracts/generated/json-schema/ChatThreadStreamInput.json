@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/ChatThreadStreamInput",
+  "$defs": {
+    "ChatThreadStreamInput": {
+      "type": "object",
+      "properties": {
+        "turn": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0,
+          "exclusiveMaximum": 500
+        },
+        "replace": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "includeSources": {
+          "type": "boolean"
+        },
+        "timeZone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "model": {
+          "type": "string",
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "turn",
+        "message"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

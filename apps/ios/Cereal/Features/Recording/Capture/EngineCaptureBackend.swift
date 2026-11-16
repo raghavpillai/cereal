@@ -60,14 +60,11 @@ final class MicrophoneInput: CaptureInput {
 }
 
 /// The capture path: one input tap feeds a pipeline that writes one continuous
-/// capture file. There is no rotation and so nothing to lose at one. Parts for
-/// delivery are cut from the file by sample index while it grows, and the live
-/// stream reads the same file.
+/// capture file. There is no rotation and so nothing to lose at one. The live
+/// stream reads the same file by sample index while it grows.
 @MainActor
 final class EngineCaptureBackend: ContinuousCaptureBackend {
     var onFailure: ((String) -> Void)?
-    var partFrames: Int64?
-    var onPartBoundary: ((Int64) -> Void)?
     private let input: any CaptureInput
     private var pipeline: CapturePipeline?
     private var finalFrames: Int64 = 0
@@ -81,10 +78,7 @@ final class EngineCaptureBackend: ContinuousCaptureBackend {
     func level() -> Float { pipeline?.level ?? 0.12 }
 
     func start(writingTo url: URL) throws {
-        var options = CapturePipeline.Options()
-        options.partFrames = partFrames
-        let pipeline = try CapturePipeline(url: url, options: options,
-            onPartBoundary: { [weak self] frames in Task { @MainActor in self?.onPartBoundary?(frames) } },
+        let pipeline = try CapturePipeline(url: url,
             onFailure: { [weak self] failure in Task { @MainActor in self?.pipelineFailed(failure) } })
         self.pipeline = pipeline
         finalFrames = 0
@@ -146,7 +140,7 @@ final class EngineCaptureBackend: ContinuousCaptureBackend {
 
 #if DEBUG
 /// QA input: plays a WAV file at real-time pace in place of the microphone, so
-/// a simulator run exercises the same pipeline, parts, uploads and live stream
+/// a simulator run exercises the same pipeline and live stream
 /// with known audio. Loops when the file ends. Absent from Release builds.
 @MainActor
 final class FileCaptureInput: CaptureInput {

@@ -11,7 +11,8 @@
             "openrouter",
             "openai",
             "anthropic",
-            "elevenlabs"
+            "elevenlabs",
+            "openai_compatible"
           ]
         },
         "configured": {
@@ -23,6 +24,16 @@
             "environment",
             "stored",
             "none"
+          ]
+        },
+        "hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       },

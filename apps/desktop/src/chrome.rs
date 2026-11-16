@@ -42,7 +42,7 @@ impl MenuKeyboard {
         *self.menu.borrow_mut() = None;
     }
 
-    fn register(
+    pub(crate) fn register(
         &self,
         action: impl Fn(&mut Cereal, &mut Window, &mut Context<Cereal>) + 'static,
     ) -> (usize, MenuRowAction) {
@@ -137,6 +137,24 @@ fn menu_key(key: &str, modified: bool, selected: Option<usize>, count: usize) ->
 }
 
 impl Cereal {
+    /// Open `menu` from its button. A press outside an open menu closes it; when
+    /// that press was on this menu's own button, the click it completes must not
+    /// open the menu again, so the button works as a toggle. Only the click that
+    /// completes that same press is refused, however long it is held: the record
+    /// names the press, and is dropped when the press is released. Returns whether
+    /// it opened.
+    pub(crate) fn open_menu(&mut self, menu: Menu) -> bool {
+        let press = self.press_seq;
+        let just_closed = self
+            .menu_closed_by_press
+            .take()
+            .is_some_and(|(closed, by)| closed == menu && by == press);
+        if !just_closed {
+            self.menu = Some(menu);
+        }
+        !just_closed
+    }
+
     /// Arrow keys move the palette's highlight; Return activates a row the
     /// user has chosen. Everything else (typing, Escape, Return on the
     /// default row) is left to the search field.
@@ -199,6 +217,10 @@ impl Cereal {
             return;
         };
         match command {
+            // A Trash row that is asking keeps the keys: the arrows stay on
+            // it and Return lets go of the question.
+            MenuKey::Select(_) | MenuKey::Activate(_)
+                if self.trash_key_while_asking(matches!(command, MenuKey::Select(_)), cx) => {}
             MenuKey::Select(index) => {
                 self.menu_keyboard.selected = Some(index);
                 cx.notify();
@@ -208,6 +230,11 @@ impl Cereal {
                 if let Some(action) = action {
                     action(self, window, cx);
                 }
+            }
+            // A Trash row asking to delete forever is let go of first.
+            MenuKey::Dismiss if self.menu == Some(Menu::Trash) && self.trash_ask.is_some() => {
+                self.trash_ask = None;
+                cx.notify();
             }
             MenuKey::Dismiss => {
                 self.menu = None;
@@ -288,9 +315,8 @@ impl Cereal {
 
     fn render_workspace_sidebar(&self, cx: &mut Context<Self>) -> Div {
         let t = self.theme();
-        let folders_hover = crate::motion::reveal_key("personal-folders");
         let glide = self.stage.glide("sidebar");
-        let mut spaces = div()
+        let spaces = div()
             .flex()
             .flex_col()
             .px(px(8.))
@@ -313,7 +339,7 @@ impl Cereal {
                     .gap(px(6.))
                     .rounded(px(8.))
                     .text_color(t.secondary)
-                    .cursor_pointer()
+                    .cursor_default()
                     .child(row_feedback(t, 8.))
                     .when(
                         self.screen == Screen::MyNotes && self.current_note.is_none(),
@@ -322,129 +348,7 @@ impl Cereal {
                     .child(self.space_tile("lock-solid"))
                     .child(div().flex_1().min_w_0().truncate().child("My notes"))
                     .reach().on_click(cx.listener(|this, _, _, cx| this.navigate(Screen::MyNotes, cx))),
-            )
-            .child(
-                div()
-                    .id("personal-folders")
-                    .h(px(29.))
-                    .px(px(4.))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .rounded(px(8.))
-                    .text_color(t.secondary)
-                    .cursor_pointer()
-                    .child(row_feedback(t, 8.).reveals(folders_hover))
-                    .reach().on_click(cx.listener(|this, _, _, cx| {
-                        this.folders_open = !this.folders_open;
-                        cx.notify();
-                    }))
-                    // Under the pointer the tile gives way to the disclosure
-                    // chevron, and the add-folder control appears.
-                    .child(
-                        div()
-                            .relative()
-                            .size(px(20.))
-                            .flex_shrink_0()
-                            .child(
-                                crate::motion::conceal(self.space_tile("prompt"), folders_hover)
-                                    .absolute()
-                                    .inset_0(),
-                            )
-                            .child(
-                                div()
-                                    .absolute()
-                                    .inset_0()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .opacity(crate::motion::revealed(folders_hover))
-                                    // One chevron that turns, rather than
-                                    // two glyphs swapped: right when closed.
-                                    .child(
-                                        icon("chevron-down", 12., t.muted).with_transformation(
-                                            Transformation::rotate(percentage(
-                                                self.stage
-                                                    .aim(
-                                                        ("folders-chevron", 0),
-                                                        if self.folders_open { 1. } else { 0.75 },
-                                                        crate::motion::SNAPPY,
-                                                    )
-                                                    .rem_euclid(1.),
-                                            )),
-                                        ),
-                                    ),
-                            ),
-                    )
-                    .child(div().flex_1().min_w_0().truncate().child("My folders"))
-                    .child(
-                        tool_tip("new-folder", "plus", "New folder", t)
-                            .size(px(20.))
-                            .opacity(crate::motion::revealed(folders_hover))
-                            .on_click(cx.listener(|this, _, w, cx| {
-                                cx.stop_propagation();
-                                this.folder_input.update(cx, |input, cx| {
-                                    input.set_content("", cx);
-                                    input.set_placeholder("Name", cx);
-                                });
-                                this.menu = Some(Menu::NewFolder);
-                                this.folder_input.read(cx).focus_handle.focus(w);
-                                cx.notify();
-                            })),
-                    ),
             );
-        // The folder rows unfold beneath "My folders" and fold back into it:
-        // 29 px a row, closing up on the exit curve. At rest they are plain
-        // children, exactly as before.
-        let folders = self
-            .stage
-            .presence(("folders", 0), self.folders_open, crate::motion::SNAPPY);
-        if folders.visible {
-            let mut rows = div().flex().flex_col();
-            for folder in &self.workspace.folders {
-                let id = folder.id;
-                rows =
-                    rows.child(
-                        div()
-                            .id(("folder", id))
-                            .ml(px(18.))
-                            .h(px(29.))
-                            .px(px(6.))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .rounded(px(7.))
-                            .text_color(t.secondary)
-                            .cursor_pointer()
-                            .child(row_feedback(t, 7.))
-                            .when(
-                                self.screen == Screen::Folder(id) && self.current_note.is_none(),
-                                |s| s.child(glide.probe(("folder", id))),
-                            )
-                            .child(icon("folder", 15., t.secondary))
-                            // `min_w_0` lets a long name end in an ellipsis
-                            // instead of being cut mid-glyph.
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .child(folder.name.clone()),
-                            )
-                            .reach().on_click(cx.listener(move |this, _, _, cx| {
-                                this.navigate(Screen::Folder(id), cx)
-                            })),
-                    );
-            }
-            if !folders.at_rest() {
-                let natural = 29. * self.workspace.folders.len() as f32;
-                rows = rows
-                    .h(px(natural * folders.value.clamp(0., 1.)))
-                    .overflow_hidden()
-                    .opacity(folders.fade);
-            }
-            spaces = spaces.child(rows);
-        }
         div()
             .flex_1()
             .min_h_0()
@@ -460,7 +364,7 @@ impl Cereal {
                     .child(self.nav_row("Home", "house", Screen::Home, cx))
                     .child(self.nav_row("Shared with me", "people", Screen::Shared, cx))
                     .child(self.nav_row("Chat", "speech-bubble", Screen::Chat, cx))
-                    .child(self.nav_row("Connect", "connect-grid", Screen::Connect, cx)),
+                    .children(self.render_sidebar_chat_threads(cx)),
             )
             .child(spaces)
             .child(div().flex_1())
@@ -476,8 +380,10 @@ impl Cereal {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .cursor_pointer()
+                    .cursor_default()
                     .child(row_feedback(t, 0.))
+                    // Where it is drawn, for scripted runs that press it.
+                    .child(crate::onboarding_view::place("workspace-switcher"))
                     .child(self.space_tile("prompt"))
                     .child(
                         div()
@@ -489,11 +395,11 @@ impl Cereal {
                     )
                     .child(icon("chevrons", 14., t.muted))
                     .reach().on_click(cx.listener(|this, _, _, cx| {
-                        this.menu = if this.menu == Some(Menu::Workspace) {
-                            None
+                        if this.menu == Some(Menu::Workspace) {
+                            this.menu = None;
                         } else {
-                            Some(Menu::Workspace)
-                        };
+                            this.open_menu(Menu::Workspace);
+                        }
                         cx.notify();
                     })),
             )
@@ -517,8 +423,10 @@ impl Cereal {
             self.footer_tip.is_some() && self.menu.is_none(),
             crate::motion::SNAPPY,
         );
+        // The trash button stays lit while its popover is up.
+        let trash_open = self.visible_menu == Some(Menu::Trash) && !self.menu_exiting;
         let tool =
-            |index: usize, id: &'static str, symbol: &'static str, label: &'static str| {
+            |index: usize, id: &'static str, symbol: &'static str, label: &'static str, lit: bool| {
                 div()
                     .id(id)
                     .relative()
@@ -526,11 +434,14 @@ impl Cereal {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(6.))
+                    .rounded(px(8.))
                     .reach()
-                    .cursor_pointer()
-                    .child(crate::motion::tactile(t.hover).press(t.fill))
-                    .child(icon(symbol, 16., t.secondary))
+                    .cursor_default()
+                    .when(lit, |tool| tool.bg(t.hover))
+                    .child(crate::motion::tactile(t.hover).press(t.fill).radius(8.))
+                    .child(icon(symbol, 16., t.muted))
+                    // Where it is drawn, for scripted runs that press it.
+                    .child(crate::onboarding_view::place(id))
                     // Like every other tooltip, the tip waits before it shows,
                     // so passing over the footer neither flashes a label nor
                     // re-renders the window.
@@ -581,24 +492,137 @@ impl Cereal {
             .items_center()
             .gap(px(1.))
             .child(
-                tool(0, "footer-recipes", "recipe", "Recipes").on_click(cx.listener(
-                    |this, _, window, cx| {
-                        footer_tip_epoch();
-                        this.footer_tip = None;
-                        this.open_recipes_from_sidebar(window, cx);
-                    },
-                )),
-            )
-            .child(
-                tool(1, "footer-shortcuts", "keyboard", "Keyboard shortcuts").on_click(
+                tool(0, "footer-shortcuts", "keyboard", "Keyboard shortcuts", false).on_click(
                     cx.listener(|this, _, _, cx| {
                         footer_tip_epoch();
                         this.footer_tip = None;
-                        this.menu = Some(Menu::Shortcuts);
+                        this.open_menu(Menu::Shortcuts);
                         cx.notify();
                     }),
                 ),
             )
+            .child(
+                tool(1, "footer-trash", "trash", "Trash", trash_open).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        footer_tip_epoch();
+                        this.footer_tip = None;
+                        this.toggle_trash(cx);
+                    },
+                )),
+            )
+    }
+
+    /// Under Chat, while the Chat page is open: its conversations, newest
+    /// first, each with its age; the eighth faded when more follow, and
+    /// "Show N more" to list the rest. They unfold beneath Chat and fold
+    /// back into it, 29 px a row, as the folders do.
+    fn render_sidebar_chat_threads(&self, cx: &mut Context<Self>) -> Option<Div> {
+        const SHOWN: usize = 8;
+        let t = self.theme();
+        let open = self.screen == Screen::Chat && self.current_note.is_none();
+        let threads = self.chat_threads();
+        let pose = self.stage.presence(
+            ("sidebar-chat-threads", 0),
+            open && !threads.is_empty(),
+            crate::motion::SNAPPY,
+        );
+        if !pose.visible {
+            return None;
+        }
+        let listed = if self.chat_threads_expanded {
+            threads.len()
+        } else {
+            threads.len().min(SHOWN)
+        };
+        // Those read but not listed, and those the servers have not sent.
+        let more = threads.len() - listed + self.chat_threads_more();
+        let now = chrono::Utc::now();
+        let count = listed;
+        let accounts: Vec<_> = threads.iter().fold(Vec::new(), |mut accounts, thread| {
+            if !accounts.contains(&thread.account) {
+                accounts.push(thread.account.clone());
+            }
+            accounts
+        });
+        let mut rows = div().flex().flex_col().gap(px(1.));
+        for (index, thread) in threads.into_iter().take(listed).enumerate() {
+            let (id, account) = (thread.id.clone(), thread.account.clone());
+            let key = crate::lazy::key(&thread.id);
+            let shown = self.chat_thread_id == thread.id && !self.chat_messages.is_empty();
+            rows = rows.child(
+                div()
+                    .id(("sidebar-chat-thread", key))
+                    .h(px(28.))
+                    .w_full()
+                    .pl(px(28.))
+                    .pr(px(4.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(8.))
+                    // The conversation on the page reads darker; Chat keeps
+                    // the sidebar's highlight.
+                    .text_color(if shown { t.text } else { t.secondary })
+                    .cursor_default()
+                    // The last row fades out when the list goes on.
+                    .when(more > 0 && index + 1 == count, |row| row.opacity(0.45))
+                    .child(row_feedback(t, 8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(thread.display_title().to_owned()),
+                    )
+                    .children(crate::chat::thread_age(&thread.updated_at, now).map(|age| {
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(12.))
+                            .text_color(t.muted)
+                            .child(age)
+                    }))
+                    .reach()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_chat_thread(&account, &id, true, cx)
+                    })),
+            );
+        }
+        if more > 0 {
+            rows = rows.child(
+                div()
+                    .id("sidebar-chat-threads-more")
+                    .h(px(28.))
+                    .w_full()
+                    .pl(px(16.))
+                    .flex()
+                    .items_center()
+                    .gap(px(7.))
+                    .rounded(px(8.))
+                    .text_color(t.muted)
+                    .cursor_default()
+                    .child(row_feedback(t, 8.))
+                    .child(icon("arrow-down", 12., t.muted))
+                    .child(format!("Show {more} more"))
+                    .reach()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        // All of those read, and the next page from each
+                        // server that has more.
+                        this.chat_threads_expanded = true;
+                        for account in &accounts {
+                            this.load_more_chat_threads(account, cx);
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        if !pose.at_rest() {
+            let natural = 29. * (count + usize::from(more > 0)) as f32;
+            rows = rows
+                .h(px(natural * pose.value.clamp(0., 1.)))
+                .overflow_hidden()
+                .opacity(pose.fade);
+        }
+        Some(rows)
     }
 
     fn nav_row(
@@ -619,7 +643,7 @@ impl Cereal {
             .gap(px(8.))
             .rounded(px(8.))
             .text_color(t.secondary)
-            .cursor_pointer()
+            .cursor_default()
             .child(row_feedback(t, 8.))
             .when(self.screen == screen && self.current_note.is_none(), |s| {
                 s.child(self.stage.glide("sidebar").probe(label))
@@ -666,13 +690,13 @@ impl Cereal {
                     |d| {
                         let options = div().flex().items_center().gap(px(8.)).child(
                             tool_tip("note-options", "more", "Note options", t).on_click(cx.listener(|this, _, window, cx| {
-                                this.focus.focus(window); this.menu = Some(Menu::Note); cx.notify();
+                                this.focus.focus(window); this.open_menu(Menu::Note); cx.notify();
                             }))
                         );
                         d.child(options.when(self.current_note.and_then(|id| self.workspace.note(id)).is_some_and(|note| !note.enhanced.trim().is_empty()), |options| options.child(
                             div().flex().gap(px(1.))
-                                .child(div().id("note-share").h(px(28.)).px(px(11.)).rounded_l(px(14.)).rounded_r(px(4.)).bg(t.text).text_color(t.bg).text_size(px(13.)).flex().items_center().gap(px(5.)).cursor_pointer().map(|d|crate::motion::dims(d,crate::motion::reveal_key("note-share"),0.1)).child(icon("lock-solid",13.,t.bg)).child("Share").reach().on_click(cx.listener(|this,_,window,cx|{this.focus.focus(window);this.menu=Some(Menu::Share);cx.notify();})))
-                                .child(div().id("note-copy-share-link").w(px(30.)).h(px(28.)).rounded_l(px(4.)).rounded_r(px(14.)).bg(t.text).flex().items_center().justify_center().cursor_pointer().map(|d|crate::motion::dims(d,crate::motion::reveal_key("note-copy-share-link"),0.1)).child(icon("link-chain",14.,t.bg)).reach().on_click(cx.listener(|this,_,_,cx|{if let Some(id)=this.current_note { if crate::server::enabled() { this.server_action(id,crate::server::Action::Share,cx); } else { this.show_toast("Connect to your server to share a note",cx); } }})))
+                                .child(div().id("note-share").h(px(28.)).px(px(11.)).rounded_l(px(14.)).rounded_r(px(4.)).bg(t.text).text_color(t.bg).text_size(px(13.)).flex().items_center().gap(px(5.)).cursor_default().map(|d|crate::motion::dims(d,crate::motion::reveal_key("note-share"),0.1)).child(icon("lock-solid",13.,t.bg)).child("Share").reach().on_click(cx.listener(|this,_,window,cx|{this.focus.focus(window);this.menu=Some(Menu::Share);cx.notify();})))
+                                .child(div().id("note-copy-share-link").w(px(30.)).h(px(28.)).rounded_l(px(4.)).rounded_r(px(14.)).bg(t.text).flex().items_center().justify_center().cursor_default().map(|d|crate::motion::dims(d,crate::motion::reveal_key("note-copy-share-link"),0.1)).child(icon("link-chain",14.,t.bg)).reach().on_click(cx.listener(|this,_,_,cx|{if let Some(id)=this.current_note { if crate::server::enabled() { this.server_action(id,crate::server::Action::Share,cx); } else { this.show_toast("Connect to your server to share a note",cx); } }})))
                         )))
                     },
                 );
@@ -729,7 +753,13 @@ impl Cereal {
                         .child("Settings"),
                 )
             })
-            .when_some(header_action(self.screen), |header, action| {
+            // An empty Chat page is already a new chat: its header stays
+            // clear, as in the reference.
+            .when_some(
+                header_action(self.screen).filter(|action| {
+                    *action != HeaderAction::NewChat || !self.chat_messages.is_empty()
+                }),
+                |header, action| {
                 header.child(
                     div().flex().items_center().gap(px(8.)).child(match action {
                         HeaderAction::NewNote => pill("new-note", "New note", "plus-small", t)
@@ -742,7 +772,8 @@ impl Cereal {
                         ),
                     }),
                 )
-            })
+            },
+            )
             .relative()
             .map(|header| {
                 // The pill arrives while a session runs elsewhere and folds
@@ -790,7 +821,7 @@ impl Cereal {
                             .child(crate::motion::tactile(hover).round())
                             .child(crate::recording_view::recording_waveform(
                                 self.recording.audio_level(),
-                                rgb(0xce9d00).into(),
+                                crate::recording_view::WAVEFORM.into(),
                             ))
                             .child(
                                 div()
@@ -827,22 +858,7 @@ impl Cereal {
         let q = self.search.read(cx).content();
         let query = q.trim();
         let notes = self.search_ids(&q);
-        let folders: Vec<PaletteFolder> = self
-            .workspace
-            .folders
-            .iter()
-            .map(|folder| PaletteFolder {
-                id: folder.id,
-                name: folder.name.clone(),
-                notes: self
-                    .workspace
-                    .notes
-                    .iter()
-                    .filter(|note| note.folder_id == Some(folder.id) && !note.trashed)
-                    .count(),
-            })
-            .collect();
-        let sections = palette_sections(query, &folders, &notes);
+        let sections = palette_sections(query, &notes);
         // One highlight shows where Return will go. It starts on the default
         // row, follows the arrow keys and the pointer, and glides between
         // rows; a new query or a closed palette returns it to the default.
@@ -889,7 +905,7 @@ impl Cereal {
                 .items_center()
                 .gap(px(11.))
                 .text_size(px(13.))
-                .cursor_pointer()
+                .cursor_default()
                 // Squash on press; the shared highlight is the hover state.
                 .child(
                     crate::motion::tactile(t.border.opacity(0.))
@@ -955,35 +971,6 @@ impl Cereal {
                             this.focus.focus(window);
                         })),
                     ),
-                    PaletteRow::Folder(index) => {
-                        let folder = &folders[index];
-                        let id = folder.id;
-                        (
-                            row(("palette-folder", id).into())
-                                .child(icon("folder", 16., t.secondary).mr(px(4.)))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .child(folder.name.clone()),
-                                )
-                                .child(detail(format!(
-                                    "{} {}",
-                                    folder.notes,
-                                    if folder.notes == 1 { "note" } else { "notes" }
-                                ))),
-                            Some(Rc::new(
-                                move |this: &mut Self,
-                                      window: &mut Window,
-                                      cx: &mut Context<Self>| {
-                                    this.folders_open = true;
-                                    this.navigate(Screen::Folder(id), cx);
-                                    this.focus.focus(window);
-                                },
-                            ) as MenuRowAction),
-                        )
-                    }
                     PaletteRow::Note(id) => {
                         let Some(note) = self.workspace.note(id) else {
                             continue;
@@ -1040,6 +1027,17 @@ impl Cereal {
                             },
                         ) as MenuRowAction),
                     ),
+                    PaletteRow::Trash => (
+                        row("Trash".into())
+                            .child(icon("trash", 16., t.secondary).mr(px(4.)))
+                            .child(div().flex_1().child("Trash")),
+                        Some(Rc::new(
+                            move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+                                this.focus.focus(window);
+                                this.open_trash(cx);
+                            },
+                        ) as MenuRowAction),
+                    ),
                     PaletteRow::Empty => (
                         div()
                             .id("palette-empty")
@@ -1049,7 +1047,7 @@ impl Cereal {
                             .items_center()
                             .text_size(px(13.))
                             .text_color(t.muted)
-                            .child("No matching folders or meetings"),
+                            .child("No matching meetings"),
                         None,
                     ),
                 };
@@ -1159,12 +1157,21 @@ impl Cereal {
         let mut overlay = div().absolute().inset_0().on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _, w, cx| {
-                this.menu = None;
+                // The press may be on the button that opened this menu: remember it, so
+                // the click it completes closes the menu rather than opening it again.
+                if let Some(closed) = this.menu.take() {
+                    this.menu_closed_by_press = Some((closed, this.press_seq));
+                }
                 this.focus.focus(w);
                 cx.notify();
             }),
         );
         match menu {
+            Menu::Trash => {
+                return overlay
+                    .child(self.render_trash_popover(pose, window, cx))
+                    .into_any_element();
+            }
             Menu::NoteDetails | Menu::CalendarEvent => {
                 let anchors = self.note_metadata_anchors(window);
                 // The event picker unfolds from the details card and folds
@@ -1207,8 +1214,7 @@ impl Cereal {
                     )
                     .into_any_element();
             }
-            Menu::RecordingSettings | Menu::TranscriptionLanguage => {
-                let language = menu == Menu::TranscriptionLanguage;
+            Menu::RecordingSettings => {
                 let viewport_width = f32::from(window.viewport_size().width);
                 let enhanced = self
                     .current_note
@@ -1218,14 +1224,10 @@ impl Cereal {
                     });
                 let panel_width =
                     (viewport_width.min(if enhanced { 682. } else { 672. }) + 8.).min(682.);
-                let popup_width = if language { 220. } else { 272. };
-                let left = recording_popup_left(viewport_width, panel_width, popup_width, language);
-                let panel = if language {
-                    self.transcription_language_settings(cx)
-                } else {
-                    self.recording_settings(cx)
-                };
-                // Both grow upwards out of the transcript footer controls.
+                let popup_width = 272.;
+                let left = recording_popup_left(viewport_width, panel_width, popup_width);
+                let panel = self.recording_settings(cx);
+                // It grows upwards out of the transcript footer controls.
                 return overlay
                     .child(div().absolute().left(px(left)).bottom(px(83.)).child(pop(
                         panel.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
@@ -1278,39 +1280,22 @@ impl Cereal {
                                     .child(small(
                                         match &session {
                                             Some(session) => session.user.email.clone(),
-                                            None if connected => "Sign in to your server".into(),
-                                            None => "Local demo on this Mac".into(),
+                                            None => "Sign in to your server".into(),
                                         },
                                         t,
                                     )),
                             ),
                     )
                     .child(separator(t).my(px(4.)));
-                for (label, symbol, screen) in [
-                    ("Favorites", "star", Screen::Favorites),
-                    ("Trash", "trash", Screen::Trash),
-                ] {
-                    content =
-                        content.child(self.menu_row(label, symbol, cx, move |this, _, cx| {
-                            this.navigate(screen, cx)
-                        }));
-                }
+                // Trash has its own button at the foot of the sidebar.
+                content = content.child(self.menu_row("Favorites", "star", cx, |this, _, cx| {
+                    this.navigate(Screen::Favorites, cx)
+                }));
                 content = content
-                    .child(
-                        self.menu_row("New folder", "folder-plus", cx, |this, w, cx| {
-                            this.folder_input.update(cx, |input, cx| {
-                                input.set_content("", cx);
-                                input.set_placeholder("Name", cx);
-                            });
-                            this.menu = Some(Menu::NewFolder);
-                            this.folder_input.read(cx).focus_handle.focus(w);
-                            cx.notify();
-                        }),
-                    )
                     .child(separator(t).my(px(4.)))
                     .child(
                         self.menu_row("Keyboard shortcuts", "keyboard", cx, |this, _, cx| {
-                            this.menu = Some(Menu::Shortcuts);
+                            this.open_menu(Menu::Shortcuts);
                             cx.notify();
                         }),
                     )
@@ -1351,7 +1336,7 @@ impl Cereal {
                 }
                 let origin = popover_origin(
                     row.at,
-                    size(px(222.), px(4. * 28. + 10.)),
+                    size(px(222.), px(RowAction::ALL.len() as f32 * 28. + 10.)),
                     window.viewport_size(),
                 );
                 // It opens under the pointer, like every native context menu.
@@ -1361,7 +1346,7 @@ impl Cereal {
                     pose,
                 )));
             }
-            Menu::Note | Menu::Share | Menu::MoveTo | Menu::Templates => {
+            Menu::Note | Menu::Share | Menu::Templates => {
                 content = content.w(px(if menu == Menu::Note || menu == Menu::Templates {
                     220.
                 } else {
@@ -1425,7 +1410,7 @@ impl Cereal {
                                             account
                                                 .as_ref()
                                                 .map(|account| account.user.email.clone())
-                                                .unwrap_or_else(|| "Local demo on this Mac".into()),
+                                                .unwrap_or_else(|| "Sign in to your server".into()),
                                             t,
                                         )),
                                 )
@@ -1542,17 +1527,6 @@ impl Cereal {
                             })
                             .h(px(28.)),
                         )
-                        .child(
-                            self.menu_row("Move to folder", "folder", cx, |this, _, cx| {
-                                this.search.update(cx, |input, cx| {
-                                    input.set_content("", cx);
-                                    input.set_placeholder("Search", cx);
-                                });
-                                this.menu = Some(Menu::MoveTo);
-                                cx.notify();
-                            })
-                            .h(px(28.)),
-                        )
                         .child(separator(t))
                         .child(
                             self.danger_row("Move to trash", "trash", cx, |this, _, cx| {
@@ -1561,103 +1535,6 @@ impl Cereal {
                                 }
                             }),
                         );
-                } else if menu == Menu::MoveTo {
-                    let current_folder = self
-                        .menu_note()
-                        .and_then(|id| self.workspace.note(id))
-                        .and_then(|note| note.folder_id);
-                    content = content
-                        .w(px(288.))
-                        .p(px(0.))
-                        .gap(px(0.))
-                        .overflow_hidden()
-                        .text_size(px(13.))
-                        .text_color(t.muted)
-                        .child(
-                            div()
-                                .h(px(38.))
-                                .px(px(12.))
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .text_size(px(13.))
-                                .child(div().flex_1().min_w_0().child(self.search.clone()))
-                                .child(icon("search", 14., t.muted)),
-                        )
-                        .child(separator(t));
-                    content = content.child(
-                        self.menu_row("My notes", "lock", cx, |this, _, cx| {
-                            if let Some(note) =
-                                this.menu_note().and_then(|id| this.workspace.note_mut(id))
-                            {
-                                note.folder_id = None;
-                            }
-                            this.menu = None;
-                            this.persist(cx);
-                        })
-                        .h(px(44.))
-                        .px(px(14.))
-                        .gap(px(13.))
-                        .child(div().flex_1())
-                        .when(
-                            self.menu_note().is_some() && current_folder.is_none(),
-                            |d| d.child(icon("check", 14., t.accent)),
-                        ),
-                    );
-                    let query = self.search.read(cx).content().trim().to_string();
-                    let folded_query = query.to_lowercase();
-                    for folder in self.workspace.folders.iter().filter(|folder| {
-                        folded_query.is_empty()
-                            || folder.name.to_lowercase().contains(&folded_query)
-                    }) {
-                        let id = folder.id;
-                        content = content.child(
-                            self.menu_row(folder.name.clone(), "folder", cx, move |this, _, cx| {
-                                if let Some(note) =
-                                    this.menu_note().and_then(|id| this.workspace.note_mut(id))
-                                {
-                                    note.folder_id = Some(id);
-                                }
-                                this.menu = None;
-                                this.persist(cx);
-                            })
-                            .px(px(14.))
-                            .gap(px(13.))
-                            .child(div().flex_1())
-                            .child(small(
-                                self.workspace
-                                    .notes
-                                    .iter()
-                                    .filter(|note| note.folder_id == Some(id) && !note.trashed)
-                                    .count()
-                                    .to_string(),
-                                t,
-                            ))
-                            .when(current_folder == Some(id), |d| {
-                                d.child(icon("check", 14., t.accent))
-                            }),
-                        );
-                    }
-                    let create_label = if query.is_empty() {
-                        "New folder".into()
-                    } else {
-                        format!("Create \"{query}\"")
-                    };
-                    content = content.child(separator(t)).child(
-                        self.menu_row(create_label, "folder-plus", cx, move |this, window, cx| {
-                            this.folder_input.update(cx, |input, cx| {
-                                input.set_content(query.clone(), cx);
-                                input.set_placeholder("Name", cx);
-                            });
-                            this.menu = Some(Menu::NewFolder);
-                            this.folder_input.read(cx).focus_handle.focus(window);
-                            cx.notify();
-                        })
-                        .h(px(40.))
-                        .px(px(14.))
-                        .gap(px(13.))
-                        .text_color(t.accent),
-                    );
                 } else {
                     let regenerate_menu = self.menu.clone();
                     let regenerate_epoch = self.menu_epoch;
@@ -1780,21 +1657,6 @@ impl Cereal {
                         .when(menu == Menu::Templates, |d| {
                             d.top(px(130.)).left(relative(0.5)).ml(px(-278.))
                         })
-                        .when(menu == Menu::MoveTo, |d| match self.row_menu {
-                            // Opened from a list row: stay where that menu was.
-                            Some(row) => {
-                                let origin = popover_origin(
-                                    row.at,
-                                    size(px(288.), px(260.)),
-                                    window.viewport_size(),
-                                );
-                                d.left(origin.x).top(origin.y)
-                            }
-                            None => {
-                                let anchors = self.note_metadata_anchors(window);
-                                d.top(px(130.)).left(px(anchors.folder_left))
-                            }
-                        })
                         .when(menu == Menu::Share, |d| d.top(px(40.)).right(px(8.)))
                         .when(menu == Menu::Note, |d| {
                             let has_share = self
@@ -1822,9 +1684,7 @@ impl Cereal {
                     .flatten();
                 let (title,description)=match &menu {
                     Menu::Account=>sheet.as_ref().map(|sheet|(sheet.title.clone(),sheet.body.clone())).unwrap_or_default(),
-                    Menu::NewFolder=>("Create folder".to_string(),"Name".to_string()),
-                    Menu::RecordingHelp if crate::server::enabled()=>("Recording a meeting".into(),"Start captures your microphone and computer audio separately. Stop saves the recording and transcribes it without generating notes. Choose Generate notes when you are ready. Resume keeps the same transcript; after you stop again, Regenerate notes includes the new conversation.".into()),
-                    Menu::RecordingHelp=>("Local audio recording".into(),"Start records your microphone and computer audio separately. Stop saves the audio on this Mac. Transcription and generated notes are available when you connect to your server.".into()),
+                    Menu::RecordingHelp=>("Recording a meeting".into(),"Start captures your microphone and computer audio separately. Stop saves the recording and transcribes it without generating notes. Choose Generate notes when you are ready. Resume keeps the same transcript; after you stop again, Regenerate notes includes the new conversation.".into()),
                     Menu::Shortcuts=>("Keyboard shortcuts".into(),"Make yourself at home.".into()),
                     _=>("Cereal".into(),"Native notes, thoughtfully simple.".into()),
                 };
@@ -1832,13 +1692,6 @@ impl Cereal {
                     .w(px(440.))
                     .p(px(24.))
                     .gap(px(16.))
-                    .when(menu == Menu::NewFolder, |d| {
-                        d.w(px(512.))
-                            .max_w(relative(0.9))
-                            .p(px(16.))
-                            .rounded(px(16.))
-                            .bg(t.bg)
-                    })
                     .child(
                         div()
                             .flex()
@@ -1849,13 +1702,6 @@ impl Cereal {
                             .when(menu == Menu::Account, |row| row.items_start().gap(px(12.)))
                             .child(if menu == Menu::Account {
                                 div().flex_1().min_w_0().child(heading(title, t))
-                            } else if menu == Menu::NewFolder {
-                                div()
-                                    .font_family(FONT)
-                                    .text_size(px(16.))
-                                    .line_height(px(20.))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(title)
                             } else {
                                 heading(title, t)
                             })
@@ -1872,86 +1718,9 @@ impl Cereal {
                             .text_size(px(14.))
                             .line_height(px(21.))
                             .text_color(t.muted)
-                            .when(menu == Menu::NewFolder, |d| {
-                                d.text_size(px(13.)).line_height(px(18.)).text_color(t.text)
-                            })
                             .child(description),
                     );
-                if menu == Menu::NewFolder {
-                    let can_create = !self.folder_input.read(cx).content().trim().is_empty();
-                    let focused = self.folder_input.read(cx).focus_handle.is_focused(window);
-                    content =
-                        content
-                            .child(
-                                div()
-                                    .h(px(36.))
-                                    .px(px(4.))
-                                    .bg(t.card)
-                                    .border_1()
-                                    .border_color(if focused { t.accent } else { t.border })
-                                    .rounded(px(6.))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(8.))
-                                    .child(
-                                        div()
-                                            .size(px(26.))
-                                            .rounded(px(5.))
-                                            .bg(t.fill)
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .child(icon("folder", 16., t.muted)),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_size(px(13.))
-                                            .child(self.folder_input.clone()),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(8.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_end()
-                                    .gap(px(8.))
-                                    .child(
-                                        pill("cancel-new-folder", "Cancel", "", t)
-                                            .h(px(28.))
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.menu = None;
-                                                this.focus.focus(window);
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("create-folder")
-                                            .h(px(28.))
-                                            .px(px(14.))
-                                            .rounded_full()
-                                            .flex()
-                                            .items_center()
-                                            .text_size(px(13.))
-                                            .bg(if can_create { t.text } else { t.fill })
-                                            .text_color(if can_create { t.bg } else { t.muted })
-                                            .when(can_create, |d| {
-                                                crate::motion::dims(
-                                                    d.cursor_pointer(),
-                                                    crate::motion::reveal_key("create-folder"),
-                                                    0.14,
-                                                )
-                                                .reach().on_click(cx.listener(|this, _, _, cx| {
-                                                    this.create_folder(cx)
-                                                }))
-                                            })
-                                            .child("Create"),
-                                    ),
-                            );
-                } else if let Some(sheet) = sheet {
+                if let Some(sheet) = sheet {
                     content = content.child(self.account_sheet_actions(&sheet, cx));
                 } else if menu == Menu::Shortcuts {
                     for (label, key) in [
@@ -1980,14 +1749,7 @@ impl Cereal {
                     ));
                 }
                 overlay = overlay
-                    .bg(scrim(
-                        if menu == Menu::NewFolder {
-                            Scrim::Form
-                        } else {
-                            Scrim::Dialog
-                        },
-                        pose.fade,
-                    ))
+                    .bg(scrim(Scrim::Dialog, pose.fade))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -2045,7 +1807,7 @@ impl Cereal {
             .gap(px(8.))
             .text_size(px(13.))
             .rounded(px(6.))
-            .cursor_pointer()
+            .cursor_default()
             .when_some(tint, |d, tint| d.text_color(tint))
             // Squash on press; the shared highlight below is the hover state.
             .child(crate::motion::tactile(t.border.opacity(0.)).press(t.fill))
@@ -2062,13 +1824,7 @@ impl Cereal {
                 row.child(icon(
                     symbol,
                     16.,
-                    tint.unwrap_or(
-                        if symbol == "folder-plus" && self.menu == Some(Menu::MoveTo) {
-                            t.accent
-                        } else {
-                            t.secondary
-                        },
-                    ),
+                    tint.unwrap_or(t.secondary),
                 ))
             })
             .child(label)
@@ -2118,14 +1874,6 @@ impl Cereal {
     }
 }
 
-/// A folder as the palette lists it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PaletteFolder {
-    pub id: u64,
-    pub name: String,
-    pub notes: usize,
-}
-
 /// One row of the command palette.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaletteRow {
@@ -2133,10 +1881,10 @@ pub enum PaletteRow {
     SearchAll {
         count: usize,
     },
-    /// Index into the folders passed to [`palette_sections`].
-    Folder(usize),
     Note(u64),
     Page(Screen, &'static str),
+    /// Trash is not a page: the row opens the sidebar's Trash popover.
+    Trash,
     Empty,
 }
 
@@ -2153,15 +1901,13 @@ pub struct PaletteSection {
     pub rows: Vec<PaletteItem>,
 }
 
-const PALETTE_FOLDERS: usize = 5;
 const PALETTE_NOTES: usize = 8;
-const PALETTE_PAGES: [(Screen, &str); 6] = [
+const PALETTE_PAGES: [(Screen, &str); 5] = [
     (Screen::Home, "Home"),
     (Screen::MyNotes, "My notes"),
     (Screen::Shared, "Shared with me"),
     (Screen::Chat, "Chat"),
     (Screen::Settings, "Settings"),
-    (Screen::Trash, "Trash"),
 ];
 
 /// What the command palette shows for `query`. `notes` are the ids of the
@@ -2171,11 +1917,7 @@ const PALETTE_PAGES: [(Screen, &str); 6] = [
 /// no companies or people here because the workspace has no such records.
 /// The selected row is always the one Return acts on — the full-results row
 /// while typing, otherwise "New note".
-pub fn palette_sections(
-    query: &str,
-    folders: &[PaletteFolder],
-    notes: &[u64],
-) -> Vec<PaletteSection> {
+pub fn palette_sections(query: &str, notes: &[u64]) -> Vec<PaletteSection> {
     let query = query.trim();
     let folded = query.to_lowercase();
     let item = |row| PaletteItem {
@@ -2199,19 +1941,6 @@ pub fn palette_sections(
         caption: None,
         rows: actions,
     });
-    let matching_folders: Vec<_> = folders
-        .iter()
-        .enumerate()
-        .filter(|(_, folder)| folded.is_empty() || folder.name.to_lowercase().contains(&folded))
-        .take(PALETTE_FOLDERS)
-        .map(|(index, _)| item(PaletteRow::Folder(index)))
-        .collect();
-    if !matching_folders.is_empty() {
-        sections.push(PaletteSection {
-            caption: Some("Folders"),
-            rows: matching_folders,
-        });
-    }
     let meetings: Vec<_> = notes
         .iter()
         .take(PALETTE_NOTES)
@@ -2228,6 +1957,7 @@ pub fn palette_sections(
         .iter()
         .filter(|(_, label)| !folded.is_empty() && label.to_lowercase().contains(&folded))
         .map(|(screen, label)| item(PaletteRow::Page(*screen, label)))
+        .chain((!folded.is_empty() && "trash".contains(&folded)).then(|| item(PaletteRow::Trash)))
         .collect();
     if !pages.is_empty() {
         sections.push(PaletteSection {
@@ -2274,11 +2004,8 @@ pub fn screen_icon(screen: Screen) -> &'static str {
         Screen::Shared => "people",
         Screen::Link => "link-chain",
         Screen::Chat => "speech-bubble",
-        Screen::Connect => "connect-grid",
         Screen::MyNotes => "lock-solid",
-        Screen::Folder(_) => "folder",
         Screen::Favorites => "star",
-        Screen::Trash => "trash",
         Screen::Settings => "settings",
         Screen::SearchResults => "search",
         Screen::Home | Screen::Login | Screen::Account | Screen::Welcome => "home",
@@ -2290,7 +2017,7 @@ pub fn screen_icon(screen: Screen) -> &'static str {
 pub fn back_label(screen: Screen, target: Screen) -> Option<BackLabel> {
     match screen {
         Screen::Home | Screen::Login | Screen::Account | Screen::Welcome => None,
-        Screen::MyNotes | Screen::Folder(_) | Screen::Favorites => Some(BackLabel::Text),
+        Screen::MyNotes | Screen::Favorites => Some(BackLabel::Text),
         _ => Some(BackLabel::Icon(screen_icon(target))),
     }
 }
@@ -2338,15 +2065,13 @@ pub struct RowMenu {
 pub enum RowAction {
     CopyLink,
     Share,
-    AddToFolder,
     MoveToTrash,
 }
 
 impl RowAction {
-    pub const ALL: [RowAction; 4] = [
+    pub const ALL: [RowAction; 3] = [
         RowAction::CopyLink,
         RowAction::Share,
-        RowAction::AddToFolder,
         RowAction::MoveToTrash,
     ];
 
@@ -2354,7 +2079,6 @@ impl RowAction {
         match self {
             RowAction::CopyLink => "Copy link",
             RowAction::Share => "Share",
-            RowAction::AddToFolder => "Add to folder",
             RowAction::MoveToTrash => "Move to trash",
         }
     }
@@ -2385,7 +2109,7 @@ pub fn back_pill(id: &'static str, label: BackLabel, t: Theme) -> Stateful<Div> 
     div()
         .id(id)
         .h(px(28.))
-        .min_w(px(44.))
+        .min_w(px(43.))
         .px(px(if label == BackLabel::Text { 8. } else { 0. }))
         .flex()
         .items_center()
@@ -2397,7 +2121,7 @@ pub fn back_pill(id: &'static str, label: BackLabel, t: Theme) -> Stateful<Div> 
         .border_color(t.hairline)
         .text_size(px(13.))
         .text_color(t.secondary)
-        .cursor_pointer()
+        .cursor_default()
         .child(row_feedback(t, 0.).round())
         .child(icon("chevron-left", 10., t.secondary))
         .child(match label {
@@ -2428,19 +2152,6 @@ impl Cereal {
     pub fn open_settings(&mut self, tab: crate::screens::SettingsTab, cx: &mut Context<Self>) {
         self.settings_tab = tab;
         self.navigate(Screen::Settings, cx);
-    }
-
-    pub fn open_recipes_from_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.current_note.is_none() && self.screen != Screen::Chat {
-            self.navigate(Screen::Chat, cx);
-        }
-        self.open_chat_recipes(window, cx);
-    }
-
-    /// The note a note-scoped menu acts on: the row that was right-clicked, or
-    /// the open note.
-    pub fn menu_note(&self) -> Option<u64> {
-        self.row_menu.map(|menu| menu.note).or(self.current_note)
     }
 
     pub fn open_row_menu(&mut self, note: u64, at: Point<Pixels>, cx: &mut Context<Self>) {
@@ -2492,29 +2203,16 @@ impl Cereal {
                 self.menu = Some(Menu::Share);
                 cx.notify();
             }
-            RowAction::AddToFolder => {
-                // The folder picker opens in place, still acting on this row.
-                self.search.update(cx, |input, cx| {
-                    input.set_content("", cx);
-                    input.set_placeholder("Search", cx);
-                });
-                self.menu = Some(Menu::MoveTo);
-                self.search.read(cx).focus_handle.focus(window);
-                cx.notify();
-            }
             RowAction::MoveToTrash => self.trash_note(note, cx),
         }
     }
 }
 
-fn recording_popup_left(
-    viewport_width: f32,
-    panel_width: f32,
-    popup_width: f32,
-    language: bool,
-) -> f32 {
+/// The audio settings button is the last of the transcript footer controls,
+/// inside the footer's 12 px padding: its menu ends where the button does.
+fn recording_popup_left(viewport_width: f32, panel_width: f32, popup_width: f32) -> f32 {
     let panel_right = (viewport_width + panel_width.min(viewport_width)) / 2.;
-    let right_inset = if language { 12. } else { 128. };
+    let right_inset = 12.;
     (panel_right - right_inset - popup_width)
         .clamp(12., (viewport_width - popup_width - 12.).max(12.))
 }
@@ -2525,17 +2223,11 @@ mod recording_popup_tests {
 
     #[test]
     fn footer_menus_follow_the_transcript_controls_when_resizing() {
-        let audio = recording_popup_left(1200., 682., 272., false);
-        let language = recording_popup_left(1200., 682., 220., true);
-        assert_eq!(audio + 272., 813.);
-        assert_eq!(language + 220., 929.);
-        assert_eq!(audio - recording_popup_left(760., 682., 272., false), 220.);
-        assert_eq!(
-            language - recording_popup_left(760., 682., 220., true),
-            220.
-        );
-        assert!(recording_popup_left(360., 360., 272., false) >= 12.);
-        assert!(recording_popup_left(360., 360., 220., true) + 220. <= 348.);
+        let audio = recording_popup_left(1200., 682., 272.);
+        assert_eq!(audio + 272., 929.);
+        assert_eq!(audio - recording_popup_left(760., 682., 272.), 220.);
+        assert!(recording_popup_left(360., 360., 272.) >= 12.);
+        assert!(recording_popup_left(360., 360., 272.) + 272. <= 348.);
     }
 }
 
@@ -2582,22 +2274,6 @@ mod chrome_tests {
     use crate::screens::SettingsTab;
     use std::prelude::v1::test;
 
-    fn folders() -> Vec<PaletteFolder> {
-        [
-            "Team meetings",
-            "Customer conversations",
-            "Ideas & inspiration",
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(index, name)| PaletteFolder {
-            id: index as u64 + 10,
-            name: name.into(),
-            notes: index + 1,
-        })
-        .collect()
-    }
-
     fn rows(sections: &[PaletteSection], caption: Option<&str>) -> Vec<PaletteRow> {
         sections
             .iter()
@@ -2607,19 +2283,11 @@ mod chrome_tests {
     }
 
     #[test]
-    fn empty_palette_offers_new_note_then_folders_then_meetings() {
-        let sections = palette_sections("  ", &folders(), &[4, 7, 9]);
+    fn empty_palette_offers_new_note_then_meetings() {
+        let sections = palette_sections("  ", &[4, 7, 9]);
         let captions: Vec<_> = sections.iter().map(|section| section.caption).collect();
-        assert_eq!(captions, [None, Some("Folders"), Some("Meetings")]);
+        assert_eq!(captions, [None, Some("Meetings")]);
         assert_eq!(rows(&sections, None), [PaletteRow::NewNote]);
-        assert_eq!(
-            rows(&sections, Some("Folders")),
-            [
-                PaletteRow::Folder(0),
-                PaletteRow::Folder(1),
-                PaletteRow::Folder(2)
-            ]
-        );
         // Return makes a new note, so the action row is the selected one.
         let selected: Vec<_> = sections
             .iter()
@@ -2632,10 +2300,9 @@ mod chrome_tests {
 
     #[test]
     fn typed_palette_selects_full_results_and_filters_every_section() {
-        let sections = palette_sections("team", &folders(), &[7]);
+        let sections = palette_sections("team", &[7]);
         assert_eq!(rows(&sections, None), [PaletteRow::SearchAll { count: 1 }]);
         assert!(sections[0].rows[0].selected);
-        assert_eq!(rows(&sections, Some("Folders")), [PaletteRow::Folder(0)]);
         assert_eq!(rows(&sections, Some("Meetings")), [PaletteRow::Note(7)]);
         assert!(
             sections
@@ -2643,52 +2310,49 @@ mod chrome_tests {
                 .all(|section| section.caption != Some("Go to"))
         );
         // Pages appear only once the query names one.
-        let pages = palette_sections("sett", &folders(), &[]);
+        let pages = palette_sections("sett", &[]);
         assert_eq!(
             rows(&pages, Some("Go to")),
             [PaletteRow::Page(Screen::Settings, "Settings")]
         );
+        // Trash is the sidebar's popover, not a page.
+        assert_eq!(rows(&palette_sections("tra", &[]), Some("Go to")), [PaletteRow::Trash]);
     }
 
     #[test]
     fn palette_never_invents_sections_and_caps_long_lists() {
         // No companies or people exist in the workspace, so none are listed.
         for query in ["", "a", "zzz"] {
-            for section in palette_sections(query, &folders(), &[1, 2]) {
+            for section in palette_sections(query, &[1, 2]) {
                 assert!(matches!(
                     section.caption,
-                    None | Some("Folders" | "Meetings" | "Go to")
+                    None | Some("Meetings" | "Go to")
                 ));
                 assert!(!section.rows.is_empty());
             }
         }
         let many: Vec<u64> = (0..40).collect();
-        let sections = palette_sections("", &[], &many);
+        let sections = palette_sections("", &many);
         assert_eq!(rows(&sections, Some("Meetings")).len(), PALETTE_NOTES);
-        assert!(
-            sections
-                .iter()
-                .all(|section| section.caption != Some("Folders"))
-        );
         // Nothing matches: say so rather than showing an empty panel.
-        let none = palette_sections("zzz", &folders(), &[]);
+        let none = palette_sections("zzz", &[]);
         assert_eq!(none.last().unwrap().rows[0].row, PaletteRow::Empty);
         assert_eq!(rows(&none, None)[0], PaletteRow::SearchAll { count: 0 });
     }
 
     #[test]
     fn the_palette_highlight_starts_on_the_row_return_already_acts_on() {
-        // Empty query: New note, five folders at most, then meetings. New
-        // note leads and is the default.
-        let sections = palette_sections("", &folders(), &[4, 5, 6]);
+        // Empty query: New note, then meetings. New note leads and is the
+        // default.
+        let sections = palette_sections("", &[4, 5, 6]);
         let (count, default) = palette_selection(&sections);
         assert_eq!(default, 0);
-        assert_eq!(count, 1 + rows(&sections, Some("Folders")).len() + 3);
+        assert_eq!(count, 1 + 3);
         // Typing: the full-results row leads and is the default.
-        let typed = palette_sections("team", &folders(), &[7]);
+        let typed = palette_sections("team", &[7]);
         assert_eq!(palette_selection(&typed).1, 0);
         // The "nothing matches" line is not a row the arrows can land on.
-        let none = palette_sections("zzz", &folders(), &[]);
+        let none = palette_sections("zzz", &[]);
         assert_eq!(palette_selection(&none), (1, 0));
         // Arrows start from that default and wrap at both ends.
         assert_eq!(
@@ -2706,7 +2370,7 @@ mod chrome_tests {
         let labels: Vec<_> = RowAction::ALL.iter().map(|action| action.label()).collect();
         assert_eq!(
             labels,
-            ["Copy link", "Share", "Add to folder", "Move to trash"]
+            ["Copy link", "Share", "Move to trash"]
         );
         let destructive: Vec<_> = RowAction::ALL
             .into_iter()
@@ -2741,12 +2405,9 @@ mod chrome_tests {
         assert_eq!(header_action(Screen::Chat), Some(HeaderAction::NewChat));
         for screen in [
             Screen::Shared,
-            Screen::Connect,
             Screen::MyNotes,
-            Screen::Folder(3),
             Screen::Favorites,
             Screen::Settings,
-            Screen::Trash,
             Screen::SearchResults,
         ] {
             assert_eq!(header_action(screen), None, "{screen:?}");
@@ -2759,7 +2420,7 @@ mod chrome_tests {
             Some(BackLabel::Text)
         );
         assert_eq!(
-            back_label(Screen::Folder(1), Screen::MyNotes),
+            back_label(Screen::Favorites, Screen::MyNotes),
             Some(BackLabel::Text)
         );
         assert_eq!(
@@ -2797,11 +2458,19 @@ mod chrome_tests {
         record_navigation(&mut trail, Screen::MyNotes, Screen::Home);
         assert!(trail.is_empty());
         // The trail is bounded however long the session runs.
-        for folder in 0..100 {
+        let pages = [
+            Screen::MyNotes,
+            Screen::SearchResults,
+            Screen::Favorites,
+            Screen::Shared,
+            Screen::Chat,
+            Screen::Settings,
+        ];
+        for step in 0..100 {
             record_navigation(
                 &mut trail,
-                Screen::Folder(folder),
-                Screen::Folder(folder + 1),
+                pages[step % pages.len()],
+                pages[(step * 3 + 1) % pages.len()],
             );
         }
         assert!(trail.len() <= 24);

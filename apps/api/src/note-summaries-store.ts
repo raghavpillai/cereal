@@ -8,6 +8,7 @@
  * `note-summaries.ts`; a PostgreSQL test runs both over the same notes.
  */
 import {Schema} from "effect"
+import {SUMMARY_TEXT_SQL} from "./transcript-link"
 import type {Database} from "@meeting-notes/database"
 import {NoteSearchPageDTO,NoteSummariesPageDTO} from "@meeting-notes/contracts"
 import type {NoteSearchField,NoteSummaryDTO} from "@meeting-notes/contracts"
@@ -23,11 +24,13 @@ function statement() {
   const values:unknown[]=[]
   return{values,bind:(value:unknown,type:string)=>{values.push(value);return`$${values.length}::${type}`}}
 }
+/** The generated notes as previews and search read them: without the chat link line (transcript-link.ts). */
+const SUMMARY=SUMMARY_TEXT_SQL("n")
 const like=(text:string)=>`%${text.replace(/[\\%_]/g,"\\$&")}%`
 const HAS_TEXT=String.raw`~ '\S'`
 const SPOKEN=`EXISTS (SELECT 1 FROM "TranscriptSegment" spoken WHERE spoken."noteId"=n."id" AND spoken."text" ${HAS_TEXT})`
 const SUMMARY_COLUMNS=`n."id",n."title",n."date",n."duration",n."createdAt",n."updatedAt",n."recordingState",n."generationState",n."transcriptRevision",n."generatedRevision",n."organizationId",
-  left(n."enhanced",${EXCERPT_SOURCE_CHARACTERS}) AS "enhancedHead",left(n."body",${EXCERPT_SOURCE_CHARACTERS}) AS "bodyHead",
+  left(${SUMMARY},${EXCERPT_SOURCE_CHARACTERS}) AS "enhancedHead",left(n."body",${EXCERPT_SOURCE_CHARACTERS}) AS "bodyHead",
   (n."enhanced" ${HAS_TEXT}) AS "hasSummary",(n."body" ${HAS_TEXT}) AS "hasBody",
   (SELECT count(DISTINCT (voice."channel",voice."speakerId"))::int FROM "TranscriptSegment" voice WHERE voice."noteId"=n."id" AND voice."text" ${HAS_TEXT}) AS "speakerCount",
   context."meeting"`
@@ -38,22 +41,13 @@ const dayOf=(date:Date)=>date.toISOString().slice(0,10)
 export function makePrismaNoteSummaries(db:Database) {
   const scope=(sql:ReturnType<typeof statement>,userId:string,organizationId:string|undefined,filter:NoteListInput["filter"])=>
     `n."ownerId"=${sql.bind(userId,"uuid")}${organizationId?` AND n."organizationId"=${sql.bind(organizationId,"uuid")}`:""}${filter==="summarized"?` AND n."enhanced" ${HAS_TEXT}`:filter==="transcribed"?` AND ${SPOKEN}`:""}`
-  async function folders(userId:string,ids:ReadonlyArray<string>) {
-    const byNote=new Map<string,Array<{id:string;name:string}>>()
-    if(!ids.length)return byNote
-    const rows=await db.$queryRawUnsafe<Array<{noteId:string;id:string;name:string}>>(
-      `SELECT link."noteId",folder."id",folder."name" FROM "MeetingFolderNote" link JOIN "MeetingFolder" folder ON folder."id"=link."folderId" WHERE link."noteId"=ANY($1::uuid[]) AND folder."ownerId"=$2::uuid`,[...ids],userId)
-    for(const row of rows)byNote.set(row.noteId,[...(byNote.get(row.noteId)??[]),{id:row.id,name:row.name}])
-    return byNote
-  }
-  const summaries=async(userId:string,rows:ReadonlyArray<SummaryRow>):Promise<Array<{summary:NoteSummaryDTO;people:string[]}>>=>{
-    const inFolders=await folders(userId,rows.map(row=>row.id))
+  const summaries=(rows:ReadonlyArray<SummaryRow>):Array<{summary:NoteSummaryDTO;people:string[]}>=>{
     return rows.map(row=>{
       const meeting=decodeMeeting(row.meeting)
       return{people:attendeeNames(meeting),summary:noteSummary({id:row.id,title:row.title,date:dayOf(row.date),duration:row.duration,createdAt:row.createdAt.toISOString(),updatedAt:row.updatedAt.toISOString(),
         recordingState:row.recordingState,generationState:row.generationState,transcriptRevision:row.transcriptRevision,generatedRevision:row.generatedRevision,
         hasBody:row.hasBody,hasSummary:row.hasSummary,speakerCount:row.speakerCount,enhanced:row.enhancedHead,body:row.bodyHead,complete:false,
-        meeting,organizationId:row.organizationId,folders:inFolders.get(row.id)??[]})}
+        meeting,organizationId:row.organizationId})}
     })
   }
   // The instant is bound as a Date, the way Prisma binds the ones it writes. Bound as text
@@ -68,7 +62,7 @@ export function makePrismaNoteSummaries(db:Database) {
         db.$queryRawUnsafe<SummaryRow[]>(`SELECT ${SUMMARY_COLUMNS} FROM "Note" n ${CONTEXT_JOIN} WHERE ${scope(page,userId,organizationId,input.filter)}${input.cursor?` AND ${after(page,input.cursor,"n.")}`:""} ORDER BY n."date" DESC,n."createdAt" DESC,n."id" DESC LIMIT ${input.limit+1}`,...page.values),
         db.$queryRawUnsafe<Array<{total:number}>>(`SELECT count(*)::int AS "total" FROM "Note" n WHERE ${scope(count,userId,organizationId,input.filter)}`,...count.values),
       ])
-      const shown=await summaries(userId,rows.slice(0,input.limit)),last=shown[shown.length-1]?.summary
+      const shown=summaries(rows.slice(0,input.limit)),last=shown[shown.length-1]?.summary
       return Schema.decodeUnknownSync(NoteSummariesPageDTO)({notes:shown.map(row=>row.summary),nextCursor:rows.length>input.limit&&last?listCursor(last,input.filter):null,total:total[0]?.total??0})
     },
     async search(userId:string,organizationId:string|undefined,input:NoteSearchInput) {
@@ -77,7 +71,7 @@ export function makePrismaNoteSummaries(db:Database) {
       const patterns=input.terms.map(term=>sql.bind(like(term),"text"))
       const invited=`jsonb_array_elements(CASE WHEN jsonb_typeof(n."meeting"->'participants')='array' THEN n."meeting"->'participants' ELSE '[]'::jsonb END)`
       const inField:Record<NoteSearchField,(pattern:string)=>string>={
-        title:pattern=>`n."title" ILIKE ${pattern}`,summary:pattern=>`n."enhanced" ILIKE ${pattern}`,notes:pattern=>`n."body" ILIKE ${pattern}`,
+        title:pattern=>`n."title" ILIKE ${pattern}`,summary:pattern=>`${SUMMARY} ILIKE ${pattern}`,notes:pattern=>`n."body" ILIKE ${pattern}`,
         transcript:pattern=>`EXISTS (SELECT 1 FROM "TranscriptSegment" said WHERE said."noteId"=n."id" AND said."text" ILIKE ${pattern})`,
         people:pattern=>`EXISTS (SELECT 1 FROM ${invited} person WHERE coalesce(person->>'isResource','false')<>'true' AND (btrim(person->>'displayName') ILIKE ${pattern} OR btrim(person->>'email') ILIKE ${pattern}))`,
       }
@@ -90,7 +84,7 @@ export function makePrismaNoteSummaries(db:Database) {
       let together=""
       if(input.terms.length>1){
         const whole=sql.bind(like(input.query),"text")
-        flags.push(`(n."title" ILIKE ${whole}) AS "titlePhrase"`,`(n."enhanced" ILIKE ${whole} OR n."body" ILIKE ${whole}) AS "documentPhrase"`)
+        flags.push(`(n."title" ILIKE ${whole}) AS "titlePhrase"`,`(${SUMMARY} ILIKE ${whole} OR n."body" ILIKE ${whole}) AS "documentPhrase"`)
         together=`+${PHRASE_WEIGHT.title}*"titlePhrase"::int+${PHRASE_WEIGHT.document}*"documentPhrase"::int`
       }
       const matched=SEARCH_FIELDS.map(field=>`(${patterns.map((_,term)=>flag(field,term)).join(" OR ")}) AS "in_${field}"`)
@@ -118,7 +112,7 @@ export function makePrismaNoteSummaries(db:Database) {
       const [rows,documents]=await Promise.all([
         db.$queryRawUnsafe<SummaryRow[]>(`SELECT ${SUMMARY_COLUMNS} FROM "Note" n ${CONTEXT_JOIN} WHERE n."ownerId"=$1::uuid AND n."id"=ANY($2::uuid[])`,userId,ids),
         db.$queryRawUnsafe<Array<{id:string;enhanced:string|null;body:string|null}>>(
-          `SELECT n."id",CASE WHEN ${input.terms.map(term=>`n."enhanced" ILIKE ${text.bind(like(term),"text")}`).join(" OR ")} THEN n."enhanced" END AS "enhanced",
+          `SELECT n."id",CASE WHEN ${input.terms.map(term=>`${SUMMARY} ILIKE ${text.bind(like(term),"text")}`).join(" OR ")} THEN ${SUMMARY} END AS "enhanced",
              CASE WHEN ${input.terms.map(term=>`n."body" ILIKE ${text.bind(like(term),"text")}`).join(" OR ")} THEN n."body" END AS "body"
            FROM "Note" n WHERE n."ownerId"=${text.bind(userId,"uuid")} AND n."id"=ANY(${text.bind(ids,"uuid[]")})`,...text.values),
       ])
@@ -127,7 +121,7 @@ export function makePrismaNoteSummaries(db:Database) {
         `SELECT DISTINCT ON (said."noteId") said."noteId",said."id",said."text",said."startMs" FROM "TranscriptSegment" said
          WHERE said."noteId"=ANY(${speech.bind(heard,"uuid[]")}) AND (${input.terms.map(term=>`said."text" ILIKE ${speech.bind(like(term),"text")}`).join(" OR ")})
          ORDER BY said."noteId",said."startMs",said."id"`,...speech.values):[]
-      const summarized=await summaries(userId,rows),byId=new Map(summarized.map(row=>[row.summary.id,row]))
+      const summarized=summaries(rows),byId=new Map(summarized.map(row=>[row.summary.id,row]))
       const written=new Map(documents.map(row=>[row.id,row])),segmentFor=new Map(segments.map(row=>[row.noteId,row]))
       const results=page.flatMap(row=>{
         const note=byId.get(row.id)

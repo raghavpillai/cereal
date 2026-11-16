@@ -39,7 +39,7 @@ export async function runTitle(target:TitleTarget,meeting:TitleMeeting,now:Date)
   const note:NoteDTO={id:crypto.randomUUID(),title:"",body:"",enhanced:"",date:stamp.slice(0,10),duration:`${Math.floor(end/60000)}:${String(Math.floor(end/1000)%60).padStart(2,"0")}`,createdAt:stamp,updatedAt:stamp,
     transcriptSegments:[...meeting.segments],recordingState:"stopped",generationState:"idle",transcriptRevision:1,generatedRevision:null}
   const providers=makeProviderServices({languageProvider:target.provider,languageModel:target.model,toolModel:target.model,fetch:metered.transport,onLanguageUsage:()=>{},...(target.stub?{openRouterKey:"stub",openAiKey:"stub",anthropicKey:"stub"}:{})})
-  const processing=makeProcessingService(makeMemoryRepository([note]),{worker:false,providers})
+  const processing=makeProcessingService(makeMemoryRepository([note]),{providers})
   const started=performance.now()
   try{
     const generated=await Effect.runPromise(processing.generate(note.id,note.transcriptRevision))

@@ -1,19 +1,13 @@
-import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { Effect, Stream } from "effect";
 import type {
-  AudioChunkDTO,
   ChatInput,
   ChatStreamEventDTO,
   NoteDTO,
   MeetingContextDTO,
-  UploadAudioChunkInput,
 } from "@meeting-notes/contracts";
 import type { ApiError } from "@meeting-notes/contracts/api";
-import {
-  type NotesRepositoryService,
-  type StoredAudioChunk,
-} from "./repository";
+import { type NotesRepositoryService } from "./repository";
 import {
   makeProviderServices,
   type ProviderServices,
@@ -23,12 +17,12 @@ import {
 
 import {prepareMeetingChat,checkChatCitations,CitationStreamFilter} from "./chat-retrieval";
 import type { LiveHub } from "./live/hub";
-import { COVERAGE_TOLERANCE_MS, overlapMs, type Interval } from "./live/coverage";
 import { liveChatState } from "./live/chat";
 import type { LiveConversationStore } from "./ai/live-conversation";
 import { cleanNoteTitle, isUntitled } from "./ai/note-title";
-import { audioKey, audioPrefix, makeStorage, type StorageService } from "./storage";
+import { audioPrefix, makeStorage, type StorageService } from "./storage";
 import type { DeletePreconditions } from "./note-import";
+import { makeEvidenceStream } from "./evidence-stream";
 
 const invalid = (message: string): ApiError => ({
   error: "invalid_request",
@@ -36,7 +30,7 @@ const invalid = (message: string): ApiError => ({
 });
 const missing: ApiError = {
   error: "not_found",
-  message: "Note or audio chunk not found",
+  message: "Note not found",
 };
 const changedSinceRead: ApiError = {
   error: "conflict",
@@ -48,191 +42,33 @@ const unavailable: ApiError = {
 };
 const persist = <A>(e: Effect.Effect<A, unknown>) =>
   Effect.mapError(e, () => unavailable);
-const publicChunk = (c: StoredAudioChunk): AudioChunkDTO => ({
-  id: c.id,
-  noteId: c.noteId,
-  channel: c.channel,
-  sequence: c.sequence,
-  startMs: c.startMs,
-  durationMs: c.durationMs,
-  state: c.state,
-  error: c.error,
-});
-const maxBytes = 20 * 1024 * 1024;
-
-/** Parse actual PCM WAV chunks, not just a MIME label. Reject malformed/truncated,
- * compressed, multi-channel, or unreasonable metadata before persisting a job. */
-export function inspectWav(audio: Uint8Array) {
-  if (audio.byteLength < 44 || audio.byteLength > maxBytes)
-    throw invalid("Audio must be a WAV file of at most 20 MiB");
-  const b = Buffer.from(audio.buffer, audio.byteOffset, audio.byteLength);
-  if (
-    b.toString("ascii", 0, 4) !== "RIFF" ||
-    b.toString("ascii", 8, 12) !== "WAVE" ||
-    b.readUInt32LE(4) + 8 !== b.length
-  )
-    throw invalid("Invalid or unfinished WAV file");
-  let rate = 0,
-    align = 0,
-    bits = 0,
-    channels = 0,
-    format = 0,
-    dataSize = -1;
-  for (let offset = 12; offset + 8 <= b.length; ) {
-    const size = b.readUInt32LE(offset + 4),
-      start = offset + 8,
-      end = start + size;
-    if (end > b.length) throw invalid("Truncated WAV data");
-    const tag = b.toString("ascii", offset, offset + 4);
-    if (tag === "fmt ") {
-      if (size < 16) throw invalid("Invalid WAV format");
-      format = b.readUInt16LE(start);
-      channels = b.readUInt16LE(start + 2);
-      rate = b.readUInt32LE(start + 4);
-      align = b.readUInt16LE(start + 12);
-      bits = b.readUInt16LE(start + 14);
-      if (b.readUInt32LE(start + 8) !== rate * align)
-        throw invalid("Invalid WAV byte rate");
-    }
-    if (tag === "data") {
-      if (dataSize !== -1)
-        throw invalid("Multiple WAV data chunks are unsupported");
-      dataSize = size;
-    }
-    offset = end + (size & 1);
-  }
-  if (
-    channels !== 1 ||
-    rate < 8000 ||
-    rate > 192000 ||
-    ![1, 3].includes(format) ||
-    !(format === 1 ? [16, 24, 32] : [32, 64]).includes(bits) ||
-    align !== (channels * bits) / 8 ||
-    dataSize <= 0 ||
-    dataSize % align !== 0
-  )
-    throw invalid("Expected nonempty mono PCM WAV audio");
-  const durationMs = Math.round((dataSize / align / rate) * 1000);
-  if (durationMs > 60 * 60 * 1000) throw invalid("Audio chunk is too long");
-  return { durationMs, sampleRate: rate };
-}
-
 function makeProcessingServiceBase(
   repository: NotesRepositoryService,
   options: {
     storageDir?: string;
-    /** Where audio parts are kept (`storage.ts`). Default: local disk only, in `storageDir`. */
+    /** Where audio parts recorded by an older version are kept (`storage.ts`): removed with their note.
+     * New recordings keep no audio on the server. Default: local disk only, in `storageDir`. */
     storage?: StorageService;
     providers?: ProviderServices;
-    worker?: boolean;
     meetingContext?: (noteId:string)=>Effect.Effect<MeetingContextDTO|null,ApiError>;
     requestSignal?:AbortSignal;
     /** The time a chat request is answered at; tests fix it. */
     clock?:()=>Date;
-    /** The live sessions of this process: the worker waits for audio they are still transcribing,
-     * Stop lets them store their last words, and chat reads their unfinished utterances. */
+    /** The live sessions of this process: Stop lets them store their last words, and chat reads their
+     * unfinished utterances. The live transcript is the only transcript; nothing is transcribed in batch. */
     live?: LiveHub;
     /** Chat during a recording remembers its threads so each request can repeat the previous one
      * (`ai/live-conversation.ts`): where they are kept (default: one store for the process), and the
      * caller they belong to. */
     liveConversations?: LiveConversationStore;
     actor?: string;
-    /** How long a part waits for a live session that is still working on its audio, and how often it looks again. */
-    livePendingWaitMs?: number;
-    livePendingRetryMs?: number;
   } = {},
 ) {
   const providers = options.providers ?? makeProviderServices();
   const root = resolve(
     options.storageDir ?? process.env.AUDIO_STORAGE_DIR ?? ".local/audio",
   );
-  let closed = false,
-    running: Promise<void> | undefined;
   const storage = options.storage ?? makeStorage({ audioDir: root, downloadsDir: process.env.DOWNLOADS_DIR || "/data/downloads" });
-  /** One part, under a key made of the note's ID and the audio's own SHA-256: the same audio stored
-   * twice is one file, and nothing a client names ever becomes part of a path. */
-  const store = (audio: Uint8Array, hash: string, noteId: string) =>
-    storage.audio.put(audioKey(noteId, hash), audio, { sha256: hash, contentType: "audio/wav" });
-  // Parts held back for a live session, by chunk ID, with the time they were first held.
-  const held = new Map<string, number>();
-  /** What a claimed part still needs from the batch provider, given what the live path has stored.
-   * `false`: nothing to do in this pass. */
-  async function coveragePlan(c: StoredAudioChunk): Promise<false | { keep: ReadonlyArray<Interval> | null }> {
-    const store = repository.live;
-    if (!store) return { keep: null };
-    const part = { fromMs: c.startMs, toMs: c.startMs + c.durationMs };
-    const pending = options.live?.pendingRange(c.noteId, c.channel);
-    if (pending && overlapMs(pending, part) > COVERAGE_TOLERANCE_MS) {
-      // The live session has this audio and has not finalised it yet. Look again shortly; give up
-      // waiting after a while and let the ledger keep the two paths apart.
-      const since = held.get(c.id) ?? Date.now();
-      held.set(c.id, since);
-      if (Date.now() - since < (options.livePendingWaitMs ?? 40_000)) {
-        await Effect.runPromise(store.deferAudioChunk(c.id, c.lease!, new Date(Date.now() + (options.livePendingRetryMs ?? 5000)).toISOString()));
-        return false;
-      }
-    }
-    held.delete(c.id);
-    const plan = await Effect.runPromise(store.planAudioChunk(c.id, c.lease!));
-    // Fully covered parts were marked ready by the plan itself: no provider call.
-    if (!plan || plan.kind === "covered") return false;
-    return { keep: plan.keep };
-  }
-  async function drain() {
-    while (!closed) {
-      const c = await Effect.runPromise(
-        repository.claimAudioChunk(new Date().toISOString()),
-      );
-      if (!c) return;
-      try {
-        const plan = await coveragePlan(c);
-        if (!plan) continue;
-        // Wherever the part is: the selected storage, or the other one if it was recorded before a switch.
-        const audio = await storage.audio.bytes(audioKey(c.noteId, c.hash));
-        if (!audio || createHash("sha256").update(audio).digest("hex") !== c.hash)
-          throw new Error("Corrupt audio storage");
-        const segments = await Effect.runPromise(
-          providers.transcribe({
-            audio,
-            channel: c.channel,
-            chunkId: c.id,
-            startMs: c.startMs,
-            durationMs: c.durationMs,
-            ...(plan.keep ? { keep: plan.keep } : {}),
-          }),
-        );
-        await Effect.runPromise(
-          plan.keep
-            // Partly covered: keep the words the live path missed. A provider without word times
-            // returns the whole part, which then replaces the live text inside it.
-            ? repository.finishAudioChunk(c.id, c.lease!, segments, null, segments.limitedToKeep ? { resolution: "mixed" } : { resolution: "batch", replaceLive: true })
-            : repository.finishAudioChunk(c.id, c.lease!, segments, null),
-        );
-      } catch {
-        await Effect.runPromise(
-          repository.finishAudioChunk(
-            c.id,
-            c.lease!,
-            [],
-            "Transcription failed. Check provider configuration and retry.",
-          ),
-        );
-      }
-    }
-  }
-  function kick() {
-    if (closed || running || options.worker === false) return;
-    running = drain()
-      .catch(() => {
-        /* Keep errors bounded and secret-free; next poll retries storage access. */
-      })
-      .finally(() => {
-        running = undefined;
-      });
-  }
-  const timer = options.worker === false ? undefined : setInterval(kick, 1000);
-  timer?.unref();
-  kick();
   const getNote = (id: string) =>
     Effect.gen(function* () {
       const n = yield* persist(repository.getNote(id));
@@ -288,76 +124,12 @@ function makeProcessingServiceBase(
           ))
         );
       }),
-    upload: (noteId: string, id: string, input: UploadAudioChunkInput) =>
-      Effect.gen(function* () {
-        yield* getNote(noteId);
-        if (
-          input.audioBase64.length % 4 !== 0 ||
-          /[^A-Za-z0-9+/=]/.test(input.audioBase64) ||
-          input.audioBase64.slice(0, -2).includes("=")
-        )
-          return yield* Effect.fail(invalid("Invalid base64 audio"));
-        const audio = Buffer.from(input.audioBase64, "base64");
-        if (audio.toString("base64") !== input.audioBase64)
-          return yield* Effect.fail(invalid("Invalid base64 audio"));
-        const wav = yield* Effect.try({
-          try: () => inspectWav(audio),
-          catch: (e) => e as ApiError,
-        });
-        if (input.startMs + wav.durationMs > 2147483647)
-          return yield* Effect.fail(
-            invalid("Audio timeline exceeds supported duration"),
-          );
-        const hash = createHash("sha256").update(audio).digest("hex");
-        yield* Effect.tryPromise({
-          try: () => store(audio, hash, noteId),
-          catch: () => unavailable,
-        });
-        const c = yield* persist(
-          repository.putAudioChunk({
-            id,
-            noteId,
-            channel: input.channel,
-            sequence: input.sequence,
-            startMs: input.startMs,
-            durationMs: wav.durationMs,
-            hash,
-            state: "queued",
-            error: null,
-            lease: null,
-            leaseUntil: null,
-          }),
-        );
-        if (!c)
-          return yield* Effect.fail(
-            invalid(
-              "Chunk ID or sequence already exists with different audio or metadata",
-            ),
-          );
-        kick();
-        return publicChunk(c);
-      }),
-    list: (id: string) =>
-      Effect.gen(function* () {
-        yield* getNote(id);
-        return (yield* persist(repository.listAudioChunks(id))).map(
-          publicChunk,
-        );
-      }),
-    retry: (noteId: string, id: string) =>
-      Effect.gen(function* () {
-        yield* getNote(noteId);
-        const c = yield* persist(repository.retryAudioChunk(noteId, id));
-        if (!c) return yield* Effect.fail(missing);
-        kick();
-        return publicChunk(c);
-      }),
     generate: (id: string, revision: number) =>
       Effect.gen(function* () {
         const source = yield* providerNote(yield* getNote(id));
         if (!source.transcriptSegments.some((s) => s.text.trim()))
           return yield* Effect.fail(
-            invalid("Transcribe audio before generating notes"),
+            invalid("This recording has no transcript to write notes from"),
           );
         if (serializeGenerationContext(source).length > 500_000)
           return yield* Effect.fail(invalid("Note context is too large for generation"));
@@ -368,7 +140,7 @@ function makeProcessingServiceBase(
         if (!n)
           return yield* Effect.fail(
             invalid(
-              "Stop recording, finish transcription, and use the current transcript revision before generating",
+              "Stop recording and use the current transcript revision before generating",
             ),
           );
         const enriched={...n,...(source.meetingContext?{meetingContext:source.meetingContext}:{})};
@@ -418,6 +190,7 @@ function makeProcessingServiceBase(
       if (quotes.some(q => !q) || quotes.length > 8) return yield* Effect.fail(unavailable);
       return { summary: result.summary, quotes: quotes.filter((q): q is NonNullable<typeof q> => q !== undefined), transcriptRevision: note.transcriptRevision };
     }),
+    evidenceStream: makeEvidenceStream({ getNote, providers, requestSignal: options.requestSignal }),
     chatStream: (id: string | null, input: ChatInput) => Effect.gen(function*() {
       if(id!==null)yield* getNote(id)
       if(input.timeZone){try{new Intl.DateTimeFormat("en-US",{timeZone:input.timeZone}).format(new Date())}catch{return yield* Effect.fail(invalid("Invalid time zone"))}}
@@ -495,24 +268,16 @@ function makeProcessingServiceBase(
         );
         return { answer };
       }),
-    runPending: async () => {
-      await running;
-      await drain();
-    },
-    dispose: async () => {
-      closed = true;
-      if (timer) clearInterval(timer);
-      await running;
-    },
+    dispose: async () => {},
   };
 }
 /** Share provider configuration and storage, never the caller's note scope.
- * Request adapters do not start background workers or retain per-user state. */
+ * Request adapters retain no per-user state. */
 export function makeProcessingService(repository: NotesRepositoryService, options: NonNullable<Parameters<typeof makeProcessingServiceBase>[1]> = {}) {
   const configured = { ...options, providers: options.providers ?? makeProviderServices() };
   return {
     ...makeProcessingServiceBase(repository, configured),
-    forRepository: (scoped: NotesRepositoryService, context?:{meetingContext?:NonNullable<Parameters<typeof makeProcessingServiceBase>[1]>["meetingContext"];requestSignal?:AbortSignal;actor?:string}) => makeProcessingServiceBase(scoped, { ...configured, ...context, worker: false }),
+    forRepository: (scoped: NotesRepositoryService, context?:{meetingContext?:NonNullable<Parameters<typeof makeProcessingServiceBase>[1]>["meetingContext"];requestSignal?:AbortSignal;actor?:string}) => makeProcessingServiceBase(scoped, { ...configured, ...context }),
   };
 }
 export type ProcessingService = ReturnType<typeof makeProcessingService>;

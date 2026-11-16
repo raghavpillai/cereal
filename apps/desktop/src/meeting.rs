@@ -238,6 +238,7 @@ impl Cereal {
                                 .update(cx, |i, cx| i.set_content("", cx));
                         }
                         if selected {
+                            // Not a button: the event picker's answer arriving. It opens directly.
                             this.menu = Some(Menu::NoteDetails);
                         }
                         this.persist(cx);
@@ -381,7 +382,7 @@ impl Cereal {
                 .flex()
                 .flex_col()
                 .gap(px(3.))
-                .cursor_pointer()
+                .cursor_default()
                 .child(crate::motion::tactile(t.hover).radius(0.))
                 .child(
                     div()
@@ -673,7 +674,7 @@ impl Cereal {
                     .flex()
                     .flex_col()
                     .gap(px(3.))
-                    .cursor_pointer()
+                    .cursor_default()
                     .child(crate::motion::tactile(t.hover).radius(0.))
                     .child(div().text_size(px(13.)).child(event.title.clone()))
                     .child(small(format!("{date} · {}", event.calendar_name), t))
@@ -708,7 +709,7 @@ impl Cereal {
                         .px(px(12.))
                         .py(px(9.))
                         .text_size(px(13.))
-                        .cursor_pointer()
+                        .cursor_default()
                         .child(crate::motion::tactile(t.hover).radius(0.))
                         .child("Remove calendar event")
                         .reach().on_click(

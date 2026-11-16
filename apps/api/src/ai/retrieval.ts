@@ -15,6 +15,7 @@ import type {NotesRepositoryService} from "../repository"
 import {meetingSearchTerms,selectMeetings,selectTranscriptPassages,transcriptPassage,type MeetingSearchInput} from "../meeting-search"
 import type {ProviderNote,ProviderServices} from "../providers"
 import type {LiveConversationStore} from "./live-conversation"
+import {forContext} from "../transcript-link"
 
 const object=(value:unknown):value is Record<string,unknown>=>!!value&&typeof value==="object"&&!Array.isArray(value)
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -83,7 +84,8 @@ export function createRetrievalSession(options:MeetingChatOptions,select:Context
       signal.throwIfAborted()
       if(options.noteId!==null&&id!==options.noteId)continue
       if(options.noteId===null&&!discovered.has(id))continue
-      const source=await run(repository.getNote(id))
+      // Read without the chat link line of the generated notes (transcript-link.ts).
+      const stored=await run(repository.getNote(id)),source=stored&&forContext(stored)
       if(!source)continue
       const citationCount=issued.length
       const note=select(await options.enrich(source),around,{input,addCitation})
@@ -128,7 +130,7 @@ export function createRetrievalSession(options:MeetingChatOptions,select:Context
           emit({type:"tool",text:"",tool:{callId,name,status:"completed",label,resultCount:retained.length,results:touched.map(note=>({noteId:note.id,title:note.title,date:note.date}))}})
           return retained.map(hit=>({noteId:hit.noteId,title:hit.title,date:hit.date,segmentId:hit.segment.id,startMs:hit.segment.startMs,quote:hit.segment.text,transcriptRevision:hit.transcriptRevision,sources:issued.filter(source=>source.noteId===hit.noteId&&source.segmentId===hit.segment.id)}))
         }
-        notes=repository.searchNotes?await run(repository.searchNotes(search)):selectMeetings(await run(repository.listNotes()),search)
+        notes=(repository.searchNotes?await run(repository.searchNotes(search)):selectMeetings(await run(repository.listNotes()),search)).map(forContext)
         for(const note of notes)discovered.add(note.id)
         progress(callId,name,"completed",`Found ${notes.length} meeting${notes.length===1?"":"s"}`,notes)
         return notes.map(note=>({noteId:note.id,title:note.title,date:note.date,hasSummary:!!note.enhanced.trim(),hasTranscript:note.transcriptRevision>0}))

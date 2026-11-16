@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Write a large synthetic workspace for benchmarking: stress_workspace.py <data-dir>
 
-500 notes in 20 folders (50 of them in Trash). Note 1, which the tour opens, has an
+500 notes (50 of them in Trash). Note 1, which the tour opens, has an
 80-line enhanced summary, a 4 KB body and a 1,500-utterance transcript; 20 more notes
 carry hour-long transcripts. Entirely fictional text; never point it at a real data directory.
 """
@@ -24,7 +24,6 @@ def main(directory):
             out.extend(f"- {sentence(9)}" for _ in range(7))
             out.append("")
         return "\n".join(out)
-    folders = [{"id": 1000 + i, "name": f"Folder {i + 1}"} for i in range(20)]
     notes = []
     for i in range(1, 501):
         long = i == 1 or 2 <= i <= 21
@@ -37,7 +36,6 @@ def main(directory):
             "date": f"2026-{11 - (i // 60) % 10:02d}-{28 - i % 27:02d}",
             "time": f"{9 + i % 8}:{(i * 7) % 60:02d} {'AM' if i % 2 else 'PM'}",
             "duration": "32 min",
-            "folder_id": 1000 + i % 20 if i % 3 else None,
             "favorite": i % 11 == 0,
             "trashed": i > 450,
             "transcriptRevision": 1,
@@ -46,8 +44,8 @@ def main(directory):
     os.makedirs(directory, exist_ok=True)
     path = os.path.join(directory, "workspace.json")
     with open(path, "w") as file:
-        json.dump({"notes": notes, "folders": folders,
-                   "settings": {"dark_mode": False, "auto_enhance": False, "show_upcoming": True}}, file)
+        json.dump({"notes": notes,
+                   "settings": {"dark_mode": False, "auto_enhance": False}}, file)
     print(f"{path}: {len(notes)} notes, {os.path.getsize(path) // 1024} KB")
 
 if __name__ == "__main__":

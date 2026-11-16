@@ -3,7 +3,9 @@ import { memo, type ReactNode } from 'react'
 /** Notes are Markdown on the wire and are read a line at a time, exactly as the
  * desktop app reads them (apps/desktop/src/summary.rs): a line is a heading, a list
  * item with a depth, a rule, a gap or a paragraph. Text is never HTML: React escapes
- * every node, and nothing in a note becomes a link, an image or markup. */
+ * every node, and nothing in a note becomes an image or markup. The one thing that
+ * becomes a link is a web address written out in full (`https://…`), which is shown
+ * exactly as written, so a link never reads as anything but where it goes. */
 
 export type NoteLine =
   | { kind: 'blank' }
@@ -148,14 +150,68 @@ export function Words({ text }: { text: string }) {
   return <>{words(text, 'w', false).nodes}</>
 }
 
+/** Where an address may start, and what it may be made of: everything up to white space or a delimiter. */
+const ADDRESS_START = /https?:\/\//gi
+const ADDRESS_END = /[\s<>"'`]/u
+/** A host that reads as what it is: a plain ASCII name or address, with an optional port. No user name or password,
+ * no percent sign, no letters of another script that only look like these. */
+const PLAIN_HOST = /^(?:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.?|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?$/
+/** Control and invisible formatting characters (bidirectional overrides, zero-width spaces): they can make an
+ * address show one place and open another. */
+const HIDDEN = /[\p{Cc}\p{Cf}]/u
+
+/** The end of an address: sentence punctuation after it is not part of it, nor a closing bracket whose opening
+ * partner is outside it (`(see https://x.example/a_(b))`), the way GitHub's autolinker reads them. */
+function trimmedAddress(candidate: string): string {
+  let address = candidate
+  for (;;) {
+    const last = address[address.length - 1] ?? ''
+    const pair = ({ ')': '(', ']': '[', '}': '{' } as Record<string, string>)[last]
+    if ('.,:;!?*_~'.includes(last) && last) address = address.slice(0, -1)
+    else if (pair && address.split(last).length > address.split(pair).length) address = address.slice(0, -1)
+    else return address
+  }
+}
+
+/** Web addresses written out in full in a run of text, as pieces of the text: an address to link has its `href`.
+ * The rules, and the cases every client tests, are in testdata/web-addresses.json. */
+export function webLinks(text: string): { text: string; href: string | null }[] {
+  const out: { text: string; href: string | null }[] = []
+  let from = 0
+  for (const match of text.matchAll(ADDRESS_START)) {
+    const at = match.index
+    if (at < from || (at > 0 && /[\p{L}\p{N}]/u.test(text[at - 1]!))) continue
+    const rest = text.slice(at), stop = rest.search(ADDRESS_END)
+    const address = trimmedAddress(stop < 0 ? rest : rest.slice(0, stop))
+    const authority = address.slice(match[0].length).split(/[/?#]/, 1)[0]!
+    if (!PLAIN_HOST.test(authority) || HIDDEN.test(address) || address.includes('\\')) continue
+    let href: string
+    try { href = new URL(address).href } catch { continue }
+    if (at > from) out.push({ text: text.slice(from, at), href: null })
+    out.push({ text: address, href })
+    from = at + address.length
+  }
+  if (from < text.length || !out.length) out.push({ text: text.slice(from), href: null })
+  return out
+}
+
+/** A link to this server (the chat with a meeting's transcript) opens in place; any other in a new tab. */
+function Address({ href, children }: { href: string; children: ReactNode }) {
+  const here = typeof window !== 'undefined' && new URL(href).origin === window.location.origin
+  return <a className="note-link" href={href} {...(here ? {} : { target: '_blank', rel: 'noopener noreferrer' })}>{children}</a>
+}
+
 function Inline({ text }: { text: string }) {
   let spaced = false
-  return <>{inlineParts(text).map((part, at) => {
+  // Addresses are found in the text as written, before any Markdown is read, so a `*` or `_` inside one stays in it.
+  const parts = webLinks(text).flatMap((piece): (InlinePart & { href: string | null })[] => piece.href ? [{ text: piece.text, style: 'plain', href: piece.href }] : inlineParts(piece.text).map(part => ({ ...part, href: null })))
+  return <>{parts.map((part, at) => {
     const run = words(part.text, String(at), spaced)
     spaced = run.spaced
-    // The break before a run belongs outside it, so that it never splits a bold or code run from its edge.
+    // The break before a run belongs outside it, so that it never splits a bold or code run (or a link) from its edge.
     const lead = run.nodes.length > 1 && (run.nodes[0] as { type?: unknown }).type === 'wbr' ? run.nodes.shift() : null
-    const body = part.style === 'strong' ? <strong key={at}>{run.nodes}</strong> : part.style === 'code' ? <code key={at}>{run.nodes}</code> : part.style === 'em' ? <em key={at}>{run.nodes}</em> : run.nodes
+    const nodes = part.href ? [<Address key={`a${at}`} href={part.href}>{run.nodes}</Address>] : run.nodes
+    const body = part.style === 'strong' ? <strong key={at}>{nodes}</strong> : part.style === 'code' ? <code key={at}>{nodes}</code> : part.style === 'em' ? <em key={at}>{nodes}</em> : nodes
     return lead ? [lead, body] : body
   })}</>
 }

@@ -14,9 +14,8 @@ use std::{
 #[derive(Default)]
 pub struct Workspace {
     pub notes: Vec<Note>,
-    pub folders: Vec<Folder>,
     pub settings: Settings,
-    /// Bumped by every mutable access to notes or folders, so lists derived
+    /// Bumped by every mutable access to notes, so lists derived
     /// from them can be cached between renders. Not persisted.
     #[serde(skip)]
     revision: u64,
@@ -30,10 +29,20 @@ pub struct Workspace {
     /// as usual.
     #[serde(skip)]
     pub hidden: std::collections::HashSet<u16>,
-    /// Server mode: the device-level files beside the accounts' directories
-    /// (`settings.json`, `folders.json`).
+    /// Server mode: the device-level settings beside the accounts'
+    /// directories (`settings.json`).
     #[serde(skip)]
-    pub device: Option<crate::folders::Device>,
+    pub device: Option<crate::device_settings::Device>,
+    /// Local mode: no new note or folder gets an id below this. A note
+    /// deleted forever raises it past its own id, so a later note never
+    /// takes over that id (and whatever is still filed under it, such as
+    /// the note's chat). Server mode keeps its own per account (`nextId`).
+    #[serde(rename = "nextId", skip_serializing_if = "is_zero")]
+    next_local_id: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// One file a save has to write.
@@ -79,7 +88,6 @@ pub enum SlotState {
 #[serde(default)]
 struct AccountFile {
     notes: Vec<Note>,
-    folders: Vec<Folder>,
     settings: Option<Settings>,
     #[serde(rename = "nextId")]
     next_id: u64,
@@ -135,7 +143,6 @@ pub struct Note {
     pub date: String,
     pub time: String,
     pub duration: String,
-    pub folder_id: Option<u64>,
     pub favorite: bool,
     pub trashed: bool,
     /// When the note's own server answered that it no longer has the note
@@ -147,16 +154,68 @@ pub struct Note {
     /// answered yet. Such a note is queued again when its account is Ready.
     #[serde(default, rename = "unsentEdits", skip_serializing_if = "std::ops::Not::not")]
     pub unsent_edits: bool,
-    /// A capture was recorded here and its upload has not been confirmed.
+    /// A recording was stopped here and the server has not confirmed the Stop
+    /// yet; it is sent again when the account is Ready. (No audio is ever
+    /// uploaded: speech is transcribed live.)
     #[serde(default, rename = "unsentCapture", skip_serializing_if = "std::ops::Not::not")]
     pub unsent_capture: bool,
+    /// Stop was pressed (or the recording ended with the app) and the server
+    /// has not been told yet: it is told once the live stream has delivered
+    /// every captured sample, so that it transcribes all of them. Kept on
+    /// disk, so a quit or a crash before then is finished at the next launch.
+    #[serde(default, rename = "pendingStop", skip_serializing_if = "Option::is_none")]
+    pub pending_stop: Option<PendingStop>,
+    /// Captures (by ID) whose audio has not all reached the server. Their
+    /// files hold the rest; a stream of them resumes where the server is.
+    #[serde(default, rename = "livePending", skip_serializing_if = "Vec::is_empty")]
+    pub live_pending: Vec<String>,
+    /// Stretches of the recording that were captured but have no
+    /// transcript: what the server lists, and what this Mac's stream was
+    /// told or had to skip. Note-timeline milliseconds, merged per channel.
+    #[serde(default, rename = "transcriptGaps", skip_serializing_if = "Vec::is_empty")]
+    pub transcript_gaps: Vec<meeting_notes_api_types::TranscriptGapDTO>,
+}
+
+/// What a Stop pressed here still owes the server (see [`Note::pending_stop`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PendingStop {
+    /// Tell the server the recording stopped.
+    Stop,
+    /// Tell it, then have the notes written (the Stop button).
+    Generate,
 }
 
 impl Note {
-    /// Something of this note exists only on this Mac: an edit or a capture
+    /// Something of this note exists only on this Mac: an edit, or a Stop
     /// the server has not confirmed.
     pub fn has_unsent_work(&self) -> bool {
-        self.unsent_edits || self.unsent_capture || self.enhanced_dirty
+        self.unsent_edits
+            || self.unsent_capture
+            || self.enhanced_dirty
+            || self.pending_stop.is_some()
+            || !self.live_pending.is_empty()
+    }
+
+    /// Add stretches without transcript, merging those that touch or overlap
+    /// on the same channel. Returns whether anything changed.
+    pub fn add_transcript_gaps(
+        &mut self,
+        gaps: impl IntoIterator<Item = meeting_notes_api_types::TranscriptGapDTO>,
+    ) -> bool {
+        let before = self.transcript_gaps.clone();
+        let mut all: Vec<_> = self.transcript_gaps.drain(..).chain(gaps).collect();
+        all.retain(|gap| gap.to_ms > gap.from_ms);
+        all.sort_by_key(|gap| (gap.channel != meeting_notes_api_types::AudioChannel::Mic, gap.from_ms));
+        for gap in all {
+            match self.transcript_gaps.last_mut() {
+                Some(last) if last.channel == gap.channel && gap.from_ms <= last.to_ms => {
+                    last.to_ms = last.to_ms.max(gap.to_ms);
+                }
+                _ => self.transcript_gaps.push(gap),
+            }
+        }
+        self.transcript_gaps != before
     }
 
     /// The day this note sorts and is grouped under: its timeline day, but
@@ -225,12 +284,14 @@ impl Note {
             date: self.date.clone(),
             time: self.time.clone(),
             duration: self.duration.clone(),
-            folder_id: self.folder_id,
             favorite: self.favorite,
             trashed: self.trashed,
             server_missing_since: self.server_missing_since.clone(),
             unsent_edits: self.unsent_edits,
             unsent_capture: self.unsent_capture,
+            pending_stop: self.pending_stop,
+            live_pending: self.live_pending.clone(),
+            transcript_gaps: Vec::new(),
         }
     }
 
@@ -330,19 +391,11 @@ impl Note {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Folder {
-    pub id: u64,
-    pub name: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub dark_mode: bool,
     pub auto_enhance: bool,
-    pub show_upcoming: bool,
     /// The note about privacy on the private space page has been closed.
     /// Kept so that it stays closed after a restart.
     pub space_banner_dismissed: bool,
@@ -353,7 +406,6 @@ impl Default for Settings {
         Self {
             dark_mode: false,
             auto_enhance: true,
-            show_upcoming: true,
             space_banner_dismissed: false,
         }
     }
@@ -381,12 +433,11 @@ impl Workspace {
     }
 
     /// The workspace of server mode before any account's notes have joined
-    /// it: the device-level settings and folders, and no notes.
+    /// it: the device-level settings, and no notes.
     pub fn for_accounts(paths: &crate::accounts::Paths) -> Self {
-        let device = crate::folders::Device::load(paths);
+        let device = crate::device_settings::Device::load(paths);
         Self {
             settings: device.settings.clone().unwrap_or_default(),
-            folders: device.folders.clone(),
             device: Some(device),
             ..Self::default()
         }
@@ -481,13 +532,6 @@ impl Workspace {
                 self.settings = seeded;
                 self.settings.dark_mode |= dark;
             }
-            // Folders become device-level (once per account, durably).
-            let map = device.seed(account, &file.folders, &mut self.folders);
-            for note in &mut file.notes {
-                if let Some(folder) = note.folder_id {
-                    note.folder_id = map.get(&folder).copied();
-                }
-            }
         }
         // Native finalization can complete during app shutdown after GPUI's
         // last workspace save. The owner reference already exists; reconcile
@@ -522,37 +566,11 @@ impl Workspace {
                 entry.written = same.then(|| crate::store::fingerprint(&encoded));
             }
         }
-        // Step 5 of the folder seeding: the account is recorded as seeded
-        // only after its file holds device folder ids.
-        if self
-            .device
-            .as_ref()
-            .is_some_and(|device| device.needs_commit(account))
-        {
-            let saved = match self.encode_slot(slot) {
-                Ok(encoded) if self.slots.get(&slot).is_some_and(|entry| entry.written.is_none()) => {
-                    let print = crate::store::fingerprint(&encoded);
-                    write_workspace(&path, &encoded, true).map(|()| {
-                        if let Some(entry) = self.slots.get_mut(&slot) {
-                            entry.written = Some(print);
-                        }
-                    })
-                }
-                Ok(_) => Ok(()),
-                Err(error) => Err(error),
-            };
-            if saved.is_ok()
-                && let Some(device) = &mut self.device
-            {
-                device.commit(account, &self.folders);
-            }
-        }
         Ok(count)
     }
 
     /// One account's file as it is written: its notes with their file ids,
-    /// the device folders its notes use (so an older build reads a
-    /// consistent file), a copy of the settings, and the id high-water mark.
+    /// a copy of the settings, and the id high-water mark.
     pub fn encode_slot(&self, slot: u16) -> Result<Vec<u8>, String> {
         struct Notes<'a>(&'a [Note], u16);
         impl Serialize for Notes<'_> {
@@ -565,7 +583,6 @@ impl Workspace {
         #[derive(Serialize)]
         struct File<'a> {
             notes: Notes<'a>,
-            folders: Vec<&'a Folder>,
             settings: &'a Settings,
             #[serde(rename = "nextId")]
             next_id: u64,
@@ -574,19 +591,8 @@ impl Workspace {
         if entry.state != SlotState::Loaded {
             return Err("That account's notes are not written".into());
         }
-        let used: std::collections::HashSet<u64> = self
-            .notes
-            .iter()
-            .filter(|note| crate::accounts::handle::slot_of(note.id) == Some(slot))
-            .filter_map(|note| note.folder_id)
-            .collect();
         crate::accounts::handle::encoding_account_file(|| serde_json::to_vec_pretty(&File {
             notes: Notes(&self.notes, slot),
-            folders: self
-                .folders
-                .iter()
-                .filter(|folder| used.contains(&folder.id))
-                .collect(),
             settings: &self.settings,
             next_id: entry.next_id,
         }))
@@ -665,7 +671,7 @@ impl Workspace {
     }
 
     /// What has to reach the disk in server mode: each loaded, live slot
-    /// whose notes changed, and the device files that changed. A slot that
+    /// whose notes changed, and the device settings if they changed. A slot that
     /// is not loaded, or was marked dead by sign-out or removal, is never
     /// written. Hidden slots are loaded and are written normally.
     pub fn pending_writes(&mut self) -> Result<Vec<PendingWrite>, String> {
@@ -690,7 +696,7 @@ impl Workspace {
             }
         }
         if let Some(device) = &mut self.device {
-            for (path, data) in device.pending(&self.folders, &self.settings) {
+            for (path, data) in device.pending(&self.settings) {
                 jobs.push(PendingWrite {
                     path,
                     data,
@@ -736,7 +742,6 @@ impl Workspace {
                 "2026-11-12",
                 "10:30 AM",
                 "32 min",
-                Some(101),
                 true,
                 "Launch checklist\n\n- Keep onboarding to three steps\n- Maya to share the updated prototypes\n- Try the new empty state with five people\n\nNext review on Monday.",
                 "## Product direction\n\nThe team aligned on a simpler first-run experience. The next iteration will focus on helping people reach their first useful note sooner.\n\n## Design updates\n\n- Reduce onboarding from five steps to three\n- Use a calmer empty state with one clear action\n- Keep the keyboard shortcut visible in the new-note button\n\n## Next steps\n\n- Maya: share the updated prototype by Friday\n- Theo: arrange five usability sessions\n- Review the results together on Monday",
@@ -748,7 +753,6 @@ impl Workspace {
                 "2026-11-12",
                 "9:00 AM",
                 "24 min",
-                Some(101),
                 false,
                 "Good progress on the release.\n\n- Search is ready for a final pass\n- Fix the calendar empty state\n- Friday release still on track",
                 "## This week's focus\n\nThe release is on track for Friday. Search is ready for a final review, and the calendar empty state needs one small update.\n\n## Action items\n\n- Jules: complete the search review\n- Sam: update the calendar empty state\n- Team: flag any release blockers before Thursday afternoon",
@@ -760,7 +764,6 @@ impl Workspace {
                 "2026-11-11",
                 "2:00 PM",
                 "45 min",
-                Some(102),
                 true,
                 "How the team shares meeting notes\n\n- Most notes live in separate documents\n- Follow-ups get lost after handoff\n- Would like a shared folder for each project",
                 "## Current workflow\n\nThe Northstar team keeps meeting notes in separate documents. Finding the latest decision takes time, especially when someone misses a meeting.\n\n## Opportunities\n\n- Shared project folders would make notes easier to find\n- Clear action items could reduce manual follow-up\n- Search should include the original notes as well as summaries\n\n## Follow-up\n\nSend a prototype of the shared-folder flow next week.",
@@ -772,7 +775,6 @@ impl Workspace {
                 "2026-11-11",
                 "11:00 AM",
                 "28 min",
-                None,
                 false,
                 "A few ideas for the next sprint.\n\nMake room for polish. Save a day for small fixes. Try a walking meeting next week.",
                 "## Ideas for next sprint\n\n- Set aside one day for visual polish and small fixes\n- Keep the planning session short and focused\n- Try a walking meeting for next week's catch-up",
@@ -784,7 +786,6 @@ impl Workspace {
                 "2026-11-10",
                 "3:30 PM",
                 "50 min",
-                Some(101),
                 false,
                 "Priorities\n\n1. Improve startup time\n2. Ship the search improvements\n3. Review keyboard navigation\n\nKeep scope small for the next release.",
                 "## Sprint priorities\n\nThe team agreed to keep the next release focused on performance and everyday usability.\n\n- Improve cold-start performance\n- Complete the search improvements\n- Review keyboard navigation across the main screens\n\n## Next steps\n\nOwners will add estimates before Thursday's planning check-in.",
@@ -796,7 +797,6 @@ impl Workspace {
                 "2026-11-10",
                 "10:00 AM",
                 "35 min",
-                Some(103),
                 false,
                 "Quiet, useful, human.\n\nExplore warmer neutrals and a more editorial type direction. Share two directions next week.",
                 "## Creative direction\n\nThe next exploration should feel quiet, useful, and human.\n\n- Explore a warmer neutral palette\n- Pair straightforward interface text with editorial headings\n- Share two distinct directions at the next review",
@@ -814,7 +814,6 @@ impl Workspace {
                         date,
                         time,
                         duration,
-                        folder_id,
                         favorite,
                         body,
                         enhanced,
@@ -840,7 +839,6 @@ impl Workspace {
                             date: date.into(),
                             time: time.into(),
                             duration: duration.into(),
-                            folder_id,
                             favorite,
                             trashed: false,
                             ..Note::default()
@@ -848,20 +846,6 @@ impl Workspace {
                     },
                 )
                 .collect(),
-            folders: vec![
-                Folder {
-                    id: 101,
-                    name: "Team meetings".into(),
-                },
-                Folder {
-                    id: 102,
-                    name: "Customer conversations".into(),
-                },
-                Folder {
-                    id: 103,
-                    name: "Ideas & inspiration".into(),
-                },
-            ],
             settings: Settings::default(),
             ..Self::default()
         }
@@ -885,6 +869,17 @@ impl Workspace {
         id
     }
 
+    /// Take a note out of the workspace for good (Delete forever in
+    /// Trash). Its id is never given to another note.
+    pub fn remove_note(&mut self, id: u64) -> Option<Note> {
+        let index = self.notes.iter().position(|note| note.id == id)?;
+        self.revision = self.revision.wrapping_add(1);
+        if !self.by_account() {
+            self.next_local_id = self.next_local_id.max(id.saturating_add(1));
+        }
+        Some(self.notes.remove(index))
+    }
+
     pub fn note(&self, id: u64) -> Option<&Note> {
         self.notes.iter().find(|note| note.id == id)
     }
@@ -894,45 +889,19 @@ impl Workspace {
         self.notes.iter_mut().find(|note| note.id == id)
     }
 
-    /// Identity of the notes and folders as they are now: changes whenever
-    /// they may have changed, and whenever the workspace itself is replaced.
-    pub fn revision(&self) -> (u64, usize, usize, usize) {
+    /// Identity of the notes as they are now: changes whenever they may
+    /// have changed, and whenever the workspace itself is replaced.
+    pub fn revision(&self) -> (u64, usize, usize) {
         (
             self.revision,
             self.notes.len(),
-            self.folders.len(),
             self.notes.as_ptr() as usize,
         )
     }
 
-    pub fn add_folder(&mut self, name: String) -> u64 {
-        self.revision = self.revision.wrapping_add(1);
-        // In server mode a folder is a folder of this Mac, in its own id
-        // space; it can hold notes of any account.
-        if let Some(device) = &mut self.device {
-            return device.add(&mut self.folders, &name);
-        }
-        let id = self.next_id();
-        let name = name.trim();
-        self.folders.push(Folder {
-            id,
-            name: if name.is_empty() {
-                "Untitled folder".into()
-            } else {
-                name.into()
-            },
-        });
-        id
-    }
-
-    /// All untrashed notes, optionally restricted by folder, favorite, and text.
+    /// All untrashed notes, optionally restricted by favorite and text.
     /// Results are newest first; searching covers the title and all note text.
-    pub fn visible_notes(
-        &self,
-        folder_id: Option<u64>,
-        favorites_only: bool,
-        query: &str,
-    ) -> Vec<&Note> {
+    pub fn visible_notes(&self, favorites_only: bool, query: &str) -> Vec<&Note> {
         let query = query.trim().to_lowercase();
         let mut notes: Vec<_> = self
             .notes
@@ -940,7 +909,6 @@ impl Workspace {
             .filter(|note| {
                 !note.trashed
                     && !self.is_hidden(note)
-                    && folder_id.is_none_or(|folder| note.folder_id == Some(folder))
                     && (!favorites_only || note.favorite)
                     && (query.is_empty()
                         || [&note.title, &note.body, &note.enhanced, &note.transcript]
@@ -959,19 +927,15 @@ impl Workspace {
     }
 
     fn next_id(&self) -> u64 {
-        let used = |id| {
-            self.notes.iter().any(|note| note.id == id)
-                || self.folders.iter().any(|folder| folder.id == id)
-        };
+        let used = |id| self.notes.iter().any(|note| note.id == id);
         let highest = self
             .notes
             .iter()
             .map(|note| note.id)
-            .chain(self.folders.iter().map(|folder| folder.id))
             .max()
             .unwrap_or(0);
         if let Some(next) = highest.checked_add(1) {
-            return next;
+            return next.max(self.next_local_id);
         }
         // Imported data can contain u64::MAX; use a free gap without overflow.
         (1..u64::MAX).find(|id| !used(*id)).unwrap_or(0)
@@ -1188,7 +1152,6 @@ mod tests {
         assert_eq!(copy.title, note.title);
         assert_eq!(copy.enhanced, note.enhanced);
         assert_eq!((&copy.date, &copy.time), (&note.date, &note.time));
-        assert_eq!(copy.folder_id, note.folder_id);
         assert_eq!(copy.transcript_revision, note.transcript_revision);
         assert_eq!(copy.needs_regeneration(), note.needs_regeneration());
         // …including whether there is a body or a transcript at all…
@@ -1240,7 +1203,7 @@ mod tests {
         };
         assert_eq!(
             workspace
-                .visible_notes(None, false, "")
+                .visible_notes(false, "")
                 .iter()
                 .map(|note| note.id)
                 .collect::<Vec<_>>(),
@@ -1382,41 +1345,33 @@ mod tests {
         assert!(restored.settings.dark_mode);
         // Closing the space banner survives a restart.
         assert!(restored.settings.space_banner_dismissed);
-        assert_eq!(restored.folders.len(), workspace.folders.len());
         assert_eq!(restored.notes.len(), workspace.notes.len());
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
         fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn search_combines_folder_favorites_and_trash_filters() {
+    fn search_combines_favorites_and_trash_filters() {
         let mut workspace = Workspace::demo();
         workspace
             .note_mut(1)
             .unwrap()
             .transcript
             .push_str(" UNIQUE QUERY");
+        workspace.note_mut(2).unwrap().body.push_str(" unique query");
         assert_eq!(
             workspace
-                .visible_notes(Some(101), true, " unique query ")
+                .visible_notes(true, " unique query ")
                 .iter()
                 .map(|note| note.id)
                 .collect::<Vec<_>>(),
             vec![1]
         );
-        assert!(
-            workspace
-                .visible_notes(Some(102), true, "unique query")
-                .is_empty()
-        );
+        assert_eq!(workspace.visible_notes(false, "unique query").len(), 2);
         workspace.note_mut(1).unwrap().trashed = true;
-        assert!(
-            workspace
-                .visible_notes(None, false, "unique query")
-                .is_empty()
-        );
+        assert!(workspace.visible_notes(true, "unique query").is_empty());
         let dates: Vec<_> = workspace
-            .visible_notes(None, false, "")
+            .visible_notes(false, "")
             .iter()
             .map(|note| note.date.clone())
             .collect();
@@ -1424,14 +1379,11 @@ mod tests {
     }
 
     #[test]
-    fn creates_unique_note_and_folder_ids_even_after_import() {
+    fn creates_unique_note_ids_even_after_import() {
         let mut workspace = Workspace::demo();
-        let folder = workspace.add_folder("  Research  ".into());
         let first = workspace.create_note();
         let second = workspace.create_note();
-        assert_ne!(folder, first);
         assert_ne!(first, second);
-        assert_eq!(workspace.folders.last().unwrap().name, "Research");
         assert_eq!(workspace.note(second).unwrap().title, "Untitled note");
         workspace.notes[0].id = u64::MAX;
         let gap = workspace.create_note();
@@ -1450,8 +1402,46 @@ mod tests {
         assert!(!workspace.notes[0].trashed);
         assert!(!workspace.settings.dark_mode);
         assert!(workspace.settings.auto_enhance);
-        assert!(workspace.settings.show_upcoming);
-        assert!(workspace.folders.is_empty());
+    }
+
+    /// Notes that were in folders are not lost: each one loads and is listed
+    /// in My notes (Trash keeps what was trashed), and saving keeps them all.
+    #[test]
+    fn a_workspace_with_notes_in_folders_loads_and_lists_every_note() {
+        let directory = std::env::temp_dir().join(format!("cereal-folders-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("workspace.json");
+        let fixture = include_str!("../fixtures/workspace-with-folders.json");
+        fs::write(&path, fixture).unwrap();
+        let listed = |workspace: &Workspace| -> Vec<String> {
+            workspace.visible_notes(false, "").iter().map(|note| note.title.clone()).collect()
+        };
+        let expected = [
+            "Kickoff with Northstar",
+            "Hiring sync",
+            "Filed in a folder that no longer exists",
+            "Never filed",
+        ];
+        let workspace = Workspace::load_from(&path).unwrap();
+        assert_eq!(workspace.notes.len(), 5, "no note is dropped");
+        assert_eq!(listed(&workspace), expected);
+        assert_eq!(
+            workspace.visible_notes(true, "").iter().map(|note| note.id).collect::<Vec<_>>(),
+            [1],
+            "a favorite in a folder is still a favorite"
+        );
+        assert!(workspace.note(5).unwrap().trashed, "a trashed note stays in Trash");
+        assert!(workspace.settings.dark_mode && workspace.settings.space_banner_dismissed);
+        // Searching finds notes that were filed.
+        assert_eq!(workspace.visible_notes(false, "candidates").len(), 1);
+        workspace.save_to(&path).unwrap();
+        let written: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(written.get("folders").is_none());
+        assert!(written["notes"].as_array().unwrap().iter().all(|note| note.get("folder_id").is_none()));
+        let again = Workspace::load_from(&path).unwrap();
+        assert_eq!(again.notes.len(), 5);
+        assert_eq!(listed(&again), expected);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -1522,7 +1512,7 @@ mod tests {
 }
 
 /// The account side of the workspace: handles, per-account files, the id
-/// high-water mark, device folders, and what is and is not written.
+/// high-water mark, device settings, and what is and is not written.
 #[cfg(test)]
 mod account_tests {
     use super::*;
@@ -1582,10 +1572,9 @@ mod account_tests {
             assert!((1..=5).contains(&file));
             assert!(note.title.starts_with(if slot == 1 { "A" } else { "B" }));
         }
-        // Loading brought the older files up to date (`nextId`, device
-        // folder ids: step 4 of the folder seeding), so the first save has
-        // nothing left to write…
-        assert!(save(&mut workspace).is_empty());
+        // Files from an older build (no `nextId`) are brought up to date by
+        // the first save…
+        assert_eq!(save(&mut workspace).len(), 2);
         let on_disk: Vec<Vec<u8>> = [&a, &b].iter().map(|id| fs::read(paths.workspace(id)).unwrap()).collect();
         let written: serde_json::Value = serde_json::from_slice(&on_disk[0]).unwrap();
         assert_eq!(written["notes"][0]["id"], 1, "on disk, always the file id");
@@ -1764,7 +1753,7 @@ mod account_tests {
         save(&mut workspace);
         // Account 1's session ended: a view filter.
         workspace.set_hidden(1, true);
-        let shown: Vec<_> = workspace.visible_notes(None, false, "").iter().map(|note| note.id).collect();
+        let shown: Vec<_> = workspace.visible_notes(false, "").iter().map(|note| note.id).collect();
         assert!(!shown.is_empty() && shown.iter().all(|id| handle::slot_of(*id) == Some(2)));
         assert_eq!(workspace.notes_of(1).count(), 2, "still in memory");
         // An edit in the other account writes only that account.
@@ -1839,7 +1828,7 @@ mod account_tests {
             ..Default::default()
         };
         let tomorrow = (Local::now().date_naive() + chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
-        let days: Vec<String> = workspace.visible_notes(None, false, "").iter().map(|note| note.sort_day()).collect();
+        let days: Vec<String> = workspace.visible_notes(false, "").iter().map(|note| note.sort_day()).collect();
         assert!(days.iter().all(|day| *day <= tomorrow), "{days:?}");
     }
 
@@ -1847,7 +1836,7 @@ mod account_tests {
     fn v7_with_one_account_the_list_is_the_one_the_build_before_showed() {
         // The same file read the way the build before read it, and as the
         // one account's file now: the same notes, in the same order, under
-        // the same days, in the same folders.
+        // the same days.
         let root = root("v7");
         let paths = Paths::at(&root);
         let a = account(1);
@@ -1860,135 +1849,15 @@ mod account_tests {
         let before = Workspace::load_from(&paths.workspace(&a)).unwrap();
         let mut now = Workspace::for_accounts(&paths);
         now.load_account(1, &a, &paths).unwrap();
-        let rows = |workspace: &Workspace, folder| -> Vec<(u64, String, String, Option<u64>, bool)> {
+        let rows = |workspace: &Workspace| -> Vec<(u64, String, String, bool)> {
             workspace
-                .visible_notes(folder, false, "")
+                .visible_notes(false, "")
                 .iter()
-                .map(|note| (handle::file_id(note.id), note.title.clone(), note.sort_day(), note.folder_id, note.favorite))
+                .map(|note| (handle::file_id(note.id), note.title.clone(), note.sort_day(), note.favorite))
                 .collect()
         };
-        assert_eq!(rows(&now, None), rows(&before, None));
-        for folder in &before.folders {
-            assert_eq!(rows(&now, Some(folder.id)), rows(&before, Some(folder.id)), "{}", folder.name);
-        }
-        assert_eq!(
-            now.folders.iter().map(|f| (f.id, f.name.clone())).collect::<Vec<_>>(),
-            before.folders.iter().map(|f| (f.id, f.name.clone())).collect::<Vec<_>>()
-        );
-        assert_eq!(now.settings.show_upcoming, before.settings.show_upcoming);
+        assert_eq!(rows(&now), rows(&before));
+        assert_eq!(now.settings.auto_enhance, before.settings.auto_enhance);
         let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn h7_two_accounts_with_a_folder_of_the_same_name_share_one_device_folder() {
-        let root = root("h7");
-        let paths = Paths::at(&root);
-        let (a, b) = (account(1), account(2));
-        write(&paths, &a, serde_json::json!({
-            "notes": [{"id": 1, "title": "A1", "folder_id": 4}],
-            "folders": [{"id": 4, "name": "Clients"}]
-        }));
-        write(&paths, &b, serde_json::json!({
-            "notes": [{"id": 1, "title": "B1", "folder_id": 9}, {"id": 2, "title": "B2"}],
-            "folders": [{"id": 9, "name": " clients "}, {"id": 4, "name": "Other"}]
-        }));
-        let mut workspace = Workspace::for_accounts(&paths);
-        workspace.load_account(1, &a, &paths).unwrap();
-        workspace.load_account(2, &b, &paths).unwrap();
-        let clients: Vec<_> = workspace.folders.iter().filter(|f| f.name.trim().eq_ignore_ascii_case("clients")).collect();
-        assert_eq!(clients.len(), 1, "one folder");
-        let clients = clients[0].id;
-        assert_eq!(clients, 4, "the first account keeps its ids");
-        // B's "Other" had A's id 4: it became a folder of its own.
-        let other = workspace.folders.iter().find(|f| f.name == "Other").unwrap().id;
-        assert_ne!(other, clients);
-        // A note of either account can be filed in it…
-        let b2 = handle::handle(2, 2).unwrap();
-        workspace.note_mut(b2).unwrap().folder_id = Some(clients);
-        save(&mut workspace);
-        // …and stays filed after a restart.
-        let mut again = Workspace::for_accounts(&paths);
-        again.load_account(1, &a, &paths).unwrap();
-        again.load_account(2, &b, &paths).unwrap();
-        let filed: Vec<String> = again.visible_notes(Some(clients), false, "").iter().map(|n| n.title.clone()).collect();
-        assert_eq!(filed.len(), 3, "{filed:?}");
-        assert_eq!(again.folders.len(), 2);
-        // Each account's file keeps the device folders its notes use, so an
-        // older build reads a consistent file.
-        let b_file: serde_json::Value = serde_json::from_slice(&fs::read(paths.workspace(&b)).unwrap()).unwrap();
-        assert_eq!(b_file["folders"].as_array().unwrap().len(), 1);
-        assert_eq!(b_file["folders"][0]["id"], clients);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn f1_folder_seeding_survives_a_crash_after_each_step_and_an_older_build() {
-        let a_file = serde_json::json!({
-            "notes": [{"id": 1, "title": "A1", "folder_id": 4}, {"id": 2, "title": "Dangling", "folder_id": 77}],
-            "folders": [{"id": 4, "name": "Clients"}]
-        });
-        let b_file = serde_json::json!({
-            "notes": [{"id": 1, "title": "B1", "folder_id": 5}, {"id": 2, "title": "B2", "folder_id": 6}],
-            "folders": [{"id": 5, "name": "clients"}, {"id": 6, "name": "Hiring"}]
-        });
-        let check = |paths: &Paths, a: &AccountId, b: &AccountId| {
-            let mut workspace = Workspace::for_accounts(paths);
-            workspace.load_account(1, a, paths).unwrap();
-            workspace.load_account(2, b, paths).unwrap();
-            let names: Vec<String> = workspace.folders.iter().map(|f| f.name.to_lowercase()).collect();
-            assert_eq!(names.iter().filter(|n| *n == "clients").count(), 1, "{names:?}");
-            assert_eq!(names.iter().filter(|n| *n == "hiring").count(), 1, "{names:?}");
-            let clients = workspace.folders.iter().find(|f| f.name == "Clients").unwrap().id;
-            let filed: Vec<String> = workspace.visible_notes(Some(clients), false, "").iter().map(|n| n.title.clone()).collect();
-            assert_eq!(filed.len(), 2, "no lost membership: {filed:?}");
-            let hiring = workspace.folders.iter().find(|f| f.name == "Hiring").unwrap().id;
-            assert_eq!(workspace.visible_notes(Some(hiring), false, "").len(), 1);
-            // A folder id that names no device folder is in no folder.
-            let dangling = workspace.notes.iter().find(|n| n.title == "Dangling").unwrap();
-            assert_eq!(dangling.folder_id, None);
-            workspace
-        };
-        // 0 = no crash; then a crash after steps 3, 4 and 5 of A's seeding,
-        // and a run again.
-        for crash in [0, 3, 4, 5] {
-            let root = root("f1");
-            let paths = Paths::at(&root);
-            let (a, b) = (account(1), account(2));
-            write(&paths, &a, a_file.clone());
-            write(&paths, &b, b_file.clone());
-            if crash == 3 {
-                let mut device = crate::folders::Device::load(&paths);
-                let mut folders = Vec::new();
-                let theirs: Vec<Folder> = serde_json::from_value(a_file["folders"].clone()).unwrap();
-                device.seed(&a, &theirs, &mut folders);
-            } else if crash >= 4 {
-                // Steps 3 to 5 for A alone.
-                let mut workspace = Workspace::for_accounts(&paths);
-                workspace.load_account(1, &a, &paths).unwrap();
-                if crash == 4 {
-                    // The commit (step 5) did not reach the disk.
-                    let mut file: serde_json::Value =
-                        serde_json::from_slice(&fs::read(paths.folders()).unwrap()).unwrap();
-                    file["seeded"] = serde_json::json!([]);
-                    fs::write(paths.folders(), serde_json::to_vec(&file).unwrap()).unwrap();
-                }
-            }
-            drop(check(&paths, &a, &b));
-            // Run again: the same, nothing duplicated.
-            let mut workspace = check(&paths, &a, &b);
-            save(&mut workspace);
-            // An older build rewrites B's file (no `nextId`, and a folder it
-            // made with an id of its choosing): no second seeding of what
-            // was there, and the new folder is kept.
-            let mut file: serde_json::Value = serde_json::from_slice(&fs::read(paths.workspace(&b)).unwrap()).unwrap();
-            file.as_object_mut().unwrap().remove("nextId");
-            file["folders"].as_array_mut().unwrap().push(serde_json::json!({"id": 1, "name": "Made by the old build"}));
-            fs::write(paths.workspace(&b), serde_json::to_vec(&file).unwrap()).unwrap();
-            let workspace = check(&paths, &a, &b);
-            assert_eq!(workspace.folders.iter().filter(|f| f.name == "Made by the old build").count(), 1);
-            let seeded: serde_json::Value = serde_json::from_slice(&fs::read(paths.folders()).unwrap()).unwrap();
-            assert_eq!(seeded["seeded"].as_array().unwrap().len(), 2, "crash {crash}");
-            let _ = fs::remove_dir_all(root);
-        }
     }
 }

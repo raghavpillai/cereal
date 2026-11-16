@@ -198,6 +198,9 @@ button:disabled, .button[aria-disabled='true'] { cursor: not-allowed; opacity: 0
 }
 .notice.is-error, .admin-notice.is-error { border-color: var(--danger-line); background: var(--danger-soft); color: var(--danger); }
 .admin-notice button { color: inherit; margin-left: 0.375rem; }
+/* A bare "Retry" inside a notice reads as a link in the notice's own colour, not as loose text. */
+.admin-notice > button:not([class]) { padding: 0; border: 0; background: none; font-weight: 500; text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+.admin-notice > button:not([class]):hover { text-decoration-thickness: 2px; }
 
 /* Empty, unavailable and error states share one centred composition. */
 .empty-state {

@@ -134,14 +134,6 @@ struct ChatView: View {
 
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("On-device preview")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(Theme.textTertiary)
-            Text("Preview replies show saved note excerpts. A connected chat service is not available yet.")
-                .font(.system(size: 15))
-                .lineSpacing(4)
-                .foregroundStyle(Theme.textSecondary)
-                .padding(.bottom, 8)
             ChatSuggestionChips(suggestions: suggestions) { draft = $0; send() }
         }
         .padding(.top, 8)
@@ -216,6 +208,8 @@ struct ChatConversation: Identifiable, Codable {
     var createdAt = Date()
     let title: String
     let messages: [ChatMessage]
+    /// The server thread it is saved as, when the server keeps chats.
+    var threadID: String? = nil
 }
 
 struct ChatMessageView: View {
@@ -570,7 +564,6 @@ struct ChatComposer: View {
     var focused: FocusState<Bool>.Binding
     let onSend: () -> Void
     let onStop: () -> Void
-    var serverMode = false
     /// With text typed while an answer arrives, the button sends (the caller queues the
     /// question) and Stop is offered again once the field is empty.
     var queuesWhileGenerating = false
@@ -605,7 +598,7 @@ struct ChatComposer: View {
                 .padding(.bottom, RailMetrics.composerFieldInsets(compact: verticalSizeClass == .compact).bottom)
             HStack(spacing: 4) {
                 Button {
-                    unavailableAction = serverMode ? "File attachments are not supported by this instance yet. Your note and transcript are already included in the conversation." : "Attachments need a connected chat service. This preview uses only saved note text."
+                    unavailableAction = "File attachments are not supported by this instance yet. Your note and transcript are already included in the conversation."
                 } label: {
                     Image(systemName: "paperclip")
                         .font(.system(size: 19))
@@ -616,13 +609,13 @@ struct ChatComposer: View {
                 .buttonStyle(SquashButtonStyle())
                 .accessibilityLabel("Attach a file")
                 Menu {
-                    Button(serverMode ? "Auto" : "On-device preview", systemImage: model == "Auto" ? "checkmark" : "circle") { model = "Auto" }
+                    Button("Auto", systemImage: model == "Auto" ? "checkmark" : "circle") { model = "Auto" }
                     ForEach(Array(availableModels.enumerated()), id: \.offset) { _, choice in
                         let key = choice.provider.rawValue + ":" + choice.model
                         Button(choice.model + " · " + choice.provider.rawValue, systemImage: model == key ? "checkmark" : "circle") { model = key }
                     }
                     Button("About chat") {
-                        unavailableAction = serverMode ? "Auto uses the model configured on your server." : "This preview returns saved note excerpts on your device. Model selection becomes available with a connected chat service."
+                        unavailableAction = "Auto uses the model configured on your server."
                     }
                 } label: {
                     HStack(spacing: 6) {
@@ -672,7 +665,7 @@ struct ChatComposer: View {
         .padding(.leading, rail.composerLeading)
         .padding(.trailing, rail.composerTrailing)
         .padding(.bottom, verticalSizeClass == .compact ? 6 : RailMetrics.composerBottom)
-        .alert(serverMode ? "Chat" : "Chat preview", isPresented: Binding(get: { unavailableAction != nil }, set: { if !$0 { unavailableAction = nil } })) {
+        .alert("Chat", isPresented: Binding(get: { unavailableAction != nil }, set: { if !$0 { unavailableAction = nil } })) {
             Button("OK", role: .cancel) { unavailableAction = nil }
         } message: { Text(unavailableAction ?? "") }
     }

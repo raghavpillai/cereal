@@ -38,8 +38,10 @@ final class FakeSocket: LiveSocket, @unchecked Sendable {
         var acknowledges = true
         /// Closes with this code once this many audio frames have arrived.
         var closeAfterFrames: (count: Int, code: Int)?
-        /// After `mark end`: the messages to send, then a normal close.
+        /// After `mark end`: the messages to send, then a close with `endClose`.
         var onEnd: [String]? = []
+        /// 1000 is the orderly close that ends a capture's stream; 1012 is a provider lost at the last moment.
+        var endClose = 1000
         var sendFails = false
         /// How long the connection takes to accept one audio frame.
         var audioDelay: Duration?
@@ -52,6 +54,8 @@ final class FakeSocket: LiveSocket, @unchecked Sendable {
     private var closedWith: Int?
     private(set) var hello: LiveWire.Hello?
     private(set) var frames: [Frame] = []
+    /// When each frame arrived.
+    private(set) var arrivals: [ContinuousClock.Instant] = []
     private(set) var marks: [LiveWire.Mark] = []
     private(set) var pings = 0
     private(set) var contentMatchesIndex = true
@@ -62,6 +66,7 @@ final class FakeSocket: LiveSocket, @unchecked Sendable {
 
     var isClosed: Bool { lock.withLock { closedWith != nil } }
     var snapshot: (frames: [Frame], marks: [LiveWire.Mark], order: [String]) { lock.withLock { (frames, marks, order) } }
+    var timedFrames: [(frame: Frame, at: ContinuousClock.Instant)] { lock.withLock { Array(zip(frames, arrivals)).map { ($0.0, $0.1) } } }
     var receivedHello: LiveWire.Hello? { lock.withLock { hello } }
     var pingCount: Int { lock.withLock { pings } }
     var contentIsCorrect: Bool { lock.withLock { contentMatchesIndex } }
@@ -97,7 +102,7 @@ final class FakeSocket: LiveSocket, @unchecked Sendable {
             lock.withLock { marks.append(mark); order.append("mark:\(mark.kind.rawValue)") }
             if mark.kind == .end, let messages = script.onEnd {
                 messages.forEach(push)
-                serverClose(1000)
+                serverClose(script.endClose)
             }
         }
     }
@@ -110,6 +115,7 @@ final class FakeSocket: LiveSocket, @unchecked Sendable {
         let count = lock.withLock { () -> Int in
             if frame.pcm != MemoryCapture.pcm(from: frame.firstSample, count: samples) { contentMatchesIndex = false }
             frames.append(Frame(first: frame.firstSample, samples: samples))
+            arrivals.append(.now)
             order.append("audio")
             return frames.count
         }
@@ -333,10 +339,11 @@ private func fastConfiguration(baseMs: Int = 754_000) -> LiveTranscriptClient.Co
         await client.cancel()
     }
 
-    @Test func aBacklogLongerThanTheResumeWindowIsSkippedToFiveSecondsBeforeTheEnd() async throws {
+    @Test func aBacklogLongerThanTheResumeWindowKeepsNineTenthsOfTheWindow() async throws {
         let capture = MemoryCapture()
         let connector = FakeConnector([.accept(.init(closeAfterFrames: (2, 1006))), .refuse(.transport)])
         let client = LiveTranscriptClient(connector: connector, source: capture, configuration: fastConfiguration())
+        let log = EventLog(); await log.follow(client)
         capture.grow(by: 6_400)
         await client.start()
         try await waitUntil("drop") { connector.socket(0)?.isClosed == true }
@@ -347,8 +354,13 @@ private func fastConfiguration(baseMs: Int = 754_000) -> LiveTranscriptClient.Co
         let second = try #require(connector.socket(1))
         // The hello still reports the true resume point; the jump is in the frame index, which is how the server learns of the gap.
         #expect(second.receivedHello?.streams[0].resumeFromSample == 6_400)
-        #expect(second.snapshot.frames.first?.first == end - 5 * 16_000)
+        // The window is 30 s: the newest 27 s are replayed, the rest has no transcript.
+        #expect(second.snapshot.frames.first?.first == end - 27 * 16_000)
         #expect(await client.statistics.skips == 1)
+        // Exactly which stretch was skipped is recorded and reported, on the note's timeline.
+        #expect(await client.statistics.skippedSamples == [6_400..<(end - 27 * 16_000)])
+        let skips = await log.events.compactMap { if case .skipped(let skip) = $0 { skip } else { nil } }
+        #expect(skips == [LiveSkip(channel: .mic, fromMs: 754_000 + 400, toMs: 754_000 + Int((end - 27 * 16_000) / 16))])
         #expect(second.contentIsCorrect)
         await client.cancel()
     }
@@ -398,8 +410,9 @@ private func fastConfiguration(baseMs: Int = 754_000) -> LiveTranscriptClient.Co
         #expect(socket.contentIsCorrect)
     }
 
-    @Test func aStreamThatCannotCatchUpInTimeStillSaysEndWithTheCaptureLengthNotWhatItSent() async throws {
+    @Test func aSlowConnectionStillDeliversTheWholeCaptureBeforeTheStreamEnds() async throws {
         // Ten seconds of capture on a connection that takes 40 ms per frame: 50 frames, 2 s, to send it all.
+        // Nothing is given up after a grace period: the stream is the only transcript.
         let capture = MemoryCapture()
         let connector = FakeConnector([.accept(.init(audioDelay: .milliseconds(40)))])
         let client = LiveTranscriptClient(connector: connector, source: capture, configuration: fastConfiguration())
@@ -409,18 +422,130 @@ private func fastConfiguration(baseMs: Int = 754_000) -> LiveTranscriptClient.Co
         try await waitUntil("first audio") { (connector.last?.throughSample ?? 0) > 0 }
         let socket = try #require(connector.last)
 
-        let began = ContinuousClock.now
-        await client.end(atSample: 160_000)
+        let delivered = await client.end(atSample: 160_000)
         await log.finished()
-        // It gave up after the grace period (300 ms here) instead of sending for two seconds...
-        #expect(ContinuousClock.now - began < .milliseconds(1_500))
-        #expect(socket.throughSample < 160_000)
-        // ...and the last thing it said is where the capture really ends.
+        let confirmed = await client.delivered
+        #expect(delivered && confirmed)
+        #expect(socket.throughSample == 160_000)
         #expect(socket.snapshot.marks == [LiveWire.Mark(kind: .end, atSample: ["mic": 160_000])])
         #expect(socket.snapshot.order.last == "mark:end")
-        #expect(await client.statistics.marksSent == [.end])
         #expect(await log.statuses.last == .ended)
         #expect(socket.contentIsCorrect)
+    }
+
+    @Test func aSixtySecondBacklogIsReplayedWholeContiguousAndNeverFasterThanThreeTimesRealTimeAlsoWhileEnding() async throws {
+        // Real pacing: the default three times real time with half a second of burst.
+        let capture = MemoryCapture()
+        let window = 900_000
+        let connector = FakeConnector([.accept(.init(resumeWindowMs: window, closeAfterFrames: (2, 1006))), .refuse(.transport)],
+                                      then: .accept(.init(resumeWindowMs: window)))
+        var configuration = fastConfiguration()
+        configuration.catchUpFactor = 3
+        let client = LiveTranscriptClient(connector: connector, source: capture, configuration: configuration)
+        capture.grow(by: 6_400)
+        await client.start()
+        try await waitUntil("drop") { connector.socket(0)?.isClosed == true }
+        // A minute is recorded while the network is away.
+        capture.grow(by: 60 * 16_000)
+        let total = Int64(6_400 + 60 * 16_000)
+        try await waitUntil("replay under way") { (connector.socket(1)?.throughSample ?? 0) > 6_400 }
+        let replay = try #require(connector.socket(1))
+        // Some way into the replay the recording stops: the rest goes out while ending, at the same pace.
+        try await Task.sleep(for: .seconds(8))
+        let sentBeforeEnd = replay.throughSample
+        #expect(sentBeforeEnd < total)
+        let delivered = await client.end(atSample: total)
+        #expect(delivered)
+
+        // Complete and contiguous across both connections: every sample once, in order.
+        let first = try #require(connector.socket(0)).snapshot.frames
+        let frames = first + replay.snapshot.frames
+        #expect(frames.first?.first == 0 && frames.last.map { $0.first + Int64($0.samples) } == total)
+        #expect(zip(frames, frames.dropFirst()).allSatisfy { $0.first + Int64($0.samples) == $1.first })
+        #expect(replay.contentIsCorrect)
+        #expect(await client.statistics.skips == 0)
+        // Never faster than three times real time plus half a second, over any stretch, before and after `end`.
+        let timed = replay.timedFrames
+        let rate = 3.0 * 16_000, burst = 0.5 * 16_000, tolerance = 0.05 * rate
+        var worst = 0.0
+        for i in timed.indices {
+            var samples = 0.0
+            for j in i..<timed.count {
+                samples += Double(timed[j].frame.samples)
+                let elapsed = timed[j].at - timed[i].at
+                let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+                worst = max(worst, samples - (burst + rate * seconds))
+            }
+        }
+        #expect(worst <= tolerance, "sent \(worst) samples more than three times real time allows")
+        let span = timed.last!.at - timed.first!.at
+        #expect(span >= .seconds(19)) // 59.6 s of audio past the burst, at 48 000 samples a second
+        #expect(replay.snapshot.marks.map(\.kind) == [.end])
+    }
+
+    @Test func stopDuringAnOutageWaitsForTheNetworkAndHandsOverEverythingBeforeItReturns() async throws {
+        let capture = MemoryCapture()
+        // The network goes at 0.4 s of audio and is away for a dozen dials after Stop.
+        let connector = FakeConnector([.accept(.init(closeAfterFrames: (2, 1006)))] + Array(repeating: .refuse(.transport), count: 12))
+        var configuration = fastConfiguration()
+        configuration.backoff = [.milliseconds(10), .milliseconds(20), .milliseconds(40)]
+        let client = LiveTranscriptClient(connector: connector, source: capture, configuration: configuration)
+        let log = EventLog(); await log.follow(client)
+        capture.grow(by: 6_400)
+        await client.start()
+        try await waitUntil("drop") { connector.socket(0)?.isClosed == true }
+        capture.grow(by: 15 * 16_000)
+        let total = Int64(6_400 + 15 * 16_000)
+        let delivered = await client.end(atSample: total)
+        #expect(delivered)
+        #expect(connector.dialCount == 14)
+        let last = try #require(connector.socket(1))
+        #expect(last.snapshot.frames.first?.first == 6_400 && last.throughSample == total && last.contentIsCorrect)
+        #expect(last.snapshot.marks == [LiveWire.Mark(kind: .end, atSample: ["mic": total])])
+        await log.finished()
+        // While it waited, it said it was reconnecting, never that it had given up.
+        let statuses = await log.statuses
+        #expect(statuses.contains(.reconnecting) && statuses.last == .ended)
+        #expect(!statuses.contains { if case .unavailable = $0 { true } else { false } })
+    }
+
+    @Test func aProviderLostAfterEndIsDialledAgainAndOnlyAnOrderlyCloseEndsTheStream() async throws {
+        // The server took everything, but its provider was lost before the last words were stored:
+        // it closes with 1012, and the next `ready` asks for the audio it has no transcript for.
+        let capture = MemoryCapture()
+        let connector = FakeConnector([.accept(.init(endClose: 1012)), .accept(.init(acceptFrom: { _ in 9_600 }))])
+        let client = LiveTranscriptClient(connector: connector, source: capture, configuration: fastConfiguration())
+        capture.grow(by: 16_000)
+        await client.start()
+        try await waitUntil("sent") { connector.socket(0)?.throughSample == 16_000 }
+        let delivered = await client.end(atSample: 16_000)
+        #expect(delivered)
+        let first = try #require(connector.socket(0)), second = try #require(connector.socket(1))
+        #expect(first.snapshot.marks.map(\.kind) == [.end])
+        #expect(second.snapshot.frames.first?.first == 9_600 && second.throughSample == 16_000)
+        #expect(second.snapshot.marks.map(\.kind) == [.end])
+        #expect(connector.dialCount == 2)
+    }
+
+    @Test func aNoteStoppedElsewhereWhileEndingSaysExactlyWhichStretchWasNotSent() async throws {
+        let capture = MemoryCapture()
+        // The connection is lost, and while the client waits to dial again the note is stopped on another device.
+        let connector = FakeConnector([.accept(.init(closeAfterFrames: (2, 1006)))], then: .refuse(.refused(status: 409)))
+        var configuration = fastConfiguration(baseMs: 10_000)
+        configuration.backoff = [.seconds(30)]
+        let client = LiveTranscriptClient(connector: connector, source: capture, configuration: configuration)
+        let log = EventLog(); await log.follow(client)
+        capture.grow(by: 6_400)
+        await client.start()
+        try await waitUntil("drop") { connector.socket(0)?.isClosed == true }
+        capture.grow(by: 32_000)
+        let delivered = await client.end(atSample: 38_400)
+        await log.finished()
+        #expect(!delivered)
+        #expect(await client.status == .unavailable(.notRecording))
+        #expect(await client.statistics.skippedSamples == [6_400..<38_400])
+        let skips = await log.events.compactMap { if case .skipped(let skip) = $0 { skip } else { nil } }
+        #expect(skips == [LiveSkip(channel: .mic, fromMs: 10_400, toMs: 12_400)])
     }
 
     @Test func aPauseThatHappenedWhileDisconnectedIsToldToTheNextConnection() async throws {
@@ -439,25 +564,30 @@ private func fastConfiguration(baseMs: Int = 754_000) -> LiveTranscriptClient.Co
         await client.cancel()
     }
 
-    @Test func notConfiguredIsFinalAndSilent() async throws {
-        let connector = FakeConnector([.refuse(.refused(status: 503))])
+    @Test func aServerThatTurnsTheStreamAwayIsDialledAgainUntilItTakesIt() async throws {
+        // Not configured (or not ready), a limit, an outage: each is retried, and then the stream goes on.
+        let connector = FakeConnector([.refuse(.refused(status: 503)), .refuse(.refused(status: 429)), .refuse(.refused(status: 503))])
         let capture = MemoryCapture()
         let client = LiveTranscriptClient(connector: connector, source: capture, configuration: fastConfiguration())
         let log = EventLog(); await log.follow(client)
+        capture.grow(by: 6_400)
         await client.start()
-        await log.finished()
-        // One attempt for this recording, then the durable parts are on their own.
-        #expect(connector.dialCount == 1)
-        #expect(await log.statuses == [.connecting, .unavailable(.notConfigured)])
-        capture.grow(by: 32_000)
-        try await Task.sleep(for: .milliseconds(60))
-        #expect(connector.dialCount == 1)
+        try await waitUntil("taken after three refusals") { connector.socket(0)?.throughSample == 6_400 }
+        #expect(connector.dialCount == 4)
+        // While it is turned away the line says so, not "reconnecting", and it is never final.
+        let statuses = await log.statuses
+        #expect(statuses.first == .connecting && statuses.contains(.providerUnavailable))
+        #expect(!statuses.contains(.reconnecting))
+        #expect(!statuses.contains { if case .unavailable = $0 { true } else { false } })
+        try await waitUntil("live") { await client.status == .live }
+        await client.cancel()
     }
 
     @Test func refusalsAndLimitsEndTheStreamButLostConnectionsAndSlowClientsRetry() {
         typealias Client = LiveTranscriptClient
-        #expect(Client.terminal(.refused(status: 503), serverError: nil) == .notConfigured)
-        #expect(Client.terminal(.refused(status: 429), serverError: nil) == .overLimit)
+        // A server that is not ready, a limit and an unavailable provider are dialled again.
+        #expect(Client.terminal(.refused(status: 503), serverError: nil) == nil)
+        #expect(Client.terminal(.refused(status: 429), serverError: nil) == nil)
         #expect(Client.terminal(.refused(status: 401), serverError: nil) == .unauthorized)
         #expect(Client.terminal(.refused(status: 403), serverError: nil) == .unauthorized)
         #expect(Client.terminal(.refused(status: 404), serverError: nil) == .notFound)
@@ -468,29 +598,80 @@ private func fastConfiguration(baseMs: Int = 754_000) -> LiveTranscriptClient.Co
         #expect(Client.terminal(.closed(code: 4401), serverError: nil) == .unauthorized)
         #expect(Client.terminal(.closed(code: 4404), serverError: nil) == .notFound)
         #expect(Client.terminal(.closed(code: 4409), serverError: nil) == .replaced)
-        #expect(Client.terminal(.closed(code: 4429), serverError: nil) == .overLimit)
-        #expect(Client.terminal(.closed(code: 4503), serverError: nil) == .providerUnavailable)
-        for code in [1000, 1001, 1006, 1011, 1012, 4408] { #expect(Client.terminal(.closed(code: code), serverError: nil) == nil) }
+        for code in [1000, 1001, 1006, 1011, LiveWire.CloseCode.serviceRestart, 4408, 4429, 4503] { #expect(Client.terminal(.closed(code: code), serverError: nil) == nil) }
         #expect(Client.terminal(.transport, serverError: nil) == nil)
         // The `error` message that precedes a refusal close is honoured when the code itself is lost.
+        let malformed = LiveWire.ServerError(code: "malformed", message: "", retryable: false, retryAfterMs: nil)
+        #expect(Client.terminal(.transport, serverError: malformed) == .protocolError)
         let overLimit = LiveWire.ServerError(code: "over_limit", message: "", retryable: false, retryAfterMs: nil)
-        #expect(Client.terminal(.transport, serverError: overLimit) == .overLimit)
+        let provider = LiveWire.ServerError(code: "provider_unavailable", message: "", retryable: false, retryAfterMs: nil)
+        #expect(Client.terminal(.transport, serverError: overLimit) == nil)
+        #expect(Client.terminal(.transport, serverError: provider) == nil)
         let slow = LiveWire.ServerError(code: "client_too_slow", message: "", retryable: true, retryAfterMs: 500)
         #expect(Client.terminal(.transport, serverError: slow) == nil)
+        // Of the ones dialled again, these are the server turning the stream away, not a lost connection.
+        #expect(Client.serverIsBusy(.refused(status: 503), serverError: nil) && Client.serverIsBusy(.refused(status: 429), serverError: nil))
+        #expect(Client.serverIsBusy(.closed(code: 4429), serverError: nil) && Client.serverIsBusy(.closed(code: 4503), serverError: nil))
+        #expect(Client.serverIsBusy(.transport, serverError: overLimit) && Client.serverIsBusy(.transport, serverError: provider))
+        #expect(!Client.serverIsBusy(.transport, serverError: nil) && !Client.serverIsBusy(.closed(code: 1006), serverError: nil))
+        #expect(!Client.serverIsBusy(.refused(status: 502), serverError: nil))
     }
 
-    @Test func aLimitCloseAfterConnectingStopsDialingForThisRecording() async throws {
-        for code in [4429, 4503, 4409] {
+    @Test func aLimitOrProviderCloseAfterConnectingIsDialledAgainAndAReplacedCaptureIsNot() async throws {
+        for code in [4429, 4503] {
             let connector = FakeConnector([.accept(.init(closeAfterFrames: (1, code)))])
             let capture = MemoryCapture()
             let client = LiveTranscriptClient(connector: connector, source: capture, configuration: fastConfiguration())
             let log = EventLog(); await log.follow(client)
             capture.grow(by: 3_200)
             await client.start()
-            await log.finished()
-            #expect(connector.dialCount == 1)
-            if case .unavailable = await log.statuses.last {} else { Issue.record("close \(code) should be final") }
+            // The second connection resumes from what the first acknowledged, and takes what follows.
+            try await waitUntil("dialled again after \(code)") { connector.socket(1)?.receivedHello != nil }
+            #expect(connector.socket(1)?.receivedHello?.streams[0].resumeFromSample == 3_200)
+            #expect(await log.statuses.contains(.providerUnavailable))
+            capture.grow(by: 3_200)
+            try await waitUntil("the rest after \(code)") { connector.socket(1)?.throughSample == 6_400 }
+            #expect(connector.socket(1)?.snapshot.frames.first?.first == 3_200)
+            #expect(connector.socket(1)?.contentIsCorrect == true)
+            await client.cancel()
         }
+        // Another connection took this capture over: that one is final.
+        let connector = FakeConnector([.accept(.init(closeAfterFrames: (1, 4409)))])
+        let capture = MemoryCapture()
+        let client = LiveTranscriptClient(connector: connector, source: capture, configuration: fastConfiguration())
+        let log = EventLog(); await log.follow(client)
+        capture.grow(by: 3_200)
+        await client.start()
+        await log.finished()
+        #expect(connector.dialCount == 1)
+        #expect(await log.statuses.last == .unavailable(.replaced))
+    }
+
+    @Test func aServerRestartingTheStreamIsDialledAgainAtOnceAndGetsTheBacklog() async throws {
+        // The provider session was lost: `error provider_unavailable` (retryable), then close 1012.
+        let capture = MemoryCapture()
+        let connector = FakeConnector([.accept(.init(closeAfterFrames: (1, 1012)))])
+        var configuration = fastConfiguration()
+        configuration.backoff = [.seconds(30)] // any back-off at all would fail this test
+        let client = LiveTranscriptClient(connector: connector, source: capture, configuration: configuration)
+        let log = EventLog(); await log.follow(client)
+        capture.grow(by: 3_200)
+        await client.start()
+        try await waitUntil("dialled again") { connector.socket(1)?.receivedHello != nil }
+        let times = connector.dialTimes
+        #expect(times[1] - times[0] < .seconds(2))
+        #expect(connector.socket(1)?.receivedHello?.streams[0].resumeFromSample == 3_200)
+        capture.grow(by: 3_200)
+        try await waitUntil("the rest") { connector.socket(1)?.throughSample == 6_400 }
+        #expect(!(await log.statuses).contains { if case .unavailable = $0 { true } else { false } })
+        await client.cancel()
+    }
+
+    @Test func theWaitBetweenDialsGrowsToThirtySecondsAndStaysThere() {
+        let delays = LiveTranscriptClient.Configuration(captureID: "c", baseMs: 0).backoff
+        #expect(delays.first == .milliseconds(500))
+        #expect(delays.last == .seconds(30))
+        #expect(zip(delays, delays.dropFirst()).allSatisfy { $0 < $1 })
     }
 
     @Test func reconnectsBackOffAndASuccessfulConnectionResetsTheDelay() async throws {
@@ -555,26 +736,6 @@ private func fastConfiguration(baseMs: Int = 754_000) -> LiveTranscriptClient.Co
         await client.cancel()
     }
 
-    @Test func lowDataModeHoldsTheStreamAndLiftingItResumesFromTheAcknowledgedSample() async throws {
-        let capture = MemoryCapture()
-        let connector = FakeConnector([])
-        let client = LiveTranscriptClient(connector: connector, source: capture, configuration: fastConfiguration())
-        let log = EventLog(); await log.follow(client)
-        capture.grow(by: 6_400)
-        await client.start()
-        try await waitUntil("audio") { connector.last?.throughSample == 6_400 }
-        try await waitUntil("acks") { await client.acknowledged == 6_400 }
-        await client.setConstrained(true)
-        try await waitUntil("held") { await client.status == .lowDataMode }
-        capture.grow(by: 16_000)
-        try await Task.sleep(for: .milliseconds(60))
-        #expect(connector.dialCount == 1)
-        await client.setConstrained(false)
-        try await waitUntil("resumed") { connector.socket(1)?.throughSample == 22_400 }
-        #expect(connector.socket(1)?.receivedHello?.streams[0].resumeFromSample == 6_400)
-        await client.cancel()
-    }
-
     @Test func aServerThatNeverAnswersHelloIsDroppedAndDialledAgain() async throws {
         let capture = MemoryCapture()
         let connector = FakeConnector([.accept(.init(sendsReady: false))])
@@ -598,7 +759,7 @@ private func fastConfiguration(baseMs: Int = 754_000) -> LiveTranscriptClient.Co
         await client.cancel()
     }
 
-    @Test func endingWithoutAConnectionFinishesAtOnce() async throws {
+    @Test func endingWithoutAConnectionAndNothingUnsentFinishesAtOnce() async throws {
         let capture = MemoryCapture()
         let connector = FakeConnector([], then: .refuse(.transport))
         var configuration = fastConfiguration()
@@ -612,28 +773,52 @@ private func fastConfiguration(baseMs: Int = 754_000) -> LiveTranscriptClient.Co
         await log.finished()
         #expect(ContinuousClock.now - began < .seconds(1))
         #expect(await log.statuses.last == .ended)
-        // Nothing can be said on a connection that is not there, and no connection is made to say it:
-        // the server sees the socket gone and takes the end of the capture from the saved audio.
+        // Nothing can be said on a connection that is not there, and no connection is made only to say it.
         #expect(await client.statistics.marksSent.isEmpty)
         #expect(connector.dialCount == 1)
     }
 
+    @Test func endingWhileDisconnectedWithAudioUnsentDialsAtOnceAndHandsItOver() async throws {
+        // The stream is cut and waiting 30 s to dial again when the recording stops.
+        let capture = MemoryCapture()
+        let connector = FakeConnector([.accept(.init(closeAfterFrames: (2, 1006))), .refuse(.transport)])
+        var configuration = fastConfiguration()
+        configuration.backoff = [.milliseconds(10), .seconds(30)]
+        configuration.endGrace = .seconds(2)
+        let client = LiveTranscriptClient(connector: connector, source: capture, configuration: configuration)
+        capture.grow(by: 6_400)
+        await client.start()
+        try await waitUntil("drop") { connector.socket(0)?.isClosed == true }
+        try await waitUntil("the long wait") { connector.dialCount == 2 }
+        capture.grow(by: 16_000)
+        let began = ContinuousClock.now
+        await client.end(atSample: 22_400)
+        // It did not wait out the 30 s: it dialled, sent the rest and said `end` at the capture's length.
+        #expect(ContinuousClock.now - began < .seconds(4))
+        let last = try #require(connector.socket(1))
+        #expect(last.throughSample == 22_400 && last.contentIsCorrect)
+        #expect(last.snapshot.marks.map(\.kind) == [.end])
+        #expect(last.snapshot.marks.first?.atSample["mic"] == 22_400)
+    }
+
     @Test func replayIsPacedAtTheCatchUpFactor() {
-        var budget = LiveSendBudget(sampleRate: 16_000, factor: 2)
-        // Half a second of burst, then exactly twice real time.
+        #expect(LiveTranscriptClient.Configuration(captureID: "c", baseMs: 0).catchUpFactor == 3)
+        #expect(LiveTranscriptClient.Configuration(captureID: "c", baseMs: 0).burstSeconds == 0.5)
+        var budget = LiveSendBudget(sampleRate: 16_000, factor: 3)
+        // At most half a second of audio at once, then never more than three times real time.
         var sent = 0
-        while budget.take(3_200) { sent += 3_200 }
-        #expect(sent == 16_000)
+        while budget.take(1_600) { sent += 1_600 }
+        #expect(sent == 8_000)
         for _ in 0..<100 {
             budget.refill(seconds: 0.1)
-            while budget.take(3_200) { sent += 3_200 }
+            while budget.take(1_600) { sent += 1_600 }
         }
-        #expect(sent == 16_000 + 10 * 32_000)
+        #expect(sent == 8_000 + 10 * 48_000)
         // Idle time does not bank more than the burst.
         budget.refill(seconds: 60)
         var burst = 0
-        while budget.take(3_200) { burst += 3_200 }
-        #expect(burst == 16_000)
+        while budget.take(1_600) { burst += 1_600 }
+        #expect(burst == 8_000)
     }
 }
 
@@ -684,7 +869,9 @@ private func fastConfiguration(baseMs: Int = 754_000) -> LiveTranscriptClient.Co
         guard case .final(let final) = try LiveWire.decode(#"{"type":"final","utteranceId":"u","transcriptRevision":42,"segment":{"id":"99ad1171-3771-4ae6-81a1-44f617b663db","channel":"mic","speakerId":"mic:n:1","speakerLabel":"Speaker 1","text":"Hello","isFinal":true,"startMs":10,"endMs":900}}"#) else { Issue.record("final"); return }
         #expect(final.transcriptRevision == 42 && final.segment.text == "Hello" && final.segment.isFinal)
         guard case .speakers(let speakers) = try LiveWire.decode(#"{"type":"speakers","merges":[{"from":"system:n:4","to":"system:n:2"}]}"#) else { Issue.record("speakers"); return }
-        #expect(speakers.merges == [.init(from: "system:n:4", to: "system:n:2")])
+        #expect(speakers.merges == [.init(from: "system:n:4", to: "system:n:2")] && speakers.relabels == nil)
+        guard case .speakers(let relabelled) = try LiveWire.decode(#"{"type":"speakers","merges":[],"relabels":[{"segmentId":"s1","speakerId":"mic:n:2","speakerLabel":"Room speaker 1"}]}"#) else { Issue.record("relabels"); return }
+        #expect(relabelled.relabels == [.init(segmentId: "s1", speakerId: "mic:n:2", speakerLabel: "Room speaker 1")])
         guard case .gap(let gap) = try LiveWire.decode(#"{"type":"gap","channel":"mic","fromMs":840000,"toMs":871000,"reason":"resume_window_exceeded"}"#) else { Issue.record("gap"); return }
         #expect(gap.fromMs == 840_000 && gap.reason == "resume_window_exceeded")
         guard case .status(let status) = try LiveWire.decode(#"{"type":"status","channel":"mic","state":"catching_up","lagMs":1800}"#) else { Issue.record("status"); return }

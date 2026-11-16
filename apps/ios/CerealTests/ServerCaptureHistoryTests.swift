@@ -6,12 +6,10 @@ import Contracts
 struct ServerCaptureHistoryTests {
     @Test func anotherDeviceAdvancesOnlyTheNextCaptureWithoutRewritingAcceptedOffsets() throws {
         let earlier = CaptureSegment(index: 0, startedAt: .now, duration: 2, fileName: "earlier.wav")
-        var history = ServerCaptureHistory(baseOffsetMs: 1000, nextSequence: 1, segments: [earlier],
+        var history = ServerCaptureHistory(baseOffsetMs: 1000, segments: [earlier],
             segmentOffsets: ["earlier.wav": 1000], nextStartMs: 3000, needsStop: false)
-        let remote = AudioChunkDTO(channel: .mic, durationMs: 12000, error: nil, id: UUID().uuidString,
-            noteId: UUID().uuidString, sequence: 8, startMs: 18000, state: .ready)
-        history.prepareForResume(remoteChunks: [remote], remoteDurationMs: 29000, localEndMs: 3000)
-        #expect(history.nextSequence == 9)
+        // The note on the server is longer now: another device recorded to it.
+        history.prepareForResume(remoteDurationMs: 30000)
         #expect(history.nextStartMs == 30000)
         #expect(history.segmentOffsets?[earlier.fileName] == 1000)
         #expect(history.needsStop == true)
@@ -22,24 +20,19 @@ struct ServerCaptureHistoryTests {
         history.append(appended)
         #expect(history.segments.count == 2)
         #expect(history.nextStartMs == 31250)
+        // A shorter note on the server never moves this device's own timeline back.
+        history.prepareForResume(remoteDurationMs: 4000)
+        #expect(history.nextStartMs == 31250)
+        history.needsNotes = true
         let restored = try JSONDecoder().decode(ServerCaptureHistory.self, from: JSONEncoder().encode(history))
-        #expect(restored.needsStop == true)
+        #expect(restored.needsStop == true && restored.needsNotes == true)
         #expect(restored.segmentOffsets == history.segmentOffsets)
-    }
-
-    @Test func remoteSystemAudioAdvancesTimelineWithoutConsumingMicrophoneSequence() {
-        var history = ServerCaptureHistory(baseOffsetMs: 0, nextSequence: 2, segments: [])
-        let remote = AudioChunkDTO(channel: .system, durationMs: 20001, error: nil, id: UUID().uuidString,
-            noteId: UUID().uuidString, sequence: 100, startMs: 999, state: .processing)
-        history.prepareForResume(remoteChunks: [remote], remoteDurationMs: 20000, localEndMs: 0)
-        #expect(history.nextStartMs == 21000)
-        #expect(history.nextSequence == 2)
     }
 
     @Test func olderCaptureLedgerDecodesWithoutInventingStopOrChangingBaseline() throws {
         let old = Data(#"{"baseOffsetMs":1250,"nextSequence":0,"segments":[]}"#.utf8)
         var restored = try JSONDecoder().decode(ServerCaptureHistory.self, from: old)
-        #expect(restored.needsStop == nil)
+        #expect(restored.needsStop == nil && restored.needsNotes == nil)
         restored.append(CaptureSegment(index: 0, startedAt: .now, duration: 2, fileName: "first.wav"))
         #expect(restored.segmentOffsets?["first.wav"] == 1250)
         #expect(restored.nextStartMs == 3250)

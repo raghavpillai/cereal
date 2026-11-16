@@ -10,7 +10,7 @@ use crate::{
 use gpui::{prelude::*, *};
 use std::{
     cell::Cell,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     rc::Rc,
     sync::{
         Arc,
@@ -36,6 +36,9 @@ pub struct SummaryOpen {
     pub explanation: String,
     pub quotes: Vec<TranscriptQuote>,
     pub error: Option<String>,
+    /// Text that streamed in and was then refused by the server's final
+    /// check: drawn only while it fades out over the error that replaces it.
+    pub withdrawn: Option<String>,
     pub transcript_revision: u64,
     pub ready: bool,
     pub trigger: Bounds<Pixels>,
@@ -52,7 +55,17 @@ pub struct SummaryState {
     cancel: Option<Arc<AtomicBool>>,
     pub edit: Option<EnhancedEdit>,
     pub transcript_selection: Option<crate::note::TranscriptSelection>,
+    /// Finished summaries by note, transcript revision and paragraph, so the
+    /// same source opens again at once. A changed transcript is a new key.
+    cache: HashMap<(u64, u64, String), (String, Vec<TranscriptQuote>)>,
+    /// The open card's content height as last laid out, which its own
+    /// height springs towards: text arriving grows the card instead of
+    /// jumping it. Zero until the first layout of a newly opened card.
+    pub measured: Rc<Cell<f32>>,
 }
+
+/// How many finished summaries are kept.
+const SUMMARY_CACHE: usize = 64;
 
 pub struct EnhancedEdit {
     pub note_id: u64,
@@ -127,10 +140,51 @@ impl SummaryState {
             && open.row == row
             && !open.ready
         {
+            // The offline preview's "summary" is the paragraph itself.
+            if open.explanation.is_empty() {
+                open.explanation = open.paragraph.clone();
+            }
             open.ready = true;
             return true;
         }
         false
+    }
+
+    /// The open card this request is for, while it is still waiting.
+    fn pending(
+        &mut self,
+        epoch: u64,
+        note_id: u64,
+        row: usize,
+        revision: u64,
+    ) -> Option<&mut SummaryOpen> {
+        if self.epoch != epoch {
+            return None;
+        }
+        self.open.as_mut().filter(|open| {
+            open.note_id == note_id
+                && open.row == row
+                && open.transcript_revision == revision
+                && !open.ready
+        })
+    }
+
+    /// The next words of the summary being written.
+    pub fn stream_evidence(
+        &mut self,
+        epoch: u64,
+        note_id: u64,
+        row: usize,
+        revision: u64,
+        text: &str,
+    ) -> bool {
+        match self.pending(epoch, note_id, row, revision) {
+            Some(open) if !text.is_empty() => {
+                open.explanation.push_str(text);
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn finish_evidence(
@@ -141,30 +195,73 @@ impl SummaryState {
         revision: u64,
         result: Result<(String, Vec<TranscriptQuote>), String>,
     ) -> bool {
-        if self.epoch != epoch {
-            return false;
-        }
-        let Some(open) = self.open.as_mut() else {
+        let Some(open) = self.pending(epoch, note_id, row, revision) else {
             return false;
         };
-        if open.note_id != note_id
-            || open.row != row
-            || open.transcript_revision != revision
-            || open.ready
-        {
-            return false;
-        }
         match result {
             Ok((explanation, quotes)) => {
                 open.explanation = explanation;
                 open.quotes = quotes;
+                open.error = None;
+                let entry = (open.explanation.clone(), open.quotes.clone());
+                let key = (note_id, revision, open.paragraph.clone());
+                if self.cache.len() >= SUMMARY_CACHE {
+                    self.cache.clear();
+                }
+                self.cache.insert(key, entry);
             }
-            Err(error) => open.error = Some(error),
+            Err(error) => {
+                // What streamed before the failure is not kept: it is only
+                // drawn while it fades out.
+                let streamed = std::mem::take(&mut open.explanation);
+                open.withdrawn = (!streamed.is_empty()).then_some(streamed);
+                open.error = Some(error);
+            }
         }
-        open.ready = true;
+        if let Some(open) = self.open.as_mut() {
+            open.ready = true;
+        }
         self.cancel = None;
         true
     }
+
+    /// A finished summary of this paragraph at this transcript revision.
+    pub fn cached(
+        &self,
+        note_id: u64,
+        revision: u64,
+        paragraph: &str,
+    ) -> Option<(String, Vec<TranscriptQuote>)> {
+        self.cache
+            .get(&(note_id, revision, paragraph.to_owned()))
+            .cloned()
+    }
+}
+
+/// The server's result as the card shows it, refused if it describes another
+/// transcript than the one the card was opened on.
+fn evidence_result(
+    evidence: meeting_notes_api_types::EvidenceDTO,
+    revision: u64,
+) -> Result<(String, Vec<TranscriptQuote>), String> {
+    if evidence.transcript_revision != revision as i64 {
+        return Err("The transcript changed. Open the source again.".into());
+    }
+    let quotes = evidence
+        .quotes
+        .into_iter()
+        .map(|quote| TranscriptQuote {
+            segment_id: Some(quote.segment_id),
+            text: quote.text,
+            speaker: quote.speaker_label,
+            timestamp: Some(format!(
+                "{:02}:{:02}",
+                quote.start_ms.max(0) / 60000,
+                quote.start_ms.max(0) / 1000 % 60
+            )),
+        })
+        .collect();
+    Ok((evidence.summary, quotes))
 }
 
 fn words(text: &str) -> HashSet<String> {
@@ -213,6 +310,215 @@ impl<'a> NoteLine<'a> {
 /// The text of an enhanced-notes line as its source card identifies it.
 pub(crate) fn paragraph_text(line: &str) -> String {
     note_line(line).text().to_owned()
+}
+
+/// Control and invisible formatting characters (bidirectional overrides,
+/// zero-width spaces and the like, Unicode Cc and Cf): they can make an
+/// address show one place and open another.
+fn hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(c as u32,
+            0xAD | 0x600..=0x605 | 0x61C | 0x6DD | 0x70F | 0x890..=0x891 | 0x8E2 | 0x180E
+            | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F | 0xFEFF
+            | 0xFFF9..=0xFFFB | 0x110BD | 0x110CD | 0x13430..=0x1343F | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A | 0xE0001 | 0xE0020..=0xE007F)
+}
+
+/// A host that reads as what it is: a plain ASCII name or address, with an
+/// optional port. No user name or password, no percent sign, no letters of
+/// another script that only look like these.
+fn plain_host(authority: &str) -> bool {
+    let (host_ok, after) = if let Some(rest) = authority.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((address, after)) => (
+                !address.is_empty()
+                    && address.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.'),
+                after,
+            ),
+            None => return false,
+        }
+    } else {
+        let (host, after) = authority.find(':').map_or((authority, ""), |at| authority.split_at(at));
+        let name = host.strip_suffix('.').unwrap_or(host);
+        (
+            !name.is_empty()
+                && name.split('.').all(|label| {
+                    !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                }),
+            after,
+        )
+    };
+    host_ok
+        && (after.is_empty()
+            || after.strip_prefix(':').is_some_and(|port| {
+                (1..=5).contains(&port.len()) && port.chars().all(|c| c.is_ascii_digit())
+            }))
+}
+
+/// The end of an address: sentence punctuation after it is not part of it,
+/// nor a closing bracket whose opening partner is outside it, the way
+/// GitHub's autolinker reads them.
+fn trimmed_address(candidate: &str) -> &str {
+    let mut address = candidate;
+    while let Some(last) = address.chars().next_back() {
+        let pair = match last {
+            ')' => Some('('),
+            ']' => Some('['),
+            '}' => Some('{'),
+            _ => None,
+        };
+        let unbalanced = pair.is_some_and(|open| {
+            address.matches(last).count() > address.matches(open).count()
+        });
+        if ".,:;!?*_~".contains(last) || unbalanced {
+            address = &address[..address.len() - last.len_utf8()];
+        } else {
+            break;
+        }
+    }
+    address
+}
+
+/// Web addresses written out in full (`https://…`) in a line of notes as it
+/// is written, before any Markdown is read: byte ranges with the address each
+/// one opens. The rules, and the cases every client tests, are in
+/// testdata/web-addresses.json. Nothing else in a note is a link: a Markdown
+/// `[label](…)` stays as typed, so a link always reads as where it goes.
+pub(crate) fn web_links(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    let lower = text.to_ascii_lowercase();
+    let mut links = Vec::new();
+    let mut from = 0;
+    while let Some(found) = lower[from..].find("http") {
+        let start = from + found;
+        from = start + 4;
+        let scheme = if lower[start..].starts_with("https://") {
+            8
+        } else if lower[start..].starts_with("http://") {
+            7
+        } else {
+            continue;
+        };
+        // An address starts a word: `xhttps://` is not one.
+        if text[..start].chars().next_back().is_some_and(char::is_alphanumeric) {
+            continue;
+        }
+        let rest = &text[start..];
+        let length = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, '\u{feff}' | '<' | '>' | '"' | '\'' | '`'))
+            .unwrap_or(rest.len());
+        let address = trimmed_address(&rest[..length]);
+        let authority = address.get(scheme..).unwrap_or("").split(['/', '?', '#']).next().unwrap_or("");
+        if !plain_host(authority) || address.contains('\\') || address.chars().any(hidden) {
+            continue;
+        }
+        links.push((start..start + address.len(), address.to_string()));
+        from = start + address.len();
+    }
+    links
+}
+
+/// A line of notes as it is drawn: emphasis from its Markdown, and each web
+/// address underlined (but for the closing "Chat with meeting transcript"
+/// line). The layout says, once drawn, which address is where.
+struct LinkedLine {
+    text: StyledText,
+    layout: TextLayout,
+    links: Rc<Vec<(std::ops::Range<usize>, String)>>,
+}
+
+fn linked_line(source: &str, theme: Theme) -> LinkedLine {
+    // The text keeps its colour; the underline is the list markers' grey.
+    let underline = HighlightStyle {
+        underline: Some(UnderlineStyle {
+            thickness: px(1.),
+            color: Some(rgb(0x71717a).into()),
+            wavy: false,
+        }),
+        ..Default::default()
+    };
+    // Addresses are found in the line as written, so a `*`, `_` or `\` inside
+    // one stays in it; the Markdown around them is read piece by piece.
+    let (mut text, mut highlights, mut links) = (String::new(), Vec::new(), Vec::new());
+    let plain = |piece: &str, text: &mut String, highlights: &mut Vec<_>| {
+        let (drawn, ranges) = crate::chat::inline(piece, theme);
+        let offset = text.len();
+        text.push_str(&drawn);
+        highlights.extend(ranges.into_iter().map(|(range, style)| ((range.start + offset)..(range.end + offset), style)));
+    };
+    // The line the notes end with is plain, as in the reference: its
+    // address still opens, it is just not drawn as a link.
+    let transcript_chat = source.trim_start().starts_with("Chat with meeting transcript:");
+    let mut at = 0;
+    for (range, address) in web_links(source) {
+        plain(&source[at..range.start], &mut text, &mut highlights);
+        let offset = text.len();
+        text.push_str(&address);
+        if !transcript_chat {
+            highlights.push((offset..text.len(), underline));
+        }
+        links.push((offset..text.len(), address));
+        at = range.end;
+    }
+    plain(&source[at..], &mut text, &mut highlights);
+    let text = StyledText::new(text).with_highlights(highlights);
+    let layout = text.layout().clone();
+    LinkedLine {
+        text,
+        layout,
+        links: Rc::new(links),
+    }
+}
+
+/// The address under `position` in a drawn line, if there is one.
+fn link_at(
+    layout: &TextLayout,
+    links: &[(std::ops::Range<usize>, String)],
+    position: Point<Pixels>,
+) -> Option<String> {
+    let index = layout.index_for_position(position).ok()?;
+    links
+        .iter()
+        .find(|(range, _)| range.contains(&index))
+        .map(|(_, address)| address.clone())
+}
+
+/// Where each address of a drawn line is, one rectangle per visual line it
+/// spans (a long address wraps), over its own characters only.
+fn link_bounds(layout: &TextLayout, links: &[(std::ops::Range<usize>, String)]) -> Vec<Bounds<Pixels>> {
+    let line_height = layout.line_height();
+    let mut rects: Vec<Bounds<Pixels>> = Vec::new();
+    for (range, address) in links {
+        let mut edges: Vec<usize> = address.char_indices().map(|(at, _)| range.start + at).collect();
+        edges.push(range.end);
+        let mut current: Option<Bounds<Pixels>> = None;
+        // The last character before a wrap has no next position on its line:
+        // it is as wide as the one before it.
+        let mut step = px(8.);
+        for pair in edges.windows(2) {
+            let (Some(from), Some(to)) = (
+                layout.position_for_index(pair[0]),
+                layout.position_for_index(pair[1]),
+            ) else {
+                continue;
+            };
+            let same_line = f32::from(to.y - from.y).abs() < 1.;
+            if same_line {
+                step = to.x - from.x;
+            }
+            let end = if same_line { to.x } else { from.x + step };
+            match current.as_mut() {
+                Some(rect) if f32::from(rect.origin.y - from.y).abs() < 1. => {
+                    rect.size.width = end.max(rect.right()) - rect.origin.x;
+                }
+                _ => {
+                    rects.extend(current.take());
+                    current = Some(Bounds::new(from, size(end - from.x, line_height)));
+                }
+            }
+        }
+        rects.extend(current);
+    }
+    rects
 }
 
 fn note_line(line: &str) -> NoteLine<'_> {
@@ -265,18 +571,6 @@ fn list_indent_unit(text: &str) -> usize {
         .min()
         .unwrap_or(2)
         .max(1)
-}
-
-fn skeleton_widths(note_id: u64, row: usize, epoch: u64) -> [f32; 3] {
-    // Cereal chooses 75–100% widths once when the source card mounts. A stable
-    // per-opening seed avoids widths jumping on every native animation frame.
-    let mut seed = note_id ^ (row as u64).rotate_left(17) ^ epoch.wrapping_mul(0x9e3779b97f4a7c15);
-    std::array::from_fn(|_| {
-        seed ^= seed.wrapping_shl(13);
-        seed ^= seed.wrapping_shr(7);
-        seed ^= seed.wrapping_shl(17);
-        0.75 + (seed % 2500) as f32 / 10000.
-    })
 }
 
 #[cfg(test)]
@@ -482,93 +776,136 @@ impl Cereal {
                 .map(|note| matching_quotes(&paragraph, &note.transcript))
                 .unwrap_or_default()
         };
+        // The same source opened again: what it said last time, at once.
+        let cached = remote
+            .then(|| self.summary.cached(note_id, revision, &paragraph))
+            .flatten();
+        // A new card is laid out at its natural size before its height
+        // springs to anything.
+        self.summary.measured.set(0.);
+        self.stage.forget(("summary-height", 0));
+        let ready = cached.is_some();
+        let (explanation, quotes) = cached.unwrap_or((String::new(), quotes));
         self.summary.open = Some(SummaryOpen {
             note_id,
             row,
-            explanation: if remote {
-                String::new()
-            } else {
-                paragraph.clone()
-            },
+            explanation,
             paragraph: paragraph.clone(),
             quotes,
             error: None,
+            withdrawn: None,
             transcript_revision: revision,
-            ready: false,
+            ready,
             trigger,
             scroll_offset: self.note_scroll.offset(),
         });
         let epoch = self.summary.epoch;
         cx.notify();
+        if ready {
+            return;
+        }
         if remote {
+            let Some(note) = note else {
+                self.summary.finish_evidence(
+                    epoch,
+                    note_id,
+                    row,
+                    revision,
+                    Err("This note is no longer available.".into()),
+                );
+                return;
+            };
             let cancel = Arc::new(AtomicBool::new(false));
             self.summary.cancel = Some(cancel.clone());
-            let (sender, receiver) = mpsc::channel();
-            std::thread::spawn(move || {
-                let result = note
-                    .ok_or_else(|| "This note is no longer available.".to_string())
-                    .and_then(|note| crate::server::load_evidence(&note, &paragraph, cancel))
-                    .and_then(|evidence| {
-                        if evidence.transcript_revision != revision as i64 {
-                            return Err("The transcript changed. Open the source again.".into());
-                        }
-                        let quotes = evidence
-                            .quotes
-                            .into_iter()
-                            .map(|quote| TranscriptQuote {
-                                segment_id: Some(quote.segment_id),
-                                text: quote.text,
-                                speaker: quote.speaker_label,
-                                timestamp: Some(format!(
-                                    "{:02}:{:02}",
-                                    quote.start_ms.max(0) / 60000,
-                                    quote.start_ms.max(0) / 1000 % 60
-                                )),
-                            })
-                            .collect();
-                        Ok((evidence.summary, quotes))
-                    });
-                let _ = sender.send(result);
-            });
+            let receiver = crate::server::stream_evidence(note, paragraph, cancel);
             cx.spawn(async move |this, cx| {
-                let result = loop {
-                    match receiver.try_recv() {
-                        Ok(result) => break result,
-                        Err(mpsc::TryRecvError::Disconnected) => {
-                            break Err("Could not load transcript context. Try again.".into());
-                        }
-                        Err(mpsc::TryRecvError::Empty) => {
-                            cx.background_executor()
-                                .timer(Duration::from_millis(50))
-                                .await;
-                            let current = this
-                                .update(cx, |this, _| this.summary.epoch == epoch)
-                                .unwrap_or(false);
-                            if !current {
-                                return;
+                loop {
+                    // Everything that has arrived since the last look, applied
+                    // in one update: a burst of tokens is one render.
+                    let mut events = Vec::new();
+                    let mut closed = false;
+                    loop {
+                        match receiver.try_recv() {
+                            Ok(event) => events.push(event),
+                            Err(mpsc::TryRecvError::Empty) => break,
+                            Err(mpsc::TryRecvError::Disconnected) => {
+                                closed = true;
+                                break;
                             }
                         }
                     }
-                };
-                let _ = this.update(cx, |this, cx| {
-                    if this.summary.epoch != epoch {
+                    let finished = this
+                        .update(cx, |this, cx| {
+                            if this.summary.epoch != epoch {
+                                return true;
+                            }
+                            // The card cannot be on screen any more (another note or
+                            // tab, a changed transcript): it closes, and so does the request.
+                            if this.current_note != Some(note_id)
+                                || this.active_tab != NoteTab::Enhanced
+                                || this
+                                    .workspace
+                                    .note(note_id)
+                                    .is_some_and(|note| note.transcript_revision != revision)
+                            {
+                                this.summary.dismiss();
+                                cx.notify();
+                                return true;
+                            }
+                            let mut changed = false;
+                            let mut finished = false;
+                            for event in events {
+                                use crate::server::EvidenceStreamEvent as Event;
+                                let result = match event {
+                                    Event::Delta(text) => {
+                                        changed |= this
+                                            .summary
+                                            .stream_evidence(epoch, note_id, row, revision, &text);
+                                        continue;
+                                    }
+                                    Event::Done(evidence) => evidence_result(evidence, revision),
+                                    Event::Error(error) => Err(error),
+                                };
+                                let quoted = result.as_ref().is_ok_and(|(_, quotes)| !quotes.is_empty());
+                                if this.summary.finish_evidence(epoch, note_id, row, revision, result) {
+                                    changed = true;
+                                    // The quotations rise in once their segments are known.
+                                    if quoted {
+                                        this.stage.mark("source-quotes");
+                                    }
+                                    // Refused text fades out from where it is.
+                                    if this.summary.open.as_ref().is_some_and(|open| open.withdrawn.is_some()) {
+                                        this.stage.forget(("summary-withdrawn", 0));
+                                        this.stage.aim(("summary-withdrawn", 0), 1., crate::motion::SNAPPY);
+                                    }
+                                }
+                                finished = true;
+                                break;
+                            }
+                            if !finished && closed {
+                                finished = this.summary.finish_evidence(
+                                    epoch,
+                                    note_id,
+                                    row,
+                                    revision,
+                                    Err("Could not load transcript context. Try again.".into()),
+                                );
+                                changed |= finished;
+                                finished = true;
+                            }
+                            if changed {
+                                cx.notify();
+                            }
+                            finished
+                        })
+                        .unwrap_or(true);
+                    if finished {
                         return;
                     }
-                    if this.current_note == Some(note_id) && this.active_tab == NoteTab::Enhanced {
-                        if this
-                            .workspace
-                            .note(note_id)
-                            .is_some_and(|note| note.transcript_revision != revision)
-                        {
-                            this.summary.dismiss();
-                        } else if this
-                            .summary
-                            .finish_evidence(epoch, note_id, row, revision, result)
-                        {
-                            cx.notify();
-                        }
-                    }
-                });
+                    cx.background_executor()
+                        .timer(Duration::from_millis(16))
+                        .await;
+                }
             })
             .detach();
             return;
@@ -584,6 +921,7 @@ impl Cereal {
                     && this.active_tab == NoteTab::Enhanced
                     && this.summary.finish_loading(epoch, note_id, row)
                 {
+                    this.stage.mark("source-quotes");
                     cx.notify();
                 }
             });
@@ -849,6 +1187,12 @@ impl Cereal {
                     )
                     .when(selected, |div| div.bg(highlight));
             }
+            // A web address in the line (the chat link at the foot of generated
+            // notes, say) opens when clicked, under the arrow; anywhere else in
+            // the line a click edits it, as before.
+            let drawn = editing.is_none().then(|| linked_line(&text, t));
+            let links = drawn.as_ref().map(|line| (line.layout.clone(), line.links.clone()));
+            let linked = links.as_ref().is_some_and(|(_, links)| !links.is_empty());
             paragraph = paragraph.child(
                 div()
                     .id(("enhanced-text", row))
@@ -857,15 +1201,44 @@ impl Cereal {
                     .child(if let Some(edit) = editing {
                         edit.input.clone().into_any_element()
                     } else {
-                        crate::chat::inline_text(&text, t).into_any_element()
+                        drawn.map(|line| line.text).unwrap().into_any_element()
                     })
-                    .when(!read_only, |text| {
-                        text.cursor(CursorStyle::IBeam).on_click(cx.listener({
-                            let note_id = note.id;
-                            move |this, _, window, cx| {
-                                this.begin_enhanced_edit(note_id, editable_row, window, cx)
-                            }
-                        }))
+                    .when_some(links.clone().filter(|_| linked), |text, (layout, links)| {
+                        text.child(
+                            canvas(
+                                move |_, window, _| {
+                                    link_bounds(&layout, &links)
+                                        .into_iter()
+                                        .map(|rect| window.insert_hitbox(rect, HitboxBehavior::Normal))
+                                        .collect::<Vec<_>>()
+                                },
+                                |_, hitboxes, window, _| {
+                                    for hitbox in &hitboxes {
+                                        window.set_cursor_style(CursorStyle::Arrow, hitbox);
+                                    }
+                                },
+                            )
+                            .absolute()
+                            .size_0(),
+                        )
+                    })
+                    .when(!read_only || linked, |text| {
+                        text.when(!read_only, |text| text.cursor(CursorStyle::IBeam))
+                            .on_click(cx.listener({
+                                let note_id = note.id;
+                                move |this, event: &ClickEvent, window, cx| {
+                                    if let Some((layout, links)) = links.as_ref()
+                                        && !links.is_empty()
+                                        && let Some(address) = link_at(layout, links, event.position())
+                                    {
+                                        crate::shared_view::open_in_browser(&address, cx);
+                                        return;
+                                    }
+                                    if !read_only {
+                                        this.begin_enhanced_edit(note_id, editable_row, window, cx)
+                                    }
+                                }
+                            }))
                     }),
             );
             if eligible {
@@ -887,7 +1260,7 @@ impl Cereal {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .cursor_pointer()
+                        .cursor_default()
                         .opacity(if selected {
                             1.
                         } else {
@@ -899,7 +1272,11 @@ impl Cereal {
                         .child(icon("source-zoom-in", 16., t.muted))
                         .child(
                             canvas(
-                                move |bounds, _, _| for_canvas.set(Some(bounds)),
+                                move |bounds, _, _| {
+                                    for_canvas.set(Some(bounds));
+                                    #[cfg(debug_assertions)]
+                                    probe::placed(note_id, row, bounds);
+                                },
                                 |_, _, _, _| {},
                             )
                             .absolute()
@@ -1079,54 +1456,71 @@ impl Cereal {
                     .text_color(muted)
                     .child("TRANSCRIPT SUMMARY"),
             );
-        if !open.ready {
-            let mut lines = div().w_full().flex().flex_col().gap(px(8.));
-            for (index, portion) in skeleton_widths(open.note_id, open.row, self.summary.epoch)
-                .into_iter()
-                .enumerate()
-            {
-                // Each line breathes on a two-second turn, starting 200 ms
-                // after the one above. Slow, so stepped at 30 Hz.
-                let delay = index as f32 * 0.1;
-                lines = lines.child(crate::motion::slow_loop(
-                    SharedString::from(format!("source-skeleton-{}-{index}", self.summary.epoch)),
-                    Duration::from_secs(2),
-                    div()
-                        .h(px(16.))
-                        .w((width - px(32.)) * portion)
-                        .rounded(px(4.))
-                        .bg(skeleton),
-                    move |div, turns| {
-                        let turn = turns - delay;
-                        if turn < 0. {
-                            return div.opacity(1.);
-                        }
-                        div.opacity(0.75 + 0.25 * (turn * std::f32::consts::TAU).cos())
-                    },
-                ));
-            }
-            body = body.child(lines);
+        if !open.ready && open.explanation.is_empty() {
+            // Until the first words arrive: one line, as tall as a line of
+            // the summary that replaces it, so the card does not jump.
+            body = body.child(
+                div()
+                    .h(px(22.))
+                    .flex()
+                    .items_center()
+                    .text_color(muted)
+                    .child(crate::motion::shimmer_label(
+                        SharedString::from(format!("source-reading-{}", self.summary.epoch)),
+                        "Reading the transcript…",
+                        t,
+                        cx,
+                    )),
+            );
         } else if let Some(error) = &open.error {
             let note_id = open.note_id;
             let row = open.row;
             let paragraph = open.paragraph.clone();
             let trigger = open.trigger;
+            // Text the final check refused leaves deliberately: it fades out
+            // in place while the error fades in under it and the card's
+            // height follows the error. Reduced motion swaps them at once.
+            let withdrawn = open.withdrawn.as_ref().map(|text| {
+                let level = self
+                    .stage
+                    .aim(("summary-withdrawn", 0), 0., crate::motion::SNAPPY)
+                    .clamp(0., 1.);
+                (text, level)
+            });
+            let shown = withdrawn.map_or(1., |(_, level)| 1. - level);
             body = body
                 .child(
                     div()
-                        .text_size(px(14.))
-                        .line_height(px(20.))
-                        .text_color(muted)
-                        .child(error.clone()),
+                        .relative()
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .line_height(px(20.))
+                                .text_color(muted)
+                                .opacity(shown)
+                                .child(error.clone()),
+                        )
+                        .when_some(withdrawn.filter(|(_, level)| *level > 0.01), |block, (text, level)| {
+                            block.child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .right_0()
+                                    .opacity(level)
+                                    .child(crate::chat::inline_text(text, t)),
+                            )
+                        }),
                 )
                 .child(
                     div()
                         .id("retry-source-summary")
+                        .opacity(shown)
                         .px(px(10.))
                         .py(px(6.))
                         .rounded(px(6.))
                         .text_size(px(13.))
-                        .cursor_pointer()
+                        .cursor_default()
                         .child(crate::motion::tactile(skeleton).radius(6.))
                         .child("Try again")
                         .reach().on_click(cx.listener(move |this, _, _, cx| {
@@ -1136,7 +1530,7 @@ impl Cereal {
                 );
         } else {
             body = body.child(crate::chat::inline_text(
-                if open.explanation.trim().is_empty() {
+                if open.ready && open.explanation.trim().is_empty() {
                     "No relevant context found"
                 } else {
                     &open.explanation
@@ -1153,7 +1547,10 @@ impl Cereal {
                     .flatten()
                     .collect::<Vec<_>>()
                     .join(" • ");
-                body = body.child(
+                // Each quotation rises in on its turn once the segments
+                // are known; reduced motion fades them in together.
+                let pose = self.stage.cascade("source-quotes", index);
+                body = body.child(crate::motion::lift(
                     div()
                         .id(SharedString::from(format!("source-quote-{index}")))
                         .flex()
@@ -1161,7 +1558,7 @@ impl Cereal {
                         .py(px(4.))
                         .rounded(px(6.))
                         .bg(skeleton)
-                        .cursor_pointer()
+                        .cursor_default()
                         // The row jumps to its place in the transcript: it
                         // answers the pointer like any other row.
                         .child(crate::motion::tactile(t.hover).radius(6.))
@@ -1196,18 +1593,52 @@ impl Cereal {
                                 cx,
                             );
                         })),
-                );
+                    pose,
+                ));
             }
         }
         if open.ready && self.recording.note_id == Some(open.note_id) && self.recording.is_active()
         {
             body = body.child(div().pt(px(8.)).border_t_1().border_color(border).text_size(px(12.)).line_height(px(16.)).text_color(muted).child("Transcription is still active. These notes were generated at a previous point when transcription was paused."));
         }
+        // The card's height follows its content on a spring: the summary
+        // arriving line by line and the quotations after it grow the card
+        // rather than jump it. Its first layout is at the natural size, which
+        // is then measured; reduced motion follows at once.
+        let max_height = px(448.).min(window.viewport_size().height - px(32.));
+        let measured = self.summary.measured.get();
+        let height = (measured > 0.).then(|| {
+            // The content and the card's 1 px border above and below it.
+            let target = (measured + 2.).min(f32::from(max_height));
+            if live {
+                self.stage
+                    .aim(("summary-height", 0), target, crate::motion::SNAPPY)
+            } else {
+                // Leaving: keep the height it had.
+                self.stage.target(("summary-height", 0)).unwrap_or(target)
+            }
+        });
+        let measure = {
+            let measured = self.summary.measured.clone();
+            canvas(
+                move |bounds, window, _| {
+                    let height = f32::from(bounds.size.height);
+                    if (measured.get() - height).abs() > 0.5 {
+                        measured.set(height);
+                        window.request_animation_frame();
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0()
+        };
+        let body = body.relative().flex_shrink_0().when(live, |body| body.child(measure));
         let card = div()
             .id("transcript-summary-popover")
             .w(width)
-            .min_h(px(192.))
-            .max_h(px(448.).min(window.viewport_size().height - px(32.)))
+            .when_some(height, |card, height| card.h(px(height)))
+            .max_h(max_height)
             .overflow_y_scroll()
             .overflow_x_hidden()
             .rounded(px(12.))
@@ -1245,11 +1676,191 @@ impl Cereal {
     }
 }
 
+/// `CEREAL_WELCOME_TOUR=source` (debug builds, isolated data): after the
+/// tour has signed in, open a note's source card the way a person does and
+/// say on stderr what it shows as the summary streams in, so captures of the
+/// window can be lined up with it. Pointer input goes through the window's
+/// own listeners; the real cursor is never moved.
+#[cfg(debug_assertions)]
+pub mod probe {
+    use crate::app::{Cereal, NoteTab};
+    use gpui::*;
+    use std::{cell::RefCell, collections::HashMap, time::Duration};
+
+    thread_local! {
+        static TRIGGERS: RefCell<HashMap<(u64, usize), Bounds<Pixels>>> = RefCell::new(HashMap::new());
+    }
+
+    /// Where the source trigger of `row` was last laid out.
+    pub fn placed(note_id: u64, row: usize, bounds: Bounds<Pixels>) {
+        TRIGGERS.with(|triggers| triggers.borrow_mut().insert((note_id, row), bounds));
+    }
+
+    fn say(what: &str) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis());
+        eprintln!("welcome {stamp} {what}");
+    }
+
+    async fn pause(cx: &mut AsyncApp, millis: u64) {
+        cx.background_executor()
+            .timer(Duration::from_millis(millis))
+            .await;
+    }
+
+    fn send(handle: WindowHandle<Cereal>, cx: &mut AsyncApp, event: PlatformInput) {
+        let _ = cx.update_window(handle.into(), |_, window, cx| window.dispatch_event(event, cx));
+    }
+
+    /// Hover the paragraph, then press its magnifier.
+    async fn click(handle: WindowHandle<Cereal>, cx: &mut AsyncApp, at: Point<Pixels>) {
+        let row = point(at.x - px(200.), at.y);
+        send(handle, cx, PlatformInput::MouseMove(MouseMoveEvent { position: row, ..Default::default() }));
+        pause(cx, 350).await;
+        send(handle, cx, PlatformInput::MouseMove(MouseMoveEvent { position: at, ..Default::default() }));
+        pause(cx, 250).await;
+        let button = MouseButton::Left;
+        send(handle, cx, PlatformInput::MouseDown(MouseDownEvent { button, position: at, click_count: 1, ..Default::default() }));
+        pause(cx, 90).await;
+        send(handle, cx, PlatformInput::MouseUp(MouseUpEvent { button, position: at, click_count: 1, ..Default::default() }));
+    }
+
+    /// The card as it is now: its state, how much summary it shows, its
+    /// quotations and the height it is laid out at.
+    fn card(view: &Cereal) -> String {
+        match &view.summary.open {
+            None => "closed".into(),
+            Some(open) => format!(
+                "row {} ready {} chars {} quotes {} error {:?} content_h {:.1} card_h {:.1}",
+                open.row,
+                open.ready,
+                open.explanation.chars().count(),
+                open.quotes.len(),
+                open.error,
+                view.summary.measured.get(),
+                view.stage.target(("summary-height", 0)).unwrap_or(0.)
+            ),
+        }
+    }
+
+    /// Follow the open card until it is finished or `seconds` pass, saying
+    /// every change of what it shows.
+    async fn follow(handle: WindowHandle<Cereal>, cx: &mut AsyncApp, label: &str, seconds: u64) -> bool {
+        let mut last = String::new();
+        for _ in 0..seconds * 100 {
+            let (now, ready) = handle
+                .update(cx, |view, _, _| (card(view), view.summary.open.as_ref().is_some_and(|open| open.ready)))
+                .unwrap_or_default();
+            if now != last {
+                say(&format!("source {label}: {now}"));
+                last = now;
+            }
+            if ready {
+                return true;
+            }
+            pause(cx, 10).await;
+        }
+        false
+    }
+
+    pub async fn run(handle: WindowHandle<Cereal>, cx: &mut AsyncApp) {
+        // The server's notes, read after signing in.
+        let mut target = None;
+        for _ in 0..600 {
+            target = handle
+                .update(cx, |view, _, _| {
+                    view.workspace.notes.iter().find(|note| {
+                        note.server_id.is_some() && !note.enhanced.trim().is_empty() && !note.transcript.is_empty()
+                    }).map(|note| note.id)
+                })
+                .ok()
+                .flatten();
+            if target.is_some() {
+                break;
+            }
+            pause(cx, 50).await;
+        }
+        let Some(note_id) = target else {
+            say("source: no server note with enhanced notes and a transcript");
+            return;
+        };
+        let _ = handle.update(cx, |view, _, cx| {
+            view.open_note(note_id, cx);
+            view.active_tab = NoteTab::Enhanced;
+            cx.notify();
+        });
+        pause(cx, 2000).await;
+        let rows: Vec<usize> = TRIGGERS.with(|triggers| {
+            let mut rows: Vec<_> = triggers.borrow().keys().filter(|(note, _)| *note == note_id).map(|(_, row)| *row).collect();
+            rows.sort();
+            rows
+        });
+        say(&format!("source: note {note_id} rows with a trigger {rows:?}"));
+        let at = |row: usize| TRIGGERS.with(|triggers| triggers.borrow().get(&(note_id, row)).map(|bounds| bounds.center()));
+        // The second card is one the first does not cover: under another heading.
+        let (Some(&first), Some(&second)) = (rows.first(), rows.get(3).or(rows.last())) else {
+            say("source: fewer than two paragraphs with a trigger");
+            return;
+        };
+        say("shot source-0-before");
+        pause(cx, 800).await;
+        // 1. Open, and watch it stream.
+        click(handle, cx, at(first).unwrap()).await;
+        say("source opened first");
+        let finished = follow(handle, cx, "first", 40).await;
+        say(&format!("source first finished: {finished}"));
+        pause(cx, 1500).await;
+        say("shot source-1-done");
+        pause(cx, 800).await;
+        // 2. Close it and open it again: from the cache, at once.
+        click(handle, cx, at(first).unwrap()).await;
+        pause(cx, 700).await;
+        say(&format!("source after toggling closed: {}", handle.update(cx, |view, _, _| card(view)).unwrap_or_default()));
+        click(handle, cx, at(first).unwrap()).await;
+        say(&format!("source reopened: {}", handle.update(cx, |view, _, _| card(view)).unwrap_or_default()));
+        pause(cx, 900).await;
+        say("shot source-2-reopened");
+        pause(cx, 800).await;
+        // 3. Closed again, then another paragraph, closed while it streams.
+        click(handle, cx, at(first).unwrap()).await;
+        pause(cx, 700).await;
+        click(handle, cx, at(second).unwrap()).await;
+        say("source opened second");
+        for _ in 0..1000 {
+            let chars = handle
+                .update(cx, |view, _, _| view.summary.open.as_ref().map_or(0, |open| open.explanation.len()))
+                .unwrap_or(0);
+            if chars > 0 {
+                break;
+            }
+            pause(cx, 10).await;
+        }
+        pause(cx, 300).await;
+        say(&format!("source second before closing: {}", handle.update(cx, |view, _, _| card(view)).unwrap_or_default()));
+        // Its magnifier again closes it.
+        click(handle, cx, at(second).unwrap()).await;
+        say(&format!("source second closed mid-stream: {}", handle.update(cx, |view, _, _| card(view)).unwrap_or_default()));
+        pause(cx, 1500).await;
+        let cached = handle
+            .update(cx, |view, _, _| {
+                let note = view.workspace.note(note_id);
+                note.and_then(|note| {
+                    let line = note.enhanced.lines().nth(second)?;
+                    view.summary.cached(note_id, note.transcript_revision, &super::paragraph_text(line))
+                })
+                .is_some()
+            })
+            .unwrap_or(false);
+        say(&format!("source second cached after closing mid-stream: {cached}"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         NoteLine, SummaryOpen, SummaryState, emphasis_ranges, list_indent_unit, matching_quotes,
-        note_line,
+        note_line, web_links,
     };
     use gpui::{Bounds, FontStyle, FontWeight, Point};
     use std::sync::{
@@ -1329,6 +1940,48 @@ mod tests {
     }
 
     #[test]
+    fn the_addresses_that_become_links_are_the_same_on_every_client() {
+        // testdata/web-addresses.json: the cases the web reader and the iPhone run too.
+        let vectors: serde_json::Value =
+            serde_json::from_str(include_str!("../../../testdata/web-addresses.json")).unwrap();
+        let cases = vectors["cases"].as_array().unwrap();
+        assert!(cases.len() > 15);
+        for case in cases {
+            let text = case["text"].as_str().unwrap();
+            let expected: Vec<&str> = case["links"].as_array().unwrap().iter().map(|link| link.as_str().unwrap()).collect();
+            let found: Vec<String> = web_links(text).into_iter().map(|(range, address)| {
+                assert_eq!(&text[range], address);
+                address
+            }).collect();
+            assert_eq!(found, expected, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn web_addresses_written_out_in_full_are_the_only_links() {
+        let address = "https://notes.example.test/notes/51207249-97a9-4bd7-b02f-93428ffb367a/chat";
+        let line = format!("Chat with meeting transcript: {address} I CAN TYPE HERE");
+        let links = web_links(&line);
+        assert_eq!(links.len(), 1);
+        assert_eq!(&line[links[0].0.clone()], address);
+        assert_eq!(links[0].1, address);
+        // Sentence punctuation is not part of an address; brackets and quotes end it.
+        let links = web_links("See (http://10.30.1.77:3000/notes/x), then \"https://a.example/b\".");
+        assert_eq!(
+            links.iter().map(|(_, address)| address.as_str()).collect::<Vec<_>>(),
+            ["http://10.30.1.77:3000/notes/x", "https://a.example/b"]
+        );
+        // Not addresses: no host, another scheme, or the middle of a word.
+        for text in ["http:// nothing", "ftp://a.example", "xhttps://a.example", "Chat with meeting transcript: ORD ELETE", ""] {
+            assert!(web_links(text).is_empty(), "{text}");
+        }
+        // Byte ranges stay on character boundaries after non-ASCII text.
+        let line = "Résumé → https://a.example/é";
+        let links = web_links(line);
+        assert_eq!(&line[links[0].0.clone()], "https://a.example/é");
+    }
+
+    #[test]
     fn markdown_note_rows_preserve_hierarchy_numbering_and_source_text() {
         assert_eq!(note_line("## Decisions"), NoteLine::Heading("Decisions"));
         assert_eq!(
@@ -1369,6 +2022,7 @@ mod tests {
             explanation: String::new(),
             quotes: vec![],
             error: None,
+            withdrawn: None,
             transcript_revision: 7,
             ready: false,
             trigger: Bounds::default(),
@@ -1392,6 +2046,113 @@ mod tests {
         assert!(!state.finish_evidence(state.epoch, 4, 2, 7, result()));
     }
 
+    fn waiting(note_id: u64, row: usize, paragraph: &str, revision: u64) -> SummaryOpen {
+        SummaryOpen {
+            note_id,
+            row,
+            paragraph: paragraph.into(),
+            explanation: String::new(),
+            quotes: vec![],
+            error: None,
+            withdrawn: None,
+            transcript_revision: revision,
+            ready: false,
+            trigger: Bounds::default(),
+            scroll_offset: Point::default(),
+        }
+    }
+
+    #[test]
+    fn streamed_words_accumulate_then_the_final_result_replaces_them_and_is_cached() {
+        let mut state = SummaryState::default();
+        state.open = Some(waiting(4, 2, "Ship Monday", 7));
+        let epoch = state.epoch;
+        assert!(state.stream_evidence(epoch, 4, 2, 7, "The launch "));
+        assert!(state.stream_evidence(epoch, 4, 2, 7, "moved."));
+        // Another card, revision or request never receives them.
+        assert!(!state.stream_evidence(epoch, 4, 3, 7, "x"));
+        assert!(!state.stream_evidence(epoch, 4, 2, 8, "x"));
+        assert!(!state.stream_evidence(epoch.wrapping_add(1), 4, 2, 7, "x"));
+        let open = state.open.as_ref().unwrap();
+        assert_eq!(open.explanation, "The launch moved.");
+        assert!(!open.ready);
+        assert!(state.cached(4, 7, "Ship Monday").is_none());
+        let quote = super::TranscriptQuote {
+            segment_id: Some("00000000-0000-4000-8000-000000000001".into()),
+            text: "We moved it.".into(),
+            speaker: Some("Speaker 1".into()),
+            timestamp: Some("00:44".into()),
+        };
+        // The server's final reading wins over what streamed.
+        assert!(state.finish_evidence(epoch, 4, 2, 7, Ok(("The launch moved to Monday.".into(), vec![quote.clone()]))));
+        let open = state.open.as_ref().unwrap();
+        assert!(open.ready);
+        assert_eq!(open.explanation, "The launch moved to Monday.");
+        assert_eq!(open.quotes, vec![quote.clone()]);
+        // Late words cannot change a finished card.
+        assert!(!state.stream_evidence(epoch, 4, 2, 7, " more"));
+        assert_eq!(
+            state.cached(4, 7, "Ship Monday"),
+            Some(("The launch moved to Monday.".into(), vec![quote]))
+        );
+        // A changed transcript or another paragraph is not the same source.
+        assert!(state.cached(4, 8, "Ship Monday").is_none());
+        assert!(state.cached(4, 7, "Ship Tuesday").is_none());
+        // The cache outlives the card.
+        state.dismiss();
+        assert!(state.cached(4, 7, "Ship Monday").is_some());
+    }
+
+    #[test]
+    fn a_failure_mid_stream_drops_the_streamed_words_and_is_not_cached() {
+        let mut state = SummaryState::default();
+        state.open = Some(waiting(1, 0, "Decision", 1));
+        let epoch = state.epoch;
+        assert!(state.stream_evidence(epoch, 1, 0, 1, "Half a sente"));
+        assert!(state.finish_evidence(epoch, 1, 0, 1, Err("Try again".into())));
+        let open = state.open.as_ref().unwrap();
+        assert!(open.ready && open.explanation.is_empty() && open.quotes.is_empty());
+        assert_eq!(open.error.as_deref(), Some("Try again"));
+        // Kept only to be drawn fading out over the error.
+        assert_eq!(open.withdrawn.as_deref(), Some("Half a sente"));
+        assert!(state.cached(1, 1, "Decision").is_none());
+        // A failure before any words has nothing to withdraw.
+        state.open = Some(waiting(1, 0, "Decision", 1));
+        assert!(state.finish_evidence(state.epoch, 1, 0, 1, Err("Try again".into())));
+        assert!(state.open.as_ref().unwrap().withdrawn.is_none());
+    }
+
+    #[test]
+    fn closing_mid_stream_cancels_the_request() {
+        let mut state = SummaryState::default();
+        state.open = Some(waiting(1, 0, "Decision", 1));
+        let cancel = Arc::new(AtomicBool::new(false));
+        state.cancel = Some(cancel.clone());
+        assert!(state.stream_evidence(state.epoch, 1, 0, 1, "Some"));
+        state.dismiss();
+        assert!(cancel.load(Ordering::Acquire));
+        assert!(!state.stream_evidence(state.epoch, 1, 0, 1, " more"));
+    }
+
+    #[test]
+    fn the_final_result_is_refused_for_another_transcript_revision() {
+        let evidence = meeting_notes_api_types::EvidenceDTO {
+            summary: "Moved".into(),
+            quotes: vec![meeting_notes_api_types::EvidenceQuoteDTO {
+                segment_id: "00000000-0000-4000-8000-000000000001".into(),
+                text: "We moved it.".into(),
+                speaker_label: Some("Speaker 4".into()),
+                start_ms: 47_000,
+            }],
+            transcript_revision: 3,
+        };
+        let (summary, quotes) = super::evidence_result(evidence.clone(), 3).unwrap();
+        assert_eq!(summary, "Moved");
+        assert_eq!(quotes[0].timestamp.as_deref(), Some("00:47"));
+        assert_eq!(quotes[0].speaker.as_deref(), Some("Speaker 4"));
+        assert!(super::evidence_result(evidence, 4).is_err());
+    }
+
     #[test]
     fn a_source_service_error_finishes_loading_without_inventing_quotes() {
         let mut state = SummaryState::default();
@@ -1402,6 +2163,7 @@ mod tests {
             explanation: String::new(),
             quotes: vec![],
             error: None,
+            withdrawn: None,
             transcript_revision: 1,
             ready: false,
             trigger: Bounds::default(),
@@ -1425,6 +2187,7 @@ mod tests {
             explanation: String::new(),
             quotes: vec![],
             error: None,
+            withdrawn: None,
             transcript_revision: 1,
             ready: true,
             trigger: Bounds::default(),
@@ -1462,6 +2225,7 @@ mod tests {
             explanation: String::new(),
             quotes: vec![],
             error: None,
+            withdrawn: None,
             transcript_revision: 0,
             ready: false,
             trigger: Bounds::default(),
@@ -1479,6 +2243,7 @@ mod tests {
             explanation: String::new(),
             quotes: vec![],
             error: None,
+            withdrawn: None,
             transcript_revision: 0,
             ready: false,
             trigger: Bounds::default(),

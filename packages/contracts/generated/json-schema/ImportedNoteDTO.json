@@ -98,6 +98,48 @@
       ],
       "additionalProperties": true
     },
+    "TranscriptGapDTO": {
+      "type": "object",
+      "properties": {
+        "channel": {
+          "$ref": "#/$defs/AudioChannel"
+        },
+        "fromMs": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        },
+        "toMs": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        }
+      },
+      "required": [
+        "channel",
+        "fromMs",
+        "toMs"
+      ],
+      "additionalProperties": true
+    },
     "RecordingState": {
       "type": "string",
       "enum": [
@@ -152,6 +194,12 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/TranscriptSegmentDTO"
+          }
+        },
+        "transcriptGaps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TranscriptGapDTO"
           }
         },
         "recordingState": {

@@ -31,7 +31,7 @@ export function makeLinkPreviews(options: {
 }) {
   const valid = (id: string | null | undefined) => /^\d{1,20}$/.test(id?.trim() ?? "") ? id!.trim() : null
   return async (pathname: string): Promise<string | null> => {
-    const shared = /^\/s\/[^/]+\/?$/.test(pathname), note = /^\/notes\/[^/]+\/?$/.test(pathname)
+    const shared = /^\/s\/[^/]+\/?$/.test(pathname), note = /^\/notes\/[^/]+(?:\/chat)?\/?$/.test(pathname)
     if (!shared && !note) return null
     const appStoreId = valid(typeof options.iosAppStoreId === "function" ? await options.iosAppStoreId().catch(() => null) : options.iosAppStoreId)
     return [

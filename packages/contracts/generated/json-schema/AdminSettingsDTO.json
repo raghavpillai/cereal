@@ -11,7 +11,8 @@
             "openrouter",
             "openai",
             "anthropic",
-            "elevenlabs"
+            "elevenlabs",
+            "openai_compatible"
           ]
         },
         "configured": {
@@ -23,6 +24,16 @@
             "environment",
             "stored",
             "none"
+          ]
+        },
+        "hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       },
@@ -41,29 +52,8 @@
           "enum": [
             "openrouter",
             "openai",
-            "anthropic"
-          ]
-        },
-        "model": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 150
-        }
-      },
-      "required": [
-        "provider",
-        "model"
-      ],
-      "additionalProperties": true
-    },
-    "TranscriptionModelSelection": {
-      "type": "object",
-      "properties": {
-        "provider": {
-          "type": "string",
-          "enum": [
-            "elevenlabs",
-            "openai"
+            "anthropic",
+            "openai_compatible"
           ]
         },
         "model": {
@@ -103,6 +93,39 @@
       ],
       "additionalProperties": true
     },
+    "OpenAICompatibleSettingsDTO": {
+      "type": "object",
+      "properties": {
+        "baseUrl": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "apiKeySet": {
+          "type": "boolean"
+        },
+        "apiKeyHint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "baseUrl",
+        "apiKeySet"
+      ],
+      "additionalProperties": true
+    },
     "SignInSettingsDTO": {
       "type": "object",
       "properties": {
@@ -130,6 +153,16 @@
         },
         "googleClientSecretSet": {
           "type": "boolean"
+        },
+        "googleClientSecretHint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "googleRedirectUris": {
           "type": "array",
@@ -220,6 +253,16 @@
         },
         "secretAccessKeySet": {
           "type": "boolean"
+        },
+        "secretAccessKeyHint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -358,18 +401,11 @@
         "generationModel": {
           "$ref": "#/$defs/LanguageModelSelection"
         },
-        "transcriptionModel": {
-          "$ref": "#/$defs/TranscriptionModelSelection"
-        },
         "liveTranscriptionModel": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/LiveTranscriptionModelSelection"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/LiveTranscriptionModelSelection"
+        },
+        "openAiCompatible": {
+          "$ref": "#/$defs/OpenAICompatibleSettingsDTO"
         },
         "openRouterConfigured": {
           "type": "boolean"
@@ -481,7 +517,7 @@
         "providers",
         "chatModels",
         "generationModel",
-        "transcriptionModel",
+        "liveTranscriptionModel",
         "openRouterConfigured",
         "elevenLabsConfigured",
         "openRouterSource",

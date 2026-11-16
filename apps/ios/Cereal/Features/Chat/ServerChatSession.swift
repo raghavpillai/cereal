@@ -54,6 +54,8 @@ enum ChatHistoryRule {
     }
 
     typealias Events = @MainActor (_ noteID: String?, _ message: String, _ history: [ChatMessageDTO], _ model: String?) throws -> AsyncThrowingStream<ChatStreamEventDTO, Error>
+    /// A question asked as exchange `turn` of the saved thread `create.id` (see `ServerChatThreads.swift`).
+    typealias ThreadEvents = @MainActor (_ create: CreateChatThreadInput, _ turn: Int, _ replace: Bool, _ message: String, _ model: String?) throws -> AsyncThrowingStream<ChatStreamEventDTO, Error>
 
     let key: String
     let accountIdentity: String
@@ -61,6 +63,8 @@ enum ChatHistoryRule {
 
     private(set) var messages: [ChatMessage]
     private(set) var history: [ChatConversation]
+    /// The server thread the conversation on screen is saved as; nil until its first question.
+    private(set) var threadID: String?
     /// An answer is arriving.
     private(set) var busy = false
     /// Questions typed while an answer was arriving, in the order they will be asked.
@@ -70,6 +74,9 @@ enum ChatHistoryRule {
     private(set) var sentCount = 0
 
     @ObservationIgnored private let events: Events
+    @ObservationIgnored private let threadEvents: ThreadEvents?
+    /// The next question replaces the saved exchange it takes the place of (a retry).
+    @ObservationIgnored private var replacing = false
     @ObservationIgnored private let currentAccount: @MainActor () -> String?
     @ObservationIgnored private let persist: @MainActor (ServerChatSession) -> Void
     @ObservationIgnored private let background: ChatBackgroundTime
@@ -79,11 +86,11 @@ enum ChatHistoryRule {
     @ObservationIgnored private var ended = false
 
     init(key: String, accountIdentity: String, noteID: String?, state: ServerChatSessions.ConversationState,
-         events: @escaping Events, currentAccount: @escaping @MainActor () -> String?,
+         events: @escaping Events, threadEvents: ThreadEvents? = nil, currentAccount: @escaping @MainActor () -> String?,
          background: ChatBackgroundTime = .none, persist: @escaping @MainActor (ServerChatSession) -> Void) {
         self.key = key; self.accountIdentity = accountIdentity; self.noteID = noteID
-        messages = state.messages; history = state.history
-        self.events = events; self.currentAccount = currentAccount; self.background = background; self.persist = persist
+        messages = state.messages; history = state.history; threadID = state.threadID
+        self.events = events; self.threadEvents = threadEvents; self.currentAccount = currentAccount; self.background = background; self.persist = persist
     }
 
     static let maximumQuestionLength = 10_000
@@ -116,8 +123,8 @@ enum ChatHistoryRule {
     @discardableResult
     func newConversation() -> [String] {
         let waiting = stop()
-        history = ServerChatSessions.archive(messages, in: history)
-        messages = []; error = nil
+        history = ServerChatSessions.archive(messages, in: history, threadID: threadID)
+        messages = []; error = nil; threadID = nil
         persist(self)
         return waiting
     }
@@ -125,8 +132,18 @@ enum ChatHistoryRule {
     /// Brings an earlier conversation back; the one on screen goes to the history.
     func select(_ conversation: ChatConversation) {
         stop()
-        let selected = ServerChatSessions.select(conversation, current: messages, history: ServerChatSessions.archive(messages, in: history))
-        messages = selected.messages; history = selected.history; error = nil
+        let selected = ServerChatSessions.select(conversation, current: messages, history: ServerChatSessions.archive(messages, in: history, threadID: threadID))
+        messages = selected.messages; history = selected.history; threadID = selected.threadID; error = nil
+        persist(self)
+    }
+
+    /// Brings a saved thread from the server; the one on screen goes to the history. Asking in it continues it.
+    func open(_ thread: ChatThreadDTO) {
+        stop()
+        history = ServerChatSessions.archive(messages, in: history, threadID: threadID)
+        messages = ChatThreadTurns.messages(of: thread)
+        threadID = thread.id.lowercased(); error = nil
+        history.removeAll { $0.threadID == threadID }
         persist(self)
     }
 
@@ -135,7 +152,9 @@ enum ChatHistoryRule {
         if messages.last?.role == .assistant { messages.removeLast() }
         guard let last = messages.last, last.role == .user else { return }
         messages.removeLast()
+        replacing = true
         ask(last.text, model: model)
+        replacing = false
     }
 
     /// The account signed out or the note was deleted: nothing more may arrive
@@ -147,12 +166,16 @@ enum ChatHistoryRule {
         ended = true
     }
 
-    var conversationsForHistory: [ChatConversation] { ServerChatSessions.archive(messages, in: history) }
+    var conversationsForHistory: [ChatConversation] { ServerChatSessions.archive(messages, in: history, threadID: threadID) }
 
     // MARK: The request
 
     private func start(_ text: String, model: String?) {
         let context = ChatHistoryRule.history(from: messages)
+        // The exchange this question is (it matters for a retry, which replaces it).
+        let turn = messages.filter { $0.role == .user }.count
+        let replace = replacing; replacing = false
+        if threadEvents != nil, threadID == nil { threadID = UUID().uuidString.lowercased() }
         error = nil
         messages.append(ChatMessage(role: .user, text: text))
         let reply = ChatMessage(role: .assistant, text: "", isStreaming: true)
@@ -178,7 +201,11 @@ enum ChatHistoryRule {
         Signpost.event("Chat.Send")
         // The request is made here, not inside the task, so it is on its way before this returns.
         let stream: AsyncThrowingStream<ChatStreamEventDTO, Error>
-        do { stream = try events(noteID, text, context, model) }
+        do {
+            if let threadEvents, let threadID {
+                stream = try threadEvents(CreateChatThreadInput(id: threadID, noteId: noteID?.lowercased()), turn, replace, text, model)
+            } else { stream = try events(noteID, text, context, model) }
+        }
         catch {
             background.end(token)
             finish(id, failure: error)
@@ -222,7 +249,7 @@ enum ChatHistoryRule {
             markInterruptedReply()
         }
         finishReply(); busy = false; requestID = nil; request = nil; deltaBuffer = nil
-        history = ServerChatSessions.archive(messages, in: history)
+        history = ServerChatSessions.archive(messages, in: history, threadID: threadID)
         persist(self)
         askNextQueued()
     }
@@ -244,7 +271,7 @@ enum ChatHistoryRule {
         request?.cancel(); request = nil; requestID = nil; busy = false
         finishReply()
         guard saving else { return }
-        history = ServerChatSessions.archive(messages, in: history)
+        history = ServerChatSessions.archive(messages, in: history, threadID: threadID)
         persist(self)
     }
 

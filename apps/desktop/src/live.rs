@@ -8,18 +8,28 @@
 //!
 //! The wire protocol's schema is `packages/contracts/src/live.ts`.
 //!
-//! Nothing here touches the capture or the durable upload. The stream can
-//! fail in any way at any time and the meeting is still transcribed from the
-//! uploaded parts exactly as before; the server skips what the stream covered.
+//! Nothing here touches the capture. The stream is the only transcription a
+//! recording gets (no audio is uploaded afterwards), so it holds on: after a
+//! drop, and while the server says live transcription is unavailable, it
+//! keeps trying for as long as the recording runs, and the WAV files on disk
+//! hold everything it has not sent yet.
 //!
 //! * The cursor of each channel is a sample index at 16 kHz on that channel's
 //!   capture timeline (its files concatenated in manifest order). At most one
 //!   frame of audio is held in memory; when the socket is slow the cursor
 //!   simply falls behind the end of the file.
 //! * After a drop the session reconnects with back-off and resumes from the
-//!   server's `acceptFromSample`. A backlog longer than the server's resume
-//!   window is skipped to five seconds before the end of the capture (to
-//!   half the window before it, if the window is shorter than ten seconds).
+//!   server's `acceptFromSample`. A backlog is replayed at no more than
+//!   [`CATCH_UP`] times real time after a burst of at most [`BURST`], on
+//!   every path (a reconnect, a relaunch, the end after Stop). One longer
+//!   than the server's resume window is skipped to the newest nine tenths of
+//!   the window, and the skipped stretch is reported as a gap.
+//! * After Stop ([`Session::end`]) the stream delivers the rest of the
+//!   capture however long that takes, reconnecting as often as needed, and
+//!   says [`Event::Delivered`] once the server has acknowledged the end of
+//!   every channel. Only then does the app tell the server to stop. A capture
+//!   left part-way by a quit or a crash is streamed again from its files
+//!   ([`Source::Saved`]).
 //! * This module has no UI and no global state, so it is tested against a
 //!   local WebSocket server (see the tests at the end).
 use meeting_notes_api_types::TranscriptSegmentDTO;
@@ -29,7 +39,7 @@ use std::{
     io,
     net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
-    sync::{Arc, Condvar, Mutex, OnceLock, mpsc},
+    sync::{Arc, Mutex, OnceLock, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -46,10 +56,19 @@ pub const RATE: u32 = 16_000;
 pub const FRAME_MIN: usize = RATE as usize / 10;
 /// 250 ms: the most one frame carries.
 pub const FRAME_MAX: usize = RATE as usize / 4;
-/// How much faster than real time a backlog is replayed.
-const CATCH_UP: f64 = 2.;
-/// Where a skipped backlog resumes: this long before the end of the capture,
-/// or half the resume window before it if that is less.
+/// How much faster than real time a backlog is replayed: at most three
+/// seconds of audio per second on each channel, after at most
+/// [`BURST`] at once. Every path is paced, a replay after a reconnect or a
+/// relaunch as much as the flush of the last samples after Stop: a burst is
+/// what the speech provider drops (`queue_overflow`), and what it drops is
+/// lost. A backlog therefore shrinks by two seconds every second while the
+/// recording runs, and by three once it has stopped.
+pub const CATCH_UP: f64 = 3.;
+/// The most audio that goes out at once, in samples: half a second.
+pub const BURST: f64 = RATE as f64 / 2.;
+/// The least of a skipped backlog that is kept: this long before the end of
+/// the capture, or half the resume window if that is less (normally nine
+/// tenths of the window is kept).
 const SKIP_TO_MS: u64 = 5_000;
 const BACK_OFF: [Duration; 5] = [
     Duration::from_millis(500),
@@ -58,6 +77,27 @@ const BACK_OFF: [Duration; 5] = [
     Duration::from_secs(4),
     Duration::from_secs(8),
 ];
+/// The back-off while the server says live transcription is unavailable (not
+/// configured, at its session limit, or the speech provider is down): slower,
+/// up to half a minute, and without end while the recording runs. Shorter
+/// under test.
+const UNAVAILABLE_BACK_OFF: [Duration; 5] = if cfg!(test) {
+    [
+        Duration::from_millis(50),
+        Duration::from_millis(100),
+        Duration::from_millis(150),
+        Duration::from_millis(200),
+        Duration::from_millis(250),
+    ]
+} else {
+    [
+        Duration::from_secs(2),
+        Duration::from_secs(5),
+        Duration::from_secs(10),
+        Duration::from_secs(20),
+        Duration::from_secs(30),
+    ]
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -120,6 +160,15 @@ pub struct SpeakerMerge {
     pub to: String,
 }
 
+/// A stored segment that now carries another speaker and label.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerRelabel {
+    pub segment_id: String,
+    pub speaker_id: String,
+    pub speaker_label: String,
+}
+
 /// Everything the server sends. Unknown message types decode as `Unknown`
 /// and are ignored, so additive protocol changes do not break old clients.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -157,6 +206,9 @@ pub enum ServerMessage {
     },
     Speakers {
         merges: Vec<SpeakerMerge>,
+        /// Applied after `merges`.
+        #[serde(default)]
+        relabels: Vec<SpeakerRelabel>,
     },
     Gap {
         channel: Channel,
@@ -590,8 +642,7 @@ impl Track {
             let Some(at) = start else { break };
             file.start = at;
             if file.len.is_none() && (index + 1 < count || self.done) {
-                // A file that cannot be read contributes nothing; the durable
-                // upload reports it.
+                // A file that cannot be read contributes nothing.
                 let (frames, len) = match Wav::open(&file.path) {
                     Ok(Some(wav)) => {
                         let frames = wav.frames().unwrap_or(0);
@@ -737,9 +788,17 @@ pub enum Source {
     /// The running capture's own state: what `manifest.json` is written
     /// from, but current to the last 80 ms poll rather than the last second.
     Monitor(crate::audio::CaptureMonitor),
-    /// `manifest.json` itself, for a capture this process does not own.
+    /// `manifest.json` itself, followed as it grows: a capture this process
+    /// does not own (and the tests' captures).
     #[allow(dead_code)]
     File(PathBuf),
+    /// A capture that nothing records any more: one stopped before this
+    /// launch, or interrupted by a quit or a crash. Its files are final
+    /// whatever its manifest says, so it is streamed to its end and the
+    /// stream does not wait for it to grow. The manifest on disk is read
+    /// for the newest list of files; the copy given here stands in when
+    /// that cannot be read.
+    Saved(crate::audio::CaptureManifest),
 }
 
 /// The parts of a capture manifest the stream follows.
@@ -777,16 +836,31 @@ impl Capture {
 impl Source {
     /// The capture's manifest as it is now.
     pub fn manifest(&self) -> Option<crate::audio::CaptureManifest> {
+        let read = |path: &Path| -> Option<crate::audio::CaptureManifest> {
+            std::fs::read(path)
+                .ok()
+                .and_then(|data| serde_json::from_slice(&data).ok())
+        };
         match self {
             Source::Monitor(monitor) => Some(monitor.snapshot()),
-            Source::File(path) => std::fs::read(path)
-                .ok()
-                .and_then(|data| serde_json::from_slice(&data).ok()),
+            Source::File(path) => read(path),
+            Source::Saved(saved) => Some(
+                read(&saved.manifest_path)
+                    .filter(|manifest| manifest.capture_id == saved.capture_id)
+                    .unwrap_or_else(|| saved.clone()),
+            ),
         }
     }
 
     fn read(&self) -> Option<Capture> {
-        self.manifest().map(|manifest| Capture::of(&manifest))
+        self.manifest().map(|manifest| {
+            let mut capture = Capture::of(&manifest);
+            if matches!(self, Source::Saved(_)) {
+                capture.done = true;
+                capture.starting = [false; 2];
+            }
+            capture
+        })
     }
 }
 
@@ -814,8 +888,9 @@ pub enum Resolved {
 }
 
 /// What the window shows of the stream. `Off` is the silent default: no
-/// server, live transcription not configured, or the stream gave up, and the
-/// recording is transcribed from its uploaded parts as before.
+/// server, or the stream has ended. `ProviderUnavailable` is also what it
+/// says while the server refuses live transcription and the stream waits to
+/// try again.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Phase {
     #[default]
@@ -853,14 +928,36 @@ pub enum Event {
         segment: TranscriptSegmentDTO,
     },
     Speakers(Vec<SpeakerMerge>),
-    /// Audio the stream will not transcribe; the uploaded part fills it.
+    /// Stored segments that now carry another speaker (after any merges).
+    Relabels(Vec<SpeakerRelabel>),
+    /// Audio the stream will not transcribe: that stretch is missing from
+    /// the transcript. Note-timeline milliseconds. Said by the server, and
+    /// by the stream itself when it skips a backlog longer than the resume
+    /// window or gives up on audio the server refused.
     Gap {
         channel: Channel,
         from_ms: u64,
         to_ms: u64,
     },
+    /// What came of the capture: every sample reached the server, or the
+    /// server will take no more of it. Sent once, before `Ended`. A stream
+    /// that ends without it was interrupted (the app is quitting, the
+    /// account's session ended): the rest of the capture is still in its
+    /// files, and a later stream of it carries on from what the server has.
+    Delivered(Delivery),
     /// The session thread is finished. Always the last event.
     Ended,
+}
+
+/// How a stream's capture came out (see [`Event::Delivered`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// The server's acknowledgements reach the end of every channel.
+    Complete,
+    /// The server will not take the rest: the note is not recording there
+    /// any more, or this recording cannot be streamed. What it did not take
+    /// was reported as gaps.
+    Refused,
 }
 
 enum Command {
@@ -872,61 +969,23 @@ enum Command {
     Sever,
 }
 
-/// Whether a stream has handed over to the durable upload: it has sent the
-/// last of its capture and `mark: end`, or it has nothing to send.
-#[derive(Default)]
-struct Handover {
-    done: Mutex<bool>,
-    changed: Condvar,
-    /// The upload has waited as long as it will: the stream is to stop where
-    /// it is and say how long the capture really was (see [`wait_for_handover`]).
-    cut: std::sync::atomic::AtomicBool,
+/// The streams that are running, in the order they started, by the key
+/// they were started with (the note's ID). One note has one publisher on the
+/// server, so the streams of a key take turns: each waits until the ones
+/// started before it have finished. A recording made after a Stop whose
+/// capture is still being delivered starts streaming once that is done.
+static STREAMS: Mutex<Vec<(u64, Arc<()>)>> = Mutex::new(Vec::new());
+
+fn streams() -> std::sync::MutexGuard<'static, Vec<(u64, Arc<()>)>> {
+    STREAMS.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
-impl Handover {
-    fn finish(&self) {
-        *self.done.lock().unwrap_or_else(|poison| poison.into_inner()) = true;
-        self.changed.notify_all();
-    }
-    fn cut(&self) -> bool {
-        self.cut.load(std::sync::atomic::Ordering::Acquire)
-    }
-}
-
-/// The streams that are running, by the key they were started with.
-static HANDOVERS: Mutex<Vec<(u64, Arc<Handover>)>> = Mutex::new(Vec::new());
-
-/// Called by the upload worker before it tells the server that the recording
-/// of `key` has stopped: wait, briefly, until that recording's stream has sent
-/// the end of its capture. The server ends the live session when it is told
-/// to stop, so without this the last fraction of a second would reach it only
-/// in the durable part, and that part would be transcribed a second time.
-/// Returns at once when no stream is running; never waits much longer than
-/// `limit`. A stream that is still behind when the limit runs out is told to
-/// stop there: it sends `mark: end` with the length of the capture, which is
-/// more than it has sent, so the server knows the stream ended part-way and
-/// leaves the unfinished words to the durable part instead of storing a
-/// clipped one. It is given a moment more to get that mark out.
-pub fn wait_for_handover(key: u64, limit: Duration) {
-    let handover = HANDOVERS
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
+/// Whether `ticket` is the oldest running stream of `key`.
+fn first_in_line(key: u64, ticket: &Arc<()>) -> bool {
+    streams()
         .iter()
-        .rev()
         .find(|(known, _)| *known == key)
-        .map(|(_, handover)| handover.clone());
-    let Some(handover) = handover else { return };
-    let done = handover.done.lock().unwrap_or_else(|poison| poison.into_inner());
-    let (done, waited) = handover
-        .changed
-        .wait_timeout_while(done, limit, |done| !*done)
-        .unwrap_or_else(|poison| poison.into_inner());
-    if waited.timed_out() {
-        handover.cut.store(true, std::sync::atomic::Ordering::Release);
-        let _ = handover
-            .changed
-            .wait_timeout_while(done, Duration::from_millis(500), |done| !*done);
-    }
+        .is_none_or(|(_, first)| Arc::ptr_eq(first, ticket))
 }
 
 /// A running stream. Dropping it abandons the stream at once; [`Session::end`]
@@ -937,8 +996,8 @@ pub struct Session {
 }
 
 impl Session {
-    /// Start following `source`. `key` names the recording for
-    /// [`wait_for_handover`]. `resolve` is called on the session's thread
+    /// Start following `source`. `key` names the note: its streams take
+    /// turns (see [`STREAMS`]). `resolve` is called on the session's thread
     /// until it yields a target; `alive` is polled and ends the session when
     /// it turns false (the account changed).
     pub fn start(
@@ -949,36 +1008,30 @@ impl Session {
     ) -> Self {
         let (commands, inbox) = mpsc::channel();
         let (outbox, events) = mpsc::sync_channel(2048);
-        let handover = Arc::new(Handover::default());
-        {
-            let mut handovers = HANDOVERS.lock().unwrap_or_else(|poison| poison.into_inner());
-            handovers.retain(|(known, _)| *known != key);
-            handovers.push((key, handover.clone()));
-        }
+        let ticket = Arc::new(());
+        streams().push((key, ticket.clone()));
         let spawned = thread::Builder::new()
             .name("live-transcript".into())
             .spawn({
-                let (outbox, handover) = (outbox.clone(), handover.clone());
+                let (outbox, ticket) = (outbox.clone(), ticket.clone());
                 move || {
                     let mut worker = Worker::new(
+                        key,
+                        ticket.clone(),
                         source,
                         Box::new(resolve),
                         Box::new(alive),
                         inbox,
                         outbox.clone(),
-                        handover.clone(),
                     );
                     worker.run();
                     drop(worker);
-                    HANDOVERS
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
-                        .retain(|(_, known)| !Arc::ptr_eq(known, &handover));
+                    streams().retain(|(_, known)| !Arc::ptr_eq(known, &ticket));
                     let _ = outbox.send(Event::Ended);
                 }
             });
         if spawned.is_err() {
-            handover.finish();
+            streams().retain(|(_, known)| !Arc::ptr_eq(known, &ticket));
             let _ = outbox.send(Event::Ended);
         }
         Self { commands, events }
@@ -992,7 +1045,11 @@ impl Session {
         let _ = self.commands.send(Command::Resume);
     }
     /// The recording stopped: send the rest of the capture once it is
-    /// finalised, then `mark: end`, and wait briefly for the last finals.
+    /// finalised (paced, like any backlog), then `mark: end`, and say
+    /// [`Event::Delivered`] once the server has acknowledged all of it. A
+    /// lost connection is retried for as long as that takes; the server
+    /// keeps the note recording until it is told to stop, which the app does
+    /// only after this.
     pub fn end(&self) {
         let _ = self.commands.send(Command::End);
     }
@@ -1023,6 +1080,8 @@ struct Connection {
     /// When the server was last heard from.
     heard: Instant,
     declared: [bool; 2],
+    /// `mark: pause` has gone out on this socket.
+    pause_marked: bool,
 }
 
 /// Why a connection attempt or an open connection ended.
@@ -1030,12 +1089,26 @@ struct Connection {
 enum Outcome {
     /// Try again after the back-off.
     Retry,
+    /// The server lost its speech provider's session and closed the socket
+    /// for this client to come straight back (1012): reconnect at once, and
+    /// the backlog since `acceptFromSample` is replayed from the files.
+    Reopen,
     /// The note is not recording on the server (yet, or any more).
     NotRecording,
-    /// The stream is finished for this recording; `true` when the reason is
-    /// the speech provider, which the window says quietly.
-    Stop(bool),
-    /// The server closed normally after `mark: end`.
+    /// Live transcription is unavailable for now (not configured, at the
+    /// session limit, or the speech provider is down): try again after the
+    /// slower back-off, for as long as it takes.
+    Unavailable,
+    /// Another connection is publishing this note's audio (4409): try again
+    /// slowly until it has finished.
+    Replaced,
+    /// The server will never take this capture (malformed, not found).
+    Refused,
+    /// The stream stops without a verdict: there are no credentials for it
+    /// (signed out, or the session is not valid any more). The capture stays
+    /// in its files for a later stream.
+    Halt,
+    /// The server closed normally.
     Finished,
 }
 
@@ -1067,10 +1140,10 @@ fn tls() -> Result<Arc<rustls::ClientConfig>, String> {
 /// How an HTTP refusal of the upgrade is handled (protocol notes, point 1).
 fn refusal(status: u16) -> Outcome {
     match status {
-        // Not configured, or the instance is at its session limit: stay on
-        // durable parts, silently.
-        503 | 429 => Outcome::Stop(false),
-        401 | 403 => Outcome::Stop(false),
+        // Not configured, or the instance is at its session limit: there is
+        // no other transcription, so ask again later.
+        503 | 429 => Outcome::Unavailable,
+        401 | 403 => Outcome::Halt,
         // The note is not in the recording state, or not there (yet).
         409 | 404 => Outcome::NotRecording,
         _ => Outcome::Retry,
@@ -1081,9 +1154,12 @@ fn refusal(status: u16) -> Outcome {
 fn closed(code: u16) -> Outcome {
     match code {
         1000 => Outcome::Finished,
-        4503 => Outcome::Stop(true),
-        4400 | 4401 | 4404 | 4409 | 4429 => Outcome::Stop(false),
-        // A network drop, 4408, 1001, 1006, 1011, 1012 and anything unknown.
+        4503 | 4429 => Outcome::Unavailable,
+        4401 => Outcome::Halt,
+        4409 => Outcome::Replaced,
+        4400 | 4404 => Outcome::Refused,
+        1012 => Outcome::Reopen,
+        // A network drop, 4408, 1001, 1006, 1011 and anything unknown.
         _ => Outcome::Retry,
     }
 }
@@ -1104,13 +1180,13 @@ fn connect(target: &Target) -> Result<(Socket, TcpStream), Outcome> {
         .url
         .as_str()
         .into_client_request()
-        .map_err(|_| Outcome::Stop(false))?;
+        .map_err(|_| Outcome::Refused)?;
     target
         .endpoint
         .authorize(request.headers_mut())
-        .map_err(|_| Outcome::Stop(false))?;
+        .map_err(|_| Outcome::Halt)?;
     let secure = request.uri().scheme_str() == Some("wss");
-    let host = request.uri().host().ok_or(Outcome::Stop(false))?.to_owned();
+    let host = request.uri().host().ok_or(Outcome::Refused)?.to_owned();
     let port = request
         .uri()
         .port_u16()
@@ -1130,7 +1206,7 @@ fn connect(target: &Target) -> Result<(Socket, TcpStream), Outcome> {
         .map_err(|_| Outcome::Retry)?;
     let control = stream.try_clone().map_err(|_| Outcome::Retry)?;
     let connector = if secure {
-        tungstenite::Connector::Rustls(tls().map_err(|_| Outcome::Stop(false))?)
+        tungstenite::Connector::Rustls(tls().map_err(|_| Outcome::Halt)?)
     } else {
         tungstenite::Connector::Plain
     };
@@ -1153,12 +1229,14 @@ fn connect(target: &Target) -> Result<(Socket, TcpStream), Outcome> {
 }
 
 struct Worker {
+    /// The note, and this stream's place among the note's streams.
+    key: u64,
+    ticket: Arc<()>,
     source: Source,
     resolve: Box<dyn FnMut() -> Resolved + Send>,
     alive: Box<dyn Fn() -> bool + Send>,
     commands: mpsc::Receiver<Command>,
     events: mpsc::SyncSender<Event>,
-    handover: Arc<Handover>,
     /// A channel was added and the socket closed to declare it: the server
     /// may still be letting go of the old socket when the new one arrives.
     redeclaring: u32,
@@ -1179,15 +1257,23 @@ struct Worker {
     not_recording: u32,
     was_ready: bool,
     started: Instant,
+    /// The recording is on hold: the stream sends what was captured up to
+    /// `held_at`, marks the pause, and sends nothing more until Resume.
     paused: bool,
-    pausing: bool,
-    /// Set by `end`: when to give up waiting.
-    ending: Option<Instant>,
+    /// A Pause arrived; `held_at` is taken from the capture as it is now,
+    /// once the manifest has been read on this pass.
+    hold_pending: bool,
+    held_at: [u64; 2],
+    /// Set by `end`: deliver the rest of the capture, however long it takes.
+    ending: bool,
     end_sent: Option<Instant>,
+    delivered: Option<Delivery>,
     states: [StreamState; 2],
     behind_since: Option<Instant>,
     reported: (Phase, u64),
-    provider_gone: bool,
+    /// The last attempt was refused as [`Outcome::Unavailable`] and no
+    /// socket has been ready since.
+    unavailable: bool,
     checked: Instant,
     /// When the manifest was last read.
     synced: Instant,
@@ -1201,21 +1287,23 @@ enum Step {
 
 impl Worker {
     fn new(
+        key: u64,
+        ticket: Arc<()>,
         source: Source,
         resolve: Box<dyn FnMut() -> Resolved + Send>,
         alive: Box<dyn Fn() -> bool + Send>,
         commands: mpsc::Receiver<Command>,
         events: mpsc::SyncSender<Event>,
-        handover: Arc<Handover>,
     ) -> Self {
         let now = Instant::now();
         Self {
+            key,
+            ticket,
             source,
             resolve,
             alive,
             commands,
             events,
-            handover,
             redeclaring: 0,
             target: None,
             capture: Capture::default(),
@@ -1224,20 +1312,23 @@ impl Worker {
             connection: None,
             budget: [0.; 2],
             budgeted: now,
-            resume_window_ms: 30_000,
+            // Until `ready` says otherwise: the server's resume window.
+            resume_window_ms: 900_000,
             attempts: 0,
             next_attempt: now,
             not_recording: 0,
             was_ready: false,
             started: now,
             paused: false,
-            pausing: false,
-            ending: None,
+            hold_pending: false,
+            held_at: [0; 2],
+            ending: false,
             end_sent: None,
+            delivered: None,
             states: [StreamState::Live; 2],
             behind_since: None,
             reported: (Phase::Off, 0),
-            provider_gone: false,
+            unavailable: false,
             checked: now,
             synced: now - Duration::from_secs(1),
         }
@@ -1257,33 +1348,6 @@ impl Worker {
     fn run(&mut self) {
         loop {
             let now = Instant::now();
-            loop {
-                match self.commands.try_recv() {
-                    Ok(Command::Pause) => self.pausing = !self.paused,
-                    Ok(Command::Resume) => self.unpause(),
-                    Ok(Command::End) => {
-                        self.ending.get_or_insert(now + Duration::from_secs(15));
-                        // With no socket up there is nothing to hand over in
-                        // the time the upload is prepared to wait.
-                        if !self.connection.as_ref().is_some_and(|c| c.ready) || self.paused {
-                            self.handover.finish();
-                        }
-                    }
-                    Ok(Command::Sever) => {
-                        if let Some(connection) = &self.connection {
-                            let _ = connection.control.shutdown(std::net::Shutdown::Both);
-                        }
-                    }
-                    Ok(Command::Abort) | Err(mpsc::TryRecvError::Disconnected) => return,
-                    Err(mpsc::TryRecvError::Empty) => break,
-                }
-            }
-            if now.duration_since(self.checked) >= Duration::from_millis(250) {
-                self.checked = now;
-                if !(self.alive)() {
-                    return;
-                }
-            }
             if now.duration_since(self.synced) >= Duration::from_millis(50)
                 && let Some(capture) = self.source.read()
             {
@@ -1294,17 +1358,33 @@ impl Worker {
                 }
                 self.capture = capture;
             }
-            if self.ending.is_some_and(|deadline| now >= deadline) {
-                // Out of time with the capture not all sent: the same last
-                // word as above, if there is a socket to say it on.
-                if self.end_sent.is_none()
-                    && self.capture.done
-                    && let Some(connection) = self.connection.as_mut().filter(|connection| connection.ready)
-                {
-                    let mark = Self::end_mark(&mut self.tracks, connection.declared);
-                    let _ = Self::send(connection, mark);
+            loop {
+                match self.commands.try_recv() {
+                    Ok(Command::Pause) => self.hold_pending |= !self.paused,
+                    Ok(Command::Resume) => self.unpause(),
+                    Ok(Command::End) => self.ending = true,
+                    Ok(Command::Sever) => {
+                        if let Some(connection) = &self.connection {
+                            let _ = connection.control.shutdown(std::net::Shutdown::Both);
+                        }
+                    }
+                    Ok(Command::Abort) | Err(mpsc::TryRecvError::Disconnected) => return,
+                    Err(mpsc::TryRecvError::Empty) => break,
                 }
-                return;
+            }
+            if std::mem::take(&mut self.hold_pending) {
+                // Held where the capture is now: that much still goes out.
+                self.paused = true;
+                for channel in Channel::ALL {
+                    let track = &mut self.tracks[channel.index()];
+                    self.held_at[channel.index()] = track.end().max(track.cursor());
+                }
+            }
+            if now.duration_since(self.checked) >= Duration::from_millis(250) {
+                self.checked = now;
+                if !(self.alive)() {
+                    return;
+                }
             }
             let step = if self.connection.is_some() {
                 self.serve(now)
@@ -1324,7 +1404,65 @@ impl Worker {
         [self.tracks[0].has_files(), self.tracks[1].has_files()]
     }
 
-    /// Not connected: wait for the capture and the back-off, then connect.
+    /// The sample channel `index` is to be delivered up to: the end of the
+    /// capture, or where it was held.
+    fn goal(&mut self, index: usize) -> u64 {
+        if self.paused {
+            self.held_at[index]
+        } else {
+            self.tracks[index].end()
+        }
+    }
+
+    /// Say once how the capture came out.
+    fn deliver(&mut self, delivery: Delivery) -> bool {
+        if self.delivered.is_some() {
+            return true;
+        }
+        self.delivered = Some(delivery);
+        self.emit(Event::Delivered(delivery))
+    }
+
+    /// The capture has ended and the server's acknowledgements reach the end
+    /// of every channel that has audio: all of it is on the server.
+    fn check_delivered(&mut self) -> bool {
+        if self.delivered.is_some() || !self.ending || !self.capture.done {
+            return true;
+        }
+        let wanted = self.wanted();
+        for index in 0..2 {
+            if wanted[index] && self.acked[index] < self.goal(index) {
+                return true;
+            }
+        }
+        self.deliver(Delivery::Complete)
+    }
+
+    /// The server will take no more of this capture: what it has not
+    /// acknowledged is missing from the transcript, and is said to be.
+    fn refuse(&mut self) {
+        if self.delivered.is_some() {
+            return;
+        }
+        if let Some(base) = self.target.as_ref().map(|target| target.base_ms) {
+            let wanted = self.wanted();
+            for channel in Channel::ALL {
+                let index = channel.index();
+                let (from, to) = (self.acked[index], self.goal(index));
+                if wanted[index] && to > from {
+                    self.emit(Event::Gap {
+                        channel,
+                        from_ms: base + from * 1000 / RATE as u64,
+                        to_ms: base + to * 1000 / RATE as u64,
+                    });
+                }
+            }
+        }
+        self.deliver(Delivery::Refused);
+    }
+
+    /// Not connected: wait for the capture, the stream's turn and the
+    /// back-off, then connect.
     fn dial(&mut self, now: Instant) -> Step {
         let wait = |until: Instant| {
             thread::sleep(
@@ -1344,15 +1482,24 @@ impl Worker {
             && now.duration_since(self.started) < Duration::from_millis(2500);
         if wanted == [false, false] || (settling && !self.capture.done) {
             if self.capture.done && wanted == [false, false] {
-                return Step::Exit; // Nothing was captured.
+                // Nothing was captured, so nothing is owed.
+                self.deliver(Delivery::Complete);
+                return Step::Exit;
             }
+            return wait(now + Duration::from_millis(20));
+        }
+        // An earlier stream of this note is still delivering its capture.
+        if !first_in_line(self.key, &self.ticket) {
             return wait(now + Duration::from_millis(20));
         }
         if self.target.is_none() {
             match (self.resolve)() {
                 Resolved::Ready(target) => self.target = Some(target),
                 Resolved::Later => return self.back_off(),
-                Resolved::Never => return Step::Exit,
+                Resolved::Never => {
+                    self.refuse();
+                    return Step::Exit;
+                }
             }
         }
         let target = self.target.clone().expect("target was just resolved");
@@ -1365,6 +1512,7 @@ impl Worker {
                     blocked: None,
                     heard: Instant::now(),
                     declared: wanted,
+                    pause_marked: false,
                 };
                 let streams: Vec<_> = Channel::ALL
                     .into_iter()
@@ -1388,6 +1536,7 @@ impl Worker {
                 if Self::send(&mut connection, Message::text(hello.to_string())).is_err() {
                     return self.back_off();
                 }
+                self.end_sent = None;
                 self.connection = Some(connection);
                 Step::Continue
             }
@@ -1396,33 +1545,71 @@ impl Worker {
     }
 
     fn back_off(&mut self) -> Step {
-        let delay = BACK_OFF[self.attempts.min(BACK_OFF.len() - 1)];
+        self.wait(&BACK_OFF)
+    }
+
+    fn wait(&mut self, delays: &[Duration]) -> Step {
+        let delay = delays[self.attempts.min(delays.len() - 1)];
         self.attempts += 1;
         self.next_attempt = Instant::now() + delay;
         Step::Continue
     }
 
-    /// Act on how a connection or an attempt ended.
+    /// Act on how a connection or an attempt ended. Nothing here gives up on
+    /// audio the server may still take: only a refusal does, and it says so.
     fn settle(&mut self, outcome: Outcome) -> Step {
         self.connection = None;
-        if self.ending.is_some() {
-            self.handover.finish();
-        }
+        self.end_sent = None;
         match outcome {
-            Outcome::Finished => Step::Exit,
-            Outcome::Stop(provider) => {
-                self.provider_gone = provider;
+            // The whole capture has been acknowledged: however the socket
+            // then closed (a close without a code, a drop), there is nothing
+            // left to send and no reason to connect again.
+            Outcome::Finished | Outcome::Retry | Outcome::Reopen if self.delivered.is_some() => {
                 Step::Exit
             }
-            // Once the recording is ending nothing is gained by reconnecting
-            // to a note the server has already stopped.
-            Outcome::NotRecording if self.ending.is_some() || self.not_recording >= 8 => Step::Exit,
+            Outcome::Halt => Step::Exit,
+            Outcome::Refused => {
+                self.refuse();
+                Step::Exit
+            }
+            // The note is not recording there. Once the recording is ending
+            // that is final when the stream has been in before, or when the
+            // capture is from an earlier launch: the server was told to stop
+            // (here or elsewhere) and will not take more. A few refusals are
+            // expected while the server is still handling Start.
+            Outcome::NotRecording
+                if self.ending
+                    && (self.was_ready
+                        || matches!(self.source, Source::Saved(_))
+                        || self.not_recording >= 8) =>
+            {
+                self.refuse();
+                Step::Exit
+            }
+            Outcome::NotRecording if self.not_recording >= 8 => {
+                self.not_recording += 1;
+                self.wait(&UNAVAILABLE_BACK_OFF)
+            }
             Outcome::NotRecording => {
                 self.not_recording += 1;
                 self.back_off()
             }
-            Outcome::Retry if self.end_sent.is_some() => Step::Exit,
-            Outcome::Retry => self.back_off(),
+            Outcome::Unavailable => {
+                self.unavailable = true;
+                self.wait(&UNAVAILABLE_BACK_OFF)
+            }
+            Outcome::Replaced => self.wait(&UNAVAILABLE_BACK_OFF),
+            // At once, the first time since the socket was last ready; a
+            // server that keeps closing is given the ordinary back-off.
+            Outcome::Reopen if self.attempts == 0 => {
+                self.attempts += 1;
+                self.next_attempt = Instant::now();
+                Step::Continue
+            }
+            // A network drop, or a server that ended the session before it
+            // had acknowledged the whole capture: the next connection
+            // resumes from what it has.
+            Outcome::Retry | Outcome::Reopen | Outcome::Finished => self.back_off(),
         }
     }
 
@@ -1440,19 +1627,24 @@ impl Worker {
     }
 
     fn unpause(&mut self) {
-        self.pausing = false;
+        self.hold_pending = false;
         if !std::mem::take(&mut self.paused) {
             return;
         }
-        if let Some(connection) = self.connection.as_mut().filter(|connection| connection.ready) {
+        if let Some(connection) = self
+            .connection
+            .as_mut()
+            .filter(|connection| connection.ready && connection.pause_marked)
+        {
+            connection.pause_marked = false;
             let mark = Self::mark("resume", &self.tracks, connection.declared);
             let _ = Self::send(connection, mark);
         }
     }
 
     /// A mark at the sample each streaming channel has been sent up to.
-    /// (A pause or a resume is marked once everything captured has gone out,
-    /// so that is also how much the capture holds.)
+    /// (A pause is marked once everything captured until it has gone out,
+    /// so that is also how much the capture held; a resume continues there.)
     fn mark(kind: &str, tracks: &[Track; 2], declared: [bool; 2]) -> Message {
         let mut at = serde_json::Map::new();
         for channel in Channel::ALL {
@@ -1467,9 +1659,7 @@ impl Worker {
     }
 
     /// The end of the recording: how many samples the capture holds for each
-    /// streaming channel, whatever part of them has been sent. When that is
-    /// more than was sent (the stream was behind and has been told to stop,
-    /// or its time ran out) the server knows the stream ended part-way.
+    /// streaming channel.
     fn end_mark(tracks: &mut [Track; 2], declared: [bool; 2]) -> Message {
         let mut at = serde_json::Map::new();
         for channel in Channel::ALL {
@@ -1491,6 +1681,7 @@ impl Worker {
                 let _ = connection.socket.close(None);
                 let _ = connection.socket.flush();
             }
+            self.end_sent = None;
             self.redeclaring = 1;
             self.next_attempt = now;
             return Step::Continue;
@@ -1514,9 +1705,10 @@ impl Worker {
                 Ok(Message::Close(frame)) => {
                     let code = frame.map_or(1005, |frame| u16::from(frame.code));
                     let _ = connection.socket.flush(); // our half of the close
-                    let outcome = if self.end_sent.is_some() {
-                        Outcome::Finished
-                    } else if code == 4409 && !connection.ready && (1..=3).contains(&self.redeclaring) {
+                    let outcome = if code == 4409
+                        && !connection.ready
+                        && (1..=3).contains(&self.redeclaring)
+                    {
                         // "Another publisher" is our own previous socket,
                         // which the server has not finished closing.
                         self.redeclaring += 1;
@@ -1524,12 +1716,18 @@ impl Worker {
                     } else {
                         closed(code)
                     };
+                    if !self.check_delivered() {
+                        return Step::Exit;
+                    }
                     return self.settle(outcome);
                 }
                 Ok(_) => connection.heard = Instant::now(),
                 Err(tungstenite::Error::Io(error)) if would_block(&error) => break,
                 Err(_) => {
-                    let outcome = if self.end_sent.is_some() {
+                    if !self.check_delivered() {
+                        return Step::Exit;
+                    }
+                    let outcome = if self.delivered.is_some() {
                         Outcome::Finished
                     } else {
                         Outcome::Retry
@@ -1537,6 +1735,9 @@ impl Worker {
                     return self.settle(outcome);
                 }
             }
+        }
+        if !self.check_delivered() {
+            return Step::Exit;
         }
         let Some(connection) = self.connection.as_mut() else {
             return Step::Continue;
@@ -1552,37 +1753,20 @@ impl Worker {
         let stalled = connection
             .blocked
             .is_some_and(|since| now.duration_since(since) > Duration::from_secs(10));
-        // Audio is going out and nothing has come back: the socket is dead
-        // even though the system has not said so.
+        // Audio is going out (or its end is being acknowledged) and nothing
+        // has come back: the socket is dead even though the system has not
+        // said so.
         let silent = connection.ready
-            && !self.paused
-            && self.end_sent.is_none()
+            && (!self.paused || self.end_sent.is_some())
+            && self.delivered.is_none()
             && now.duration_since(connection.heard) > Duration::from_secs(20);
         if stalled || silent || (!connection.ready && now.duration_since(connection.heard) > Duration::from_secs(10)) {
             return self.settle(Outcome::Retry);
         }
-        // The upload will wait no longer for a stream that is behind: say how
-        // long the capture is and send no more of it. (Once the capture is
-        // final, so that the length is.)
-        if self.end_sent.is_none()
-            && self.ending.is_some()
-            && self.handover.cut()
-            && self.capture.done
-            && connection.ready
-            && !self.paused
-        {
-            let mark = Self::end_mark(&mut self.tracks, connection.declared);
-            let sent = Self::send(connection, mark);
-            self.handover.finish();
-            if sent.is_err() {
-                return self.settle(Outcome::Retry);
-            }
-            self.end_sent = Some(now);
-            return Step::Continue;
-        }
         if let Some(sent) = self.end_sent {
-            // Waiting for the last finals and the server's close.
-            return if now.duration_since(sent) > Duration::from_secs(4) {
+            // Everything has gone out: waiting for the acknowledgement of
+            // the end, then for the last finals and the server's close.
+            return if self.delivered.is_some() && now.duration_since(sent) > Duration::from_secs(10) {
                 Step::Exit
             } else {
                 Step::Continue
@@ -1591,53 +1775,69 @@ impl Worker {
         if !connection.ready || connection.blocked.is_some() {
             return Step::Continue;
         }
-        if self.paused {
-            return Step::Continue;
-        }
         self.pump(now)
     }
 
-    /// Send the audio that is due on each channel.
+    /// Send the audio that is due on each channel, never faster than
+    /// [`CATCH_UP`] times real time after a burst of at most [`BURST`].
     fn pump(&mut self, now: Instant) -> Step {
         let elapsed = now.duration_since(self.budgeted).as_secs_f64();
         self.budgeted = now;
         // Everything captured is to go out, short frames included: the
         // capture has ended, or a pause is waiting for the last samples.
-        let flushing = self.pausing || (self.ending.is_some() && self.capture.done);
+        let flushing = self.paused || (self.ending && self.capture.done);
         let mut drained = true;
         for channel in Channel::ALL {
             let index = channel.index();
+            if !self.connection.as_ref().is_some_and(|c| c.declared[index]) {
+                continue;
+            }
+            self.budget[index] = (self.budget[index] + elapsed * CATCH_UP * RATE as f64).min(BURST);
+            let goal = self.goal(index);
+            let base = self.target.as_ref().map_or(0, |target| target.base_ms);
+            let track = &mut self.tracks[index];
+            // More than the resume window behind: skip ahead. The server sees
+            // the index jump and declares the gap, which stays a gap in the
+            // transcript; the window is told at once.
+            let behind_ms = goal.saturating_sub(track.cursor()) * 1000 / RATE as u64;
+            if behind_ms > self.resume_window_ms {
+                // As much of the backlog as the window allows (the newest
+                // nine tenths of it): the live transcript is the only one,
+                // so every second replayed is a second of transcript kept.
+                // It resumes well inside the window, and only ever forwards:
+                // resuming at its very edge would leave the stream "behind"
+                // for good, skipping again on every pass.
+                let back = (self.resume_window_ms - self.resume_window_ms / 10)
+                    .max(SKIP_TO_MS.min(self.resume_window_ms / 2));
+                let to = goal.saturating_sub(back * RATE as u64 / 1000);
+                let from = track.cursor();
+                if to > from {
+                    track.seek(to);
+                    let _ = self.events.send(Event::Gap {
+                        channel,
+                        from_ms: base + from * 1000 / RATE as u64,
+                        to_ms: base + to * 1000 / RATE as u64,
+                    });
+                }
+            }
             let Some(connection) = self.connection.as_mut() else {
                 return Step::Continue;
             };
-            if !connection.declared[index] {
-                continue;
-            }
-            self.budget[index] =
-                (self.budget[index] + elapsed * CATCH_UP * RATE as f64).min(RATE as f64 / 2.);
-            let track = &mut self.tracks[index];
-            // More than the resume window behind: skip to near the end. The
-            // server sees the index jump and declares the gap; the durable
-            // part covers it.
-            let end = track.end();
-            let behind_ms = end.saturating_sub(track.cursor()) * 1000 / RATE as u64;
-            if behind_ms > self.resume_window_ms {
-                // It resumes well inside the window, and only ever forwards.
-                // Resuming further back than the window allows would leave
-                // the stream "behind" for good: it would skip again on every
-                // pass, pinned that far behind the capture and dropping a
-                // few milliseconds whenever this thread was kept waiting.
-                let back = SKIP_TO_MS.min(self.resume_window_ms / 2);
-                let to = end.saturating_sub(back * RATE as u64 / 1000);
-                if to > track.cursor() {
-                    track.seek(to);
-                }
-            }
             loop {
                 track.fill();
                 let Some(samples) = track.frame(if flushing { 1 } else { FRAME_MIN }) else {
                     break;
                 };
+                // While held, nothing past the hold.
+                let room = if self.paused {
+                    goal.saturating_sub(track.cursor()) as usize
+                } else {
+                    usize::MAX
+                };
+                let samples = &samples[..samples.len().min(room)];
+                if samples.is_empty() {
+                    break;
+                }
                 if self.budget[index] < samples.len() as f64 {
                     drained = false;
                     break;
@@ -1654,28 +1854,32 @@ impl Worker {
                     return Step::Continue; // The socket is full; flush first.
                 }
             }
-            drained &= track.frame(1).is_none();
+            drained &= if self.paused {
+                track.cursor() >= goal
+            } else {
+                track.frame(1).is_none()
+            };
         }
         let Some(connection) = self.connection.as_mut() else {
             return Step::Continue;
         };
-        if self.pausing && drained {
-            self.pausing = false;
-            self.paused = true;
+        if self.paused && drained && !connection.pause_marked {
+            connection.pause_marked = true;
             let mark = Self::mark("pause", &self.tracks, connection.declared);
             if Self::send(connection, mark).is_err() {
                 return self.settle(Outcome::Retry);
             }
-        } else if self.ending.is_some()
+        } else if self.ending
             && self.capture.done
-            && Channel::ALL
-                .into_iter()
-                .all(|channel| !connection.declared[channel.index()] || self.tracks[channel.index()].exhausted())
+            && drained
+            && Channel::ALL.into_iter().all(|channel| {
+                !connection.declared[channel.index()]
+                    || self.paused
+                    || self.tracks[channel.index()].exhausted()
+            })
         {
             let mark = Self::end_mark(&mut self.tracks, connection.declared);
-            let sent = Self::send(connection, mark);
-            self.handover.finish();
-            if sent.is_err() {
+            if Self::send(connection, mark).is_err() {
                 return self.settle(Outcome::Retry);
             }
             self.end_sent = Some(now);
@@ -1693,6 +1897,7 @@ impl Worker {
             } => {
                 self.resume_window_ms = resume_window_ms;
                 self.attempts = 0;
+                self.unavailable = false;
                 self.not_recording = 0;
                 self.redeclaring = 0;
                 self.was_ready = true;
@@ -1706,10 +1911,9 @@ impl Worker {
                 self.budgeted = Instant::now();
                 if let Some(connection) = self.connection.as_mut() {
                     connection.ready = true;
-                    if self.paused {
-                        let mark = Self::mark("pause", &self.tracks, connection.declared);
-                        let _ = Self::send(connection, mark);
-                    }
+                    // A pause is marked again once what was captured up to
+                    // it has been sent on this socket.
+                    connection.pause_marked = false;
                 }
                 self.emit(Event::Revision(transcript_revision))
             }
@@ -1747,7 +1951,10 @@ impl Worker {
                 revision: transcript_revision,
                 segment,
             }),
-            ServerMessage::Speakers { merges } => self.emit(Event::Speakers(merges)),
+            ServerMessage::Speakers { merges, relabels } => {
+                (merges.is_empty() || self.emit(Event::Speakers(merges)))
+                    && (relabels.is_empty() || self.emit(Event::Relabels(relabels)))
+            }
             ServerMessage::Gap {
                 channel,
                 from_ms,
@@ -1761,14 +1968,8 @@ impl Worker {
                 self.states[channel.index()] = state;
                 true
             }
-            ServerMessage::Error { code, retryable } => {
-                // The close that follows decides what happens; this only
-                // records that the provider is the reason.
-                if code == "provider_unavailable" && !retryable {
-                    self.provider_gone = true;
-                }
-                true
-            }
+            // The close that follows decides what happens.
+            ServerMessage::Error { .. } => true,
             ServerMessage::Unknown => true,
         }
     }
@@ -1781,6 +1982,9 @@ impl Worker {
             .filter(|connection| connection.ready)
             .map(|connection| connection.declared);
         let (phase, behind) = match declared {
+            // Refused for now: said as a warning, since nothing else will
+            // transcribe what is being recorded meanwhile.
+            None if self.unavailable => (Phase::ProviderUnavailable, 0),
             None if self.was_ready => (Phase::Reconnecting, 0),
             None => (Phase::Connecting, 0),
             Some(_) if self.paused => (Phase::Paused, 0),
@@ -1832,21 +2036,14 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        self.handover.finish();
         if let Some(mut connection) = self.connection.take() {
             let _ = connection.control.set_write_timeout(Some(Duration::from_millis(200)));
             let _ = connection.socket.close(None);
             let _ = connection.socket.flush();
         }
-        // The last word on the stream: off, or the provider being the reason
-        // it stopped.
-        let last = if self.provider_gone {
-            Phase::ProviderUnavailable
-        } else {
-            Phase::Off
-        };
-        if self.reported != (last, 0) {
-            let _ = self.events.send(Event::Status(last, 0));
+        // The last word on the stream.
+        if self.reported != (Phase::Off, 0) {
+            let _ = self.events.send(Event::Status(Phase::Off, 0));
         }
     }
 }
@@ -1926,7 +2123,16 @@ pub(crate) mod tests {
         assert_eq!(
             decode(r#"{"type":"speakers","merges":[{"from":"system:n:4","to":"system:n:2"}]}"#),
             Some(ServerMessage::Speakers {
-                merges: vec![SpeakerMerge { from: "system:n:4".into(), to: "system:n:2".into() }]
+                merges: vec![SpeakerMerge { from: "system:n:4".into(), to: "system:n:2".into() }],
+                relabels: vec![],
+            })
+        );
+        // Relabels, by segment, after the merges.
+        assert_eq!(
+            decode(r#"{"type":"speakers","merges":[],"relabels":[{"segmentId":"s-9","speakerId":"mic:n:2","speakerLabel":"Room speaker 1"}]}"#),
+            Some(ServerMessage::Speakers {
+                merges: vec![],
+                relabels: vec![SpeakerRelabel { segment_id: "s-9".into(), speaker_id: "mic:n:2".into(), speaker_label: "Room speaker 1".into() }],
             })
         );
         assert_eq!(
@@ -1962,21 +2168,35 @@ pub(crate) mod tests {
 
     #[test]
     fn refusals_and_close_codes_follow_the_protocol_notes() {
-        // Not configured, at the limit, or not allowed: stay on parts, no retry.
-        for status in [503, 429, 401, 403] {
-            assert_eq!(refusal(status), Outcome::Stop(false), "HTTP {status}");
+        // Not configured, at the limit, or the provider is down: there is no
+        // other transcription, so the stream asks again later.
+        for status in [503, 429] {
+            assert_eq!(refusal(status), Outcome::Unavailable, "HTTP {status}");
         }
+        for code in [4503, 4429] {
+            assert_eq!(closed(code), Outcome::Unavailable, "close {code}");
+        }
+        // No valid session: the stream stops without a verdict, and the
+        // capture waits in its files for the account to be back.
+        for status in [401, 403] {
+            assert_eq!(refusal(status), Outcome::Halt, "HTTP {status}");
+        }
+        assert_eq!(closed(4401), Outcome::Halt);
+        // A request this client got wrong: the server will never take it.
+        for code in [4400, 4404] {
+            assert_eq!(closed(code), Outcome::Refused, "close {code}");
+        }
+        // Another connection publishes the note: asked again, slowly.
+        assert_eq!(closed(4409), Outcome::Replaced);
         for status in [409, 404] {
             assert_eq!(refusal(status), Outcome::NotRecording, "HTTP {status}");
         }
         assert_eq!(refusal(502), Outcome::Retry);
-        for code in [4400, 4401, 4404, 4409, 4429] {
-            assert_eq!(closed(code), Outcome::Stop(false), "close {code}");
-        }
-        assert_eq!(closed(4503), Outcome::Stop(true));
-        for code in [4408, 1001, 1006, 1011, 1012, 1005] {
+        for code in [4408, 1001, 1006, 1011, 1005] {
             assert_eq!(closed(code), Outcome::Retry, "close {code}");
         }
+        // The provider's session was lost: straight back.
+        assert_eq!(closed(1012), Outcome::Reopen);
         assert_eq!(closed(1000), Outcome::Finished);
         assert_eq!(BACK_OFF.map(|delay| delay.as_millis()), [500, 1000, 2000, 4000, 8000]);
     }
@@ -2477,6 +2697,33 @@ pub(crate) mod tests {
         }
     }
 
+    /// What the real server does with a stream once it is ready: take the
+    /// audio from `accept`, acknowledge it, and on `mark: end` acknowledge
+    /// the end and close. Returns how far each channel was taken, or `None`
+    /// when the client went away first.
+    fn take_until_end(socket: &mut ServerSocket, seen: &mpsc::Sender<Seen>, accept: [u64; 2]) -> Option<[u64; 2]> {
+        let mut taken = accept;
+        while let Some(message) = hear(socket, seen) {
+            match message {
+                Message::Binary(bytes) => {
+                    let channel = bytes[1] as usize;
+                    let first = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
+                    let count = (bytes.len() - FRAME_HEADER) as u64 / 2;
+                    taken[channel] = taken[channel].max(first + count);
+                    let name = ["mic", "system"][channel];
+                    say(socket, serde_json::json!({"type": "ack", "channel": name, "throughSample": taken[channel], "transcribedThroughMs": 0}));
+                }
+                Message::Text(text) if text.as_str().contains(r#""kind":"end""#) => {
+                    let _ = socket.close(None);
+                    while socket.read().is_ok() {}
+                    return Some(taken);
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     fn target(server: &Server, fixture: &Fixture) -> Target {
         Target {
             endpoint: crate::accounts::client::LiveEndpoint::for_test(
@@ -2606,20 +2853,28 @@ pub(crate) mod tests {
         }
         fixture.finish();
         session.end();
-        // What the upload does before it tells the server to stop: wait for
-        // the stream to hand over. That takes as long as sending the last
-        // fraction of a second, not the limit.
+        // What Stop waits for before it tells the server to stop: the
+        // server has acknowledged the whole capture. That takes as long as
+        // sending the last fraction of a second.
         let asked = Instant::now();
-        wait_for_handover(key(&fixture), Duration::from_secs(10));
+        let mut heard = Vec::new();
+        loop {
+            match session.events.recv_timeout(Duration::from_secs(10)).expect("delivered") {
+                Event::Delivered(delivery) => {
+                    assert_eq!(delivery, Delivery::Complete);
+                    break;
+                }
+                Event::Ended => panic!("ended before it delivered"),
+                event => heard.push(event),
+            }
+        }
         assert!(asked.elapsed() < Duration::from_secs(3), "{:?}", asked.elapsed());
         let handed_over = until(&server.seen, |seen| matches!(seen, Seen::Mark(_)));
-        let events = events(&session);
+        // What the window heard, before the delivery and after it.
+        heard.extend(events(&session));
+        let events = heard;
         let mut seen = handed_over;
         seen.extend(until(&server.seen, |seen| matches!(seen, Seen::Closed)));
-        // With the stream gone there is nothing to wait for.
-        let asked = Instant::now();
-        wait_for_handover(key(&fixture), Duration::from_secs(10));
-        assert!(asked.elapsed() < Duration::from_millis(100));
         // One connection, authenticated with the bearer token and no Origin.
         assert_eq!(server.connections.load(Ordering::SeqCst), 1);
         let Seen::Headers { authorization, origin, path } = &seen[0] else { panic!("{:?}", seen[0]) };
@@ -2707,13 +2962,7 @@ pub(crate) mod tests {
             // The server kept a little more than it had acknowledged.
             let resume = seen_resume(&mut socket);
             ready(&mut socket, &[("mic", resume)], 30_000, 0);
-            while let Some(message) = hear(&mut socket, seen) {
-                if matches!(&message, Message::Text(text) if text.as_str().contains(r#""kind":"end""#)) {
-                    let _ = socket.close(None);
-                    while socket.read().is_ok() {}
-                    return;
-                }
-            }
+            take_until_end(&mut socket, seen, [resume, 0]);
         });
         // The second connection accepts from 800 samples after the last ack.
         fn seen_resume(_: &mut ServerSocket) -> u64 {
@@ -2743,10 +2992,17 @@ pub(crate) mod tests {
         let all = contiguous(&resumed);
         let whole = convert(48_000, &spoken);
         assert_eq!(all, whole[(acked + 800) as usize..]);
-        // Catching up is paced: 3 s of backlog is not sent in one burst.
+        // Catching up is paced: the backlog (about 3.5 s) is not sent in one
+        // burst but at no more than three times real time after the first
+        // half second, so it takes at least (3.5 - 0.5) / 3 s. Less a tenth
+        // for the server's own clock reading frames in batches.
         let (start, end) = (second.iter().find_map(frame_time).unwrap(), second.iter().rev().find_map(frame_time).unwrap());
-        assert!(end.duration_since(start) > Duration::from_millis(900), "{:?}", end.duration_since(start));
+        let audio = all.len() as f64 / RATE as f64;
+        let floor = Duration::from_secs_f64(((audio - BURST / RATE as f64) / CATCH_UP - 0.1).max(0.));
+        assert!(audio > 3., "{audio} s were replayed");
+        assert!(end.duration_since(start) >= floor, "{audio} s in {:?}, at least {floor:?}", end.duration_since(start));
         assert!(events.contains(&Event::Status(Phase::Reconnecting, 0)));
+        assert!(events.contains(&Event::Delivered(Delivery::Complete)));
         fn frame_time(seen: &Seen) -> Option<Instant> {
             match seen {
                 Seen::Frame { at, .. } => Some(*at),
@@ -2756,7 +3012,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_backlog_longer_than_the_resume_window_is_skipped_to_five_seconds_before_the_end() {
+    fn a_backlog_longer_than_the_resume_window_keeps_nine_tenths_of_the_window() {
         let mut fixture = Fixture::new("skip");
         let mut mic = fixture.add(Channel::Mic, "mic.wav", 48_000);
         // Twelve seconds were captured before the socket came up.
@@ -2774,17 +3030,27 @@ pub(crate) mod tests {
         });
         let session = session(&server, &fixture);
         let seen = until(&server.seen, |seen| matches!(seen, Seen::Closed));
+        let gap = std::iter::from_fn(|| session.events.recv_timeout(Duration::from_secs(5)).ok())
+            .find(|event| matches!(event, Event::Gap { .. }));
         drop(session);
         let sent = frames(&seen, 0);
-        // 12 s minus 5 s, to within the filter's reach of the growing end.
-        assert!((sent[0].0 as i64 - 7 * 16_000).abs() < 100, "first frame at {}", sent[0].0);
+        // 12 s minus nine tenths of the 10 s window, to within the filter's
+        // reach of the growing end.
+        assert!((sent[0].0 as i64 - 3 * 16_000).abs() < 100, "first frame at {}", sent[0].0);
         contiguous(&sent);
-        // Never faster than twice real time: 1.5 s of wall clock carries at
-        // most 3 s of audio plus the half second the pacing lets through at
-        // once. (How close it gets to that depends on how busy the machine
-        // running the test is, so only the ceiling is asserted tightly.)
+        // Never faster than three times real time: 1.5 s of wall clock
+        // carries at most 4.5 s of audio plus the half second the pacing lets
+        // through at once. (How close it gets to that depends on how busy the
+        // machine running the test is, so only the ceiling is asserted
+        // tightly.)
         let total: usize = sent.iter().map(|frame| frame.1.len()).sum();
-        assert!(total >= 8_000 && total < 16_000 * 4, "{total} samples in 1.5 s");
+        assert!(total >= 8_000 && total <= 16_000 * 5, "{total} samples in 1.5 s");
+        // The window is told exactly which stretch was skipped, on the note's
+        // timeline: from the start of the capture to where the replay began.
+        assert_eq!(
+            gap,
+            Some(Event::Gap { channel: Channel::Mic, from_ms: 754_000, to_ms: 754_000 + sent[0].0 * 1000 / 16_000 })
+        );
     }
 
     #[test]
@@ -2808,13 +3074,14 @@ pub(crate) mod tests {
         let seen = until(&server.seen, |seen| matches!(seen, Seen::Closed));
         drop(session);
         let sent = frames(&seen, 0);
-        // Half the window before the end: inside it, so the backlog is
-        // skipped once. (Five seconds back would still be "more than the
-        // window behind" and the stream would skip again on every pass.)
-        assert!((sent[0].0 as i64 - 11 * 16_000).abs() < 100, "first frame at {}", sent[0].0);
+        // Nine tenths of the window before the end: inside it, so the
+        // backlog is skipped once. (Five seconds back would still be "more
+        // than the window behind" and the stream would skip again on every
+        // pass.)
+        assert!((sent[0].0 as i64 - 10_200 * 16).abs() < 100, "first frame at {}", sent[0].0);
         contiguous(&sent);
         let total: usize = sent.iter().map(|frame| frame.1.len()).sum();
-        assert!((14_000..=16_000).contains(&total), "the last second, once: {total} samples");
+        assert!((27_000..=29_600).contains(&total), "the last 1.8 s, once: {total} samples");
     }
 
     #[test]
@@ -2827,13 +3094,7 @@ pub(crate) mod tests {
             let mut socket = accept(stream, seen);
             hear(&mut socket, seen).expect("hello");
             ready(&mut socket, &[("mic", 0)], 30_000, 0);
-            while let Some(message) = hear(&mut socket, seen) {
-                if matches!(&message, Message::Text(text) if text.as_str().contains(r#""kind":"end""#)) {
-                    let _ = socket.close(None);
-                    while socket.read().is_ok() {}
-                    return;
-                }
-            }
+            take_until_end(&mut socket, seen, [0, 0]);
         });
         let session = session(&server, &fixture);
         session.pause();
@@ -2868,57 +3129,41 @@ pub(crate) mod tests {
         assert!(events.contains(&Event::Status(Phase::Paused, 0)));
     }
 
+    /// Refused as unavailable (not configured, at the session limit): the
+    /// window is told, and the stream keeps asking, more and more slowly,
+    /// until it is let in; then it sends the whole capture from the start.
     #[test]
-    fn a_stream_that_is_behind_at_stop_says_how_long_the_capture_was() {
-        let mut fixture = Fixture::new("behind");
-        let mut mic = fixture.add(Channel::Mic, "mic.wav", 16_000);
-        // Eight seconds were captured before the socket came up; at twice
-        // real time the stream needs four seconds to send them.
-        mic.append(&tone(16_000, 330., 0, 16_000 * 8));
-        let server = server(|_, stream, seen| {
-            let mut socket = accept(stream, seen);
-            hear(&mut socket, seen).expect("hello");
-            ready(&mut socket, &[("mic", 0)], 30_000, 0);
-            while let Some(message) = hear(&mut socket, seen) {
-                if matches!(&message, Message::Text(text) if text.as_str().contains(r#""kind":"end""#)) {
-                    let _ = socket.close(None);
-                    while socket.read().is_ok() {}
-                    return;
-                }
-            }
-        });
-        let session = session(&server, &fixture);
-        let mut seen = until(&server.seen, |seen| matches!(seen, Seen::Frame { .. }));
-        // Stop. The upload waits a moment for the stream and then goes ahead.
-        fixture.finish();
-        session.end();
-        let waited = Instant::now();
-        wait_for_handover(key(&fixture), Duration::from_millis(300));
-        assert!(waited.elapsed() < Duration::from_millis(1_500), "the wait is bounded");
-        seen.extend(until(&server.seen, |seen| matches!(seen, Seen::Closed)));
-        // The mark says how much was captured, which is more than was sent,
-        // and nothing more of the capture follows it.
-        let marks: Vec<_> = seen.iter().filter_map(|seen| match seen { Seen::Mark(mark) => Some(mark.clone()), _ => None }).collect();
-        assert_eq!(marks, [serde_json::json!({"type": "mark", "kind": "end", "atSample": {"mic": 128_000}})]);
-        let sent: usize = frames(&seen, 0).iter().map(|frame| frame.1.len()).sum();
-        assert!(sent > 0 && sent < 128_000, "{sent} of 128000 samples had been sent");
-        let marked = seen.iter().position(|seen| matches!(seen, Seen::Mark(_))).unwrap();
-        assert!(!seen[marked..].iter().any(|seen| matches!(seen, Seen::Frame { .. })));
-        drop(session);
-    }
-
-    #[test]
-    fn an_instance_without_live_transcription_is_tried_once_and_stays_silent() {
+    fn a_refusal_as_unavailable_is_retried_for_as_long_as_the_recording_runs() {
         let mut fixture = Fixture::new("off");
         let mut mic = fixture.add(Channel::Mic, "mic.wav", 48_000);
         mic.append(&tone(48_000, 330., 0, 48_000));
-        let server = server(|_, stream, _| refuse(stream, 503));
+        fixture.finish();
+        let server = server(|index, stream, seen| {
+            if index < 4 {
+                return refuse(stream, if index % 2 == 0 { 503 } else { 429 });
+            }
+            let mut socket = accept(stream, seen);
+            hear(&mut socket, seen).expect("hello");
+            ready(&mut socket, &[("mic", 0)], 300_000, 0);
+            take_until_end(&mut socket, seen, [0, 0]);
+        });
         let session = session(&server, &fixture);
+        let mut before = Vec::new();
+        loop {
+            let event = session.events.recv_timeout(Duration::from_secs(20)).unwrap();
+            let live = event == Event::Status(Phase::Live, 0);
+            before.push(event);
+            if live {
+                break;
+            }
+        }
+        assert!(before.contains(&Event::Status(Phase::ProviderUnavailable, 0)), "{before:?}");
+        session.end();
         let events = events(&session);
-        // No text, no warning, no status: the window never hears of it.
-        assert_eq!(events, []);
-        thread::sleep(Duration::from_millis(700));
-        assert_eq!(server.connections.load(Ordering::SeqCst), 1, "503 is not retried");
+        let seen = until(&server.seen, |seen| matches!(seen, Seen::Mark(_)));
+        assert_eq!(server.connections.load(Ordering::SeqCst), 5);
+        assert_eq!(contiguous(&frames(&seen, 0)).len(), 16_000);
+        assert_eq!(events.last(), Some(&Event::Status(Phase::Off, 0)));
     }
 
     #[test]
@@ -2934,13 +3179,7 @@ pub(crate) mod tests {
             let mut socket = accept(stream, seen);
             hear(&mut socket, seen).expect("hello");
             ready(&mut socket, &[("mic", 0)], 30_000, 0);
-            while let Some(message) = hear(&mut socket, seen) {
-                if matches!(&message, Message::Text(text) if text.as_str().contains(r#""kind":"end""#)) {
-                    let _ = socket.close(None);
-                    while socket.read().is_ok() {}
-                    return;
-                }
-            }
+            take_until_end(&mut socket, seen, [0, 0]);
         });
         // The target is not known on the first ask either.
         let (target, mut asked) = (target(&server, &fixture), 0);
@@ -2972,35 +3211,95 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_provider_outage_is_reported_and_the_stream_does_not_retry() {
+    fn a_provider_outage_is_reported_and_the_stream_tries_again_and_resumes() {
         let mut fixture = Fixture::new("provider");
         let mut mic = fixture.add(Channel::Mic, "mic.wav", 48_000);
         mic.append(&tone(48_000, 330., 0, 48_000));
-        let server = server(|_, stream, seen| {
+        let server = server(|index, stream, seen| {
             use tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
             let mut socket = accept(stream, seen);
             hear(&mut socket, seen).expect("hello");
-            ready(&mut socket, &[("mic", 0)], 30_000, 0);
-            hear(&mut socket, seen).expect("audio");
-            // The provider stops answering: first a status while the server
-            // retries it, then the server gives up.
-            say(&mut socket, serde_json::json!({"type": "status", "channel": "mic", "state": "provider_unavailable", "lagMs": 4_000}));
-            thread::sleep(Duration::from_millis(300));
-            say(&mut socket, serde_json::json!({"type": "gap", "channel": "mic", "fromMs": 754_000, "toMs": 755_000, "reason": "provider_unavailable"}));
-            say(&mut socket, serde_json::json!({"type": "error", "code": "provider_unavailable", "message": "The speech provider is unavailable", "retryable": false}));
-            let _ = socket.close(Some(CloseFrame { code: CloseCode::from(4503), reason: "provider unavailable".into() }));
-            while socket.read().is_ok() {}
+            if index == 0 {
+                ready(&mut socket, &[("mic", 0)], 300_000, 0);
+                hear(&mut socket, seen).expect("audio");
+                // The provider stops answering: first a status while the
+                // server retries it, then the server gives up on the socket.
+                say(&mut socket, serde_json::json!({"type": "status", "channel": "mic", "state": "provider_unavailable", "lagMs": 4_000}));
+                thread::sleep(Duration::from_millis(300));
+                say(&mut socket, serde_json::json!({"type": "gap", "channel": "mic", "fromMs": 754_000, "toMs": 755_000, "reason": "provider_unavailable"}));
+                say(&mut socket, serde_json::json!({"type": "error", "code": "provider_unavailable", "message": "The speech provider is unavailable", "retryable": false}));
+                let _ = socket.close(Some(CloseFrame { code: CloseCode::from(4503), reason: "provider unavailable".into() }));
+                while socket.read().is_ok() {}
+                return;
+            }
+            // The provider is back: the stream resumes where it was acked.
+            ready(&mut socket, &[("mic", 0)], 300_000, 0);
+            take_until_end(&mut socket, seen, [0, 0]);
         });
         let session = session(&server, &fixture);
+        let mut before = Vec::new();
+        let mut outage = false;
+        loop {
+            let event = session.events.recv_timeout(Duration::from_secs(20)).unwrap();
+            outage |= event == Event::Status(Phase::ProviderUnavailable, 0);
+            let back = outage && event == Event::Status(Phase::Live, 0);
+            before.push(event);
+            if back {
+                break;
+            }
+        }
+        assert!(before.contains(&Event::Gap { channel: Channel::Mic, from_ms: 754_000, to_ms: 755_000 }));
+        fixture.finish();
+        session.end();
         let events = events(&session);
-        assert!(events.contains(&Event::Status(Phase::ProviderUnavailable, 0)));
-        assert!(events.contains(&Event::Gap { channel: Channel::Mic, from_ms: 754_000, to_ms: 755_000 }));
-        // The last thing said about the stream is why it stopped, and it
-        // stays on durable parts.
-        let last = events.iter().rfind(|event| matches!(event, Event::Status(..)));
-        assert_eq!(last, Some(&Event::Status(Phase::ProviderUnavailable, 0)));
-        thread::sleep(Duration::from_millis(700));
-        assert_eq!(server.connections.load(Ordering::SeqCst), 1);
+        assert_eq!(server.connections.load(Ordering::SeqCst), 2);
+        assert_eq!(events.last(), Some(&Event::Status(Phase::Off, 0)));
+    }
+
+    /// The server lost its provider session and closed with 1012 after a
+    /// retryable error: the stream comes straight back and replays from the
+    /// sample the server says it stored up to, with no warning on screen.
+    #[test]
+    fn a_lost_provider_session_reconnects_and_replays_from_the_stored_sample() {
+        let mut fixture = Fixture::new("reopen");
+        let mut mic = fixture.add(Channel::Mic, "mic.wav", 48_000);
+        mic.append(&tone(48_000, 330., 0, 48_000));
+        fixture.finish();
+        let server = server(|index, stream, seen| {
+            use tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
+            let mut socket = accept(stream, seen);
+            hear(&mut socket, seen).expect("hello");
+            if index == 0 {
+                ready(&mut socket, &[("mic", 0)], 300_000, 0);
+                hear(&mut socket, seen).expect("audio");
+                say(&mut socket, serde_json::json!({"type": "error", "code": "provider_unavailable", "message": "The speech provider session was lost", "retryable": true}));
+                let _ = socket.close(Some(CloseFrame { code: CloseCode::from(1012), reason: "reconnect".into() }));
+                while socket.read().is_ok() {}
+                return;
+            }
+            // Half a second of it was stored before the session was lost.
+            ready(&mut socket, &[("mic", 8_000)], 300_000, 0);
+            take_until_end(&mut socket, seen, [8_000, 0]);
+        });
+        let session = session(&server, &fixture);
+        let mut seen = until(&server.seen, |seen| matches!(seen, Seen::Closed));
+        let first_closed = seen.len();
+        loop {
+            let event = session.events.recv_timeout(Duration::from_secs(20)).unwrap();
+            assert_ne!(event, Event::Status(Phase::ProviderUnavailable, 0), "a retryable loss is not a warning");
+            if event == Event::Status(Phase::Live, 0) && server.connections.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+        }
+        session.end();
+        let events = events(&session);
+        seen.extend(until(&server.seen, |seen| matches!(seen, Seen::Mark(_))));
+        assert_eq!(server.connections.load(Ordering::SeqCst), 2);
+        assert!(!events.contains(&Event::Status(Phase::ProviderUnavailable, 0)), "{events:?}");
+        let replayed = frames(&seen[first_closed..], 0);
+        assert_eq!(replayed.first().map(|frame| frame.0), Some(8_000));
+        assert_eq!(contiguous(&replayed).len(), 8_000);
+        assert_eq!(events.last(), Some(&Event::Status(Phase::Off, 0)));
     }
 
     #[test]
@@ -3028,21 +3327,8 @@ pub(crate) mod tests {
                 .map(|stream| (if stream["channel"] == "mic" { "mic" } else { "system" }, stream["resumeFromSample"].as_u64().unwrap()))
                 .collect();
             ready(&mut socket, &accept, 30_000, 0);
-            let mut taken = accept.iter().find(|(channel, _)| *channel == "mic").unwrap().1;
-            while let Some(message) = hear(&mut socket, seen) {
-                match message {
-                    Message::Binary(bytes) if bytes[1] == 0 => {
-                        taken += (bytes.len() - FRAME_HEADER) as u64 / 2;
-                        say(&mut socket, serde_json::json!({"type": "ack", "channel": "mic", "throughSample": taken, "transcribedThroughMs": 0}));
-                    }
-                    Message::Text(text) if index == 2 && text.as_str().contains(r#""kind":"end""#) => {
-                        let _ = socket.close(None);
-                        while socket.read().is_ok() {}
-                        return;
-                    }
-                    _ => {}
-                }
-            }
+            let from = |name: &str| accept.iter().find(|(channel, _)| *channel == name).map_or(0, |(_, from)| *from);
+            take_until_end(&mut socket, seen, [from("mic"), from("system")]);
         });
         let session = session(&server, &fixture);
         // The microphone alone at first, long enough for acknowledgements
@@ -3077,5 +3363,329 @@ pub(crate) mod tests {
         let Some(Seen::Mark(mark)) = rest.last() else { panic!() };
         assert_eq!(mark["atSample"], serde_json::json!({"mic": 16_000, "system": 8_000}));
         events(&session);
+    }
+
+    // ------------------------------------------------------------ delivery
+
+    /// The pace of a replay as the server saw it: no frame arrives before
+    /// three times real time since the first frame allows, after the half
+    /// second the pacing lets through at once (plus one frame of slack for
+    /// the server's own reading). Returns how long the replay took.
+    fn assert_paced(seen: &[Seen], channel: u8) -> Duration {
+        let timed: Vec<(Instant, usize)> = seen
+            .iter()
+            .filter_map(|seen| match seen {
+                Seen::Frame { channel: c, at, samples, .. } if *c == channel => Some((*at, samples.len())),
+                _ => None,
+            })
+            .collect();
+        let first = timed[0].0;
+        let mut total = 0;
+        for (at, count) in &timed {
+            total += count;
+            let since = at.duration_since(first);
+            let allowed = BURST + CATCH_UP * RATE as f64 * since.as_secs_f64() + FRAME_MAX as f64;
+            assert!(total as f64 <= allowed, "{total} samples within {since:?} of the first frame; at most {allowed}");
+        }
+        timed.last().unwrap().0.duration_since(first)
+    }
+
+    fn pcm(samples: &[f32]) -> Vec<i16> {
+        samples.iter().map(|sample| pcm16(*sample)).collect()
+    }
+
+    /// Events until the capture is delivered (or the session ends without it).
+    fn until_delivered(session: &Session, limit: Duration) -> (Option<Delivery>, Vec<Event>) {
+        let mut before = Vec::new();
+        loop {
+            match session.events.recv_timeout(limit) {
+                Ok(Event::Delivered(delivery)) => return (Some(delivery), before),
+                Ok(Event::Ended) => return (None, before),
+                Ok(event) => before.push(event),
+                Err(error) => panic!("nothing came of the capture: {error}; so far {before:?}"),
+            }
+        }
+    }
+
+    /// A minute captured while nothing reached the server, then Stop: all of
+    /// it goes out, in order and once, never faster than three times real
+    /// time (a burst is what the provider drops), and only then is the
+    /// capture delivered.
+    #[test]
+    fn a_sixty_second_backlog_is_replayed_whole_and_never_faster_than_three_times_real_time() {
+        let mut fixture = Fixture::new("sixty");
+        let mut mic = fixture.add(Channel::Mic, "mic.wav", 16_000);
+        let spoken = tone(16_000, 330., 0, 16_000 * 60);
+        mic.append(&spoken);
+        fixture.finish();
+        let server = server(|_, stream, seen| {
+            let mut socket = accept(stream, seen);
+            hear(&mut socket, seen).expect("hello");
+            ready(&mut socket, &[("mic", 0)], 900_000, 0);
+            take_until_end(&mut socket, seen, [0, 0]);
+        });
+        let session = session(&server, &fixture);
+        session.end();
+        let seen = until(&server.seen, |seen| matches!(seen, Seen::Closed));
+        let events = events(&session);
+        let sent = frames(&seen, 0);
+        assert_eq!(sent[0].0, 0);
+        let all = contiguous(&sent);
+        assert!(all == pcm(&spoken), "{} of {} samples, in order", all.len(), spoken.len());
+        // 59.5 s after the first half second, at three times real time.
+        let took = assert_paced(&seen, 0);
+        assert!(took.as_secs_f64() >= (60. - 0.5) / CATCH_UP - 0.5, "60 s in {took:?}");
+        // The end is marked after the last frame, and the capture is delivered.
+        let marked = seen.iter().position(|seen| matches!(seen, Seen::Mark(_))).unwrap();
+        assert!(!seen[marked..].iter().any(|seen| matches!(seen, Seen::Frame { .. })));
+        assert!(events.contains(&Event::Delivered(Delivery::Complete)), "{events:?}");
+        assert_eq!(events.last(), Some(&Event::Status(Phase::Off, 0)));
+    }
+
+    /// The network goes after the first second; the capture carries on for
+    /// `offline` seconds more, Stop is pressed, and the network comes back a
+    /// little later. Everything captured reaches the server, paced, and only
+    /// then does the stream say the capture is delivered, which is when the
+    /// app tells the server to stop.
+    fn stop_while_offline(name: &str, offline: usize) {
+        let mut fixture = Fixture::new(name);
+        let mut mic = fixture.add(Channel::Mic, "mic.wav", 16_000);
+        let total = 16_000 * (2 + offline);
+        let spoken = tone(16_000, 330., 0, total);
+        mic.append(&spoken[..32_000]);
+        let down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let kept = Arc::new(AtomicUsize::new(0));
+        let server = server({
+            let (down, kept) = (down.clone(), kept.clone());
+            move |index, stream, seen| {
+                if index > 0 && down.load(Ordering::SeqCst) {
+                    return refuse(stream, 502); // no route to the server
+                }
+                let mut socket = accept(stream, seen);
+                hear(&mut socket, seen).expect("hello");
+                let from = kept.load(Ordering::SeqCst) as u64;
+                ready(&mut socket, &[("mic", from)], 900_000, 0);
+                if index == 0 {
+                    // A second of audio arrives, then the network goes.
+                    let mut taken = 0;
+                    while taken < 16_000 {
+                        let Some(Message::Binary(bytes)) = hear(&mut socket, seen) else { panic!("audio") };
+                        taken += (bytes.len() - FRAME_HEADER) / 2;
+                        say(&mut socket, serde_json::json!({"type": "ack", "channel": "mic", "throughSample": taken, "transcribedThroughMs": 0}));
+                    }
+                    kept.store(taken, Ordering::SeqCst);
+                    down.store(true, Ordering::SeqCst);
+                    return;
+                }
+                take_until_end(&mut socket, seen, [from, 0]);
+            }
+        });
+        let session = session(&server, &fixture);
+        let mut seen = until(&server.seen, |seen| matches!(seen, Seen::Closed));
+        // Offline, the capture carries on (written at once: what matters is
+        // how much there is), then Stop.
+        mic.append(&spoken[32_000..]);
+        fixture.finish();
+        session.end();
+        // The stream keeps trying, and nothing is delivered while the server
+        // cannot be reached: the Stop waits.
+        thread::sleep(Duration::from_millis(1_200));
+        let early: Vec<Event> = session.events.try_iter().collect();
+        assert!(!early.iter().any(|event| matches!(event, Event::Delivered(_))), "{early:?}");
+        assert!(server.connections.load(Ordering::SeqCst) >= 2, "it kept trying");
+        down.store(false, Ordering::SeqCst);
+        let (delivered, _) = until_delivered(&session, Duration::from_secs(90));
+        assert_eq!(delivered, Some(Delivery::Complete));
+        // By then the server has every sample: the Stop goes after them.
+        seen.extend(server.seen.try_iter());
+        let kept = kept.load(Ordering::SeqCst);
+        let hello_at = seen.iter().rposition(|seen| matches!(seen, Seen::Hello(_))).unwrap();
+        let replay = frames(&seen[hello_at..], 0);
+        assert_eq!(replay[0].0, kept as u64, "resumes where the server is");
+        let all = contiguous(&replay);
+        assert!(all == pcm(&spoken[kept..]), "{} of {} samples", all.len(), total - kept);
+        let took = assert_paced(&seen[hello_at..], 0);
+        let backlog = (total - kept) as f64 / RATE as f64;
+        assert!(took.as_secs_f64() >= (backlog - 0.5) / CATCH_UP - 0.5, "{backlog} s in {took:?}");
+        let events = events(&session);
+        assert_eq!(events.last(), Some(&Event::Status(Phase::Off, 0)));
+    }
+
+    #[test]
+    fn stop_while_offline_waits_for_the_network_and_delivers_the_whole_capture_first() {
+        stop_while_offline("offline-15", 15);
+    }
+
+    #[test]
+    fn stop_after_two_minutes_offline_delivers_the_whole_backlog_first() {
+        stop_while_offline("offline-120", 120);
+    }
+
+    /// The app quit (or crashed) with part of a stopped recording not yet on
+    /// the server. At the next launch the note still owes the capture and
+    /// the Stop; a new stream of the capture's files, which nothing
+    /// finalised, resumes where the server is and delivers the rest. Only
+    /// then is the Stop due.
+    #[test]
+    fn a_delivery_cut_short_by_a_quit_is_finished_from_the_files_after_a_relaunch() {
+        use crate::model::{Note, PendingStop};
+        let mut fixture = Fixture::new("relaunch");
+        let mut mic = fixture.add(Channel::Mic, "mic.wav", 16_000);
+        let spoken = tone(16_000, 330., 0, 16_000 * 6);
+        // Never finished: the process went away with the capture.
+        mic.append(&spoken);
+        let kept = Arc::new(AtomicUsize::new(0));
+        let server = server({
+            let kept = kept.clone();
+            move |index, stream, seen| {
+                let mut socket = accept(stream, seen);
+                hear(&mut socket, seen).expect("hello");
+                let from = kept.load(Ordering::SeqCst) as u64;
+                ready(&mut socket, &[("mic", from)], 900_000, 0);
+                if index == 0 {
+                    // What the server takes before the app goes away.
+                    let mut taken = 0;
+                    while let Some(Message::Binary(bytes)) = hear(&mut socket, seen) {
+                        taken += (bytes.len() - FRAME_HEADER) / 2;
+                        kept.store(taken, Ordering::SeqCst);
+                        say(&mut socket, serde_json::json!({"type": "ack", "channel": "mic", "throughSample": taken, "transcribedThroughMs": 0}));
+                    }
+                    return;
+                }
+                take_until_end(&mut socket, seen, [from, 0]);
+            }
+        });
+        // Stop was pressed and the stream was delivering when the app quit.
+        let note = Note {
+            id: 7,
+            audio_captures: vec![fixture.manifest.clone()],
+            live_pending: vec![fixture.manifest.capture_id.clone()],
+            pending_stop: Some(PendingStop::Generate),
+            ..Default::default()
+        };
+        let session = session(&server, &fixture);
+        session.end();
+        until(&server.seen, |seen| matches!(seen, Seen::Frame { first, samples, .. } if *first + samples.len() as u64 >= 16_000));
+        drop(session);
+        until(&server.seen, |seen| matches!(seen, Seen::Closed));
+        let kept = kept.load(Ordering::SeqCst);
+        assert!((16_000..96_000).contains(&kept), "{kept}");
+        // The next launch: the note as it was saved.
+        let saved: Note = serde_json::from_str(&serde_json::to_string(&note).unwrap()).unwrap();
+        assert_eq!(crate::live_view::stop_due(&saved, false), None, "the capture is still owed");
+        let owed = crate::live_view::undelivered_captures(&saved);
+        assert_eq!(owed.len(), 1);
+        assert!(!owed[0].completed(), "nothing finalised the capture");
+        let target = target(&server, &fixture);
+        let again = Session::start(key(&fixture), Source::Saved(owed[0].clone()), move || Resolved::Ready(target.clone()), || true);
+        again.end();
+        let rest = until(&server.seen, |seen| matches!(seen, Seen::Closed));
+        let events = events(&again);
+        assert!(events.contains(&Event::Delivered(Delivery::Complete)), "{events:?}");
+        let Some(Seen::Hello(hello)) = rest.iter().find(|seen| matches!(seen, Seen::Hello(_))) else { panic!() };
+        assert_eq!(hello["captureId"], "capture-relaunch");
+        assert_eq!(hello["streams"][0]["resumeFromSample"], 0, "a new launch knows nothing of the old stream");
+        let replay = frames(&rest, 0);
+        assert_eq!(replay[0].0, kept as u64);
+        assert!(contiguous(&replay) == pcm(&spoken[kept..]));
+        let Some(Seen::Mark(mark)) = rest.iter().find(|seen| matches!(seen, Seen::Mark(_))) else { panic!() };
+        assert_eq!(mark["atSample"]["mic"], 96_000);
+        // Delivered: now the Stop is due, once no stream of the note owes more.
+        let mut delivered = saved;
+        delivered.live_pending.clear();
+        assert_eq!(crate::live_view::stop_due(&delivered, true), None);
+        assert_eq!(crate::live_view::stop_due(&delivered, false), Some(PendingStop::Generate));
+    }
+
+    /// The note was stopped elsewhere while this Mac was still delivering:
+    /// the server refuses the rest, and that is said as a stretch without
+    /// transcript, not dropped silently.
+    #[test]
+    fn audio_the_server_refuses_after_stop_is_reported_as_missing() {
+        let mut fixture = Fixture::new("refused");
+        let mut mic = fixture.add(Channel::Mic, "mic.wav", 16_000);
+        mic.append(&tone(16_000, 330., 0, 16_000 * 3));
+        let kept = Arc::new(AtomicUsize::new(0));
+        let server = server({
+            let kept = kept.clone();
+            move |index, stream, seen| {
+                if index > 0 {
+                    return refuse(stream, 409);
+                }
+                let mut socket = accept(stream, seen);
+                hear(&mut socket, seen).expect("hello");
+                ready(&mut socket, &[("mic", 0)], 900_000, 0);
+                let mut taken = 0;
+                while taken < 16_000 {
+                    let Some(Message::Binary(bytes)) = hear(&mut socket, seen) else { panic!("audio") };
+                    taken += (bytes.len() - FRAME_HEADER) / 2;
+                    say(&mut socket, serde_json::json!({"type": "ack", "channel": "mic", "throughSample": taken, "transcribedThroughMs": 0}));
+                }
+                kept.store(taken, Ordering::SeqCst);
+            }
+        });
+        let session = session(&server, &fixture);
+        until(&server.seen, |seen| matches!(seen, Seen::Closed));
+        fixture.finish();
+        session.end();
+        let (delivered, before) = until_delivered(&session, Duration::from_secs(20));
+        assert_eq!(delivered, Some(Delivery::Refused));
+        let kept = kept.load(Ordering::SeqCst) as u64;
+        assert!(
+            before.contains(&Event::Gap { channel: Channel::Mic, from_ms: 754_000 + kept * 1000 / 16_000, to_ms: 757_000 }),
+            "{before:?}"
+        );
+        events(&session);
+    }
+
+    /// One note has one publisher on the server: a second stream of the
+    /// note (a recording made while the last one's capture is still being
+    /// delivered) connects only once the first has finished.
+    #[test]
+    fn the_streams_of_one_note_take_turns() {
+        let mut one = Fixture::new("turn-one");
+        one.add(Channel::Mic, "mic.wav", 16_000).append(&tone(16_000, 330., 0, 8_000));
+        one.finish();
+        let mut two = Fixture::new("turn-two");
+        two.add(Channel::Mic, "mic.wav", 16_000).append(&tone(16_000, 440., 0, 8_000));
+        two.finish();
+        let server = server(|_, stream, seen| {
+            let mut socket = accept(stream, seen);
+            hear(&mut socket, seen).expect("hello");
+            ready(&mut socket, &[("mic", 0)], 900_000, 0);
+            take_until_end(&mut socket, seen, [0, 0]);
+        });
+        let note = key(&one);
+        // The first is slow to find its target: without turns the second
+        // would be in first.
+        let (first_target, mut asked) = (target(&server, &one), 0);
+        let first = Session::start(
+            note,
+            one.source(),
+            move || {
+                asked += 1;
+                if asked == 1 { Resolved::Later } else { Resolved::Ready(first_target.clone()) }
+            },
+            || true,
+        );
+        let second_target = target(&server, &two);
+        let second = Session::start(note, two.source(), move || Resolved::Ready(second_target.clone()), || true);
+        first.end();
+        second.end();
+        let mut closed = 0;
+        let seen = until(&server.seen, |seen| {
+            closed += usize::from(matches!(seen, Seen::Closed));
+            closed == 2
+        });
+        let hellos: Vec<_> = seen
+            .iter()
+            .filter_map(|seen| match seen {
+                Seen::Hello(hello) => Some(hello["captureId"].as_str().unwrap().to_owned()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hellos, ["capture-turn-one", "capture-turn-two"]);
+        assert!(events(&first).contains(&Event::Delivered(Delivery::Complete)));
+        assert!(events(&second).contains(&Event::Delivered(Delivery::Complete)));
     }
 }

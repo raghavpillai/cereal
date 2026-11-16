@@ -47,10 +47,10 @@ function LoadWorkspace({session,client,expired,signOut,arrival,transport}:{sessi
  // Setup in progress, and how the panel should open once it ends.
  const[setup,setSetup]=useState<{settings:AdminSettingsDTO;fromStart:boolean}|null>(null),[opened,setOpened]=useState<Arrival>(arrived)
  const loaded=opened?.settings??resource.data
- if(setup)return <Onboarding client={client} initial={{kind:'ready',settings:setup.settings,fromStart:setup.fromStart}} expired={expired} finished={settings=>{setOpened({settings,celebrate:true});setSetup(null)}}/>
+ if(setup)return <Onboarding client={client} viewerEmail={session.user.email} initial={{kind:'ready',settings:setup.settings,fromStart:setup.fromStart}} expired={expired} finished={settings=>{setOpened({settings,celebrate:true});setSetup(null)}}/>
  if(!loaded)return <Page><section className="admin-card">{resource.error?<Notice error>{resource.error}<button onClick={()=>void resource.reload()}>Retry</button></Notice>:<Loading label="Loading instance settings…"/>}</section></Page>
  // While setup is unfinished it is all this page shows: there is no way to the settings except through it.
- if(needsOnboarding(loaded))return <Onboarding client={client} initial={{kind:'ready',settings:loaded}} expired={expired} finished={settings=>setOpened({settings,celebrate:true})}/>
+ if(needsOnboarding(loaded))return <Onboarding client={client} viewerEmail={session.user.email} initial={{kind:'ready',settings:loaded}} expired={expired} finished={settings=>setOpened({settings,celebrate:true})}/>
  return <Page settled arriving={opened?.celebrate??false}><Workspace key={opened?.settings.onboarding?.completedAt??'loaded'} session={session} client={client} initialSettings={loaded} transport={transport} expired={expired} signOut={signOut} restart={settings=>setSetup({settings,fromStart:true})}/></Page>
 }
 function Workspace({session,client,initialSettings,transport,expired,signOut,restart}:{session:AuthSessionDTO;client:AdminClient;initialSettings:AdminSettingsDTO;transport:Transport|undefined;expired:()=>void;signOut:()=>Promise<void>;restart:(settings:AdminSettingsDTO)=>void}){
@@ -61,7 +61,7 @@ function Workspace({session,client,initialSettings,transport,expired,signOut,res
   <div className="instance-heading"><div><h1>Instance settings</h1><p>{settings.instanceName}</p></div><span className="instance-owner">{session.user.role==='owner'?'Owner':'Administrator'}</span></div>
   <TransportWarning transport={transport}/>
   {notice&&<Notice>{notice}</Notice>}{tasks.error&&<Notice error>{tasks.error}</Notice>}
-  <SettingsPanel key={settings.updatedAt??'initial'} settings={settings} client={client} expired={expired} busy={tasks.pending.has('settings')} save={save} replace={next=>{setSettings(next);setNotice('Sign-in method changed.')}}><AdministratorsPanel client={client} viewer={session.user} expired={expired}/></SettingsPanel>
+  <SettingsPanel key={settings.updatedAt??'initial'} viewerEmail={session.user.email} settings={settings} client={client} expired={expired} busy={tasks.pending.has('settings')} save={save} replace={next=>{setSettings(next);setNotice('Sign-in method changed.')}}><AdministratorsPanel client={client} viewer={session.user} expired={expired}/></SettingsPanel>
   <div className="instance-footer"><span>Signed in as {session.user.email}{transport==='private'&&<span className="instance-transport"> · {PRIVATE_TRANSPORT_LINE}</span>}</span><div>{session.user.role==='owner'&&settings.onboarding&&<button type="button" className="instance-setup-again" disabled={tasks.pending.has('setup')} onClick={()=>void runSetupAgain()}>Run setup again</button>}<a href="/account">Google Calendar <ArrowUpRight size={12}/></a><Button variant="ghost" size="sm" onClick={()=>void signOut()}><LogOut/>Sign out</Button></div></div>
  </>
 }

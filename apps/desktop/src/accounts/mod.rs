@@ -306,12 +306,6 @@ impl Paths {
     pub fn settings(&self) -> PathBuf {
         self.data.join("settings.json")
     }
-    pub fn folders(&self) -> PathBuf {
-        self.data.join("folders.json")
-    }
-    pub fn recipes(&self) -> PathBuf {
-        self.data.join("recipes.json")
-    }
 }
 
 /// A session a server has just confirmed: what a sign-in ends with.

@@ -219,6 +219,8 @@ private struct ChannelState {
     var retiredSinks: [PCMSink] = []
     var startedAt: Double = 0
     var selfExcluded = false
+    /// Microphone only: what carries its audio to the sink (see `MicIsolation`).
+    var isolation: MicIsolation?
 }
 
 @available(macOS 14.2, *)
@@ -230,6 +232,8 @@ private final class NativeAudioSession: @unchecked Sendable {
     private let flags: UInt32
     /// A listening check: levels only, nothing written to disk.
     private let discard: Bool
+    /// Isolate the voice in the microphone channel (flag 8).
+    private let voiceIsolation: Bool
     private var channels = [ChannelState(), ChannelState()]
     private var cancelled = false
     private var stopped = false
@@ -254,6 +258,7 @@ private final class NativeAudioSession: @unchecked Sendable {
         self.output = output
         self.flags = flags & 3
         self.discard = flags & 4 != 0
+        self.voiceIsolation = flags & 8 != 0
         for index in 0..<2 where flags & (1 << index) != 0 { channels[index].state = "starting" }
     }
 
@@ -323,15 +328,21 @@ private final class NativeAudioSession: @unchecked Sendable {
             let stats = state.sink?.stats()
             let sinks = state.retiredSinks + (state.sink.map { [$0] } ?? [])
             let allStats = sinks.map { $0.stats() }
+            // "loading": raw until the model is ready, then isolated, on one timeline.
+            let isolation = state.isolation?.status ?? (state: "off", latencyMs: 0, gapFrames: 0)
             return ["state": state.state, "error": state.error?.json as Any? ?? NSNull(),
                 "level": state.state == "recording" ? (stats?.level ?? 0) : 0,
                 "frames_received": allStats.reduce(UInt64(0)) { $0 + $1.frames_received },
                 "frames_written": allStats.reduce(UInt64(0)) { $0 + $1.frames_written },
-                "dropped_frames": allStats.reduce(UInt64(0)) { $0 + $1.dropped_frames }, "sample_rate": state.sink?.sampleRate ?? 0,
+                // Frames the audio engine dropped before the tap (made up with silence) count as dropped too.
+                "dropped_frames": allStats.reduce(UInt64(0)) { $0 + $1.dropped_frames } + isolation.gapFrames,
+                "input_gap_frames": isolation.gapFrames, "sample_rate": state.sink?.sampleRate ?? 0,
                 "channels": 1, "path": state.sink?.path as Any? ?? NSNull(),
                 "paths": sinks.map(\.path),
                 "last_buffer_uptime": stats?.last_buffer_uptime ?? 0,
-                "self_process_excluded": state.selfExcluded]
+                "self_process_excluded": state.selfExcluded,
+                "voice_isolation": isolation.state,
+                "processing_latency_ms": isolation.latencyMs]
         }
         return ["version": 1, "phase": phase, "requested_channels": flags,
                 "mic": channel(copy[0]), "system": channel(copy[1])]
@@ -390,8 +401,13 @@ private final class NativeAudioSession: @unchecked Sendable {
             let sink = try PCMSink(url: output.appendingPathComponent("mic.wav"), sampleRate: format.sampleRate, discard: discard)
             register(sink, for: 0)
             let description = format.streamDescription.pointee
-            input.installTap(onBus: 0, bufferSize: 4_096, format: format) { buffer, _ in
-                sink.push(buffer.audioBufferList, frames: buffer.frameLength, description: description)
+            // Voice isolation runs here, on the tap's thread, on the microphone
+            // only. The engine stays input-only: no output device, no ducking.
+            // A unit loaded ahead of time is reused; start never waits for one.
+            let isolation = MicIsolation(enabled: voiceIsolation, sampleRate: format.sampleRate, raw: description)
+            lock.withLock { channels[0].isolation = isolation }
+            input.installTap(onBus: 0, bufferSize: 4_096, format: format) { buffer, when in
+                isolation.deliver(buffer, at: when) { sink.push($0, frames: $1, description: $2) }
             }
             self.engine = engine
             micTapInstalled = true
@@ -413,14 +429,17 @@ private final class NativeAudioSession: @unchecked Sendable {
     }
 
     private func stopMicrophone() {
-        let sink = lock.withLock { channels[0].sink }
-        sink?.closeInput()
+        let (sink, isolation) = lock.withLock { (channels[0].sink, channels[0].isolation) }
         if let observer = micObserver { NotificationCenter.default.removeObserver(observer); micObserver = nil }
         if let engine {
             if micTapInstalled { engine.inputNode.removeTap(onBus: 0); micTapInstalled = false }
             engine.stop()
-            engine.reset()
         }
+        // The audio still inside the voice isolation unit is the end of the
+        // capture; it goes in before the sink stops taking any.
+        isolation?.finish { sink?.push($0, frames: $1, description: $2) }
+        sink?.closeInput()
+        engine?.reset()
         engine = nil
         sink?.finish()
     }
@@ -718,7 +737,7 @@ public func mn_audio_start(_ path: UnsafePointer<CChar>?, _ flags: UInt32,
         return nil
     }
     guard let path, let directory = String(validatingCString: path), !directory.isEmpty,
-          directory.utf8.count <= 4_096, flags & 3 != 0, flags & ~UInt32(7) == 0 else {
+          directory.utf8.count <= 4_096, flags & 3 != 0, flags & ~UInt32(15) == 0 else {
         _ = copyCString("A valid output directory and microphone/system channel flags are required.", to: error, capacity: errorCapacity)
         return nil
     }

@@ -84,6 +84,8 @@ fn main() {
             "native/MeetingAudio.swift",
             "native/AudioWatchdog.swift",
             "native/MenuBar.swift",
+            "native/Notifications.swift",
+            "native/VoiceIsolation.swift",
             "-o",
         ])
         .arg(&swift_object));

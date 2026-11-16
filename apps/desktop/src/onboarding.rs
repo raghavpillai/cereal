@@ -5,8 +5,13 @@
 //! The welcome is shown before anything else on a Mac that has never been
 //! through it. A marker in the app's data directory records that it was
 //! completed, or how far it got, so quitting half way resumes there. An
-//! install that already has notes or a saved session is treated as complete:
-//! nobody who was using the app before this existed is interrupted by it.
+//! install that already has a saved session is treated as complete: nobody
+//! who was using a server before this existed is interrupted by it.
+//!
+//! Cereal needs a server. An install without one (one that kept its notes
+//! "on this Mac only", which is no longer offered) is shown the server step
+//! at every launch until it signs in, whatever its marker says. What such an
+//! install kept on this Mac is left on disk as it is and not read again.
 use crate::{account::Discovery, handoff::SignInMethods};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -34,12 +39,14 @@ impl Step {
     }
 }
 
-/// Where the welcome is, and whether this Mac keeps its notes to itself.
+/// Where the welcome is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Flow {
     pub step: Step,
-    /// "Try it on this Mac only" was chosen: there is no server, so there is
-    /// no calendar step either.
+    /// The capture harness's walk without a server (`CEREAL_WELCOME_TOUR=local`
+    /// in a debug build): no calendar step, and the server step is passed.
+    /// Nothing a person can press sets it, and it is never read back from
+    /// the marker.
     pub local: bool,
 }
 
@@ -54,6 +61,12 @@ pub struct Facts {
 impl Flow {
     pub const START: Flow = Flow {
         step: Step::Welcome,
+        local: false,
+    };
+
+    /// An install without a server, sent to sign in.
+    pub const AT_SERVER: Flow = Flow {
+        step: Step::Server,
         local: false,
     };
 
@@ -130,7 +143,8 @@ impl Flow {
         }
     }
 
-    /// Keep notes on this Mac only, and move on from the server step.
+    /// For the capture harness only: walk on without a server.
+    #[cfg(debug_assertions)]
     pub fn choose_local(&mut self) {
         self.local = true;
         if self.step == Step::Server {
@@ -156,6 +170,8 @@ pub struct Saved {
     pub completed: bool,
     #[serde(default = "first_step")]
     pub step: Step,
+    /// Written by builds that offered "this Mac only". Read so such a
+    /// marker still parses, and otherwise ignored.
     #[serde(default)]
     pub local: bool,
 }
@@ -175,36 +191,36 @@ pub enum Marker {
 pub struct Existing {
     /// A workspace of local notes, or an account's cached notes.
     pub notes: bool,
-    /// A saved session, or a remembered server.
+    /// A saved session, or a remembered server: the app is set up for one.
     pub session: bool,
 }
 
 /// Whether the welcome is shown at launch, and from where.
 ///
-/// * A marker that says completed: never.
-/// * A marker that says how far it got: from there. A step that no longer
-///   applies is replaced by the nearest one that does (the calendar without
-///   a server; anything after the server step when the session it relied on
-///   has gone).
-/// * No marker: only on an install with no notes and no session.
+/// * Set up for a server: as the marker says. Completed, or no marker (an
+///   install from before the welcome): never. Part way: from there.
+/// * Not set up for a server: always, since nothing works without one.
+///   From the top on a new install; at the server step on one that was used
+///   before (completed, or with notes and no marker); and never past the
+///   server step, which cannot be left without signing in.
 pub fn first_run(marker: Marker, existing: Existing) -> Option<Flow> {
     match marker {
-        Marker::Saved(saved) if saved.completed => None,
+        Marker::Saved(saved) if saved.completed => {
+            (!existing.session).then_some(Flow::AT_SERVER)
+        }
         Marker::Saved(saved) => {
             let mut flow = Flow {
                 step: saved.step,
-                local: saved.local,
+                local: false,
             };
             let past_server = !matches!(flow.step, Step::Welcome | Step::Server);
-            if past_server && !flow.local && !existing.session {
+            if past_server && !existing.session {
                 flow.step = Step::Server;
-            }
-            if flow.step == Step::Calendar && flow.local {
-                flow.step = Step::Pill;
             }
             Some(flow)
         }
-        Marker::Missing if existing.notes || existing.session => None,
+        Marker::Missing if existing.session => None,
+        Marker::Missing if existing.notes => Some(Flow::AT_SERVER),
         Marker::Missing => Some(Flow::START),
     }
 }
@@ -270,11 +286,14 @@ pub fn at_launch() -> Option<Flow> {
     let path = marker_path()?;
     let root = path.parent()?;
     let marker = read_marker(&path);
-    let existing = existing_in(root, crate::accounts::has_saved_session());
+    let existing = existing_in(
+        root,
+        crate::accounts::has_saved_session() || crate::accounts::server_mode(),
+    );
     let flow = first_run(marker, existing);
     if flow.is_none() && marker == Marker::Missing {
-        // An install from before the welcome: say so once, so that signing
-        // out or clearing notes later does not bring it up.
+        // An install from before the welcome that has a server: say so
+        // once, so that signing out later does not start it from the top.
         let _ = write_marker(
             &path,
             Saved {
@@ -779,14 +798,19 @@ mod tests {
     }
 
     #[test]
-    fn an_install_with_notes_or_a_session_is_never_interrupted() {
+    fn an_install_with_a_session_is_never_interrupted() {
         for existing in [
-            Existing { notes: true, session: false },
             Existing { notes: false, session: true },
             Existing { notes: true, session: true },
         ] {
             assert_eq!(first_run(Marker::Missing, existing), None);
         }
+        // Notes without a server are notes of "this Mac only": that install
+        // is sent to sign in, not left alone.
+        assert_eq!(
+            first_run(Marker::Missing, Existing { notes: true, session: false }),
+            Some(Flow::AT_SERVER)
+        );
         // What counts: local notes, an account's cached notes, a remembered
         // server, a saved session.
         let root = scratch("existing");
@@ -810,8 +834,8 @@ mod tests {
     #[test]
     fn a_completed_marker_keeps_the_welcome_away_whatever_else_is_there() {
         let done = Marker::Saved(Saved { completed: true, step: Step::Done, local: false });
-        assert_eq!(first_run(done, Existing::default()), None);
         assert_eq!(first_run(done, Existing { notes: true, session: true }), None);
+        assert_eq!(first_run(done, Existing { notes: false, session: true }), None);
         // It survives being written and read back, readable by this user only.
         let root = scratch("marker");
         let path = root.join("onboarding.json");
@@ -844,11 +868,12 @@ mod tests {
         // The next launch: the session is there, and so are its cached notes.
         let existing = Existing { notes: true, session: true };
         assert_eq!(first_run(read_marker(&path), existing), Some(flow));
-        // On this Mac only, there is no session to find and none is needed.
+        // A walk begun "on this Mac only" by an older build: there is no
+        // session, so it is back at the server step, as a server flow.
         let local = Saved { completed: false, step: Step::Pill, local: true };
         assert_eq!(
             first_run(Marker::Saved(local), Existing { notes: true, session: false }),
-            Some(Flow { step: Step::Pill, local: true })
+            Some(Flow::AT_SERVER)
         );
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -861,11 +886,12 @@ mod tests {
             first_run(Marker::Saved(saved), Existing::default()),
             Some(Flow { step: Step::Server, local: false })
         );
-        // There is no calendar without a server.
+        // A marker's "this Mac only" is not taken up again: with a session
+        // the walk resumes as a server flow, calendar and all.
         let saved = Saved { completed: false, step: Step::Calendar, local: true };
         assert_eq!(
-            first_run(Marker::Saved(saved), Existing::default()),
-            Some(Flow { step: Step::Pill, local: true })
+            first_run(Marker::Saved(saved), Existing { notes: true, session: true }),
+            Some(Flow { step: Step::Calendar, local: false })
         );
         // The first two steps need nothing.
         for step in [Step::Welcome, Step::Server] {
@@ -899,14 +925,72 @@ mod tests {
     }
 
     #[test]
-    fn the_server_step_is_left_only_signed_in_or_on_this_mac_only() {
-        let mut flow = Flow { step: Step::Server, local: false };
+    fn the_server_step_is_left_only_signed_in() {
+        let mut flow = Flow::START;
+        assert!(flow.advance(NOTHING));
+        assert_eq!(flow, Flow::AT_SERVER);
+        // No Continue, no Skip, and advancing does nothing.
         assert!(!flow.can_continue(NOTHING) && !flow.can_skip(NOTHING));
-        assert!(!flow.advance(NOTHING));
+        assert!(!Step::Server.optional());
+        for _ in 0..3 {
+            assert!(!flow.advance(NOTHING));
+        }
         assert_eq!(flow.step, Step::Server);
-        // Signed in: Continue.
+        // Every other fact without a session changes nothing.
+        let all_but_session = Facts { signed_in: false, ..EVERYTHING };
+        assert!(!flow.can_continue(all_but_session) && !flow.advance(all_but_session));
+        assert_eq!(flow.step, Step::Server);
+        // Signed in: Continue, on to the audio step, with the calendar after.
         assert!(flow.can_continue(Facts { signed_in: true, ..NOTHING }));
-        // This Mac only: straight on, and the calendar step is gone.
+        flow.signed_in();
+        assert!(flow.advance(EVERYTHING));
+        assert_eq!(flow.step, Step::Audio);
+        assert!(flow.steps().contains(&Step::Calendar));
+    }
+
+    #[test]
+    fn an_install_without_a_server_is_sent_to_the_server_step_at_every_launch() {
+        let no_server = [Existing { notes: true, session: false }, Existing::default()];
+        // Completed by an older build "on this Mac only", or completed with
+        // a server whose last account was then removed (which forgets the
+        // server too). An install that still remembers its server counts as
+        // having a session here: it opens the account sign-in instead.
+        for local in [true, false] {
+            let done = Marker::Saved(Saved { completed: true, step: Step::Done, local });
+            for existing in no_server {
+                assert_eq!(first_run(done, existing), Some(Flow::AT_SERVER), "{local} {existing:?}");
+            }
+        }
+        // Part way through, past the server step: back to it.
+        for step in [Step::Audio, Step::Calendar, Step::Pill, Step::Done] {
+            for local in [true, false] {
+                let saved = Marker::Saved(Saved { completed: false, step, local });
+                assert_eq!(first_run(saved, Existing { notes: true, session: false }), Some(Flow::AT_SERVER));
+            }
+        }
+        // Before it: where it was.
+        let welcome = Marker::Saved(Saved { completed: false, step: Step::Welcome, local: true });
+        assert_eq!(first_run(welcome, Existing::default()), Some(Flow::START));
+        // Whatever the marker said, the flow it gives is a server flow.
+        for step in [Step::Welcome, Step::Server, Step::Audio, Step::Calendar, Step::Pill, Step::Done] {
+            for completed in [true, false] {
+                for existing in no_server {
+                    let saved = Marker::Saved(Saved { completed, step, local: true });
+                    let flow = first_run(saved, existing).unwrap();
+                    assert!(!flow.local);
+                    assert!(matches!(flow.step, Step::Welcome | Step::Server));
+                }
+            }
+        }
+        // Once there is a session, a completed marker keeps the welcome away.
+        let done = Marker::Saved(Saved { completed: true, step: Step::Done, local: true });
+        assert_eq!(first_run(done, Existing { notes: true, session: true }), None);
+    }
+
+    /// The capture harness's walk without a server (debug builds only).
+    #[test]
+    fn the_harness_walk_without_a_server_still_works() {
+        let mut flow = Flow::AT_SERVER;
         flow.choose_local();
         assert_eq!(flow, Flow { step: Step::Audio, local: true });
         assert!(!flow.steps().contains(&Step::Calendar));

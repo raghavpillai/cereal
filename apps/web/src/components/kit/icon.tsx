@@ -9,7 +9,6 @@ const ICONS = {
   search: stroke(1.5, <><circle cx="10.8" cy="10.8" r="7.2" /><path d="m16 16 5 5" /></>),
   'calendar-dots': { attributes: { fill: 'none' }, body: <><rect x="4" y="5" width="16" height="15.5" rx="3" stroke="currentColor" strokeWidth="1.5" /><path d="M4 9.75h16" stroke="currentColor" strokeWidth="1.5" /><path d="M8 3.25v3M16 3.250v3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /><g fill="currentColor"><circle cx="8.5" cy="13.25" r="1" /><circle cx="12" cy="13.25" r="1" /><circle cx="15.5" cy="13.25" r="1" /><circle cx="8.5" cy="16.75" r="1" /><circle cx="12" cy="16.75" r="1" /></g></> },
   people: stroke(1.5, <><circle cx="9" cy="7.75" r="3.5" /><path d="M2.75 20.25v-1a4.5 4.5 0 0 1 4.5-4.5h3.5a4.5 4.5 0 0 1 4.5 4.5v1" /><path d="M15.5 4.6a3.5 3.5 0 0 1 0 6.3" /><path d="M18 14.9a4.4 4.4 0 0 1 3.25 4.35v1" /></>),
-  folder: stroke(1.5, <path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />),
   'notes-lines': stroke(1.5, <path d="M4 6h16M4 12h16M4 18h9" />, false),
   sparkles: stroke(1.5, <path d="m12 3 2.7 6.3L21 12l-6.3 2.7L12 21l-2.7-6.3L3 12l6.3-2.7ZM20 2v4m-2-2h4" />),
   'sparkles-solid': { attributes: { fill: 'currentColor' }, body: <><path d="M10 3.5c.5 4.2 2.3 6 6.5 6.5-4.2.5-6 2.3-6.5 6.5-.5-4.2-2.3-6-6.5-6.5 4.2-.5 6-2.3 6.5-6.5Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" /><path d="M18 14c.25 2.1 1.15 3 3.25 3.25-2.1.25-3 1.150-3.25 3.25-.25-2.100-1.150-3-3.250-3.250 2.100-.250 3-1.150 3.250-3.250Z" /></> },

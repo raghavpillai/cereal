@@ -23,7 +23,7 @@ const segments=[
   seg(4,"mic",3,1,"Will do. I will send the revised quote with 40 seats by Thursday.",66000),
 ]
 const ask=(message:string,history:ChatInput["history"]=[]):ChatInput=>({message,history,includeSources:true})
-const silent:ProviderServices={transcribe:()=>Effect.succeed([]),generate:()=>Effect.succeed(""),chat:()=>Effect.succeed("")}
+const silent:ProviderServices={generate:()=>Effect.succeed(""),chat:()=>Effect.succeed("")}
 const prepare=(notes:NoteDTO[],input:ChatInput,enrich:(note:NoteDTO)=>ProviderNote=note=>note)=>prepareMeetingChat({noteId:notes[0]!.id,input,repository:makeMemoryRepository(notes),providers:silent,enrich:async source=>enrich(source),signal:new AbortController().signal,emit:()=>{}})
 const resolves=(citation:ChatCitationDTO,source:NoteDTO)=>{
   if(citation.source!=="transcript")return (citation.source==="notes"?source.body:source.enhanced).includes(citation.quote)&&citation.segmentId===null
@@ -68,13 +68,8 @@ test("a recording note gets the live instructions, a present tense and the lag w
   expect(messages[0]!.content).toBe(meetingChatSystemPrompt("live",true))
   expect(messages[1]!.content).toContain("The meeting is in progress")
   expect(messages[1]!.content).toContain("The transcript currently ends at line S3, about 0:23 into the recording.")
-  expect(messages[1]!.content).toContain("usually 20 to 40 seconds after it is said")
+  expect(messages[1]!.content).toContain("Live transcription is not connected right now")
   expect(messages[1]!.content).not.toContain("<generated_notes>")
-  // With uploaded parts on the server, the delay is stated from their length and the backlog.
-  const repository=makeMemoryRepository([stored])
-  for(const [sequence,state] of [[0,"ready"],[1,"processing"]] as const)await Effect.runPromise(repository.putAudioChunk({id:id(700+sequence),noteId:stored.id,channel:"mic",sequence,startMs:sequence*120_000,durationMs:120_000,state,error:null} as Parameters<typeof repository.putAudioChunk>[0]))
-  const parts=await prepareMeetingChat({noteId:stored.id,input:ask("What was that?"),repository,providers:silent,enrich:async source=>source,signal:new AbortController().signal,emit:()=>{}})
-  expect(chatAnswerMessages(parts.note,ask("What was that?"))[1]!.content).toContain("audio is uploaded in parts of about 120 seconds and transcribed after each one, so the transcript can trail the conversation by up to about 150 seconds; right now about 217 seconds of received audio are still being transcribed")
   const empty=await prepare([note({recordingState:"recording"})],ask("What did I miss?"))
   expect(chatAnswerMessages(empty.note,ask("What did I miss?"))[1]!.content).toContain("No transcript has arrived yet for this recording.")
 })
@@ -140,7 +135,7 @@ test("a live answer completes when speech lands while it streams, and its citati
     yield "Ines asked for a revised quote by Thursday [[S3]]."
     await Effect.runPromise(repository.updateNote(during.id,{transcriptSegments:[...during.transcriptSegments,segments[3]!]}))
   }}
-  const processing=makeProcessingService(repository,{worker:false,providers}),events:ChatStreamEventDTO[]=[]
+  const processing=makeProcessingService(repository,{providers}),events:ChatStreamEventDTO[]=[]
   await Effect.runPromise(Stream.runForEach(await Effect.runPromise(processing.chatStream(during.id,ask("What did Ines ask for?"))),event=>Effect.sync(()=>{events.push(event)})))
   await processing.dispose()
   const stored=await Effect.runPromise(repository.getNote(during.id))

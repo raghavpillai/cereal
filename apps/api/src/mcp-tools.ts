@@ -6,7 +6,7 @@ import type {McpStore} from "./mcp-store"
 import {McpStoreError} from "./mcp-store"
 import {UUID,NoteDate} from "@meeting-notes/contracts"
 
-export const MCP_SCOPES = ["notes:read","transcripts:read","folders:write","notes:write","attachments:read","profile:read","account:read","account:write"] as const
+export const MCP_SCOPES = ["notes:read","transcripts:read","notes:write","attachments:read","profile:read","account:read","account:write"] as const
 export type McpScope = typeof MCP_SCOPES[number]
 export interface McpToolContext {
   principal:PrincipalData
@@ -36,7 +36,7 @@ const text=(maximum:number)=>Schema.String.check(Schema.isMinLength(1),Schema.is
 const opt=<S extends Schema.Top>(schema:S)=>Schema.optionalKey(schema)
 const limit=Schema.Int.check(Schema.isBetween({minimum:1,maximum:100}))
 const emptyInput=Schema.Record(Schema.String,Schema.Never)
-const search={query:opt(text(300)),from:opt(NoteDate),to:opt(NoteDate),attendee:opt(text(254)),company:opt(text(200)),folder_id:opt(UUID),limit:opt(limit),cursor:opt(text(1000))}
+const search={query:opt(text(300)),from:opt(NoteDate),to:opt(NoteDate),attendee:opt(text(254)),company:opt(text(200)),limit:opt(limit),cursor:opt(text(1000))}
 export const MCP_TOOL_INPUTS={
   search_meetings:Schema.Struct({...search,query:text(300)}),
   search_transcripts:Schema.Struct({...search,query:text(300)}),
@@ -45,11 +45,6 @@ export const MCP_TOOL_INPUTS={
   get_meeting_transcript:Schema.Struct({meeting_id:UUID,cursor:opt(text(1000)),start_ms:opt(Schema.Int.check(Schema.isBetween({minimum:0,maximum:2147483647}))),limit:opt(limit),max_characters:opt(Schema.Int.check(Schema.isBetween({minimum:256,maximum:50000})))}),
   get_meeting_attachment:Schema.Struct({attachment_id:UUID}),
   query_cereal_meetings:Schema.Struct({query:text(20000),time_zone:opt(text(100))}),
-  list_meeting_folders:emptyInput,
-  create_folder:Schema.Struct({title:text(200),description:opt(Schema.String.check(Schema.isMaxLength(2000)))}),
-  update_folder:Schema.Struct({folder_id:UUID,title:opt(text(200)),description:opt(Schema.String.check(Schema.isMaxLength(2000)))}),
-  add_note_to_folder:Schema.Struct({folder_id:UUID,meeting_id:UUID}),
-  remove_note_from_folder:Schema.Struct({folder_id:UUID,meeting_id:UUID}),
   update_private_notes:Schema.Struct({meeting_id:UUID,text:text(100000),position:Schema.Literals(["append","prepend"])}),
   generate_summary:Schema.Struct({meeting_id:UUID}),
   get_agent_brief:emptyInput,
@@ -59,18 +54,13 @@ export const MCP_TOOL_INPUTS={
 } as const
 export type McpToolName=keyof typeof MCP_TOOL_INPUTS
 const descriptions:Record<McpToolName,string>={
-  search_meetings:"Find private meetings you own in the active workspace by keyword, inclusive date range, explicitly attached attendee/company email or name, or private folder. Results are paginated. Membership alone never grants another person's notes.",
+  search_meetings:"Find private meetings you own in the active workspace by keyword, inclusive date range, or explicitly attached attendee/company email or name. Results are paginated. Membership alone never grants another person's notes.",
   search_transcripts:"Find exact source passages and timestamps from your own active-workspace transcripts. Speaker IDs remain scoped to recording part/channel; no attendee identity is inferred.",
-  list_meetings:"List your private active-workspace meetings, with dates and explicit calendar attendees. Filter by folder/date/attendee and follow nextCursor for more.",
-  get_meetings:"Read up to four owned meeting notes, summaries, explicit attendee metadata and available attachment/folder IDs. Transcript contents are read separately.",
+  list_meetings:"List your private active-workspace meetings, with dates and explicit calendar attendees. Filter by date/attendee and follow nextCursor for more.",
+  get_meetings:"Read up to four owned meeting notes, summaries, explicit attendee metadata and available attachment IDs. Transcript contents are read separately.",
   get_meeting_transcript:"Read a full owned transcript using revision-bound pagination; long utterances are split into exact text parts with textOffset. Follow nextCursor until null. start_ms begins up to30seconds before a known passage.",
   get_meeting_attachment:"Read an actual owner-uploaded PNG/JPEG/WebP meeting image. No screenshot is invented or fetched from external URLs. Obtain attachment IDs from get_meetings.",
   query_cereal_meetings:"Ask the configured meeting assistant an evidence-grounded question across only your own active-workspace meetings. This slower operation uses actual search/read tools and returns issued citations. Requires transcript consent because the assistant may read transcripts.",
-  list_meeting_folders:"List your private active-workspace folders, their descriptions and owned-note counts. Folders do not share your private notes with other members.",
-  create_folder:"When explicitly asked, create a private top-level folder in the active workspace. Does not share notes.",
-  update_folder:"When explicitly asked, rename your private folder or update its description.",
-  add_note_to_folder:"When explicitly asked, add an owned meeting to an owned private folder in the same workspace. Idempotent; this does not change sharing permissions.",
-  remove_note_from_folder:"When explicitly asked, remove an owned meeting from an owned folder. Does not delete the meeting.",
   update_private_notes:"When explicitly asked, atomically add text to the beginning or end of existing private notes. Existing text is preserved; concurrent edits are serialized. Does not generate a summary automatically.",
   generate_summary:"When explicitly asked, generate or regenerate a stopped meeting's notes from its current transcript using the configured server processing service. No template support is advertised. May take30–90seconds.",
   get_agent_brief:"Read the explicit profile saved by this account for the active workspace. Empty means no profile has been configured; this service does not silently infer a profile from meeting history.",
@@ -79,12 +69,12 @@ const descriptions:Record<McpToolName,string>={
   sign_out:"When explicitly asked, disconnect only this AI client's OAuth consent and its tokens. Does not sign the user out of native/browser apps or delete notes.",
 }
 const scopes:Record<McpToolName,ReadonlyArray<McpScope>>={
-  search_meetings:["notes:read"],search_transcripts:["notes:read","transcripts:read"],list_meetings:["notes:read"],get_meetings:["notes:read"],get_meeting_transcript:["notes:read","transcripts:read"],get_meeting_attachment:["notes:read","attachments:read"],query_cereal_meetings:["notes:read","transcripts:read"],list_meeting_folders:["notes:read"],create_folder:["folders:write"],update_folder:["folders:write"],add_note_to_folder:["folders:write","notes:read"],remove_note_from_folder:["folders:write","notes:read"],update_private_notes:["notes:write","notes:read"],generate_summary:["notes:write","notes:read","transcripts:read"],get_agent_brief:["profile:read"],get_account_info:["account:read"],switch_workspace:["account:read","account:write"],sign_out:["account:read"],
+  search_meetings:["notes:read"],search_transcripts:["notes:read","transcripts:read"],list_meetings:["notes:read"],get_meetings:["notes:read"],get_meeting_transcript:["notes:read","transcripts:read"],get_meeting_attachment:["notes:read","attachments:read"],query_cereal_meetings:["notes:read","transcripts:read"],update_private_notes:["notes:write","notes:read"],generate_summary:["notes:write","notes:read","transcripts:read"],get_agent_brief:["profile:read"],get_account_info:["account:read"],switch_workspace:["account:read","account:write"],sign_out:["account:read"],
 }
-const writes=new Set<McpToolName>(["create_folder","update_folder","add_note_to_folder","remove_note_from_folder","update_private_notes","generate_summary","switch_workspace","sign_out"])
+const writes=new Set<McpToolName>(["update_private_notes","generate_summary","switch_workspace","sign_out"])
 export const MCP_TOOL_DEFINITIONS=Object.entries(MCP_TOOL_INPUTS).map(([name,schema])=>{
   const key=name as McpToolName,document=Schema.toJsonSchemaDocument(schema)
-  return {name:key,title:name.split("_").map(word=>word[0]!.toUpperCase()+word.slice(1)).join(" "),description:descriptions[key],inputSchema:{$schema:"https://json-schema.org/draft/2020-12/schema",...document.schema,$defs:document.definitions},requiredScopes:scopes[key],annotations:{readOnlyHint:!writes.has(key),destructiveHint:key==="generate_summary"||key==="sign_out",idempotentHint:["update_folder","add_note_to_folder","remove_note_from_folder","switch_workspace"].includes(key),openWorldHint:false}}
+  return {name:key,title:name.split("_").map(word=>word[0]!.toUpperCase()+word.slice(1)).join(" "),description:descriptions[key],inputSchema:{$schema:"https://json-schema.org/draft/2020-12/schema",...document.schema,$defs:document.definitions},requiredScopes:scopes[key],annotations:{readOnlyHint:!writes.has(key),destructiveHint:key==="generate_summary"||key==="sign_out",idempotentHint:["switch_workspace"].includes(key),openWorldHint:false}}
 })
 function decode<S extends Schema.ConstraintDecoder<unknown>>(schema:S,input:unknown):S["Type"] {
   try{return Schema.decodeUnknownSync(schema,{onExcessProperty:"error"})(input)}catch{throw new McpToolError("invalid_arguments","Tool arguments did not match the published schema.")}
@@ -105,15 +95,11 @@ export function createMcpToolExecutor(options:McpToolExecutorOptions) {
           case "search_meetings":case "list_meetings":case "search_transcripts": {
             const input=decode(MCP_TOOL_INPUTS[tool],args)
             if(input.from&&input.to&&input.from>input.to)throw new McpToolError("invalid_arguments","The date range ends before it starts.")
-            const search={query:input.query,from:input.from,to:input.to,attendee:input.attendee,company:input.company,folderId:input.folder_id,limit:Math.min(tool==="search_transcripts"?20:100,input.limit??20),cursor:input.cursor,includeTranscriptMatch:context.scopes.has("transcripts:read")}
+            const search={query:input.query,from:input.from,to:input.to,attendee:input.attendee,company:input.company,limit:Math.min(tool==="search_transcripts"?20:100,input.limit??20),cursor:input.cursor,includeTranscriptMatch:context.scopes.has("transcripts:read")}
             return result(tool==="search_transcripts"?await store.searchTranscripts(scope,search):await store.listMeetings(scope,search))
           }
           case "get_meetings": {const input=decode(MCP_TOOL_INPUTS[tool],args);return result(await store.getMeetings(scope,[...new Set(input.meeting_ids)]))}
           case "get_meeting_transcript": {const input=decode(MCP_TOOL_INPUTS[tool],args);return result(await store.transcript(scope,input.meeting_id,{limit:input.limit??30,cursor:input.cursor,startMs:input.start_ms,maxCharacters:input.max_characters??20000}))}
-          case "list_meeting_folders":decode(MCP_TOOL_INPUTS[tool],args);return result(await store.listFolders(scope))
-          case "create_folder": {const input=decode(MCP_TOOL_INPUTS[tool],args);if(!input.title.trim())throw new McpToolError("invalid_arguments","Folder title is required.");return result(await store.createFolder(scope,input.title.trim(),input.description??""))}
-          case "update_folder": {const input=decode(MCP_TOOL_INPUTS[tool],args);if(input.title===undefined&&input.description===undefined||input.title!==undefined&&!input.title.trim())throw new McpToolError("invalid_arguments","Provide a valid folder title or description.");return result(await store.updateFolder(scope,input.folder_id,{...(input.title!==undefined?{name:input.title.trim()}:{}),...(input.description!==undefined?{description:input.description}:{})}))}
-          case "add_note_to_folder":case "remove_note_from_folder": {const input=decode(MCP_TOOL_INPUTS[tool],args);return result(await store.folderNote(scope,input.folder_id,input.meeting_id,tool==="add_note_to_folder"))}
           case "update_private_notes": {const input=decode(MCP_TOOL_INPUTS[tool],args);if(!input.text.trim())throw new McpToolError("invalid_arguments","Notes text must not be empty.");return result(await store.updatePrivateNotes(scope,input.meeting_id,input.text,input.position))}
           case "generate_summary": {const input=decode(MCP_TOOL_INPUTS[tool],args),note=await store.noteForProcessing(scope,input.meeting_id);const generated=await Effect.runPromise(options.processingForUser(scope.userId,scope.workspaceId,context.signal).generate(note.id,note.transcriptRevision),{signal:context.signal});return result({noteId:generated.id,summary:generated.enhanced,transcriptRevision:generated.transcriptRevision,generatedRevision:generated.generatedRevision})}
           case "get_meeting_attachment": {const input=decode(MCP_TOOL_INPUTS[tool],args),file=await store.getAttachment(scope,input.attachment_id);return {content:[{type:"text",text:JSON.stringify({id:file.id,noteId:file.noteId,name:file.name,mimeType:file.mimeType})},{type:"image",data:Buffer.from(file.data).toString("base64"),mimeType:file.mimeType}],structuredContent:{id:file.id,noteId:file.noteId,name:file.name,mimeType:file.mimeType}}}

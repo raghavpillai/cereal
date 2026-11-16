@@ -8,7 +8,7 @@ private let noteID = "3a49a4af-c660-42e9-a36a-a806fbb41e0d"
 private let noteJSON = #"{"id":"3a49a4af-c660-42e9-a36a-a806fbb41e0d","title":"Server note","body":"Editable notes","enhanced":"Generated notes","date":"2026-11-12","duration":"1:12","createdAt":"2026-11-12T10:00:00.000Z","updatedAt":"2026-11-12T10:01:00.123Z","recordingState":"stopped","generationState":"ready","transcriptRevision":2,"generatedRevision":2,"transcriptSegments":[{"id":"99ad1171-3771-4ae6-81a1-44f617b663db","channel":"mic","speakerId":"self","speakerLabel":null,"text":"Hello café 🦊","isFinal":false,"startMs":0,"endMs":null}]}"#
 
 /// The list row for `noteJSON`: the same note without its text or transcript.
-private let summaryJSON = #"{"id":"3a49a4af-c660-42e9-a36a-a806fbb41e0d","title":"Server note","date":"2026-11-12","duration":"1:12","createdAt":"2026-11-12T10:00:00.000Z","updatedAt":"2026-11-12T10:01:00.123Z","recordingState":"stopped","generationState":"ready","transcriptRevision":2,"generatedRevision":2,"hasBody":true,"hasSummary":true,"hasTranscript":true,"speakerCount":1,"excerpt":"Generated notes.","meeting":null,"attendees":{"people":[],"others":0,"total":0},"organizationId":null,"folders":[]}"#
+private let summaryJSON = #"{"id":"3a49a4af-c660-42e9-a36a-a806fbb41e0d","title":"Server note","date":"2026-11-12","duration":"1:12","createdAt":"2026-11-12T10:00:00.000Z","updatedAt":"2026-11-12T10:01:00.123Z","recordingState":"stopped","generationState":"ready","transcriptRevision":2,"generatedRevision":2,"hasBody":true,"hasSummary":true,"hasTranscript":true,"speakerCount":1,"excerpt":"Generated notes.","meeting":null,"attendees":{"people":[],"others":0,"total":0},"organizationId":null}"#
 private func summariesPage(_ rows: [String], next: String? = nil, total: Int? = nil) -> String {
     "{\"notes\":[\(rows.joined(separator: ","))],\"nextCursor\":\(next.map { "\"\($0)\"" } ?? "null"),\"total\":\(total ?? rows.count)}"
 }
@@ -20,6 +20,14 @@ private struct Response: Sendable {
     var failure: URLError.Code?
     var contentType = "application/json"
     var headers: [String: String] = [:]
+}
+
+/// The paths a test's requests went to.
+private final class Paths: @unchecked Sendable {
+    private let lock = NSLock()
+    private var paths: [String] = []
+    func add(_ path: String) { lock.withLock { paths.append(path) } }
+    var all: [String] { lock.withLock { paths } }
 }
 
 private final class Fixtures: @unchecked Sendable {
@@ -286,10 +294,10 @@ private func requestBody(_ request: URLRequest) -> Data {
         }
     }
 
-    @Test func pipelineUsesGeneratedContractsAuthenticatedRoutesAndStableChunkIdentity() async throws {
-        let chunkID = "845f989f-00e2-46b2-bb9d-6d56e779c28c"
-        let receipt = "{\"id\":\"\(chunkID)\",\"noteId\":\"\(noteID)\",\"channel\":\"mic\",\"sequence\":3,\"startMs\":12000,\"durationMs\":4000,\"state\":\"queued\",\"error\":null}"
+    @Test func pipelineUsesGeneratedContractsAndAuthenticatedRoutesAndUploadsNoAudio() async throws {
+        let paths = Paths()
         let api = try client { request in
+            paths.add(request.url?.path ?? "")
             #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer unit-test-token")
             let path = request.url?.path ?? ""
             let body = (try? JSONSerialization.jsonObject(with: requestBody(request))) as? [String: Any]
@@ -308,30 +316,14 @@ private func requestBody(_ request: URLRequest) -> Data {
                 #expect((body?["history"] as? [[String: String]])?.first?["role"] == "user")
                 return Response(body: #"{"answer":"The owner approved the plan."}"#)
             }
-            if path.hasSuffix("/retry") { return Response(body: receipt) }
-            if request.httpMethod == "PUT" {
-                #expect(path.hasSuffix("/audio/chunks/\(chunkID)"))
-                #expect(body?["channel"] as? String == "mic")
-                #expect(body?["sequence"] as? Int == 3)
-                #expect(body?["startMs"] as? Int == 12000)
-                #expect(body?["audioBase64"] is String)
-                return Response(body: receipt)
-            }
-            #expect(path.hasSuffix("/audio/chunks"))
-            return Response(body: "[\(receipt)]")
+            Issue.record("Unexpected request to \(path)")
+            return Response(status: 404, body: #"{"error":"not_found","message":"No"}"#)
         }
         _ = try await api.recording(noteID: noteID, command: .resume)
-        var wav = Data("RIFF".utf8) + Data(repeating: 0, count: 4) + Data("WAVE".utf8)
-        wav.append(Data(repeating: 0, count: 32))
-        let uploaded = try await api.uploadAudio(noteID: noteID, chunkID: chunkID, channel: .mic, sequence: 3, startMs: 12000, wav: wav)
-        #expect(uploaded.id == chunkID)
-        #expect(try await api.audioChunks(noteID: noteID).count == 1)
-        #expect(try await api.retryAudio(noteID: noteID, chunkID: chunkID).state == .queued)
         _ = try await api.generate(noteID: noteID, expectedTranscriptRevision: 2)
         #expect(try await api.chat(noteID: noteID, message: "What changed?", history: [ChatMessageDTO(content: "Plan?", role: .user)]).answer == "The owner approved the plan.")
-        await #expect(throws: APIClientError.invalidAudio) {
-            try await api.uploadAudio(noteID: noteID, chunkID: chunkID, channel: .mic, sequence: 0, startMs: 0, wav: Data("not audio".utf8))
-        }
+        // Recording to notes is the live stream and these calls; nothing touches the audio routes.
+        #expect(!paths.all.contains { $0.contains("/audio") })
     }
 }
 
@@ -402,11 +394,6 @@ private func requestBody(_ request: URLRequest) -> Data {
         #expect(model.principalID == userB)
         #expect(model.list.rows.isEmpty && model.list.total == 0)
         #expect(model.state.notes.isEmpty)
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let oldOutbox = try AudioOutbox(instance: InstanceURL("https://example.test"), principalID: userA, root: root)
-        let entry = AudioOutboxEntry(id: UUID().uuidString, noteID: noteID, channel: .mic, sequence: 0, startMs: 0, durationMs: 1, fileName: "unused.wav", sourceFileName: "capture.wav", state: .pending)
-        await #expect(throws: APIClientError.unauthorized) { try await model.upload(entry, from: oldOutbox) }
     }
 
     @Test func partialEnhancedEditUsesCanonicalPatchWithoutReplacingTypedOrCaptureFields() async throws {
@@ -771,6 +758,15 @@ private let invitationJSON = #"{"id":"00000000-0000-4000-8000-000000000013","org
     #expect(text == "Selected answer")
 }
 
+@Test func chatChoicesKeepTheModelsThisBuildCanReadAndSkipTheRest() async throws {
+    let api = try client { _ in
+        Response(body: #"{"models":[{"provider":"openai_compatible","model":"llama3.2:3b"},{"provider":"a_future_provider","model":"x"},{"provider":"openrouter","model":"openai/gpt-6-sol"}]}"#)
+    }
+    let choices = try await api.chatModels()
+    #expect(choices.models.map(\.model) == ["llama3.2:3b", "openai/gpt-6-sol"])
+    #expect(choices.models.first?.provider == .openaiCompatible)
+}
+
 // MARK: - Paged list and server search
 
 private final class RequestLog: @unchecked Sendable {
@@ -786,7 +782,7 @@ private final class RequestLog: @unchecked Sendable {
 
 private func uuid(_ n: Int) -> String { "00000000-0000-4000-8000-" + String(format: "%012d", n) }
 private func summary(_ n: Int, title: String? = nil, date: String = "2026-11-12", attendees: String = #"{"people":[],"others":0,"total":0}"#) -> String {
-    #"{"id":"\#(uuid(n))","title":"\#(title ?? "Note \(n)")","date":"\#(date)","duration":"","createdAt":"\#(date)T10:00:\#(String(format: "%02d", n % 60)).000Z","updatedAt":"\#(date)T10:00:\#(String(format: "%02d", n % 60)).000Z","recordingState":"idle","generationState":"idle","transcriptRevision":0,"generatedRevision":null,"hasBody":false,"hasSummary":false,"hasTranscript":false,"speakerCount":0,"excerpt":"","meeting":null,"attendees":\#(attendees),"organizationId":null,"folders":[]}"#
+    #"{"id":"\#(uuid(n))","title":"\#(title ?? "Note \(n)")","date":"\#(date)","duration":"","createdAt":"\#(date)T10:00:\#(String(format: "%02d", n % 60)).000Z","updatedAt":"\#(date)T10:00:\#(String(format: "%02d", n % 60)).000Z","recordingState":"idle","generationState":"idle","transcriptRevision":0,"generatedRevision":null,"hasBody":false,"hasSummary":false,"hasTranscript":false,"speakerCount":0,"excerpt":"","meeting":null,"attendees":\#(attendees),"organizationId":null}"#
 }
 private func wholeNote(_ n: Int, title: String, date: String = "2026-11-12", body: String = "") -> String {
     #"{"id":"\#(uuid(n))","title":"\#(title)","body":"\#(body)","enhanced":"","date":"\#(date)","duration":"","createdAt":"\#(date)T10:00:\#(String(format: "%02d", n % 60)).000Z","updatedAt":"\#(date)T11:00:00.000Z","recordingState":"idle","generationState":"idle","transcriptRevision":0,"generatedRevision":null,"transcriptSegments":[]}"#

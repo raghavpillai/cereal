@@ -17,6 +17,8 @@ struct ServerChatView: View {
     @State private var model = "Auto"
     @State private var availableModels: [LanguageModelSelection] = []
     @State private var showHistory = false
+    /// This account's saved threads for this note (or all notes), read from the server when History opens.
+    @State private var saved = ServerChatThreadList()
     @State private var followsTail = true
     /// Height of the scroll view above the composer; see `followsChatTail`.
     @State private var room: CGFloat = 0
@@ -130,7 +132,7 @@ struct ServerChatView: View {
                     .safeAreaBar(edge: .bottom, spacing: 0) {
                         GlassChromeGroup(spacing: 16) {
                             ChatComposer(draft: $draft, model: $model, isGenerating: busy, focused: $focused,
-                                onSend: send, onStop: stop, serverMode: true, queuesWhileGenerating: true, identifierPrefix: "server-chat")
+                                onSend: send, onStop: stop, queuesWhileGenerating: true, identifierPrefix: "server-chat")
                                 .glassMorph("composer", in: glass)
                                 // The control is drawn here so its glass buds off the composer, on a
                                 // zero-height line along the composer's top edge. The bar does not take
@@ -182,6 +184,12 @@ struct ServerChatView: View {
                 draft = second; send()
             }
         }
+        // QA only: `-qa.history YES` opens the saved chats once the screen is up.
+        .task {
+            guard UserDefaults.standard.bool(forKey: "qa.history") else { return }
+            try? await Task.sleep(for: .seconds(1.5))
+            showHistory = true
+        }
         #endif
         .task(id: server.accountIdentity) {
             availableModels = []; model = "Auto"
@@ -193,7 +201,7 @@ struct ServerChatView: View {
         .onChange(of: sessionKey) {
             selectedCitation = nil; choosingMeeting = false; session = nil; draft = ""; restore()
         }
-        .sheet(isPresented: $showHistory) { historySheet }
+        .sheet(isPresented: $showHistory) { historySheet.task { await saved.refresh(server: server, noteID: noteID) } }
         .sheet(item: $selectedCitation) { ChatCitationTranscriptSheet(selection: $0) }
         .sheet(isPresented: $choosingMeeting) { ChatMeetingContextPicker(onSelect: selectMeetingContext) }
     }
@@ -206,7 +214,20 @@ struct ServerChatView: View {
         }.padding(.top, 8)
     }
 
-    private var visibleHistory: [ChatConversation] { session?.conversationsForHistory ?? [] }
+    /// Conversations kept on this iPhone only. Those saved on the server are listed from there instead.
+    private var visibleHistory: [ChatConversation] { (session?.conversationsForHistory ?? []).filter { $0.threadID == nil } }
+
+    private func openSaved(_ summary: ChatThreadSummaryDTO) {
+        focused = false
+        Task { @MainActor in
+            do {
+                let thread = try await server.chatThread(id: summary.id)
+                session?.open(thread)
+                resetScrollPosition()
+                draft = ""; showHistory = false
+            } catch { saved.error = error.localizedDescription }
+        }
+    }
 
     private var historySheet: some View {
         NavigationStack {
@@ -215,9 +236,37 @@ struct ServerChatView: View {
                     Text(message).font(.footnote).foregroundStyle(Theme.textSecondary)
                         .listRowBackground(Color.clear)
                 }
-                if visibleHistory.isEmpty {
-                    ContentUnavailableView("No previous chats", systemImage: "bubble.left.and.bubble.right")
+                if let message = saved.error {
+                    Text(message).font(.footnote).foregroundStyle(Theme.textSecondary)
                         .listRowBackground(Color.clear)
+                }
+                if visibleHistory.isEmpty && saved.listed.isEmpty {
+                    ContentUnavailableView(saved.loading ? "Loading chats" : "No previous chats", systemImage: "bubble.left.and.bubble.right")
+                        .listRowBackground(Color.clear)
+                }
+                ForEach(saved.listed, id: \.id) { thread in
+                    Button { openSaved(thread) } label: {
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            Text(ChatThreadTurns.title(thread)).lineLimit(1).foregroundStyle(Theme.textPrimary)
+                            Spacer(minLength: 0)
+                            if let at = CalendarSchedule.timestamp(thread.updatedAt) {
+                                Text(ChatThreadTurns.age(of: at)).font(.caption).monospacedDigit()
+                                    .foregroundStyle(Theme.textSecondary)
+                                    .accessibilityLabel(ChatThreadTurns.spokenAge(of: at))
+                            }
+                        }.padding(.vertical, 5)
+                    }
+                    .listRowBackground(Theme.surface)
+                    .accessibilityIdentifier("server-chat-thread")
+                    .swipeActions {
+                        Button("Delete", role: .destructive) { Task { await saved.delete(thread.id, server: server) } }
+                    }
+                }
+                if saved.more > 0 {
+                    Button("Show \(saved.more) more") { Task { await saved.loadMore(server: server, noteID: noteID) } }
+                        .font(.footnote).disabled(saved.loading)
+                        .listRowBackground(Color.clear)
+                        .accessibilityIdentifier("server-chat-more")
                 }
                 ForEach(visibleHistory) { conversation in
                     Button {
@@ -339,8 +388,10 @@ struct QueuedQuestionRow: View {
 /// Private local history is isolated by instance URL and note UUID. A bounded,
 /// protected file stores conversation text, never owner/provider credentials.
 @MainActor final class ServerChatSessions {
-    static let shared = ServerChatSessions(persistenceURL: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?.appendingPathComponent("Cereal/server-chat-history.json"))
-    struct ConversationState: Codable { var messages: [ChatMessage] = []; var history: [ChatConversation] = [] }
+    /// Saved chats are the server's (`ServerChatThreads.swift`): conversations are held in memory only, and
+    /// no history file is read or written.
+    static let shared = ServerChatSessions(persistenceURL: nil)
+    struct ConversationState: Codable { var messages: [ChatMessage] = []; var history: [ChatConversation] = []; var threadID: String? = nil }
     private struct HistoryFile: Codable { var version = 1; var values: [String: ConversationState]; var order: [String] }
     private var values: [String: ConversationState] = [:]
     private var order: [String] = []
@@ -379,16 +430,21 @@ struct QueuedQuestionRow: View {
                     guard let server else { throw APIClientError.unauthorized }
                     return try server.chatEvents(noteID: noteID, message: message, history: history, model: model)
                 },
+                threadEvents: { [weak server] create, turn, replace, message, model in
+                    guard let server else { throw APIClientError.unauthorized }
+                    return try server.chatThreadEvents(create: create, turn: turn, replace: replace, message: message, model: model)
+                },
                 currentAccount: { [weak server] in server?.accountIdentity }, background: .application)
     }
 
     func session(for key: String, accountIdentity: String, noteID: String?, events: @escaping ServerChatSession.Events,
+                 threadEvents: ServerChatSession.ThreadEvents? = nil,
                  currentAccount: @escaping @MainActor () -> String?, background: ChatBackgroundTime = .none) -> ServerChatSession {
         liveOrder.removeAll { $0 == key }; liveOrder.append(key)
         if let existing = live[key] { return existing }
         let session = ServerChatSession(key: key, accountIdentity: accountIdentity, noteID: noteID, state: load(for: key),
-                                        events: events, currentAccount: currentAccount, background: background) { [weak self] session in
-            self?.save(messages: session.messages, history: session.history, for: session.key)
+                                        events: events, threadEvents: threadEvents, currentAccount: currentAccount, background: background) { [weak self] session in
+            self?.save(messages: session.messages, history: session.history, threadID: session.threadID, for: session.key)
         }
         live[key] = session
         // Idle conversations beyond the newest few are let go; they are on disk. One with an answer arriving never is.
@@ -435,21 +491,21 @@ struct QueuedQuestionRow: View {
 
     /// Switching history is a transition, not destructive replacement: preserve
     /// the outgoing thread before restoring the chosen one.
-    static func select(_ conversation: ChatConversation, current: [ChatMessage], history: [ChatConversation]) -> ConversationState {
-        finished(ConversationState(messages: conversation.messages, history: archive(current, in: history)))
+    static func select(_ conversation: ChatConversation, current: [ChatMessage], history: [ChatConversation], currentThreadID: String? = nil) -> ConversationState {
+        finished(ConversationState(messages: conversation.messages, history: archive(current, in: history, threadID: currentThreadID), threadID: conversation.threadID))
     }
 
-    static func archive(_ messages: [ChatMessage], in history: [ChatConversation]) -> [ChatConversation] {
+    static func archive(_ messages: [ChatMessage], in history: [ChatConversation], threadID: String? = nil) -> [ChatConversation] {
         guard messages.contains(where: { !$0.text.isEmpty }) else { return Array(history.prefix(20)) }
         let firstQuestion = messages.first(where: { $0.role == .user })?.id ?? messages.first?.id
         let existing = history.first { ($0.messages.first(where: { $0.role == .user })?.id ?? $0.messages.first?.id) == firstQuestion }
         let current = ChatConversation(id: existing?.id ?? UUID(), createdAt: existing?.createdAt ?? .now,
-            title: messages.first(where: { $0.role == .user })?.text ?? "Conversation", messages: messages)
+            title: messages.first(where: { $0.role == .user })?.text ?? "Conversation", messages: messages, threadID: threadID ?? existing?.threadID)
         return Array(([current] + history.filter { $0.id != current.id && ($0.messages.first(where: { $0.role == .user })?.id ?? $0.messages.first?.id) != firstQuestion }).prefix(20))
     }
 
-    func save(messages: [ChatMessage], history: [ChatConversation], for key: String) {
-        values[key] = Self.finished(ConversationState(messages: Array(messages.suffix(200)), history: Self.archive(messages, in: history)))
+    func save(messages: [ChatMessage], history: [ChatConversation], threadID: String? = nil, for key: String) {
+        values[key] = Self.finished(ConversationState(messages: Array(messages.suffix(200)), history: Self.archive(messages, in: history, threadID: threadID), threadID: threadID))
         order.removeAll { $0 == key }; order.append(key)
         while order.count > 64 { values.removeValue(forKey: order.removeFirst()) }
         persist()
@@ -483,8 +539,8 @@ struct QueuedQuestionRow: View {
             }
         }
         return ConversationState(messages: sanitize(state.messages), history: state.history.prefix(20).map {
-            ChatConversation(id: $0.id, createdAt: $0.createdAt, title: $0.title, messages: sanitize($0.messages))
-        })
+            ChatConversation(id: $0.id, createdAt: $0.createdAt, title: $0.title, messages: sanitize($0.messages), threadID: $0.threadID)
+        }, threadID: state.threadID)
     }
 }
 

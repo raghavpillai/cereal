@@ -177,7 +177,7 @@ thread_local! {
     static PLACES: RefCell<HashMap<&'static str, Bounds<Pixels>>> = RefCell::new(HashMap::new());
 }
 
-fn place(name: &'static str) -> impl IntoElement {
+pub(crate) fn place(name: &'static str) -> impl IntoElement {
     canvas(
         move |bounds, _, _| {
             PLACES.with(|places| places.borrow_mut().insert(name, bounds));
@@ -221,7 +221,7 @@ fn primary_button(
         .whitespace_nowrap()
         .map(|button| {
             if enabled {
-                button.cursor_pointer().reach().child(
+                button.cursor_default().reach().child(
                     motion::tactile(neutral_wash(0.16))
                         .press(neutral_wash(0.14))
                         .round()
@@ -269,7 +269,7 @@ fn secondary_button(
         .line_height(px(20.))
         .text_color(t.text)
         .whitespace_nowrap()
-        .cursor_pointer()
+        .cursor_default()
         .reach()
         .child(motion::tactile(t.hover).press(t.border.opacity(0.6)).round())
         .child(place(id))
@@ -304,7 +304,7 @@ fn quiet_button_with(
         .line_height(px(20.))
         .text_color(t.muted)
         .whitespace_nowrap()
-        .cursor_pointer()
+        .cursor_default()
         .reach()
         .child(motion::tactile(t.hover).press(t.border.opacity(0.6)).round())
         .child(place(id))
@@ -457,15 +457,7 @@ impl Cereal {
     /// Settings → About → "Show welcome again".
     pub fn show_welcome_again(&mut self, cx: &mut Context<Self>) {
         self.finish_note(cx);
-        let local = !crate::server::enabled();
-        self.begin_onboarding(
-            Flow {
-                step: Step::Welcome,
-                local,
-            },
-            true,
-            cx,
-        );
+        self.begin_onboarding(Flow::START, true, cx);
     }
 
     /// Everything that follows from the step having changed.
@@ -585,6 +577,9 @@ impl Cereal {
         false
     }
 
+    /// The capture harness's walk without a server. Debug builds only:
+    /// nothing a person can press leads here.
+    #[cfg(debug_assertions)]
     pub fn onboarding_choose_local(&mut self, cx: &mut Context<Self>) {
         let Some(flow) = self.onboarding.flow.as_mut() else {
             return;
@@ -1024,20 +1019,6 @@ impl Cereal {
                             .into_any_element(),
                         );
                     }
-                    if !crate::accounts::server_mode() && !flow.local {
-                        body.push(
-                            div()
-                                .flex()
-                                .ml(px(-12.))
-                                .child(
-                                    quiet_button("welcome-local", "Try it on this Mac only", t)
-                                        .h(px(30.))
-                                        .text_size(px(13.))
-                                        .on_click(cx.listener(|this, _, _, cx| this.onboarding_choose_local(cx))),
-                                )
-                                .into_any_element(),
-                        );
-                    }
                 }
             }
             Step::Audio => {
@@ -1245,7 +1226,7 @@ impl Cereal {
                 };
                 body.push(match &session {
                     Some(session) => summary(true, format!("Signed in to {instance} as {}", session.user.email)),
-                    None => summary(true, "Notes are kept on this Mac only".into()),
+                    None => summary(false, "Not signed in to a server".into()),
                 });
                 body.push(match (permissions[0], permissions[1]) {
                     (Permission::Allowed, Permission::Allowed) => summary(true, "Microphone and system audio are allowed".into()),

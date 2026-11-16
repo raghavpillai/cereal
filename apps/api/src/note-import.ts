@@ -37,7 +37,7 @@ export const clampCreatedAt = (createdAt: string, now: Date): Date =>
   new Date(Math.min(Math.max(Date.parse(createdAt), EARLIEST_CREATED_AT), now.getTime() + CLOCK_TOLERANCE_MS))
 
 export interface NoteStamp { readonly updatedAt: number; readonly transcriptRevision: number; readonly generatedRevision: number | null }
-export interface DeletePreconditions { readonly stamp?: NoteStamp; readonly chunks?: number }
+export interface DeletePreconditions { readonly stamp?: NoteStamp }
 /** `updatedAt|transcriptRevision|generatedRevision`, the last part empty (or "null") for a note without
  * generated notes. Null for anything else: a stamp that cannot be read is refused, never ignored. */
 export function parseNoteStamp(stamp: string): NoteStamp | null {

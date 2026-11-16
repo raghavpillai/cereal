@@ -43,6 +43,7 @@ import type {ProviderNote} from "../providers"
 import {transcriptPassage} from "../meeting-search"
 import type {MeetingChatOptions,PreparedChat} from "./retrieval"
 import {baseSystemPrompt,chatAnswerInstructions,chatMessageLayout,type LanguageMessage,type LanguageRequestParameters} from "./shared"
+import {forContext} from "../transcript-link"
 import {copyState,liveConversations,type LiveConversation,type LiveConversationMatch,type LiveConversationStore,type LiveState,type LiveTurn,type ShownSegment} from "./live-conversation"
 
 /** A finished note: follow-up questions come within minutes, so the short cache lifetime is enough. */
@@ -118,7 +119,7 @@ export const isLiveNote=(note:Pick<ProviderNote,"recordingState">)=>note.recordi
 type Entry={kind:"marker";text:string}|{kind:"gap";text:string}|{kind:"line";id:string|null;speaker:string;text:string}
 interface DocumentView {entries:Array<{id:string|null;text:string}>;truncated:boolean;empty:boolean}
 type Speakers={microphoneAndSystem:boolean;callOnly:boolean;numbered:boolean;liveNumbered:boolean;restartingNumbers:boolean;merged:boolean}
-type Coverage={segments:number;shownSegments:number;omittedSegments:number;lastLineId:string|null;transcribedThroughMs:number|null;receivedThroughMs:number|null;partMs:number|null;liveState:LiveTranscriptState["state"]|null;summaryStale:boolean}
+type Coverage={segments:number;shownSegments:number;omittedSegments:number;lastLineId:string|null;transcribedThroughMs:number|null;receivedThroughMs:number|null;liveState:LiveTranscriptState["state"]|null;summaryStale:boolean}
 /** How a request on a meeting in progress was laid out: the first of a thread, one more turn of it,
  * or a thread started again from the current transcript (`reason` says why). */
 export type MeetingChatLayout="finished"|"new"|"append"|"rebase"
@@ -366,10 +367,8 @@ function documentTail(text:string,limit:number):{text:string;truncated:boolean} 
 }
 
 export interface AssembleOptions {citable:boolean;mode?:MeetingChatMode;
-  /** End of the newest audio the server holds, when known (from uploaded parts). */
+  /** End of the newest audio the server holds, when known (the live session's). */
   receivedThroughMs?:number|null
-  /** Typical length of an uploaded audio part, when known: what the transcript's delay depends on. */
-  partMs?:number|null
   /** The time of the request. Stated to the model only together with `input.timeZone`, so a date is never given in the wrong zone. */
   now?:Date|null
   /** A meeting in progress: where threads are remembered (default: the process-wide store) and whose they are. */
@@ -440,7 +439,7 @@ function assembleFinishedChat(note:MeetingChatNote,input:ChatInput,options:Assem
   const context:MeetingChatContext={mode:"finished",citable:options.citable,messages:[],layout:"finished",citations,shown:stored.filter(segment=>kept.has(segment)||extra.has(segment)),
     shownNotes:notes.excerpt?`${notes.text}\n${notes.excerpt}`:notes.text,shownSummary:summary.excerpt?`${summary.text}\n${summary.excerpt}`:summary.text,
     unfinished:unfinishedOf(note,"finished",source),notesWithheld:false,speakers:labels.info(),transcript,notes:notesView,summary:summaryView,excerpts,
-    coverage:{segments:stored.length,shownSegments:shown.length,omittedSegments:stored.length-shown.length,lastLineId,transcribedThroughMs,receivedThroughMs:options.receivedThroughMs??null,partMs:options.partMs??null,liveState:null,summaryStale:summaryStale(note)},
+    coverage:{segments:stored.length,shownSegments:shown.length,omittedSegments:stored.length-shown.length,lastLineId,transcribedThroughMs,receivedThroughMs:options.receivedThroughMs??null,liveState:null,summaryStale:summaryStale(note)},
     asked:wallClock(options.now,input.timeZone)}
   const added=renderExcerpts(context.excerpts)
   context.messages=[
@@ -484,12 +483,8 @@ function lagText(coverage:Coverage,unfinished:number):string[] {
     if(coverage.receivedThroughMs!==null)out.push(`The server has heard the meeting up to about ${clock(coverage.receivedThroughMs)}.${unfinished?"":behind!==null&&behind>4000?` No finished sentence has arrived since the last line${coverage.liveState==="live"?", so nothing, or only the start of a sentence, has been said since then":""}.`:""}`)
   }
   else if(coverage.liveState==="provider_unavailable")out.push("Live transcription is temporarily unavailable, so the transcript may be well behind the conversation.")
-  else{
-    const backlog=behind!==null&&behind>5000?`; right now about ${Math.round(behind/1000)} seconds of received audio are still being transcribed`:""
-    // Phase 1 of the live-transcription design: 30-second parts, about 20 s behind at the median and 40 s at the tail.
-    if(coverage.partMs===null||coverage.partMs<=45_000)out.push(`Speech reaches the transcript in batches, usually 20 to 40 seconds after it is said and sometimes later${backlog}. The last half minute of the conversation may therefore be missing.`)
-    else out.push(`Speech reaches the transcript in batches: audio is uploaded in parts of about ${Math.round(coverage.partMs/1000)} seconds and transcribed after each one, so the transcript can trail the conversation by up to about ${Math.round(coverage.partMs/1000)+30} seconds${backlog}. Anything said in that time may be missing.`)
-  }
+  // Recording, but no live session in this process: the transcript is the live transcript, and only it.
+  else out.push("Live transcription is not connected right now, so the transcript may be behind the conversation until it reconnects.")
   return out
 }
 function finishedStatus(note:MeetingChatNote,context:MeetingChatContext):string {
@@ -530,7 +525,7 @@ function renderExcerpts(excerpts:MeetingChatContext["excerpts"]):string {
 function liveStatus(o:{first:boolean;fresh:number;coverage:Coverage;unfinished:number;notesWithheld:boolean;summaryEmpty:boolean;notesTruncated:boolean;asked:MeetingChatContext["asked"]}):string {
   const {coverage}=o,out:string[]=[]
   if(o.first)out.push("The meeting is in progress: it is being recorded right now, and the transcript above is everything that has reached the server so far.")
-  if(!coverage.segments&&!o.unfinished)out.push("No transcript has arrived yet for this recording. Audio is transcribed in batches; depending on the app, the first text arrives within a minute or only once the recording is stopped. Until then only the typed notes can be used.")
+  if(!coverage.segments&&!o.unfinished)out.push("No transcript has arrived yet for this recording. It is transcribed live, so text appears a few seconds after someone speaks; until then only the typed notes can be used.")
   else {
     if(!o.first&&!o.fresh)out.push("No finished line has been added to the transcript since the previous question.")
     if(coverage.transcribedThroughMs!==null)out.push(`The transcript currently ends${coverage.lastLineId?` at line ${coverage.lastLineId},`:""} about ${clock(coverage.transcribedThroughMs)} into the recording. As far as you can see, that is "now".`)
@@ -563,7 +558,7 @@ function assembleLiveChat(note:MeetingChatNote,input:ChatInput,options:AssembleO
     let lastLineId:string|null=null
     for(let i=visible.length-1;i>=0&&!lastLineId;i--)lastLineId=state.shown.get(visible[i]!.id)!.lineIds.filter(id=>!!id).at(-1)??null
     return {segments:stored.length,shownSegments:visible.length,omittedSegments:stored.length-visible.length,lastLineId,
-      transcribedThroughMs:note.live?.transcribedThroughMs??transcribedThroughMs,receivedThroughMs:note.live?.asOfMs??options.receivedThroughMs??null,partMs:options.partMs??null,liveState:note.live?.state??null,summaryStale:summaryStale(note)}
+      transcribedThroughMs:note.live?.transcribedThroughMs??transcribedThroughMs,receivedThroughMs:note.live?.asOfMs??options.receivedThroughMs??null,liveState:note.live?.state??null,summaryStale:summaryStale(note)}
   }
   /** The next label of the thread and its citation; null once the 999 are used up. */
   const issue=(state:LiveState,from:ChatCitationDTO["source"],quote:string,segment?:TranscriptSegmentDTO):string|null=>{
@@ -873,19 +868,10 @@ export async function prepareMeetingNoteChat(options:MeetingChatOptions,noteId:s
   emit("running","Reading transcript passages")
   const stored=await Effect.runPromise(repository.getNote(noteId),{signal})
   if(!stored)throw new Error("Note not found")
-  const note:MeetingChatNote=await options.enrich(stored)
-  let receivedThroughMs:number|null=null,partMs:number|null=null
-  if(isLiveNote(note)&&!note.live){
-    // Uploaded audio parts show how much has been received but not transcribed yet, and how long a part is.
-    try{
-      const chunks=await Effect.runPromise(repository.listAudioChunks(noteId),{signal})
-      if(chunks.length){
-        receivedThroughMs=Math.max(...chunks.map(chunk=>chunk.startMs+chunk.durationMs))
-        partMs=chunks.map(chunk=>chunk.durationMs).sort((a,b)=>a-b)[Math.floor(chunks.length/2)]!
-      }
-    }catch{signal.throwIfAborted()}
-  }
-  const context=assembleMeetingChat(note,input,{citable:sources,receivedThroughMs,partMs,now:options.now??null,
+  // The chat link at the foot of the generated notes is not part of the meeting (transcript-link.ts).
+  const note:MeetingChatNote=await options.enrich(forContext(stored))
+  // Received but not yet transcribed: nothing is, beyond what the live session reports (`note.live`).
+  const context=assembleMeetingChat(note,input,{citable:sources,now:options.now??null,
     ...(options.liveConversations?{conversations:options.liveConversations}:{}),...(options.conversationScope?{scope:options.conversationScope}:{}),...(options.onLiveThreadRebuilt?{onThreadRebuilt:options.onLiveThreadRebuilt}:{})})
   emit("completed","Looked deeper into 1 note",[{noteId:note.id,title:note.title,date:note.date}])
   // The note handed on holds exactly what the model is shown.

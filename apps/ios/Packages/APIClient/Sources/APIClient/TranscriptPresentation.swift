@@ -8,7 +8,10 @@ import Contracts
 /// has the other side of a call (a desktop recording: the microphone is the
 /// person, the system audio is everyone else). In a recording of a room, where
 /// one microphone hears several people, an unnamed voice is "Speaker", with a
-/// number when there is more than one of them. Which audio a line came from,
+/// number when there is more than one of them. A live voice (`mic:n:N`,
+/// `system:n:N`) the server has not labelled yet is given the label the server
+/// gives it: "Me" for the microphone's first voice, "Room speaker N" for its
+/// others, "Speaker N" for the other side of a call. Which audio a line came from,
 /// and which part of the recording, is not shown.
 public enum TranscriptPresentation {
     public struct Row: Identifiable, Sendable {
@@ -38,6 +41,19 @@ public enum TranscriptPresentation {
 
     static let me = "Me"
     static let speaker = "Speaker"
+    /// The label the server gives a live speaker (`<channel>:n:<number>`), for a
+    /// line it has not labelled yet: the microphone's first voice is "Me", its
+    /// others are "Room speaker 1", "Room speaker 2"…; the other side of a call is
+    /// "Speaker N". Nil for any other id.
+    static func liveLabel(_ speakerID: String) -> String? {
+        let parts = speakerID.split(separator: ":")
+        guard parts.count == 3, parts[1] == "n", let number = Int(parts[2]), number >= 1 else { return nil }
+        switch parts[0] {
+        case "mic": return number == 1 ? me : "Room speaker \(number - 1)"
+        case "system": return "\(speaker) \(number)"
+        default: return nil
+        }
+    }
 
     public static func rows(_ segments: [TranscriptSegmentDTO]) -> [Row] {
         // Keep equal-time sources in their server order and retain every utterance.
@@ -52,7 +68,7 @@ public enum TranscriptPresentation {
         var named: Set<String> = []
         for segment in ordered {
             if let label = label(segment) { named.insert(label); continue }
-            guard !(segment.channel == .mic && microphoneIsMe), let key = voice(segment), !voices.contains(key) else { continue }
+            guard !(segment.channel == .mic && microphoneIsMe), liveLabel(segment.speakerId) == nil, let key = voice(segment), !voices.contains(key) else { continue }
             voices.append(key)
         }
         // A number is only needed to tell unnamed voices apart, and never one
@@ -71,11 +87,60 @@ public enum TranscriptPresentation {
             let name: String
             if let label = label(segment) { name = label }
             else if segment.channel == .mic && microphoneIsMe { name = me }
+            // A live voice the server has not labelled yet gets the label it will be given.
+            else if let live = liveLabel(segment.speakerId) { name = live }
             // A voice the provider could not tell apart from the others is nobody in particular.
             else if let key = voice(segment), let number = numbers[key] { name = "\(speaker) \(number)" }
             else { name = speaker }
             return Row(segment: segment, speaker: name)
         }
+    }
+
+    /// A row of a transcript as it is shown: a line, or a stretch with no transcript.
+    public enum Entry: Identifiable, Sendable {
+        case row(Row)
+        case gap(TranscriptGap)
+        public var id: String {
+            switch self {
+            case .row(let row): row.id
+            case .gap(let gap): gap.id
+            }
+        }
+    }
+
+    /// The lines and the missing stretches, in timeline order. A stretch comes
+    /// before a line that starts at the same moment.
+    public static func entries(_ segments: [TranscriptSegmentDTO], gaps: [TranscriptGap]) -> [Entry] {
+        let rows = rows(segments)
+        let gaps = TranscriptGap.merged(gaps)
+        guard !gaps.isEmpty else { return rows.map { .row($0) } }
+        var result: [Entry] = []
+        result.reserveCapacity(rows.count + gaps.count)
+        var next = 0
+        for row in rows {
+            while next < gaps.count, gaps[next].fromMs <= row.segment.startMs { result.append(.gap(gaps[next])); next += 1 }
+            result.append(.row(row))
+        }
+        result.append(contentsOf: gaps[next...].map { .gap($0) })
+        return result
+    }
+
+    public static func entries(_ note: NoteDTO) -> [Entry] {
+        entries(note.transcriptSegments, gaps: (note.transcriptGaps ?? []).map { TranscriptGap(channel: $0.channel, fromMs: $0.fromMs, toMs: $0.toMs) })
+    }
+
+    /// "12:03–12:10": a stretch of the recording, as transcript times are written.
+    /// The stretch is widened to whole seconds, so it never reads shorter than it is.
+    public static func span(_ gap: TranscriptGap) -> String {
+        "\(time(gap.fromMs / 1000 * 1000))–\(time((gap.toMs + 999) / 1000 * 1000))"
+    }
+    /// The row in a transcript for a stretch with no text.
+    public static func missingText(_ gap: TranscriptGap) -> String { "Transcript missing \(span(gap))" }
+    /// What a recording says, for as long as it is shown, about the stretches it could not transcribe. Nil when there are none.
+    public static func untranscribedText(_ gaps: [TranscriptGap]) -> String? {
+        let gaps = TranscriptGap.merged(gaps)
+        guard !gaps.isEmpty else { return nil }
+        return "Couldn't transcribe " + gaps.map(span).joined(separator: ", ")
     }
 
     private static func time(_ milliseconds: Int) -> String {
@@ -104,5 +169,27 @@ public enum TranscriptPresentation {
             return segment.speakerId
         }
         return String(parts[2])
+    }
+}
+
+/// A stretch of a recording that has no transcript, on the note timeline.
+public struct TranscriptGap: Equatable, Hashable, Sendable, Identifiable {
+    public var channel: AudioChannel
+    public var fromMs: Int
+    public var toMs: Int
+    public init(channel: AudioChannel, fromMs: Int, toMs: Int) { self.channel = channel; self.fromMs = fromMs; self.toMs = toMs }
+    public var id: String { "gap-\(channel.rawValue)-\(fromMs)" }
+
+    /// In timeline order, with stretches of one channel that overlap or touch made one.
+    public static func merged(_ gaps: [TranscriptGap]) -> [TranscriptGap] {
+        var result: [TranscriptGap] = []
+        for gap in gaps.filter({ $0.toMs > $0.fromMs }).sorted(by: { ($0.fromMs, $0.toMs) < ($1.fromMs, $1.toMs) }) {
+            if let index = result.lastIndex(where: { $0.channel == gap.channel }), result[index].toMs >= gap.fromMs {
+                result[index].toMs = max(result[index].toMs, gap.toMs)
+            } else {
+                result.append(gap)
+            }
+        }
+        return result.sorted { ($0.fromMs, $0.toMs) < ($1.fromMs, $1.toMs) }
     }
 }

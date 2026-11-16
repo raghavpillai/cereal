@@ -179,15 +179,8 @@ export class Recording {
     this.mark("resume")
     this.say("resume")
   }
-  private uploadDue(final = false) {
-    if (this.options.upload === false || (this.options.holdUploadsWhileDown && this.down && !final)) return
-    const { fixture } = this, part = (this.options.partSeconds ?? 30) * fixture.rate
-    while ((this.nextPart + 1) * part <= this.captured || (final && this.nextPart * part < this.captured)) {
-      const from = this.nextPart * part, to = Math.min(this.captured, from + part), sequence = (this.options.firstSequence ?? 0) + this.nextPart++
-      for (const channel of fixture.channels) this.uploads.push(this.server.ok(`/notes/${this.noteId}/audio/chunks/${crypto.randomUUID()}`, "PUT", { channel, sequence, startMs: (this.options.baseMs ?? 0) + Math.round(from * 1000 / fixture.rate), audioBase64: Buffer.from(wavFile(fixture.pcm[channel].slice(from * 2, to * 2), fixture.rate)).toString("base64") }).catch(error => this.say(`part upload failed: ${error}`)))
-      if (to >= this.captured && final) break
-    }
-  }
+  /** Audio parts are no longer uploaded: speech is transcribed live only. Kept so the scenarios read as before. */
+  private uploadDue(_final = false) {}
   /** Runs the capture to `untilSeconds` (default: the end of the fixture), firing events at their capture time. */
   async run(events: Event[] = [], untilSeconds?: number, options: { /** False: return when the capture ends even if the stream has not sent all of it. */ drain?: boolean } = {}) {
     const { fixture } = this, frame = Math.round(fixture.rate / 10), end = Math.min(fixture.totalSamples, untilSeconds === undefined ? fixture.totalSamples : Math.round(untilSeconds * fixture.rate))
@@ -244,15 +237,8 @@ export class Recording {
     if (options.stop !== false) { const from = performance.now(); await this.server.ok(`/notes/${this.noteId}/recording`, "POST", { command: "stop" }); stopMs = Math.round(performance.now() - from) }
     return { stopMs, closeCode: this.closes.at(-1)?.code ?? null }
   }
-  /** Waits until every durable part of the note is ready or failed. */
-  async partsSettled(timeoutMs = 240_000) {
-    for (const deadline = performance.now() + timeoutMs; ;) {
-      const chunks = await this.server.ok(`/notes/${this.noteId}/audio/chunks`) as Array<{ state: string }>
-      if (chunks.every(chunk => chunk.state === "ready" || chunk.state === "failed")) return chunks
-      if (performance.now() > deadline) return chunks
-      await Bun.sleep(1000)
-    }
-  }
+  /** There are no durable parts any more: nothing to wait for. */
+  async partsSettled(_timeoutMs = 0): Promise<Array<{ state: string }>> { return [] }
   async stored() { return await this.server.ok(`/notes/${this.noteId}`) as StoredNote }
   async remove() { const result = await this.server.call(`/notes/${this.noteId}`, "DELETE"); return result.status }
   of<K extends LiveServerMessage["type"]>(type: K) { return this.received.flatMap(item => item.message.type === type ? [{ at: item.at, message: item.message as Extract<LiveServerMessage, { type: K }> }] : []) }

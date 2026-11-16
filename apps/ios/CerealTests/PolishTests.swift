@@ -349,30 +349,6 @@ struct ServerHomeGroupingTests {
 }
 
 struct RecordingPolishTests {
-    private func segment(_ index: Int, start: TimeInterval, duration: TimeInterval) -> CaptureSegment {
-        CaptureSegment(index: index, startedAt: Date(timeIntervalSinceReferenceDate: start), duration: duration, fileName: "segment-\(index).wav")
-    }
-
-    /// The detector for audio lost between rotated segments. On a device,
-    /// each segment's start time and file length come from the recorder, so
-    /// any pause between one file ending and the next starting shows up here.
-    @Test func audioMissingBetweenRotatedSegmentsIsDetected() {
-        let continuous = [segment(0, start: 0, duration: 120), segment(1, start: 120.004, duration: 120)]
-        #expect(CaptureContinuity.gaps(in: continuous).isEmpty)
-        #expect(CaptureContinuity.lostSeconds(in: continuous) == 0)
-
-        let rotated = [segment(0, start: 0, duration: 120), segment(1, start: 120.180, duration: 120), segment(2, start: 240.420, duration: 60)]
-        let gaps = CaptureContinuity.gaps(in: rotated)
-        #expect(gaps.map(\.afterIndex) == [0, 1])
-        #expect(abs(gaps[0].seconds - 0.180) < 0.0001)
-        #expect(abs(CaptureContinuity.lostSeconds(in: rotated) - 0.420) < 0.0001)
-    }
-
-    @Test func aLaterResumeIsNotCountedAsLostAudio() {
-        let resumed = [segment(0, start: 0, duration: 60), segment(1, start: 900, duration: 30)]
-        #expect(CaptureContinuity.gaps(in: resumed).isEmpty)
-    }
-
     @Test func hapticsFollowRecordingStateChanges() {
         #expect(RecordingFeedback.feedback(from: .idle, to: .recording) != nil)
         #expect(RecordingFeedback.feedback(from: .paused, to: .recording) != nil)
@@ -507,5 +483,36 @@ struct RecordingPolishTests {
         let coloured = marked.runs.filter { $0.foregroundColor != nil }.map { String(marked[$0.range].characters) }
         #expect(coloured == ["roadmap"])
         #expect(NoteSearch.server([], account: account).isEmpty)
+    }
+}
+
+/// Release builds have no demo. Their store leaves what an earlier version saved exactly as it was.
+@MainActor struct OffDiskStoreTests {
+    @Test func aStoreOffDiskNeitherReadsNorWritesTheDemoFiles() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cereal-off-disk-" + UUID().uuidString, isDirectory: true)
+        let recordings = dir.appendingPathComponent("recordings", isDirectory: true)
+        let interrupted = recordings.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: interrupted, withIntermediateDirectories: true)
+        try Data("RIFF".utf8).write(to: interrupted.appendingPathComponent("segment-0.wav"))
+        let file = dir.appendingPathComponent("notes.json")
+        let saved = try JSONEncoder().encode([Note(title: "Made in the old demo", createdAt: .now, userNotes: "kept as it was")])
+        try saved.write(to: file)
+
+        let store = NoteStore(fileURL: file, recordingsRoots: [recordings], onDisk: false)
+        #expect(store.notes.isEmpty)
+        #expect(store.captureRecoveryMessage == nil)
+        store.createNote()
+        store.flush()
+        #expect(try Data(contentsOf: file) == saved)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: interrupted.path) == ["segment-0.wav"])
+        // A store on disk, as debug builds use for the QA demo, reads the same file.
+        #expect(NoteStore(fileURL: file, recordingsRoots: [recordings]).notes.contains { $0.title == "Made in the old demo" })
+    }
+
+    @Test func aFirstDebugLaunchStillSeedsTheQADemo() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cereal-qa-demo-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let store = NoteStore(fileURL: dir.appendingPathComponent("notes.json"), recordingsRoots: [dir])
+        #expect(store.activeNotes.contains { !$0.sections.isEmpty })
     }
 }

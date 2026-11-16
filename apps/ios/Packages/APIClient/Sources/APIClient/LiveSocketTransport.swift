@@ -78,7 +78,14 @@ final class URLSessionLiveSocket: NSObject, LiveSocket, URLSessionWebSocketDeleg
             case .data(let data): return .data(data)
             @unknown default: return .data(Data())
             }
-        } catch { throw failure() }
+        } catch {
+            // The server's close code can reach the delegate a moment after the failed receive. It
+            // matters: only an orderly close after `mark: end` ends a capture's stream.
+            if lock.withLock({ closeCode == nil && !closed }), task.closeCode == .invalid {
+                try? await Task.sleep(for: .milliseconds(150))
+            }
+            throw failure()
+        }
     }
 
     func ping() async throws {

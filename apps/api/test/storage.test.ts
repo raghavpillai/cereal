@@ -209,8 +209,8 @@ async function server(environment: NodeJS.ProcessEnv = {}) {
   const administration = makeAdministrationService(makeMemoryCalendarStore(repository), secretBoxFromKey(randomBytes(32)), { environment })
   const storage = makeStorage({ audioDir, downloadsDir, configuration: () => administration.storageConfiguration() })
   const heard: number[] = []
-  const providers: ProviderServices = { transcribe: input => Effect.sync(() => { heard.push(input.audio.byteLength); return [{ id: crypto.randomUUID(), channel: input.channel, speakerId: `${input.chunkId}:speaker_0`, speakerLabel: "Speaker 0", text: "Stored and read back.", isFinal: true, startMs: input.startMs, endMs: input.startMs + 100 }] }), generate: () => Effect.succeed("Notes"), chat: () => Effect.succeed("") }
-  const processing = makeProcessingService(repository, { providers, worker: false, storage, storageDir: audioDir })
+  const providers: ProviderServices = { generate: () => Effect.succeed("Notes"), chat: () => Effect.succeed("") }
+  const processing = makeProcessingService(repository, { providers, storage, storageDir: audioDir })
   const downloads = makeDownloads({ directory: downloadsDir, version: "3.4.5", storage: storage.downloads })
   const api = makeApiHandler(repository, token, { processing, administration, storage, downloads })
   cleanup.push(api.dispose)
@@ -228,7 +228,7 @@ function wav(seed = 0) {
 test("storage settings: defaults, the environment as a fallback, validation, and a secret that is sealed and never returned", async () => {
   const f = await server()
   const initial = await (await f.request("/admin/settings")).json()
-  expect(initial.storage).toEqual({ backend: "local", source: "default", endpoint: null, region: "us-east-1", bucket: null, prefix: "", forcePathStyle: false, accessKeyId: null, secretAccessKeySet: false })
+  expect(initial.storage).toEqual({ backend: "local", source: "default", endpoint: null, region: "us-east-1", bucket: null, prefix: "", forcePathStyle: false, accessKeyId: null, secretAccessKeySet: false, secretAccessKeyHint: null })
   const patch = async (storage: Record<string, unknown>) => { const response = await f.request("/admin/settings", "PATCH", { storage }); return { status: response.status, body: await response.json() } }
   // S3 needs a bucket, a key and a secret; every value is checked.
   expect(await patch({ backend: "s3" })).toMatchObject({ status: 400, body: { message: "Enter the bucket, access key ID and secret access key before choosing S3-compatible storage" } })
@@ -237,7 +237,7 @@ test("storage settings: defaults, the environment as a fallback, validation, and
   expect((await (await f.request("/admin/settings")).json()).storage.source).toBe("default")
   const saved = await patch({ ...f.s3Settings, prefix: "/cereal/" })
   expect(saved.status).toBe(200)
-  expect(saved.body.storage).toEqual({ backend: "s3", source: "stored", endpoint: fake.endpoint, region: "us-east-1", bucket: "cereal-test", prefix: "cereal/", forcePathStyle: true, accessKeyId: ACCESS, secretAccessKeySet: true })
+  expect(saved.body.storage).toEqual({ backend: "s3", source: "stored", endpoint: fake.endpoint, region: "us-east-1", bucket: "cereal-test", prefix: "cereal/", forcePathStyle: true, accessKeyId: ACCESS, secretAccessKeySet: true, secretAccessKeyHint: "…" + SECRET.slice(-4) })
   expect(JSON.stringify(saved.body)).not.toContain(SECRET)
   expect(JSON.stringify(await (await f.request("/admin/settings")).json())).not.toContain(SECRET)
   // In force at once, without a restart, and sealed at rest.
@@ -254,7 +254,7 @@ test("storage settings: defaults, the environment as a fallback, validation, and
   expect((await f.api.handler(new Request("http://localhost/api/v1/admin/storage/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }))).status).toBe(401)
   // The environment applies only while nothing has been saved.
   const env = await server({ STORAGE_BACKEND: "s3", S3_ENDPOINT: fake.endpoint, S3_BUCKET: "second-bucket", S3_PREFIX: "env", S3_ACCESS_KEY_ID: ACCESS, S3_SECRET_ACCESS_KEY: SECRET, S3_FORCE_PATH_STYLE: "true" })
-  expect((await (await env.request("/admin/settings")).json()).storage).toEqual({ backend: "s3", source: "environment", endpoint: fake.endpoint, region: "us-east-1", bucket: "second-bucket", prefix: "env/", forcePathStyle: true, accessKeyId: ACCESS, secretAccessKeySet: true })
+  expect((await (await env.request("/admin/settings")).json()).storage).toEqual({ backend: "s3", source: "environment", endpoint: fake.endpoint, region: "us-east-1", bucket: "second-bucket", prefix: "env/", forcePathStyle: true, accessKeyId: ACCESS, secretAccessKeySet: true, secretAccessKeyHint: "…" + SECRET.slice(-4) })
   expect(await env.storage.current()).toMatchObject({ backend: "s3", s3: { bucket: "second-bucket", prefix: "env/", secretAccessKey: SECRET } })
   expect((await (await env.request("/admin/settings", "PATCH", { storage: { bucket: "cereal-test" } })).json()).storage).toMatchObject({ backend: "s3", source: "stored", bucket: "cereal-test", prefix: "env/", secretAccessKeySet: true })
   // An environment that points somewhere it must not is ignored, not obeyed.
@@ -277,59 +277,22 @@ test("test connection over HTTP tries a draft without saving it, and uses the st
   expect(fake.buckets.get("cereal-test")!.size + fake.buckets.get("second-bucket")!.size).toBe(0)
 })
 
-test("audio through a bucket: an uploaded part lands there, is transcribed from there and is deleted with its note; older local audio keeps working", async () => {
+test("audio an older version stored is deleted with its note, from either backend", async () => {
   const f = await server()
-  const first = await (await f.request("/notes", "POST", { title: "Before the switch" })).json()
-  const upload = (noteId: string, seed: number, sequence = 0) => f.request(`/notes/${noteId}/audio/chunks/${crypto.randomUUID()}`, "PUT", { channel: "system", sequence, startMs: 0, audioBase64: wav(seed).toString("base64") })
-  // Recorded while storage is local disk, not yet transcribed.
-  expect((await upload(first.id, 1)).status).toBe(200)
+  const first = await (await f.request("/notes", "POST", { title: "Recorded on disk" })).json()
+  // Audio a server that still kept parts wrote to local disk.
+  await f.storage.audio.put(audioKey(first.id, sha256(wav(1))), wav(1), { sha256: sha256(wav(1)), contentType: "audio/wav" })
   expect(await readdir(join(f.audioDir, first.id))).toEqual([`${sha256(wav(1))}.wav`])
   expect((await f.request("/admin/settings", "PATCH", { storage: { ...f.s3Settings, prefix: "cereal" } })).status).toBe(200)
-  const second = await (await f.request("/notes", "POST", { title: "After the switch" })).json()
-  expect((await upload(second.id, 2)).status).toBe(200)
+  const second = await (await f.request("/notes", "POST", { title: "Recorded into the bucket" })).json()
+  await f.storage.audio.put(audioKey(second.id, sha256(wav(2))), wav(2), { sha256: sha256(wav(2)), contentType: "audio/wav" })
   const bucket = fake.buckets.get("cereal-test")!
   expect([...bucket.keys()]).toEqual([`cereal/audio/${second.id}/${sha256(wav(2))}.wav`])
-  expect(Buffer.from(bucket.get(`cereal/audio/${second.id}/${sha256(wav(2))}.wav`)!.bytes).equals(wav(2))).toBe(true)
-  expect(await readdir(f.audioDir)).toEqual([first.id])
-  // The worker reads each part from wherever it is.
-  await f.processing.runPending()
-  expect(f.heard).toEqual([wav(1).length, wav(2).length])
-  for (const note of [first, second]) {
-    const chunks = await (await f.request(`/notes/${note.id}/audio/chunks`)).json()
-    expect(chunks.map((chunk: { state: string }) => chunk.state)).toEqual(["ready"])
-  }
-  // Uploading the same audio again is the same object, not a second one.
-  expect((await upload(second.id, 2, 1)).status).toBe(200)
-  expect(bucket.size).toBe(1)
   // Deleting each note removes its audio from where it is.
   expect((await f.request(`/notes/${second.id}`, "DELETE")).status).toBe(200)
   expect(bucket.size).toBe(0)
   expect((await f.request(`/notes/${first.id}`, "DELETE")).status).toBe(200)
   expect(await readdir(f.audioDir)).toEqual([])
-})
-
-test("a storage failure during upload is a clean 503 and leaves no record of the part", async () => {
-  const f = await server()
-  await f.request("/admin/settings", "PATCH", { storage: f.s3Settings })
-  const note = await (await f.request("/notes", "POST", { title: "Unlucky" })).json()
-  const send = () => f.request(`/notes/${note.id}/audio/chunks/${crypto.randomUUID()}`, "PUT", { channel: "mic", sequence: 0, startMs: 0, audioBase64: wav(3).toString("base64") })
-  for (const [status, code] of [[500, "InternalError"], [403, "AccessDenied"], [404, "NoSuchBucket"]] as const) {
-    fake.failNext("PUT", status, code)
-    const response = await send()
-    expect(response.status).toBe(503)
-    expect(await response.json()).toEqual({ error: "unavailable", message: "Processing is temporarily unavailable" })
-  }
-  expect(await (await f.request(`/notes/${note.id}/audio/chunks`)).json()).toEqual([])
-  expect(fake.buckets.get("cereal-test")!.size).toBe(0)
-  expect(await readdir(f.audioDir)).toEqual([])
-  // The store recovers: the same upload now succeeds, once.
-  expect((await send()).status).toBe(200)
-  expect((await (await f.request(`/notes/${note.id}/audio/chunks`)).json()).length).toBe(1)
-  expect(fake.buckets.get("cereal-test")!.size).toBe(1)
-  // A part whose object has gone missing fails its transcription; it is not reported as transcribed.
-  fake.buckets.get("cereal-test")!.clear()
-  await f.processing.runPending()
-  expect((await (await f.request(`/notes/${note.id}/audio/chunks`)).json())[0]).toMatchObject({ state: "failed" })
 })
 
 test("downloads from a bucket: listed with the recorded digest, streamed through the server with ranges, and disk is still looked in second", async () => {

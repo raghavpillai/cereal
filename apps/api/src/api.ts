@@ -18,6 +18,8 @@ import {DOWNLOAD_FILES_PATH,makeDownloads,type DownloadsService} from "./downloa
 import {readAppVersion} from "./version"
 import type {StorageService} from "./storage"
 import {MAX_IMPORT_BYTES,importDigest,importedSegmentId,parseNoteStamp} from "./note-import"
+import {makeChatsService,makeMemoryChatStore,type ChatsService} from "./chats"
+import {withoutTranscriptLink} from "./transcript-link"
 import {InvalidPageRequest,parseListInput,parseSearchInput,selectNoteSearch,selectNoteSummaries,withMeeting} from "./note-summaries"
 
 const unavailable = { error: "unavailable", message: "The note service is temporarily unavailable" } as const
@@ -46,7 +48,8 @@ function createShare(noteId: string, input: CreateShareInput, clock: () => Date)
     const snapshot: SharedNoteDTO = {
       shareId: id, title: note.title,
       body: input.includeBody ? note.body : "",
-      enhanced: input.includeEnhanced ? note.enhanced : "",
+      // Without the chat link line: a link holder cannot open it, and it would only show them the note's id.
+      enhanced: input.includeEnhanced ? withoutTranscriptLink(note.id, note.enhanced) : "",
       date: note.date, duration: note.duration, sharedAt: metadata.createdAt, expiresAt: metadata.expiresAt,
     }
     yield* persist(repo.createShare({ metadata, tokenHash: hashToken(token), snapshot }))
@@ -55,13 +58,15 @@ function createShare(noteId: string, input: CreateShareInput, clock: () => Date)
 }
 
 /** The caller owns repository lifetime; dispose releases only the API runtime. */
-export function makeApiHandler(repository: NotesRepositoryService, adminToken: string, options: { clock?: () => Date; processing?: ProcessingService; administration?: AdministrationService; authentication?: AuthenticationService; google?: GoogleIntegration; noteParticipants?:NoteParticipantsService; mcpStore?:McpStore; downloads?:DownloadsService; storage?:StorageService; principalResolver?: (headers: Headers) => Promise<PrincipalData|null> } = {}) {
+export function makeApiHandler(repository: NotesRepositoryService, adminToken: string, options: { clock?: () => Date; processing?: ProcessingService; administration?: AdministrationService; authentication?: AuthenticationService; google?: GoogleIntegration; noteParticipants?:NoteParticipantsService; mcpStore?:McpStore; downloads?:DownloadsService; storage?:StorageService; chats?:ChatsService; principalResolver?: (headers: Headers) => Promise<PrincipalData|null> } = {}) {
   if (adminToken.length < 32) throw new Error("ADMIN_TOKEN must contain at least 32 characters")
-  const processing = options.processing ?? makeProcessingService(repository, { worker: false })
+  const processing = options.processing ?? makeProcessingService(repository)
   const administration = options.administration ?? makeAdministrationService(makeMemoryCalendarStore(repository), undefined, { clock: options.clock })
   const useProcessing = <A, E, R>(operation: (service: ReturnType<ProcessingService["forRepository"]>) => Effect.Effect<A, E, R>) =>
     Effect.gen(function*(){const repo=yield* NotesRepository,principal=yield* AuthPrincipal,request=yield* HttpServerRequest.HttpServerRequest;return yield* operation(processing.forRepository(repo,{actor:principal.id,requestSignal:request.source instanceof Request?request.source.signal:undefined,meetingContext:options.google?noteId=>Effect.map(options.google!.getNoteContext(principal.id,noteId),context=>context.meeting):undefined}))})
   const clock = options.clock ?? (() => new Date())
+  // Saved conversations. The server passes its database-backed ones; anything else keeps them in memory.
+  const chats = options.chats ?? makeChatsService(makeMemoryChatStore(repository), { clock })
   // The apps this server hands out. The server passes its own; anything else reads the same environment.
   const downloads = options.downloads ?? makeDownloads({ directory: process.env.DOWNLOADS_DIR || "/data/downloads", version: readAppVersion(), iosAppStoreId: process.env.IOS_APP_STORE_ID })
   const auth = Layer.succeed(OwnerAuth, {
@@ -210,6 +215,15 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
     .handle("listCalendarEvents", ({query}) => Effect.gen(function*(){const p=yield* AuthPrincipal,range=yield* administration.eventRange(query),shared=yield* administration.listEvents(range,p.id),personal=options.google?yield* options.google.listEvents(p.id,range):[];const events=[...shared,...personal].sort((a,b)=>a.startAt.localeCompare(b.startAt)||a.id.localeCompare(b.id));if(events.length>10000)return yield* Effect.fail({error:"invalid_request",message:"Too many events; request a shorter date range"} as const);return events}))
     .handle("createCalendarEventNote", ({params}) => Effect.gen(function*(){const p=yield* AuthPrincipal,personal=options.google?yield* options.google.createEventNote(p.id,params.id):null;if(personal)return personal;const note=yield* administration.createEventNote(params.id,p.id);if(options.google){const context=yield* administration.eventContext(params.id);if(context)yield* options.google.initializeExternalContext(p.id,note.id,context)}return note}))
     .handle("chatWorkspaceStream", ({payload}) => useProcessing(service => service.chatStream(null,payload)))
+    // Saved conversations: always the signed-in person's own (chats.ts). The thread's note is read through that
+    // person's repository, so a thread can never reach a note they cannot.
+    .handle("listChatThreads", ({query}) => Effect.flatMap(AuthPrincipal,p=>chats.list(p.id,query)))
+    .handle("createChatThread", ({payload}) => Effect.gen(function*(){const p=yield* AuthPrincipal,repo=yield* NotesRepository;return yield* chats.create(p.id,repo,payload)}))
+    .handle("getChatThread", ({params}) => Effect.flatMap(AuthPrincipal,p=>chats.get(p.id,params.id)))
+    .handle("updateChatThread", ({params,payload}) => Effect.flatMap(AuthPrincipal,p=>chats.rename(p.id,params.id,payload.title)))
+    .handle("deleteChatThread", ({params}) => Effect.flatMap(AuthPrincipal,p=>chats.delete(p.id,params.id)))
+    .handle("appendChatTurn", ({params,payload}) => Effect.flatMap(AuthPrincipal,p=>chats.append(p.id,params.id,payload)))
+    .handle("streamChatThread", ({params,payload}) => Effect.flatMap(AuthPrincipal,p=>chats.stream(p.id,params.id,payload,(noteId,input)=>useProcessing(service=>service.chatStream(noteId,input)))))
     .handle("getAgentBrief",()=>mcpSupport(async(store,scope)=>({...await store.agentBrief(scope),source:"explicit_user_profile" as const,automaticallyInferred:false as const})))
     .handle("updateAgentBrief",({payload})=>mcpSupport(async(store,scope)=>({...await store.updateAgentBrief(scope,payload.body),workspaceId:scope.workspaceId,source:"explicit_user_profile" as const,automaticallyInferred:false as const})))
     .handle("uploadNoteAttachment",({params,payload})=>mcpSupport(async(store,scope)=>{
@@ -218,13 +232,11 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
       return {...saved,mimeType:payload.mimeType,createdAt:saved.createdAt.toISOString()}
     }))
     .handle("recording", ({params,payload}) => useProcessing(service => service.recording(params.id,payload.command)))
-    .handle("uploadAudioChunk", ({params,payload}) => useProcessing(service => service.upload(params.id,params.chunkId,payload)))
-    .handle("listAudioChunks", ({params}) => useProcessing(service => service.list(params.id)))
-    .handle("retryAudioChunk", ({params}) => useProcessing(service => service.retry(params.id,params.chunkId)))
     .handle("generateNotes", ({params,payload}) => useProcessing(service => service.generate(params.id,payload.expectedTranscriptRevision)))
     .handle("chat", ({params,payload}) => useProcessing(service => service.chat(params.id,payload)))
     .handle("chatStream", ({params,payload}) => useProcessing(service => service.chatStream(params.id,payload)))
     .handle("evidence", ({params,payload}) => useProcessing(service => service.evidence(params.id,payload)))
+    .handle("evidenceStream", ({params,payload}) => useProcessing(service => service.evidenceStream(params.id,payload)))
     .handle("listNotes", () => Effect.flatMap(NotesRepository, (repo) => persist(repo.listNotes())))
     .handle("listNoteSummaries", ({query}) => Effect.gen(function*(){
       const repo=yield* NotesRepository,input=yield* pageInput(()=>parseListInput(query))
@@ -257,11 +269,11 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
       return { note: result.note, segmentIds: payload.transcriptSegments.map(segment => ({ from: segment.id, to: importedSegmentId(result.note.id, segment.id) })) }
     }))
     .handle("deleteNote", ({params,query}) => Effect.gen(function*(){
-      if(query.ifStamp===undefined&&query.ifChunks===undefined)return yield* useProcessing(service => service.deleteNote(params.id))
+      if(query.ifStamp===undefined)return yield* useProcessing(service => service.deleteNote(params.id))
       const stamp=query.ifStamp===undefined?undefined:parseNoteStamp(query.ifStamp)
       // A precondition that cannot be read is refused: it is never treated as absent.
       if(stamp===null)return yield* Effect.fail({error:"invalid_request",message:"ifStamp must be updatedAt|transcriptRevision|generatedRevision"} as const)
-      return yield* useProcessing(service => service.deleteNote(params.id,{...(stamp?{stamp}:{}),...(query.ifChunks===undefined?{}:{chunks:Number(query.ifChunks)})}))
+      return yield* useProcessing(service => service.deleteNote(params.id,stamp?{stamp}:{}))
     }))
     .handle("listShares", ({ params }) => Effect.gen(function*() {
       const repo = yield* NotesRepository
@@ -349,7 +361,7 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
           request=new Request(request,{body})
         }
       }
-      const streamAbort=/^\/api\/v1\/(?:notes\/[^/]+\/)?chat\/stream$/.test(new URL(request.url).pathname)?new AbortController():null
+      const streamAbort=/^\/api\/v1\/(?:(?:notes\/[^/]+\/)?chat|notes\/[^/]+\/evidence|chats\/[^/]+)\/stream$/.test(new URL(request.url).pathname)?new AbortController():null
       const forwarded=streamAbort?new Request(request,{signal:AbortSignal.any([request.signal,streamAbort.signal])}):request
       const response = new URL(request.url).pathname.startsWith("/api/auth/") && options.authentication ? await options.authentication.handler(request) : await web.handler(forwarded)
       const headers = new Headers(response.headers)

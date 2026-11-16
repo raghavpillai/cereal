@@ -48,6 +48,10 @@ export const NoteDTO = Schema.Struct({
   createdAt: Timestamp,
   updatedAt: Timestamp,
   transcriptSegments: Schema.Array(TranscriptSegmentDTO),
+  /** Stretches of a recording, two seconds or longer, that were captured but have no transcript (the stream
+   * could not deliver them in time). Absent on a note without live recording. Clients show each as a row such
+   * as "Transcript missing 12:03–12:10". */
+  transcriptGaps: Schema.optionalKey(Schema.Array(Schema.Struct({ channel: AudioChannel, fromMs: Milliseconds, toMs: Milliseconds }).annotate({ identifier: "TranscriptGapDTO" }))),
   recordingState: RecordingState,
   generationState: GenerationState,
   transcriptRevision: Revision,
@@ -114,7 +118,7 @@ export const ApiErrorCode = Schema.Literals(["unauthorized", "forbidden", "confl
 export const ApiErrorDTO = Schema.Struct({ error: ApiErrorCode, message: Schema.String }).annotate({ identifier: "ApiErrorDTO" })
 export type ApiErrorDTO = typeof ApiErrorDTO.Type
 /** `features` names what this server can do beyond the first v1: "note-import" (POST /api/v1/notes/import),
- * "conditional-delete" (`ifStamp` and `ifChunks` on DELETE /api/v1/notes/{id}) and "meeting-identity"
+ * "conditional-delete" (`ifStamp` on DELETE /api/v1/notes/{id}) and "meeting-identity"
  * (`meetingUid` and `occurrence` on calendar events). Absent on a server older than all three. A feature
  * only ever adds a check the server makes; a client never relaxes one of its own because of it. */
 export const HealthDTO = Schema.Struct({ status: Schema.Literal("ok"), version: Schema.Literal("v1"), features: Schema.optionalKey(Schema.Array(Schema.String)) }).annotate({ identifier: "HealthDTO" })
@@ -147,27 +151,6 @@ export const NotesDTO = Schema.Array(NoteDTO)
 export const SharesDTO = Schema.Array(ShareDTO)
 
 /** The batch provider boundary. Streaming transcription has its own boundary and wire protocol in ./live.ts. */
-export interface TranscriptionProvider {
-  readonly name: string
-  transcribe(input: { channel: "mic" | "system"; audio: Uint8Array; sampleRate: number; signal: AbortSignal }): AsyncIterable<TranscriptSegmentDTO>
-}
-
-/** Immutable WAV uploads are acknowledged before provider work; retry the same UUID safely. */
-export const UploadAudioChunkInput = Schema.Struct({
-  channel: AudioChannel,
-  sequence: Revision,
-  startMs: Milliseconds,
-  audioBase64: Schema.String.check(Schema.isMinLength(4), Schema.isMaxLength(27_962_028)),
-}).annotate({ identifier: "UploadAudioChunkInput" })
-export type UploadAudioChunkInput = typeof UploadAudioChunkInput.Type
-export const AudioChunkState = Schema.Literals(["queued", "processing", "ready", "failed"]).annotate({ identifier: "AudioChunkState" })
-export const AudioChunkDTO = Schema.Struct({
-  id: UUID, noteId: UUID, channel: AudioChannel, sequence: Revision, startMs: Milliseconds, durationMs: Milliseconds,
-  state: AudioChunkState,
-  error: Schema.NullOr(Schema.String),
-}).annotate({ identifier: "AudioChunkDTO" })
-export type AudioChunkDTO = typeof AudioChunkDTO.Type
-export const AudioChunksDTO = Schema.Array(AudioChunkDTO)
 export const ChatMessageDTO = Schema.Struct({
   role: Schema.Literals(["user", "assistant"]), content: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(20_000)),
 }).annotate({ identifier: "ChatMessageDTO" })
@@ -212,6 +195,12 @@ export const EvidenceDTO = Schema.Struct({
   summary: NoteText, quotes: Schema.Array(EvidenceQuoteDTO).check(Schema.isMaxLength(8)), transcriptRevision: Revision,
 }).annotate({ identifier: "EvidenceDTO" })
 export type EvidenceDTO = typeof EvidenceDTO.Type
+/** The source summary as it is written (POST /api/v1/notes/:id/evidence/stream): `delta` events carry the
+ * summary's text in order, then `done` carries the validated result in `evidence`, or `error` ends it. */
+export const EvidenceStreamEventDTO = Schema.Struct({
+  type: Schema.Literals(["delta", "done", "error"]), text: NoteText, evidence: Schema.optionalKey(EvidenceDTO),
+}).annotate({ identifier: "EvidenceStreamEventDTO" })
+export type EvidenceStreamEventDTO = typeof EvidenceStreamEventDTO.Type
 
 /** Owner-only instance administration. Secret values are accepted only on writes. */
 export const UserRole = Schema.Literals(["owner", "admin", "user"])
@@ -272,22 +261,34 @@ export type UpdateOrganizationMemberRoleInput = typeof UpdateOrganizationMemberR
 
 export const CalendarPreferencesDTO = Schema.Struct({lookAheadDays:Schema.Number.check(Schema.isInt32())}).annotate({identifier:"CalendarPreferencesDTO"})
 
-export const AIProvider = Schema.Literals(["openrouter", "openai", "anthropic", "elevenlabs"])
+/** `openai_compatible` is any server that speaks OpenAI's chat completions at an address the owner gives
+ * (Ollama, vLLM, LM Studio, a hosted /v1 API). It writes notes and answers chat; it never transcribes. */
+export const AIProvider = Schema.Literals(["openrouter", "openai", "anthropic", "elevenlabs", "openai_compatible"])
 export type AIProvider = typeof AIProvider.Type
-export const LanguageProvider = Schema.Literals(["openrouter", "openai", "anthropic"])
+export const LanguageProvider = Schema.Literals(["openrouter", "openai", "anthropic", "openai_compatible"])
+/** Where an OpenAI-compatible server's API starts, such as http://10.0.0.5:11434/v1. http or https, no user name,
+ * password, query or fragment; the server checks and tidies it (`src/compatible.ts`). */
+const CompatibleBaseUrl = Schema.String.check(Schema.isMinLength(8), Schema.isMaxLength(2048), Schema.isPattern(/^\s*https?:\/\/\S+$/i))
+/** A self-hosted server may want no key, or a short one. */
+const CompatibleKey = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1000), Schema.isPattern(/^[^\r\n]+$/))
 const ModelIdentifier = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(150), Schema.isPattern(/^[A-Za-z0-9_.:/-]+$/))
 const ProviderKey = Schema.String.check(Schema.isMinLength(10), Schema.isMaxLength(1000), Schema.isPattern(/^[^\r\n]+$/))
 export const LanguageModelSelection = Schema.Struct({ provider: LanguageProvider, model: ModelIdentifier }).annotate({identifier:"LanguageModelSelection"})
 export type LanguageModelSelection = typeof LanguageModelSelection.Type
-export const TranscriptionModelSelection = Schema.Struct({ provider: Schema.Literals(["elevenlabs", "openai"]), model: ModelIdentifier }).annotate({identifier:"TranscriptionModelSelection"})
-export type TranscriptionModelSelection = typeof TranscriptionModelSelection.Type
-export const ProviderStatusDTO = Schema.Struct({id: AIProvider, configured: Schema.Boolean, source: Schema.Literals(["environment", "stored", "none"])}).annotate({identifier:"ProviderStatusDTO"})
+/** A batch speech-to-text model. Transcription is live only now, so this is not a choice anyone makes any more; it
+ * stays readable (with "openai") for servers that stored it before. */
+/** `hint` tells which key is saved without giving it away: a known public prefix, "…", and the last four characters
+ * ("sk-or-v1-…a1b2"), or "…" and the last two of a short key. For `openai_compatible` it is the server's address,
+ * which is not secret. Null when nothing is saved or the saved key cannot be read. */
+export const ProviderStatusDTO = Schema.Struct({id: AIProvider, configured: Schema.Boolean, source: Schema.Literals(["environment", "stored", "none"]), hint: Schema.optionalKey(Schema.NullOr(Schema.String))}).annotate({identifier:"ProviderStatusDTO"})
 /** The streaming speech-to-text model of an instance; no selection means live transcription is off. */
 export const LiveTranscriptionModelSelection = Schema.Struct({ provider: Schema.Literals(["elevenlabs"]), model: ModelIdentifier }).annotate({identifier:"LiveTranscriptionModelSelection"})
 export type LiveTranscriptionModelSelection = typeof LiveTranscriptionModelSelection.Type
-export const AIModelDTO = Schema.Struct({id: ModelIdentifier, name: Schema.String, capabilities: Schema.Array(Schema.Literals(["language", "transcription", "live_transcription"]))}).annotate({identifier:"AIModelDTO"})
+export const AIModelDTO = Schema.Struct({id: ModelIdentifier, name: Schema.String, capabilities: Schema.Array(Schema.Literals(["language", "live_transcription"]))}).annotate({identifier:"AIModelDTO"})
 export type AIModelDTO = typeof AIModelDTO.Type
-export const ModelCatalogInput = Schema.Struct({provider: AIProvider, apiKey: Schema.optionalKey(ProviderKey), refresh: Schema.optionalKey(Schema.Boolean)}).annotate({identifier:"ModelCatalogInput"})
+/** `apiKey` is a draft key to try; a key for one of the hosted providers is still at least 10 characters (checked by
+ * the server). `baseUrl` is a draft address for `openai_compatible`; without it the saved one is used. */
+export const ModelCatalogInput = Schema.Struct({provider: AIProvider, apiKey: Schema.optionalKey(CompatibleKey), baseUrl: Schema.optionalKey(CompatibleBaseUrl), refresh: Schema.optionalKey(Schema.Boolean)}).annotate({identifier:"ModelCatalogInput"})
 export type ModelCatalogInput = typeof ModelCatalogInput.Type
 export const ModelCatalogDTO = Schema.Struct({provider: AIProvider, models: Schema.Array(AIModelDTO), fetchedAt: Timestamp, notice: Schema.NullOr(Schema.String)}).annotate({identifier:"ModelCatalogDTO"})
 export type ModelCatalogDTO = typeof ModelCatalogDTO.Type
@@ -306,6 +307,8 @@ export const SignInSettingsDTO = Schema.Struct({
   googleClientId: Schema.NullOr(Schema.String),
   /** The secret itself is never returned. */
   googleClientSecretSet: Schema.Boolean,
+  /** The saved secret, masked ("GOCSPX-…a1b2"), as for provider keys. Null when none is saved or it cannot be read. */
+  googleClientSecretHint: Schema.optionalKey(Schema.NullOr(Schema.String)),
   /** The redirect URIs to register in Google Cloud: sign-in first, then the calendar connection. */
   googleRedirectUris: Schema.Array(Schema.String),
   /** True when this server's address is plain HTTP off this machine: Google will not redirect to it, so Google
@@ -379,6 +382,8 @@ export const StorageSettingsDTO = Schema.Struct({
   forcePathStyle: Schema.Boolean,
   accessKeyId: Schema.NullOr(Schema.String),
   secretAccessKeySet: Schema.Boolean,
+  /** The secret in force, masked to its last four characters ("…a1b2"), no prefix. Null when there is none. */
+  secretAccessKeyHint: Schema.optionalKey(Schema.NullOr(Schema.String)),
 }).annotate({ identifier: "StorageSettingsDTO" })
 export type StorageSettingsDTO = typeof StorageSettingsDTO.Type
 const StorageText = (max: number) => Schema.String.check(Schema.isMaxLength(max))
@@ -435,15 +440,20 @@ export type OnboardingDTO = typeof OnboardingDTO.Type
 export const OnboardingStepState = Schema.Literals(["done", "skipped"]).annotate({ identifier: "OnboardingStepState" })
 export const OnboardingStepInput = Schema.Struct({ step: OnboardingStep, state: OnboardingStepState }).annotate({ identifier: "OnboardingStepInput" })
 export type OnboardingStepInput = typeof OnboardingStepInput.Type
+/** The OpenAI-compatible server: its address, and whether a key is saved for it. The key itself is never returned. */
+export const OpenAICompatibleSettingsDTO = Schema.Struct({ baseUrl: Schema.NullOr(Schema.String), apiKeySet: Schema.Boolean, /** The saved key, masked as for the other providers (ProviderStatusDTO.hint). */ apiKeyHint: Schema.optionalKey(Schema.NullOr(Schema.String)) }).annotate({ identifier: "OpenAICompatibleSettingsDTO" })
+export type OpenAICompatibleSettingsDTO = typeof OpenAICompatibleSettingsDTO.Type
 export const AdminSettingsDTO = Schema.Struct({
   instanceName: Schema.String, languageModel: Schema.String,
   instanceLogo: Schema.NullOr(InstanceLogo),
   providers: Schema.Array(ProviderStatusDTO),
   chatModels: Schema.Array(LanguageModelSelection),
   generationModel: LanguageModelSelection,
-  transcriptionModel: TranscriptionModelSelection,
-  /** Null when live transcription is off. Always sent by this server; optional so older fixtures stay valid. */
-  liveTranscriptionModel: Schema.optionalKey(Schema.NullOr(LiveTranscriptionModelSelection)),
+  /** The speech-to-text model, which always streams: speech is transcribed live only. Live transcription is always
+   * on, and runs once ElevenLabs has a key. */
+  liveTranscriptionModel: LiveTranscriptionModelSelection,
+  /** Always sent by this server; optional so older fixtures stay valid. */
+  openAiCompatible: Schema.optionalKey(OpenAICompatibleSettingsDTO),
   openRouterConfigured: Schema.Boolean, elevenLabsConfigured: Schema.Boolean,
   openRouterSource: Schema.Literals(["environment", "stored", "none"]),
   elevenLabsSource: Schema.Literals(["environment", "stored", "none"]),
@@ -469,9 +479,12 @@ export const UpdateAdminSettingsInput = Schema.Struct({
   instanceLogo: Schema.optionalKey(Schema.NullOr(InstanceLogo)),
   chatModels: Schema.optionalKey(Schema.Array(LanguageModelSelection).check(Schema.isMinLength(1), Schema.isMaxLength(20))),
   generationModel: Schema.optionalKey(LanguageModelSelection),
-  transcriptionModel: Schema.optionalKey(TranscriptionModelSelection),
-  /** Null turns live transcription off. */
-  liveTranscriptionModel: Schema.optionalKey(Schema.NullOr(LiveTranscriptionModelSelection)),
+  /** Live transcription cannot be turned off: only which live model is used can change. Only a streaming model is accepted. */
+  liveTranscriptionModel: Schema.optionalKey(LiveTranscriptionModelSelection),
+  /** Null removes the address, which disconnects the OpenAI-compatible provider. */
+  openAiCompatibleBaseUrl: Schema.optionalKey(Schema.NullOr(CompatibleBaseUrl)),
+  /** Optional for that provider: many self-hosted servers need none. Null removes the saved key. */
+  openAiCompatibleApiKey: Schema.optionalKey(Schema.NullOr(CompatibleKey)),
   openAiApiKey: Schema.optionalKey(Schema.NullOr(ProviderKey)),
   anthropicApiKey: Schema.optionalKey(Schema.NullOr(ProviderKey)),
   languageModel: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(150), Schema.isPattern(/^[A-Za-z0-9_.:/-]+$/))),
@@ -621,7 +634,6 @@ export const NoteAttendeesDTO = Schema.Struct({
 }).annotate({ identifier: "NoteAttendeesDTO" })
 export type NoteAttendeesDTO = typeof NoteAttendeesDTO.Type
 export const NoteMeetingTimeDTO = Schema.Struct({ startAt: Timestamp, endAt: Timestamp, allDay: Schema.Boolean }).annotate({ identifier: "NoteMeetingTimeDTO" })
-export const NoteFolderRefDTO = Schema.Struct({ id: UUID, name: Schema.String.check(Schema.isMaxLength(200)) }).annotate({ identifier: "NoteFolderRefDTO" })
 export const NoteSummaryDTO = Schema.Struct({
   id: UUID,
   title: NoteTitle,
@@ -643,7 +655,6 @@ export const NoteSummaryDTO = Schema.Struct({
   meeting: Schema.NullOr(NoteMeetingTimeDTO),
   attendees: NoteAttendeesDTO,
   organizationId: Schema.NullOr(UUID),
-  folders: Schema.Array(NoteFolderRefDTO).check(Schema.isMaxLength(8)),
 }).annotate({ identifier: "NoteSummaryDTO" })
 export type NoteSummaryDTO = typeof NoteSummaryDTO.Type
 /** Newest meeting first: date, then creation time, then ID, all descending. `nextCursor`
@@ -686,8 +697,8 @@ export const NoteSearchPageDTO = Schema.Struct({
 export type NoteSearchPageDTO = typeof NoteSearchPageDTO.Type
 
 export const WireSchemas = {
-  NoteAttendeeDTO, NoteAttendeesDTO, NoteMeetingTimeDTO, NoteFolderRefDTO, NoteSummaryDTO, NoteSummariesPageDTO, NoteSearchTextPartDTO, NoteSearchExcerptDTO, NoteSearchResultDTO, NoteSearchPageDTO,
-  LanguageModelSelection, TranscriptionModelSelection, LiveTranscriptionModelSelection, ProviderStatusDTO, AIModelDTO, ModelCatalogInput, ModelCatalogDTO, ChatModelsDTO,
+  NoteAttendeeDTO, NoteAttendeesDTO, NoteMeetingTimeDTO, NoteSummaryDTO, NoteSummariesPageDTO, NoteSearchTextPartDTO, NoteSearchExcerptDTO, NoteSearchResultDTO, NoteSearchPageDTO,
+  LanguageModelSelection, LiveTranscriptionModelSelection, ProviderStatusDTO, AIModelDTO, ModelCatalogInput, ModelCatalogDTO, ChatModelsDTO,
   McpWorkspaceDTO,McpAuthorizationDTO,McpConnectionDTO,McpConnectionsDTO,
   UploadNoteAttachmentInput,NoteAttachmentDTO,AgentBriefDTO,UpdateAgentBriefInput,
   OrganizationDTO, OrganizationsDTO, OrganizationMemberDTO, OrganizationInvitationDTO, OrganizationDetailsDTO, OrganizationInvitationsDTO, CreateOrganizationInput, UpdateOrganizationInput, SetActiveOrganizationInput, InviteOrganizationMemberInput, UpdateOrganizationMemberRoleInput,
@@ -695,13 +706,13 @@ export const WireSchemas = {
   UserDTO, AuthSessionDTO, UsersDTO, CreateUserInput, UpdateUserRoleInput, CalendarPreferencesDTO,
   SignInSettingsDTO, UpdateSignInSettingsInput, AuthMethodsDTO, AppHandoffInput, AppHandoffDTO, AppHandoffExchangeInput, AppHandoffTokenDTO,
   AdminSettingsDTO, UpdateAdminSettingsInput, CalendarDTO, CreateCalendarInput, UpdateCalendarInput, CalendarEventDTO,
-  UploadAudioChunkInput, AudioChunkDTO, ChatMessageDTO, ChatInput, ChatAnswerDTO, ChatCitationDTO, ChatToolMeetingDTO, ChatToolProgressDTO, ChatStreamEventDTO,
-  EvidenceRequestDTO, EvidenceQuoteDTO, EvidenceDTO,
+  ChatMessageDTO, ChatInput, ChatAnswerDTO, ChatCitationDTO, ChatToolMeetingDTO, ChatToolProgressDTO, ChatStreamEventDTO,
+  EvidenceRequestDTO, EvidenceQuoteDTO, EvidenceDTO, EvidenceStreamEventDTO,
   TranscriptSegmentDTO, NoteDTO, CreateNoteInput, UpdateNoteInput, ImportedRecordingState, ImportNoteInput, ImportedSegmentIdDTO, ImportedNoteDTO, RecordingCommandDTO, GenerateNotesCommandDTO, GenerationProgressDTO,
   SharedNoteDTO, CreateShareInput, ShareDTO, CreatedShareDTO, HealthDTO, DeletedDTO, ApiErrorDTO,
   DownloadFileDTO, MacDownloadDTO, DownloadsDTO,
   StorageSettingsDTO, UpdateStorageSettingsInput, StorageTestInput, StorageTestDTO,
-  AppsSettingsDTO, UpdateAppsSettingsInput,
+  AppsSettingsDTO, UpdateAppsSettingsInput, OpenAICompatibleSettingsDTO,
   OnboardingStepsDTO, OnboardingDTO, OnboardingStepInput,
   GoogleVerificationInput, GoogleVerificationStartDTO, GoogleVerificationStatusDTO, SwitchToPasswordInput,
 } as const

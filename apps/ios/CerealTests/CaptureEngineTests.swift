@@ -170,25 +170,6 @@ struct CapturePipelineTests {
         #expect(ContinuousCapture.frames(inFile: url) == 32_000)
     }
 
-    @Test func partBoundariesAreReportedOnceEachAsTheCaptureGrows() throws {
-        let root = InjectedAudio.directory()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let reported = Reported()
-        var options = CapturePipeline.Options()
-        options.partFrames = 2 * 16_000
-        let pipeline = try CapturePipeline(url: root.appendingPathComponent("capture-0.wav"), options: options,
-                                           onPartBoundary: { reported.add($0) })
-        InjectedAudio.feed({ pipeline.append($0) }, format: InjectedAudio.builtIn, from: 0, seconds: 7)
-        pipeline.finish()
-        let frames = reported.values
-        #expect(frames.count == 3)
-        // Reported as soon as the boundary sample is in the file: within one input buffer of it.
-        for (index, value) in frames.enumerated() {
-            let boundary = Int64(index + 1) * 32_000
-            #expect(value >= boundary && value < boundary + 1_400)
-        }
-    }
-
     @Test func theHeaderOnDiskIsNeverMoreThanASecondBehindTheAudio() throws {
         let root = InjectedAudio.directory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -544,29 +525,13 @@ struct EngineRecorderTests {
         #expect(recorder.stopSegment() == nil)
         #expect(CaptureRecovery.scan(roots: [root]).isEmpty)
     }
-
-    @Test func partBoundariesReachTheOwnerOnTheMainActor() async throws {
-        let root = InjectedAudio.directory()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let input = ManualCaptureInput()
-        let recorder = recorder(input, root: root)
-        var boundaries: [Int64] = []
-        recorder.partSeconds = 1
-        recorder.onPartBoundary = { boundaries.append($0) }
-        recorder.startSegment(noteID: UUID())
-        input.feed(format: InjectedAudio.builtIn, from: 0, seconds: 3.5)
-        try await Task.sleep(for: .milliseconds(100))
-        #expect(boundaries.count == 3)
-        #expect(boundaries.enumerated().allSatisfy { $1 >= Int64($0 + 1) * 16_000 })
-        recorder.stopSegment()
-    }
 }
 
 // MARK: - Crash recovery
 
 @MainActor
 struct ContinuousCaptureRecoveryTests {
-    @Test func aCaptureKilledMidMeetingIsRecoveredToItsLastWrittenSampleAndCutWithoutLoss() throws {
+    @Test func aCaptureKilledMidMeetingIsMeasuredToItsLastWrittenSample() throws {
         let root = InjectedAudio.directory()
         defer { try? FileManager.default.removeItem(at: root) }
         let noteID = UUID()
@@ -595,18 +560,6 @@ struct ContinuousCaptureRecoveryTests {
         #expect(capture.duration == Double(writtenAtKill) / 16_000)
         // Recovery read the file and changed nothing in it.
         #expect(try Data(contentsOf: url).prefix(44) == header)
-
-        // The recovered capture is cut into parts that join to it byte for byte, and parts
-        // already cut before the kill keep their identity.
-        let outbox = try AudioOutbox(instance: InstanceURL("https://example.test"), principalID: "00000000-0000-4000-8000-000000000001", root: root.appendingPathComponent("outbox"))
-        let id = noteID.uuidString.lowercased()
-        let before = try outbox.stageParts(noteID: id, capture: url, availableFrames: 30 * 16_000 + 5, partFrames: 30 * 16_000, isFinal: false, startMs: 60_000, sequence: 0)
-        #expect(before.count == 1)
-        let after = try outbox.stageParts(noteID: id, capture: url, availableFrames: writtenAtKill, partFrames: 30 * 16_000, isFinal: true, startMs: 60_000, sequence: 1)
-        #expect(after.map(\.startMs) == [90_000, 120_000])
-        var joined = Data()
-        for entry in before + after { joined.append(try outbox.audioData(for: entry).dropFirst(44)) }
-        #expect(joined == (try Data(contentsOf: url).dropFirst(44)))
         withExtendedLifetime(pipeline) {}
     }
 
@@ -657,24 +610,24 @@ struct CaptureEnginePolicyTests {
         #expect(!((LegacyRecorderBackend() as any CaptureBackend) is any ContinuousCaptureBackend))
         // Unless the key is set in this process, a recorder gets the engine.
         if !CaptureEnginePolicy.usesLegacyRecorder() { #expect(CaptureEnginePolicy.makeBackend() is EngineCaptureBackend) }
+        // A recording to a server, whose only transcript is the live stream, always gets the engine.
+        #expect(CaptureEnginePolicy.makeContinuousBackend() is EngineCaptureBackend)
     }
 
-    @Test func partsOfAContinuousCaptureAreThirtySecondsAndFixedWhenItBegins() throws {
-        #expect(ServerRecordingController.partSeconds == 30)
-        var history = ServerCaptureHistory(baseOffsetMs: 1_000, nextSequence: 0, segments: [])
-        history.prepareForResume(remoteChunks: [], remoteDurationMs: 61_000, localEndMs: 0)
+    @Test func aCapturesPlaceOnTheNoteTimelineIsFixedWhenItBegins() throws {
+        var history = ServerCaptureHistory(baseOffsetMs: 1_000, segments: [])
+        history.prepareForResume(remoteDurationMs: 61_000)
         // The capture's place on the note timeline is known before any audio exists.
-        #expect(history.begin(fileName: "capture-0.wav", partSeconds: 30) == 61_000)
-        #expect(history.partSeconds?["capture-0.wav"] == 30)
+        #expect(history.begin(fileName: "capture-0.wav") == 61_000)
         // When it finishes, it keeps that place, and the next capture follows it.
         history.append(CaptureSegment(index: 0, startedAt: .now, duration: 95.5, fileName: "capture-0.wav"))
         #expect(history.segmentOffsets?["capture-0.wav"] == 61_000)
         #expect(history.nextStartMs == 156_500)
-        #expect(history.begin(fileName: "capture-1.wav", partSeconds: 30) == 156_500)
-        // The ledger round-trips, and a ledger written before this field existed still decodes.
+        #expect(history.begin(fileName: "capture-1.wav") == 156_500)
+        // The ledger round-trips, and one an earlier version wrote, with its delivery fields, still decodes.
         let restored = try JSONDecoder().decode(ServerCaptureHistory.self, from: JSONEncoder().encode(history))
-        #expect(restored.partSeconds == history.partSeconds)
-        let old = try JSONDecoder().decode(ServerCaptureHistory.self, from: Data(#"{"baseOffsetMs":0,"nextSequence":0,"segments":[]}"#.utf8))
-        #expect(old.partSeconds == nil)
+        #expect(restored.segmentOffsets == history.segmentOffsets && restored.nextStartMs == 156_500)
+        let old = try JSONDecoder().decode(ServerCaptureHistory.self, from: Data(#"{"baseOffsetMs":0,"nextSequence":4,"segments":[],"partSeconds":{"capture-0.wav":30},"serverMissingSince":0}"#.utf8))
+        #expect(old.baseOffsetMs == 0 && old.needsStop == nil && old.needsNotes == nil)
     }
 }

@@ -37,14 +37,41 @@ test("allow-list entries are a full address or a whole domain, compared without 
   for (const bad of ["", "example.org", "someone@", "someone@example", "@", "@example", "a@b@c.test", "some one@example.test", "@.test", "someone@example..test", "x".repeat(250) + "@example.test"]) expect(normalizeAllowedEmail(bad)).toBeNull()
   const allowed = ["someone@example.com", "@example.org"]
   expect(emailAllowed("Someone@Example.com", allowed)).toBe(true)
-  expect(emailAllowed("anyone@EXAMPLE.org", allowed)).toBe(true)
-  for (const address of ["other@example.com", "someone@example.com.evil.test", "anyone@sub.example.org", "anyone@notexample.org", "anyone@example.org.evil.test", "@example.org", "example.org", ""]) expect(emailAllowed(address, allowed)).toBe(false)
-  expect(emailAllowed("anyone@example.org", [])).toBe(false)
+  expect(emailAllowed("anyone@EXAMPLE.org", allowed, "Example.org")).toBe(true)
+  for (const address of ["other@example.com", "someone@example.com.evil.test", "anyone@sub.example.org", "anyone@notexample.org", "anyone@example.org.evil.test", "@example.org", "example.org", ""]) expect(emailAllowed(address, allowed, "example.org")).toBe(false)
+  expect(emailAllowed("anyone@example.org", [], "example.org")).toBe(false)
+})
+
+test("a domain entry admits only the organisation's Google Workspace accounts (hd); a full address admits any verified account", () => {
+  // A consumer Google account opened with a company address has no hd, and stays "verified" after its owner
+  // has left the company and lost the mailbox.
+  expect(emailAllowed("leaver@example.org", ["@example.org"])).toBe(false)
+  expect(emailAllowed("leaver@example.org", ["@example.org"], null)).toBe(false)
+  expect(emailAllowed("leaver@example.org", ["@example.org"], "")).toBe(false)
+  expect(emailAllowed("leaver@example.org", ["@example.org"], "other.example")).toBe(false)
+  expect(emailAllowed("leaver@example.org", ["@example.org"], "sub.example.org")).toBe(false)
+  // Listed by address, the same account gets in, hd or not.
+  expect(emailAllowed("leaver@example.org", ["@example.org", "leaver@example.org"])).toBe(true)
+  expect(emailAllowed("Leaver@Example.org", ["leaver@example.org"], "other.example")).toBe(true)
+  // The organisation's own Workspace account gets in through the domain entry.
+  expect(emailAllowed("staff@example.org", ["@example.org"], "example.org")).toBe(true)
+})
+
+test("an allow-list domain entry for a mail service anyone can sign up with is refused, with the reason", async () => {
+  const f = fixture()
+  for (const entry of ["@gmail.com", "@GMAIL.com", "@yahoo.co.uk", "@outlook.de", "@icloud.com", "@privaterelay.appleid.com", "@mail.ru", "@comcast.net"]) {
+    const refused = await failure(f.admin.updateSettings({ signIn: { allowedEmails: ["someone@example.test", entry] } }))
+    expect(refused.error, entry).toBe("invalid_request")
+    expect(refused.message, entry).toBe(`Anyone can sign up for an address at ${entry.slice(1).toLowerCase()}, so the whole domain cannot be allowed. Add people’s full addresses instead`)
+  }
+  // A full address at such a provider is fine, and so is an organisation's (or a school's) domain.
+  const saved = await run(f.admin.updateSettings({ signIn: { allowedEmails: ["someone@gmail.com", "@example.org", "@stanford.edu"] } }))
+  expect(saved.signIn?.allowedEmails).toEqual(["someone@gmail.com", "@example.org", "@stanford.edu"])
 })
 
 test("sign-in settings: defaults, at least one method, Google only with a stored client, and a sealed secret that is never returned", async () => {
   const f = fixture()
-  expect((await run(f.admin.getSettings())).signIn).toEqual({ password: true, google: false, allowedEmails: [], googleClientId: null, googleClientSecretSet: false,
+  expect((await run(f.admin.getSettings())).signIn).toEqual({ password: true, google: false, allowedEmails: [], googleClientId: null, googleClientSecretSet: false, googleClientSecretHint: null,
     googleRedirectUris: ["https://notes.example.test/api/v1/auth/google/callback", "https://notes.example.test/api/integrations/google/callback"], googleNeedsHttps: false })
   expect(await f.admin.signInPolicy()).toEqual({ password: true, google: false, allowedEmails: [], googleCredentials: null, instanceName: "Cereal" })
 

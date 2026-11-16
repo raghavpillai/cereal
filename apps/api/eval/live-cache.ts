@@ -124,7 +124,7 @@ const voice=(speaker:string,channel:"mic"|"system")=>{const known=numbers[channe
 const stored:TranscriptSegmentDTO[]=built.turns.map(turn=>{const n=voice(turn.speaker,turn.channel);return {id:stableUuid("live-cache",fixture.id,turn.index),channel:turn.channel,speakerId:`${turn.channel}:n:${n}`,speakerLabel:`Speaker ${n}`,text:turn.text,isFinal:true,startMs:turn.startMs,endMs:turn.endMs}})
 const note=fixtureNote(fixture,{now,level:"none",capture:"stream",segments:mode==="finished"?stored:[],recording:mode!=="finished"}),repository=makeMemoryRepository([note])
 let atMs=0
-const hub:LiveHub={size:1,full:()=>false,connect:async()=>{throw new Error("not used")},active:()=>true,pendingRange:()=>null,flush:async()=>{},end:async()=>{},dispose:async()=>{},
+const hub:LiveHub={size:1,full:()=>false,connect:async()=>{throw new Error("not used")},active:()=>true,flush:async()=>{},end:async()=>{},dispose:async()=>{},
   snapshot:()=>{
     const turn=built.turns.find(candidate=>candidate.startMs<atMs&&candidate.endMs>atMs)
     if(!turn)return {asOfMs:atMs,state:"live" as const,tail:[]}
@@ -134,7 +134,7 @@ const hub:LiveHub={size:1,full:()=>false,connect:async()=>{throw new Error("not 
   }}
 const meeting=meetingContextFor(fixture,now)
 const providers=makeProviderServices({languageProvider:provider,languageModel:model,toolModel:model,fetch:metered,...({onLanguageUsage:()=>{}} as object)})
-const processing=makeProcessingService(repository,{worker:false,providers,...(mode==="finished"?{}:{live:hub}),meetingContext:()=>Effect.succeed(meeting)})
+const processing=makeProcessingService(repository,{providers,...(mode==="finished"?{}:{live:hub}),meetingContext:()=>Effect.succeed(meeting)})
 
 const flat=(messages:Call["messages"])=>messages.map(message=>`${message.role}\u0001${typeof message.content==="string"?message.content:(message.content as Array<{text?:string}>).map(part=>part.text??"").join("")}`).join("\u0002")
 const shared=(a:string,b:string)=>{let i=0;const n=Math.min(a.length,b.length);while(i<n&&a[i]===b[i])i++;return i}

@@ -847,7 +847,7 @@ fn welcome_scene(s: &Scene, done: bool) -> AnyElement {
     // The recording control at the foot of the note, as in the app.
     let listening = !done && !s.reduced && (0.3..2.7).contains(&s.since);
     let level = if listening || writing {
-        crate::onboarding::simulated_level(Channel::Microphone, s.since + 0.4).max(0.25)
+        crate::onboarding::simulated_level(Channel::Microphone, polled(s.since + 0.4)).max(0.25)
     } else {
         0.
     };
@@ -1349,7 +1349,7 @@ fn pill_scene(s: &Scene) -> AnyElement {
         .aim(("welcome-pill-press", 0), if trying.is_some_and(|at| at < 0.14) { 1. } else { 0. }, SNAPPY);
     let level = match trying {
         Some(at) if at < TRY_OPEN.1 + 0.3 => {
-            crate::onboarding::simulated_level(Channel::Microphone, at + 1.3).max(0.12)
+            crate::onboarding::simulated_level(Channel::Microphone, polled(at + 1.3)).max(0.12)
         }
         _ => 0.,
     };
@@ -1387,10 +1387,19 @@ fn pill_scene(s: &Scene) -> AnyElement {
                 1.3 * m.k,
                 1.8 * m.k,
                 12. * m.k,
-                rgb(0xce9d00).into(),
+                crate::recording_view::WAVEFORM.into(),
             )),
     );
     frame.into_any_element()
+}
+
+/// The scene's made-up level as the app would see it: sampled on the
+/// recording's 80 ms poll, not on every frame. The bars ease for 300 ms to
+/// each new level, so a level that changed every frame would keep restarting
+/// their glide and they would barely move.
+fn polled(seconds: f32) -> f32 {
+    const POLL: f32 = 0.08;
+    (seconds / POLL).floor() * POLL
 }
 
 #[cfg(test)]

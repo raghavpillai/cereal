@@ -83,6 +83,8 @@ public struct NoteLink: Hashable, Sendable {
     public let noteID: String
 
     public var webURL: URL { origin.endpoint(["notes", noteID]) }
+    /// The page that chats with this note's transcript, which the foot of its generated notes links to.
+    public var transcriptChatURL: URL { origin.endpoint(["notes", noteID, "chat"]) }
 }
 
 /// What the browser hands back after a sign-in: `cereal://auth?code=…&state=…&server=…`.
@@ -107,6 +109,12 @@ public enum AppLink: Equatable, Sendable {
 
     public init?(_ url: URL) { self.init(text: url.absoluteString) }
 
+    /// The note whose transcript chat `url` is (`https://<server>/notes/<id>/chat`), or nil for any other link.
+    public static func transcriptChat(_ url: URL) -> NoteLink? {
+        guard case .note(let link)? = AppLink(url), url.path.split(separator: "/").last == "chat" else { return nil }
+        return link
+    }
+
     /// A link as text, for one typed or pasted. Surrounding white space is ignored.
     public init?(text: String) {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -128,14 +136,16 @@ public enum AppLink: Equatable, Sendable {
         !text.isEmpty && text.utf8.count <= maximumLength && text.utf8.allSatisfy { $0 > 0x20 && $0 < 0x7f && $0 != 0x5c }
     }
 
-    /// `https://<server>/s/<token>` or `https://<server>/notes/<id>`. The path is
-    /// matched whole and unescaped, so an encoded or dotted segment is not a link.
-    /// A query or fragment added along the way is dropped.
+    /// `https://<server>/s/<token>`, `https://<server>/notes/<id>`, or that note's
+    /// transcript chat, `https://<server>/notes/<id>/chat`, which opens the note.
+    /// The path is matched whole and unescaped, so an encoded or dotted segment is
+    /// not a link. A query or fragment added along the way is dropped.
     private static func web(_ components: URLComponents) -> AppLink? {
         guard let origin = ServerOrigin(components: components) else { return nil }
         let path = components.percentEncodedPath
         guard !path.contains("%") else { return nil }
-        let segments = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        var segments = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        if segments.count == 4, segments[1] == "notes", segments[3] == "chat" { segments.removeLast() }
         guard segments.count == 3, segments[0].isEmpty else { return nil }
         switch segments[1] {
         case "s":

@@ -119,23 +119,6 @@
       ],
       "additionalProperties": true
     },
-    "NoteFolderRefDTO": {
-      "type": "object",
-      "properties": {
-        "id": {
-          "$ref": "#/$defs/UUID"
-        },
-        "name": {
-          "type": "string",
-          "maxLength": 200
-        }
-      },
-      "required": [
-        "id",
-        "name"
-      ],
-      "additionalProperties": true
-    },
     "NoteSummaryDTO": {
       "type": "object",
       "properties": {
@@ -249,13 +232,6 @@
               "type": "null"
             }
           ]
-        },
-        "folders": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/NoteFolderRefDTO"
-          },
-          "maxItems": 8
         }
       },
       "required": [
@@ -276,8 +252,7 @@
         "excerpt",
         "meeting",
         "attendees",
-        "organizationId",
-        "folders"
+        "organizationId"
       ],
       "additionalProperties": true
     }

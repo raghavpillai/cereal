@@ -18,7 +18,7 @@ const args = process.argv.slice(2)
 const value = (name: string) => { const index = args.indexOf(`--${name}`); return index >= 0 ? args[index + 1] : undefined }
 const directory = value("fixture"), base = value("base") ?? "http://127.0.0.1:3000", token = process.env.ADMIN_API_TOKEN
 if (!directory || !token) { console.error("usage: bun --env-file=.env scripts/live/check-deployed.ts --fixture <directory>"); process.exit(2) }
-const limitSeconds = Number(value("seconds") ?? 80), askAt = Number(value("ask-at") ?? 45), partSeconds = 30
+const limitSeconds = Number(value("seconds") ?? 80), askAt = Number(value("ask-at") ?? 45)
 
 const manifest: FixtureManifest = JSON.parse(await readFile(join(directory, "manifest.json"), "utf8"))
 const rate = manifest.sampleRate, channels = Object.keys(manifest.channels) as Array<"mic" | "system">
@@ -47,15 +47,8 @@ try {
   console.log(`ready: ${ready!.provider} ${ready!.model}; streaming ${(totalSamples / rate).toFixed(0)} s on ${channels.join(" + ")}`)
 
   const frameSamples = Math.round(rate / 10), endAt = new Map<number, number>()
-  const uploads: Promise<unknown>[] = []
-  let cursor = 0, nextPart = 0, chat: Promise<void> | undefined
-  const uploadDue = (captured: number) => {
-    while ((nextPart + 1) * partSeconds * rate <= captured || (captured >= totalSamples && nextPart * partSeconds * rate < totalSamples)) {
-      const from = nextPart * partSeconds * rate, to = Math.min(totalSamples, from + partSeconds * rate), sequence = nextPart++
-      for (const channel of channels) uploads.push(api(`/notes/${note.id}/audio/chunks/${crypto.randomUUID()}`, "PUT", { channel, sequence, startMs: Math.round(from * 1000 / rate), audioBase64: Buffer.from(wavFile(pcm[channel].slice(from * 2, to * 2), rate)).toString("base64") }))
-      if (to >= totalSamples) break
-    }
-  }
+  let cursor = 0, chat: Promise<void> | undefined
+
   const ask = async () => {
     const lastLine = [...lines].reverse().find(line => endAt.has(lines.indexOf(line)))
     const asked = now()
@@ -71,7 +64,6 @@ try {
   const origin = performance.now()
   while (cursor < totalSamples) {
     const captured = Math.min(totalSamples, Math.floor((performance.now() - origin) * rate / 1000))
-    uploadDue(captured)
     if (!chat && captured >= askAt * rate) chat = ask().catch(error => { failed = true; console.log(`  chat failed: ${error}`) })
     const end = Math.min(captured, cursor + frameSamples)
     if (end - cursor < frameSamples && end < totalSamples) { await Bun.sleep(2); continue }
@@ -83,11 +75,9 @@ try {
   await chat
   socket.send(JSON.stringify({ type: "mark", kind: "end", atSample: Object.fromEntries(channels.map(channel => [channel, totalSamples])) }))
   for (const deadline = performance.now() + 8000; closeCode === undefined && performance.now() < deadline;) await Bun.sleep(20)
-  uploadDue(totalSamples)
-  await Promise.all(uploads)
   const stopAt = performance.now()
   await api(`/notes/${note.id}/recording`, "POST", { command: "stop" })
-  console.log(`socket closed with ${closeCode}; stop answered in ${Math.round(performance.now() - stopAt)} ms; ${uploads.length} durable parts uploaded`)
+  console.log(`socket closed with ${closeCode}; stop answered in ${Math.round(performance.now() - stopAt)} ms`)
 
   const delays = (type: "interim" | "final") => lines.flatMap((line, index) => {
     const pattern = new RegExp(line.probe, "i"), lineStartMs = line.firstSample * 1000 / rate

@@ -18,6 +18,26 @@
       ],
       "additionalProperties": true
     },
+    "LiveSpeakerRelabel": {
+      "type": "object",
+      "properties": {
+        "segmentId": {
+          "type": "string"
+        },
+        "speakerId": {
+          "type": "string"
+        },
+        "speakerLabel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "segmentId",
+        "speakerId",
+        "speakerLabel"
+      ],
+      "additionalProperties": true
+    },
     "LiveSpeakersMessage": {
       "type": "object",
       "properties": {
@@ -31,6 +51,12 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/LiveSpeakerMerge"
+          }
+        },
+        "relabels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LiveSpeakerRelabel"
           }
         }
       },

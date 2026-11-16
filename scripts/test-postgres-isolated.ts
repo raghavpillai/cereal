@@ -7,7 +7,7 @@ import {resolve,dirname} from "node:path"
 const context=process.env.TEST_DOCKER_CONTEXT??"colima-meeting-notes",container=process.env.TEST_POSTGRES_CONTAINER??"meeting-notes-db-1"
 const suffix=randomBytes(6).toString("hex"),name="mn_test_"+suffix,password=randomBytes(24).toString("hex")
 const root=resolve(import.meta.dir,"..")
-async function run(args:string[],input?:string){const p=Bun.spawn(args,{cwd:root,stdin:input===undefined?"ignore":new Blob([input]),stdout:"pipe",stderr:"pipe"});const[out,err,code]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);if(code!==0){console.error((out+err).replaceAll(password,"[test secret]"));throw new Error("Isolated PostgreSQL command failed")}if(args.includes("test"))console.log((out+err).replaceAll(password,"[test secret]"))}
+async function run(args:string[],input?:string){const p=Bun.spawn(args,{cwd:root,stdin:input===undefined?"ignore":new Blob([input]),stdout:"pipe",stderr:"pipe"});const[out,err,code]=await Promise.all([new Response(p.stdout).text(),new Response(p.stderr).text(),p.exited]);if(code!==0){console.error((out+err).replaceAll(password,"[test secret]"));throw new Error("Isolated PostgreSQL command failed (exit "+code+")")}if(args.includes("test"))console.log((out+err).replaceAll(password,"[test secret]"))}
 const psql=(database:string,sql:string)=>run(["docker","--context",context,"exec","-i",container,"psql","-U","meeting_notes","-d",database,"-v","ON_ERROR_STOP=1"],sql)
 let created=false
 try{
@@ -25,11 +25,12 @@ try{
   // process. Keep real-login suites isolated without relaxing production limits.
   // The notes list benchmark builds a 500-note account and reads an 11 MB response. In the same
   // process as every other file it is killed for memory (exit 137) in a small Docker VM, so it runs alone.
-  const separate=["auth-postgres.test.ts","sign-in-postgres.test.ts","mcp-auth-postgres.test.ts","organizations-postgres.test.ts","note-summaries-postgres.test.ts","onboarding-postgres.test.ts","plain-http-postgres.test.ts","google-claim-postgres.test.ts","import-postgres.test.ts"]
+  const separate=["auth-postgres.test.ts","sign-in-postgres.test.ts","mcp-auth-postgres.test.ts","organizations-postgres.test.ts","note-summaries-postgres.test.ts","onboarding-postgres.test.ts","plain-http-postgres.test.ts","google-claim-postgres.test.ts","import-postgres.test.ts","import.test.ts"]
   const tests=(await readdir(resolve(root,"apps/api/test"))).filter(name=>name.endsWith(".test.ts")&&!separate.includes(name)).map(name=>"apps/api/test/"+name)
   for(const files of [["apps/api/test/auth-postgres.test.ts"],["apps/api/test/sign-in-postgres.test.ts"],tests,["apps/api/test/note-summaries-postgres.test.ts"],
    // The note import, on its own for the same reason as the benchmark: it sends a 24 MB request of 50,000 segments.
-   ["apps/api/test/import-postgres.test.ts"],["apps/api/test/mcp-auth-postgres.test.ts"],["apps/api/test/organizations-postgres.test.ts"],
+   // Its in-memory twin sends the same request, and is killed the same way among the other files.
+   ["apps/api/test/import-postgres.test.ts"],["apps/api/test/import.test.ts"],["apps/api/test/mcp-auth-postgres.test.ts"],["apps/api/test/organizations-postgres.test.ts"],
    // On its own and last: it returns the bootstrap owner to "never claimed" and claims it again.
    ["apps/api/test/onboarding-postgres.test.ts"],
    // Real sign-ins over plain HTTP addresses, on their own for the same reason as the other sign-in files.

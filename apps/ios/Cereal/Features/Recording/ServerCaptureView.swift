@@ -24,8 +24,22 @@ enum CaptureLeaveGesture {
     }
 }
 
+/// What an error says on screen. A cancellation is not a failure the person
+/// can act on (the screen went away, or the request was superseded), so it says nothing.
+enum ErrorText {
+    static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let failure = error as? APIClientError, failure == .transport(.cancelled) { return true }
+        let underlying = error as NSError
+        return underlying.domain == NSURLErrorDomain && underlying.code == NSURLErrorCancelled
+    }
+    static func shown(_ error: Error) -> String? { isCancellation(error) ? nil : error.localizedDescription }
+}
+
 struct ServerCaptureView: View {
     let noteID: String
+    /// The note was made for this recording: closed while it still holds nothing, it is removed.
+    var discardsIfEmpty = false
     @Environment(ServerNotesModel.self) private var server
     @Environment(ServerRecordingController.self) private var recording
     @Environment(\.account) private var account
@@ -80,8 +94,20 @@ struct ServerCaptureView: View {
                     // While recording, the only status is the live stream's, and only when
                     // it has something to say. The line follows the stream by itself.
                     LiveStatusLine(live: live, font: .system(size: 13), color: Theme.textSecondary)
-                } else if !active && ownsCapture && recording.isSyncing {
-                    Text("Transcribing...").font(.system(size: 13)).foregroundStyle(Theme.textSecondary)
+                } else if finishing, let live = recording.transcript(for: ref) {
+                    // After Stop, while the stream hands over what it has not sent yet.
+                    LiveStatusLine(live: live, font: .system(size: 13), color: Theme.textSecondary, finishing: true)
+                } else if let after = afterStopLine {
+                    // After Stop: the notes being written, or why there are none.
+                    VStack(spacing: 4) {
+                        Text(after).font(.system(size: 13)).foregroundStyle(Theme.textSecondary).multilineTextAlignment(.center)
+                        if let missing {
+                            Text(missing).font(.system(size: 13)).foregroundStyle(Theme.danger).multilineTextAlignment(.center)
+                        }
+                    }.transition(motion.fade)
+                } else if let missing {
+                    // What this recording could not transcribe stays said.
+                    Text(missing).font(.system(size: 13)).foregroundStyle(Theme.danger).multilineTextAlignment(.center)
                         .transition(motion.fade)
                 }
                 if focus == nil && active {
@@ -95,8 +121,8 @@ struct ServerCaptureView: View {
                             .disabled(recording.isBusy || generating)
                             .glassMorph("pill", in: glass)
                         if showsGenerate, let note {
-                            GenerateButton(title: note.generatedRevision == note.transcriptRevision ? "View notes" : note.generatedRevision == nil ? "Generate notes" : "Regenerate notes", busy: generating) { generate() }
-                                .disabled(recording.isSyncing)
+                            GenerateButton(title: note.generatedRevision == note.transcriptRevision ? "View notes" : note.generatedRevision == nil ? "Generate notes" : "Regenerate notes",
+                                           busy: generating || writingNotes) { generate() }
                                 .glassMorph("generate", in: glass)
                         }
                         if active && focus == nil {
@@ -164,14 +190,23 @@ struct ServerCaptureView: View {
         .task {
             guard !loaded else { return }
             do {
-                let value = try await server.note(id: noteID)
+                // A read that was superseded (the account's connection was renewed under it) is asked again.
+                var value: NoteDTO?
+                for attempt in 0..<3 where value == nil {
+                    do { value = try await server.note(id: noteID) }
+                    catch where ErrorText.isCancellation(error) {
+                        guard attempt < 2 else { throw error }
+                        try await Task.sleep(for: .milliseconds(300))
+                    }
+                }
+                guard let value else { return }
                 initial = value; title = value.title; serverTitle = value.title; text = value.body; loaded = true
                 // Returning to a recording in progress neither restarts it nor raises the keyboard.
                 let returning = active
                 if !returning { await recording.start(note: value, in: account) }
                 if text.isEmpty && !returning { focus = .body }
                 meetingContext = try? await server.noteContext(id: noteID)
-            } catch { self.error = error.localizedDescription }
+            } catch { if let shown = ErrorText.shown(error) { self.error = shown } }
         }
         .sheet(isPresented: $showingMeeting) { MeetingContextSheet(noteID: noteID, initial: meetingContext) {
             meetingContext = $0
@@ -200,27 +235,49 @@ struct ServerCaptureView: View {
             message: { Text("File attachments are not supported by this instance yet.") }
     }
 
+    /// After Stop, until they are written: the notes this recording's Stop is writing.
+    private var writingNotes: Bool { ownsCapture && recording.isGeneratingNotes(ref) }
+    /// After Stop, while the capture's audio is still being handed to the server.
+    private var finishing: Bool { ownsCapture && !active && recording.isFinishingTranscript(ref) }
+    /// The stretches of this recording that could not be transcribed, once it has stopped.
+    private var missing: String? {
+        guard ownsCapture, !active, let live = recording.transcript(for: ref) else { return nil }
+        return TranscriptPresentation.untranscribedText(live.gaps)
+    }
     private var showsGenerate: Bool {
         guard !active, let note else { return false }
-        return note.transcriptRevision > 0 && !recording.hasPendingAudio(ref)
+        return writingNotes || note.transcriptRevision > 0
     }
-    /// Drives the fade between the error, "Transcribing..." and nothing.
+    /// The line under the editor once the recording has stopped.
+    private var afterStopLine: String? {
+        guard !active, ownsCapture, let note else { return nil }
+        if finishing { return LiveStatusText.finishing }
+        if writingNotes { return "Writing your notes from the transcript…" }
+        return ServerRecordingController.endedWithoutTranscript(note) ? ServerRecordingController.noTranscript : nil
+    }
+    /// Drives the fade between the error, the line after Stop and nothing.
     private var statusLine: String {
-        error ?? (ownsCapture ? recording.error : nil) ?? (!active && ownsCapture && recording.isSyncing ? "syncing" : "")
+        error ?? (ownsCapture ? recording.error : nil) ?? afterStopLine ?? ""
     }
     private var date: Date {
         note.flatMap { MeetingPresentation.metadataDate(createdAt: $0.createdAt, fallbackDate: $0.date, meeting: meetingContext?.meeting) } ?? .now
     }
     private func start() { if let note { Task { await recording.start(note: note, in: account) } } }
-    private func stop() { focus = nil; if active { recording.stop() } }
+    /// Stops the recording. Its notes are written from the transcript straight
+    /// away, after what was typed here has been saved.
+    private func stop() {
+        focus = nil
+        guard active else { return }
+        saveTask?.cancel()
+        recording.stop(beforeNotes: { _ = try? await save() })
+    }
     private func queueSave() {
         guard loaded else { return }
         unsaved = true
         saveTask?.cancel()
         saveTask = Task {
             do { try await Task.sleep(for: .milliseconds(400)); try await save() }
-            catch is CancellationError { }
-            catch { self.error = error.localizedDescription }
+            catch { if let shown = ErrorText.shown(error) { self.error = shown } }
         }
     }
     private func save() async throws {
@@ -251,7 +308,7 @@ struct ServerCaptureView: View {
                 if router.path != target { router.path = target }
                 router.serverCapture = nil
                 dismiss()
-            } catch { self.error = error.localizedDescription }
+            } catch { if let shown = ErrorText.shown(error) { self.error = shown } }
         }
     }
     /// What typing on this screen changes. The title is sent only when it is
@@ -262,6 +319,19 @@ struct ServerCaptureView: View {
     }
 
     private func close() {
+        guard discardsIfEmpty, !active, !saving, !generating else { closeKeepingNote(); return }
+        focus = nil; saveTask?.cancel(); saving = true
+        Task {
+            // Only what the person typed counts as typed: a title the server gave is judged from the server's copy.
+            let gone = await recording.discardIfNothingRecorded(ref, typedTitle: title == serverTitle ? "" : title, typedText: text)
+            saving = false
+            guard gone else { closeKeepingNote(); return }
+            unsaved = false
+            router.serverCapture = nil
+            dismiss()
+        }
+    }
+    private func closeKeepingNote() {
         leave { ref.map { CaptureNavigation.pathAfterClosing(from: router.path, note: $0, recording: active) } ?? router.path }
     }
     private func viewNotes() {
@@ -271,7 +341,7 @@ struct ServerCaptureView: View {
         leave { ref.map { CaptureNavigation.pathForChat(from: router.path, note: $0) } ?? router.path }
     }
     private func generate() {
-        guard !active, !generating, let note else { return }
+        guard !active, !generating, !writingNotes, let note else { return }
         if note.generatedRevision == note.transcriptRevision { close(); return }
         generating = true; focus = nil; saveTask?.cancel()
         Task {
@@ -282,7 +352,7 @@ struct ServerCaptureView: View {
                 router.path = ref.map { CaptureNavigation.pathAfterClosing(from: router.path, note: $0, recording: false) } ?? router.path
                 router.serverCapture = nil
                 dismiss()
-            } catch { self.error = error.localizedDescription }
+            } catch { if let shown = ErrorText.shown(error) { self.error = shown } }
         }
     }
 }

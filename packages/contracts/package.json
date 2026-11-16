@@ -6,7 +6,10 @@
     ".": "./src/index.ts",
     "./api": "./src/api.ts",
     "./client": "./src/client.ts",
+    "./compatible": "./src/compatible.ts",
     "./live": "./src/live.ts",
+    "./mail-domains": "./src/mail-domains.ts",
+    "./chats": "./src/chats.ts",
     "./transport": "./src/transport.ts"
   },
   "scripts": {

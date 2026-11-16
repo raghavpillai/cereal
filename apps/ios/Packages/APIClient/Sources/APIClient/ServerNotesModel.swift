@@ -489,10 +489,10 @@ public final class ServerNotesModel {
         return note
     }
 
-    public func delete(id: String) async throws {
+    public func delete(id: String, ifStamp: String? = nil) async throws {
         guard let api else { throw APIClientError.unauthorized }
         let revision = connectionRevision
-        let result = try await api.deleteNote(id: id)
+        let result = try await api.deleteNote(id: id, ifStamp: ifStamp)
         guard revision == connectionRevision else { throw CancellationError() }
         guard result.deleted else { throw APIClientError.invalidResponse }
         requestRevision &+= 1
@@ -545,36 +545,6 @@ public final class ServerNotesModel {
         let note = try await api.recording(noteID: noteID, command: command)
         try accept(note, revision: revision)
         return note
-    }
-
-    /// An instance identity is mandatory: an outbox from another connection must never upload here.
-    public func upload(_ entry: AudioOutboxEntry, from outbox: AudioOutbox) async throws -> AudioChunkDTO {
-        guard let api, instance == outbox.instance, principalID == outbox.principalID else { throw APIClientError.unauthorized }
-        let revision = connectionRevision
-        // Validate on the main actor; read the 4 MB chunk away from it.
-        let file = try outbox.audioFile(for: entry)
-        let wav = try await Task.detached(priority: .utility) { try Data(contentsOf: file) }.value
-        guard revision == connectionRevision else { throw CancellationError() }
-        let receipt = try await api.uploadAudio(noteID: entry.noteID, chunkID: entry.id, channel: entry.channel,
-            sequence: entry.sequence, startMs: entry.startMs, wav: wav)
-        guard revision == connectionRevision else { throw CancellationError() }
-        return receipt
-    }
-
-    public func audioChunks(noteID: String) async throws -> [AudioChunkDTO] {
-        guard let api else { throw APIClientError.unauthorized }
-        let revision = connectionRevision
-        let chunks = try await api.audioChunks(noteID: noteID)
-        guard revision == connectionRevision else { throw CancellationError() }
-        return chunks
-    }
-
-    public func retryAudio(noteID: String, chunkID: String) async throws -> AudioChunkDTO {
-        guard let api else { throw APIClientError.unauthorized }
-        let revision = connectionRevision
-        let receipt = try await api.retryAudio(noteID: noteID, chunkID: chunkID)
-        guard revision == connectionRevision else { throw CancellationError() }
-        return receipt
     }
 
     /// Generating notes for a note without a title also gives it one, and the
@@ -635,6 +605,60 @@ public final class ServerNotesModel {
                         continuation.yield(event)
                     }
                     guard revision == connectionRevision else { throw CancellationError() }
+                    continuation.finish()
+                } catch { continuation.finish(throwing: error) }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    // MARK: Saved chats
+
+    public func chatThreads(noteID: String?, limit: Int = 20, cursor: String? = nil) async throws -> ChatThreadsPageDTO {
+        guard let api else { throw APIClientError.unauthorized }
+        let revision = connectionRevision
+        let page = try await api.chatThreads(noteID: noteID, workspace: noteID == nil, limit: limit, cursor: cursor)
+        guard revision == connectionRevision else { throw CancellationError() }
+        return page
+    }
+
+    public func chatThread(id: String) async throws -> ChatThreadDTO {
+        guard let api else { throw APIClientError.unauthorized }
+        let revision = connectionRevision
+        let thread = try await api.chatThread(id: id)
+        guard revision == connectionRevision else { throw CancellationError() }
+        return thread
+    }
+
+    public func renameChatThread(id: String, title: String) async throws -> ChatThreadDTO {
+        guard let api else { throw APIClientError.unauthorized }
+        return try await api.renameChatThread(id: id, title: title)
+    }
+
+    public func deleteChatThread(id: String) async throws {
+        guard let api else { throw APIClientError.unauthorized }
+        _ = try await api.deleteChatThread(id: id)
+    }
+
+    /// Ask a question in the saved thread `create.id`, creating the (empty) thread first if the server does not
+    /// have it. A new question is the thread's next exchange on the server; with `replace`, exchange `turn` and
+    /// the ones after it are replaced (a retry).
+    public func chatThreadEvents(create: CreateChatThreadInput, turn: Int, replace: Bool, message: String, model: String? = nil) throws -> AsyncThrowingStream<ChatStreamEventDTO, Error> {
+        guard let api, let id = create.id else { throw APIClientError.unauthorized }
+        let revision = connectionRevision
+        return AsyncThrowingStream { continuation in
+            let task = Task { @MainActor in
+                do {
+                    let thread = try await api.createChatThread(create)
+                    guard revision == self.connectionRevision else { throw CancellationError() }
+                    let replacing = replace && turn < thread.turnCount
+                    let stream = try api.chatThreadEvents(threadID: id, ChatThreadStreamInput(includeSources: true, message: message, model: model, replace: replacing ? true : nil, timeZone: TimeZone.current.identifier, turn: replacing ? turn : thread.turnCount))
+                    for try await event in stream {
+                        try Task.checkCancellation()
+                        guard revision == self.connectionRevision else { throw CancellationError() }
+                        continuation.yield(event)
+                    }
+                    guard revision == self.connectionRevision else { throw CancellationError() }
                     continuation.finish()
                 } catch { continuation.finish(throwing: error) }
             }

@@ -38,7 +38,7 @@ const failureText=(error:unknown,calls:CallMetric[])=>{
 /** POST /api/v1/notes/:id/generate. */
 export async function runGeneration(target:Target,note:NoteDTO,meeting:MeetingContextDTO|null):Promise<Execution> {
   const {providers,metered}=providersFor(target,"generation"),repository=makeMemoryRepository([note])
-  const processing=makeProcessingService(repository,{worker:false,providers,...(meeting?{meetingContext:()=>Effect.succeed(meeting)}:{})})
+  const processing=makeProcessingService(repository,{providers,...(meeting?{meetingContext:()=>Effect.succeed(meeting)}:{})})
   const started=performance.now()
   try{
     const generated=await Effect.runPromise(processing.generate(note.id,note.transcriptRevision))
@@ -54,7 +54,7 @@ export async function runGeneration(target:Target,note:NoteDTO,meeting:MeetingCo
 /** `live`: the live transcription sessions of the server, when the scenario has one (its unfinished utterances reach chat through it). */
 export async function runChat(target:Target,notes:ReadonlyArray<NoteDTO>,noteId:string|null,input:ChatInput,meetings:ReadonlyMap<string,MeetingContextDTO>=new Map(),live?:LiveHub):Promise<Execution> {
   const {providers,metered}=providersFor(target,"answer"),repository=makeMemoryRepository(notes)
-  const processing=makeProcessingService(repository,{worker:false,providers,meetingContext:id=>Effect.succeed(meetings.get(id)??null),...(live?{live}:{})})
+  const processing=makeProcessingService(repository,{providers,meetingContext:id=>Effect.succeed(meetings.get(id)??null),...(live?{live}:{})})
   const started=performance.now(),tools:Execution["tools"]=[]
   let output="",first:number|null=null,error:string|undefined,done=false,citations:Execution["citations"]=[]
   try{

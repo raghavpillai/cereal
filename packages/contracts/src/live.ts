@@ -51,7 +51,7 @@ export const LiveHelloMessage = Schema.Struct({
   protocol: Schema.Literal(LIVE_PROTOCOL_VERSION),
   /** Stable for one capture. The same value on a second connection marks it as a reconnect. */
   captureId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200)),
-  /** ISO 639 code; the provider detects the language when absent. */
+  /** ISO 639 code; the provider detects the language when absent, which is what the apps do. */
   language: Schema.optionalKey(Schema.String.check(Schema.isMinLength(2), Schema.isMaxLength(16))),
   streams: Schema.Array(LiveStreamHello).check(Schema.isMinLength(1), Schema.isMaxLength(2)),
 }).annotate({ identifier: "LiveHelloMessage" })
@@ -124,11 +124,15 @@ export const LiveSpeakersMessage = Schema.Struct({
   type: Schema.Literal("speakers"),
   /** Stored segments whose `speakerId` is `from` now carry `to`. */
   merges: Schema.Array(Schema.Struct({ from: Schema.String, to: Schema.String }).annotate({ identifier: "LiveSpeakerMerge" })),
+  /** Stored segments, by id, that now carry another speaker or label: a voice the server first took for the
+   * microphone's owner turned out to be someone else, or "Me" moved to the voice that speaks most. Applied
+   * after `merges`. Absent when there are none. */
+  relabels: Schema.optionalKey(Schema.Array(Schema.Struct({ segmentId: Schema.String, speakerId: Schema.String, speakerLabel: Schema.String }).annotate({ identifier: "LiveSpeakerRelabel" }))),
 }).annotate({ identifier: "LiveSpeakersMessage" })
 export type LiveSpeakersMessage = typeof LiveSpeakersMessage.Type
 
 export const LiveGapReason = Schema.Literals(["resume_window_exceeded", "provider_unavailable"]).annotate({ identifier: "LiveGapReason" })
-/** Audio the live path will not transcribe. The durable part covering it fills it later. */
+/** Audio the live path will not transcribe: it has no transcript, and the note lists it in `transcriptGaps`. */
 export const LiveGapMessage = Schema.Struct({
   type: Schema.Literal("gap"),
   channel: AudioChannel,
@@ -217,7 +221,9 @@ export type LiveTranscriberEvent =
    * `text` is empty when the provider confirmed a stretch of silence. */
   | { type: "final"; text: string; startSec: number; endSec: number; words?: ReadonlyArray<LiveWord>; finalThroughSec: number; utterance?: number
       /** Whether this final answers a `flush()`: true or false when the adapter knows, absent when it cannot tell. */
-      flushed?: boolean }
+      flushed?: boolean
+      /** The language the provider detected for this utterance (ISO 639), when it reports one. */
+      language?: string }
   | { type: "speakers_merged"; from: string; to: string }
   /** `detail` names the provider's error kind for the server log; it never carries provider text. */
   | { type: "error"; retryable: boolean; reason?: "unavailable" | "over_limit" | "not_configured"; detail?: string }
@@ -232,8 +238,10 @@ export interface LiveTranscriberSession {
    * (0 for a provider with an out-of-band keep-alive), so the caller can keep its timeline right. */
   keepAlive(): number
   close(): Promise<void>
-  /** Bytes accepted by `send` that have not reached the provider yet. */
+  /** Bytes handed to the network that the provider has not read yet: what grows when it stops reading. */
   readonly bufferedBytes: number
+  /** Seconds of audio accepted by `send` but held back to pace it (see the ElevenLabs adapter). */
+  readonly queuedSeconds?: number
   readonly events: AsyncIterable<LiveTranscriberEvent>
 }
 export interface LiveTranscriber {

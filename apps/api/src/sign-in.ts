@@ -18,12 +18,16 @@ export function normalizeAllowedEmail(raw: string): string | null {
   const entry = raw.trim().toLowerCase()
   return entry.length <= 254 && /^[^\s@]*@[^\s@.]+(?:\.[^\s@.]+)+$/.test(entry) ? entry : null
 }
-/** Whether a verified address may create an account by signing in with Google. */
-export function emailAllowed(email: string, allowed: ReadonlyArray<string>): boolean {
+/** Whether a verified address may create an account by signing in with Google. A full address on the list
+ * is enough. A domain entry ("@example.com") also needs Google's `hd` claim to name that domain: only a Google
+ * Workspace account of the organisation has it. A consumer Google account can be opened with any address and
+ * stays "verified" after its owner loses that mailbox (someone who has left the company), so it has no `hd`
+ * and gets in only by being listed by address. */
+export function emailAllowed(email: string, allowed: ReadonlyArray<string>, hostedDomain?: string | null): boolean {
   const address = email.trim().toLowerCase(), at = address.lastIndexOf("@")
   if (at < 1) return false
-  const domain = address.slice(at)
-  return allowed.some(entry => entry.startsWith("@") ? entry === domain : entry === address)
+  const domain = address.slice(at), workspace = hostedDomain ? "@" + hostedDomain.trim().toLowerCase() : null
+  return allowed.some(entry => entry.startsWith("@") ? entry === domain && entry === workspace : entry === address)
 }
 
 /** Where a browser may be sent after signing in: a path on this origin, never another site and never the API. */
@@ -131,7 +135,7 @@ export function makeSignInService(deps: {
   }
   /** The account for a verified Google identity: one already linked to it, else the account with the same
    * address, else a new one when the address is on the allow list. Null means not allowed. */
-  async function accountFor(identity: { subject: string; email: string; name: string | null }, allowed: ReadonlyArray<string>): Promise<string | null> {
+  async function accountFor(identity: { subject: string; email: string; name: string | null; hostedDomain: string | null }, allowed: ReadonlyArray<string>): Promise<string | null> {
     const link = (userId: string) => db.account.create({ data: { id: crypto.randomUUID(), accountId: identity.subject, providerId: "google", userId } })
     for (let attempt = 0; attempt < 2; attempt++) {
       const linked = await db.account.findFirst({ where: { providerId: "google", accountId: identity.subject } })
@@ -139,7 +143,7 @@ export function makeSignInService(deps: {
       const existing = await db.user.findUnique({ where: { email: identity.email } })
       try {
         if (existing) { await link(existing.id); return existing.id }
-        if (!emailAllowed(identity.email, allowed)) return null
+        if (!emailAllowed(identity.email, allowed, identity.hostedDomain)) return null
         const id = crypto.randomUUID()
         await db.$transaction(async tx => {
           await tx.user.create({ data: { id, name: identity.name ?? identity.email.split("@")[0]!, email: identity.email, emailVerified: true, role: "user" } })
@@ -307,7 +311,8 @@ export function makeSignInService(deps: {
         const identity = await json(endpoints.userinfo, { headers: { Authorization: "Bearer " + accessToken } })
         const subject = text(identity.sub, 255), email = text(identity.email, 254)?.toLowerCase() ?? null
         if (!subject || !email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || identity.email_verified !== true) return refused("failed", returnPath)
-        const userId = await accountFor({ subject, email, name: text(identity.name, 200) }, policy.allowedEmails)
+        // `hd` is the Google Workspace domain of the account; a consumer account has none.
+        const userId = await accountFor({ subject, email, name: text(identity.name, 200), hostedDomain: text(identity.hd, 253) }, policy.allowedEmails)
         if (!userId) return refused("not_allowed", returnPath)
         // Like the web password form: the session ends with the browser session.
         const session = await deps.issueSession(userId, false, request.headers)

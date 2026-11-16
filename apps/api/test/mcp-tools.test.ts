@@ -13,13 +13,23 @@ function fixture(events:ReadonlyArray<ChatStreamEventDTO>=[]){
  return{executor:createMcpToolExecutor(options),calls,progress}
 }
 test("all advertised tools publish the same bounded Effect inputs and granular permissions, without unsupported templates",()=>{
- expect(MCP_TOOL_DEFINITIONS).toHaveLength(18)
- expect(new Set(MCP_TOOL_DEFINITIONS.map(tool=>tool.name)).size).toBe(18)
+ expect(MCP_TOOL_DEFINITIONS).toHaveLength(13)
+ expect(new Set(MCP_TOOL_DEFINITIONS.map(tool=>tool.name)).size).toBe(13)
  expect(MCP_TOOL_DEFINITIONS.some(tool=>String(tool.name)==="list_templates")).toBe(false)
  for(const tool of MCP_TOOL_DEFINITIONS){expect((tool.inputSchema as Record<string,unknown>).type).toBe("object");expect(tool.requiredScopes.length).toBeGreaterThan(0);expect(tool.annotations.openWorldHint).toBe(false)}
  expect(MCP_TOOL_DEFINITIONS.find(tool=>tool.name==="query_cereal_meetings")!.requiredScopes).toContain("transcripts:read")
  expect(MCP_TOOL_DEFINITIONS.find(tool=>tool.name==="update_private_notes")!.annotations.readOnlyHint).toBe(false)
  expect(MCP_TOOL_DEFINITIONS.find(tool=>tool.name==="sign_out")!.requiredScopes).toEqual(["account:read"])
+})
+test("folders are gone: no folder tool, filter or permission exists, and a former folder tool is unknown",async()=>{
+ const f=fixture()
+ expect(MCP_TOOL_DEFINITIONS.filter(tool=>/folder/i.test(tool.name+" "+tool.description+" "+JSON.stringify(tool.inputSchema)))).toEqual([])
+ expect(MCP_TOOL_DEFINITIONS.some(tool=>(tool.requiredScopes as ReadonlyArray<string>).includes("folders:write"))).toBe(false)
+ expect(MCP_SCOPES as ReadonlyArray<string>).not.toContain("folders:write")
+ for(const name of ["list_meeting_folders","create_folder","update_folder","add_note_to_folder","remove_note_from_folder"])
+  await expect(f.executor.execute(name,{},context())).rejects.toMatchObject({code:"invalid_arguments",message:"Unknown tool."})
+ await expect(f.executor.execute("list_meetings",{folder_id:"00000000-0000-4000-8000-000000000001"},context())).rejects.toBeInstanceOf(McpToolError)
+ expect(f.calls).not.toContain("list")
 })
 test("scope rejection precedes any data access and prototype names never resolve as tools",async()=>{
  const f=fixture()
@@ -64,7 +74,7 @@ test("already-cancelled requests do not read or mutate storage",async()=>{
 
 test("empty tools accept only an empty object and publish a closed object schema",async()=>{
  const f=fixture()
- for(const name of ["list_meeting_folders","get_agent_brief","get_account_info","sign_out"] as const){
+ for(const name of ["get_agent_brief","get_account_info","sign_out"] as const){
   const schema=MCP_TOOL_DEFINITIONS.find(tool=>tool.name===name)!.inputSchema as Record<string,unknown>
   expect(schema.type).toBe("object");expect(schema.additionalProperties).toBe(false)
   for(const args of [{extra:true},null,[],"text",1])await expect(f.executor.execute(name,args,context())).rejects.toBeInstanceOf(McpToolError)

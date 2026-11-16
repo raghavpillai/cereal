@@ -46,7 +46,9 @@ import Contracts
         defer { try? FileManager.default.removeItem(at: root) }
         let url = root.appendingPathComponent("capture-0.wav")
         let writer = try CaptureFileWriter(url: url)
-        let client = try api.liveTranscriptClient(noteID: note.id, source: CaptureFileReader(url: url),
+        // The real socket, behind a connector that can cut the connection the way a network does.
+        let connector = DroppableConnector(URLSessionLiveConnector(request: try api.liveTranscriptRequest(noteID: note.id)))
+        let client = LiveTranscriptClient(connector: connector, source: try CaptureFileReader(url: url),
             configuration: LiveTranscriptClient.Configuration(captureID: "\(note.id)/capture-0.wav", baseMs: 0))
         let log = EventLog(); await log.follow(client)
         await client.start()
@@ -75,10 +77,8 @@ import Contracts
 
         // A dropped connection: the client comes back as the same capture and carries on from its acknowledgement.
         let connectionsBefore = await client.statistics.connections
-        await client.setConstrained(true)
-        try await waitUntil("held", timeout: .seconds(5)) { await client.status == .lowDataMode }
+        connector.drop()
         try await record(audio(seconds: 2, tone: true, startingAt: Int(writer.frames)), into: writer)
-        await client.setConstrained(false)
         try await record(audio(seconds: 0.8, tone: false, startingAt: 0), into: writer)
         try await waitUntil("reconnected", timeout: .seconds(10)) { await client.statistics.connections == connectionsBefore + 1 }
         try await waitUntil("a final after reconnect", timeout: .seconds(15)) { await log.finalTexts.count >= 5 }
@@ -132,4 +132,18 @@ import Contracts
         #expect(await missingLog.statuses.last == .unavailable(.notFound))
         _ = try await api.deleteNote(id: note.id)
     }
+}
+
+/// Hands out real sockets and can close the one in use, as a lost network would.
+private final class DroppableConnector: LiveSocketConnector, @unchecked Sendable {
+    private let inner: any LiveSocketConnector
+    private let lock = NSLock()
+    private var current: (any LiveSocket)?
+    init(_ inner: any LiveSocketConnector) { self.inner = inner }
+    func connect() async throws -> any LiveSocket {
+        let socket = try await inner.connect()
+        lock.withLock { current = socket }
+        return socket
+    }
+    func drop() { lock.withLock { current }?.close(code: 1001) }
 }

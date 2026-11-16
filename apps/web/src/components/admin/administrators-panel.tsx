@@ -23,7 +23,7 @@ function OwnerAdministrators({client,viewer,expired}:{client:AdminClient;viewer:
    {!resource.data&&!resource.error?<p className="settings-help">Loading administrators…</p>:<AdministratorsList users={users} viewer={viewer} busy={busy} revoke={user=>{tasks.clearError();setRevoking(user)}}/>}
   </CardContent></Card>
   {adding&&<AddAdministrator users={users} busy={busy} loading={resource.busy} error={tasks.error??resource.error} close={()=>setAdding(false)} promote={promote} refresh={resource.reload}/>}
-  {revoking&&<Modal title="Revoke admin access?" busy={busy} close={()=>setRevoking(null)}><div className="admin-dialog-body"><p><strong>{revoking.email}</strong> will lose instance-settings access. Their notes are kept.</p>{tasks.error&&<Notice error>{tasks.error}</Notice>}</div><div className="admin-dialog-actions"><Button type="button" variant="outline" disabled={busy} onClick={()=>setRevoking(null)}>Cancel</Button><Button type="button" variant="destructive" disabled={busy} onClick={()=>void revoke(revoking)}>{busy?'Revoking…':'Revoke admin'}</Button></div></Modal>}
+  {revoking&&<Modal title="Revoke admin access?" busy={busy} close={()=>setRevoking(null)}><div className="admin-dialog-body"><p><strong>{revoking.email}</strong> will lose instance-settings access. Their notes are kept.</p>{tasks.error&&<Notice error>{tasks.error}</Notice>}</div><div className="admin-dialog-actions"><Button type="button" variant="outline" disabled={busy} onClick={()=>setRevoking(null)}>Cancel</Button><Button type="button" variant="destructive" disabled={busy} data-busy={busy?'':undefined} onClick={()=>void revoke(revoking)}>{busy?'Revoking…':'Revoke admin'}</Button></div></Modal>}
  </>
 }
 export function AdministratorsList({users,viewer,busy,revoke}:{users:readonly UserDTO[];viewer:UserDTO;busy:boolean;revoke:(user:UserDTO)=>void}){
@@ -38,9 +38,9 @@ export function AddAdministrator({users,busy,loading=false,error,close,promote,r
   <fieldset className="admin-fieldset admin-dialog-body" disabled={busy||loading}>
    <p>Choose an existing user to manage this instance’s settings.</p>
    <label className="settings-label">User<select className="admin-account-select" aria-label="User to promote" required disabled={!eligible.length||busy||loading} value={valid?selected:''} onChange={e=>setSelected(e.target.value)}><option value="" disabled>{eligible.length?'Choose a user':'No eligible users'}</option>{eligible.map(user=><option key={user.id} value={user.id}>{user.name.trim()?`${user.name} · ${user.email}`:user.email}</option>)}</select></label>
-   {!eligible.length&&!busy&&!loading&&!error&&<p className="settings-help">Users must already belong to this instance. Current admins and the owner are excluded.</p>}
+   {!eligible.length&&!busy&&!loading&&!error&&<p className="settings-help">Everyone with an account here is already an admin.</p>}
    {error&&<Notice error>{error}<Button type="button" variant="ghost" size="sm" onClick={()=>void refresh()}>Refresh users</Button></Notice>}
   </fieldset>
-  <div className="admin-dialog-actions"><Button type="button" variant="outline" disabled={busy} onClick={close}>Cancel</Button><Button type="submit" disabled={busy||loading||!valid}>{busy?'Granting…':loading?'Loading users…':'Grant admin'}</Button></div>
+  <div className="admin-dialog-actions"><Button type="button" variant="outline" disabled={busy} onClick={close}>Cancel</Button><Button type="submit" disabled={busy||loading||!valid} data-busy={busy?'':undefined}>{busy?'Granting…':loading?'Loading users…':'Grant admin'}</Button></div>
  </form></Modal>
 }

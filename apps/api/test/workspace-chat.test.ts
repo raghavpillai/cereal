@@ -13,7 +13,7 @@ const id=(n:number)=>`00000000-0000-4000-8000-${String(n).padStart(12,"0")}`
 const segment=(n:number,text:string,startMs:number)=>({id:id(5000+n),channel:"system" as const,speakerId:`system:${id(900)}:speaker_1`,speakerLabel:"Speaker 1",text,isFinal:true,startMs,endMs:startMs+4000})
 const note=(n:number,fields:Partial<NoteDTO>):NoteDTO=>({id:id(n),title:"Untitled",body:"",enhanced:"",date:"2026-03-09",duration:"",createdAt:"2026-03-09T10:00:00.000Z",updatedAt:"2026-03-09T11:00:00.000Z",transcriptSegments:[],recordingState:"stopped",generationState:"idle",transcriptRevision:fields.transcriptSegments?.length?1:0,generatedRevision:null,...fields})
 const now=new Date("2026-03-10T15:00:00.000Z")
-const base:ProviderServices={transcribe:()=>Effect.succeed([]),generate:()=>Effect.succeed(""),chat:()=>Effect.succeed("")}
+const base:ProviderServices={generate:()=>Effect.succeed(""),chat:()=>Effect.succeed("")}
 const call=(n:number,name:string,args:unknown):ChatToolCall=>({id:`call_${n}`,name,arguments:JSON.stringify(args)})
 /** Runs retrieval with a scripted planner and returns everything observable. */
 async function research(seed:ReadonlyArray<NoteDTO>,input:ChatInput,script:ReadonlyArray<ReadonlyArray<ChatToolCall>>|null,options:{readCharacterBudget?:number}={}) {

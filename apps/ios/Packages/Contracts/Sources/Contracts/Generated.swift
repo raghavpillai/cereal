@@ -5,7 +5,6 @@
 //   let noteAttendeeDTO = try? JSONDecoder().decode(NoteAttendeeDTO.self, from: jsonData)
 //   let noteAttendeesDTO = try? JSONDecoder().decode(NoteAttendeesDTO.self, from: jsonData)
 //   let noteMeetingTimeDTO = try? JSONDecoder().decode(NoteMeetingTimeDTO.self, from: jsonData)
-//   let noteFolderRefDTO = try? JSONDecoder().decode(NoteFolderRefDTO.self, from: jsonData)
 //   let noteSummaryDTO = try? JSONDecoder().decode(NoteSummaryDTO.self, from: jsonData)
 //   let noteSummariesPageDTO = try? JSONDecoder().decode(NoteSummariesPageDTO.self, from: jsonData)
 //   let noteSearchTextPartDTO = try? JSONDecoder().decode(NoteSearchTextPartDTO.self, from: jsonData)
@@ -13,7 +12,6 @@
 //   let noteSearchResultDTO = try? JSONDecoder().decode(NoteSearchResultDTO.self, from: jsonData)
 //   let noteSearchPageDTO = try? JSONDecoder().decode(NoteSearchPageDTO.self, from: jsonData)
 //   let languageModelSelection = try? JSONDecoder().decode(LanguageModelSelection.self, from: jsonData)
-//   let transcriptionModelSelection = try? JSONDecoder().decode(TranscriptionModelSelection.self, from: jsonData)
 //   let liveTranscriptionModelSelection = try? JSONDecoder().decode(LiveTranscriptionModelSelection.self, from: jsonData)
 //   let providerStatusDTO = try? JSONDecoder().decode(ProviderStatusDTO.self, from: jsonData)
 //   let aIModelDTO = try? JSONDecoder().decode(AIModelDTO.self, from: jsonData)
@@ -69,8 +67,6 @@
 //   let createCalendarInput = try? JSONDecoder().decode(CreateCalendarInput.self, from: jsonData)
 //   let updateCalendarInput = try? JSONDecoder().decode(UpdateCalendarInput.self, from: jsonData)
 //   let calendarEventDTO = try? JSONDecoder().decode(CalendarEventDTO.self, from: jsonData)
-//   let uploadAudioChunkInput = try? JSONDecoder().decode(UploadAudioChunkInput.self, from: jsonData)
-//   let audioChunkDTO = try? JSONDecoder().decode(AudioChunkDTO.self, from: jsonData)
 //   let chatMessageDTO = try? JSONDecoder().decode(ChatMessageDTO.self, from: jsonData)
 //   let chatInput = try? JSONDecoder().decode(ChatInput.self, from: jsonData)
 //   let chatAnswerDTO = try? JSONDecoder().decode(ChatAnswerDTO.self, from: jsonData)
@@ -81,6 +77,7 @@
 //   let evidenceRequestDTO = try? JSONDecoder().decode(EvidenceRequestDTO.self, from: jsonData)
 //   let evidenceQuoteDTO = try? JSONDecoder().decode(EvidenceQuoteDTO.self, from: jsonData)
 //   let evidenceDTO = try? JSONDecoder().decode(EvidenceDTO.self, from: jsonData)
+//   let evidenceStreamEventDTO = try? JSONDecoder().decode(EvidenceStreamEventDTO.self, from: jsonData)
 //   let transcriptSegmentDTO = try? JSONDecoder().decode(TranscriptSegmentDTO.self, from: jsonData)
 //   let noteDTO = try? JSONDecoder().decode(NoteDTO.self, from: jsonData)
 //   let createNoteInput = try? JSONDecoder().decode(CreateNoteInput.self, from: jsonData)
@@ -108,6 +105,7 @@
 //   let storageTestDTO = try? JSONDecoder().decode(StorageTestDTO.self, from: jsonData)
 //   let appsSettingsDTO = try? JSONDecoder().decode(AppsSettingsDTO.self, from: jsonData)
 //   let updateAppsSettingsInput = try? JSONDecoder().decode(UpdateAppsSettingsInput.self, from: jsonData)
+//   let openAICompatibleSettingsDTO = try? JSONDecoder().decode(OpenAICompatibleSettingsDTO.self, from: jsonData)
 //   let onboardingStepsDTO = try? JSONDecoder().decode(OnboardingStepsDTO.self, from: jsonData)
 //   let onboardingDTO = try? JSONDecoder().decode(OnboardingDTO.self, from: jsonData)
 //   let onboardingStepInput = try? JSONDecoder().decode(OnboardingStepInput.self, from: jsonData)
@@ -125,6 +123,18 @@
 //   let liveGapMessage = try? JSONDecoder().decode(LiveGapMessage.self, from: jsonData)
 //   let liveStatusMessage = try? JSONDecoder().decode(LiveStatusMessage.self, from: jsonData)
 //   let liveErrorMessage = try? JSONDecoder().decode(LiveErrorMessage.self, from: jsonData)
+//   let chatThreadTitleSource = try? JSONDecoder().decode(ChatThreadTitleSource.self, from: jsonData)
+//   let chatThreadMessageStatus = try? JSONDecoder().decode(ChatThreadMessageStatus.self, from: jsonData)
+//   let chatThreadMessageDTO = try? JSONDecoder().decode(ChatThreadMessageDTO.self, from: jsonData)
+//   let chatThreadSummaryDTO = try? JSONDecoder().decode(ChatThreadSummaryDTO.self, from: jsonData)
+//   let chatThreadDTO = try? JSONDecoder().decode(ChatThreadDTO.self, from: jsonData)
+//   let chatThreadsPageDTO = try? JSONDecoder().decode(ChatThreadsPageDTO.self, from: jsonData)
+//   let chatTurnAnswerStatus = try? JSONDecoder().decode(ChatTurnAnswerStatus.self, from: jsonData)
+//   let chatTurnAnswerInput = try? JSONDecoder().decode(ChatTurnAnswerInput.self, from: jsonData)
+//   let createChatThreadInput = try? JSONDecoder().decode(CreateChatThreadInput.self, from: jsonData)
+//   let appendChatTurnInput = try? JSONDecoder().decode(AppendChatTurnInput.self, from: jsonData)
+//   let updateChatThreadInput = try? JSONDecoder().decode(UpdateChatThreadInput.self, from: jsonData)
+//   let chatThreadStreamInput = try? JSONDecoder().decode(ChatThreadStreamInput.self, from: jsonData)
 
 import Foundation
 
@@ -154,7 +164,6 @@ public struct NoteSummaryDTO: Codable, Sendable {
     public let date: String
     public let duration: String
     public let excerpt: String
-    public let folders: [NoteFolderRefDTO]
     public let generatedRevision: Int?
     public let generationState: GenerationState
     public let hasBody: Bool
@@ -175,7 +184,6 @@ public struct NoteSummaryDTO: Codable, Sendable {
         case date = "date"
         case duration = "duration"
         case excerpt = "excerpt"
-        case folders = "folders"
         case generatedRevision = "generatedRevision"
         case generationState = "generationState"
         case hasBody = "hasBody"
@@ -191,13 +199,12 @@ public struct NoteSummaryDTO: Codable, Sendable {
         case updatedAt = "updatedAt"
     }
 
-    public init(attendees: NoteAttendeesDTO, createdAt: String, date: String, duration: String, excerpt: String, folders: [NoteFolderRefDTO], generatedRevision: Int?, generationState: GenerationState, hasBody: Bool, hasSummary: Bool, hasTranscript: Bool, id: String, meeting: NoteMeetingTimeDTO?, organizationId: String?, recordingState: RecordingState, speakerCount: Int, title: String, transcriptRevision: Int, updatedAt: String) {
+    public init(attendees: NoteAttendeesDTO, createdAt: String, date: String, duration: String, excerpt: String, generatedRevision: Int?, generationState: GenerationState, hasBody: Bool, hasSummary: Bool, hasTranscript: Bool, id: String, meeting: NoteMeetingTimeDTO?, organizationId: String?, recordingState: RecordingState, speakerCount: Int, title: String, transcriptRevision: Int, updatedAt: String) {
         self.attendees = attendees
         self.createdAt = createdAt
         self.date = date
         self.duration = duration
         self.excerpt = excerpt
-        self.folders = folders
         self.generatedRevision = generatedRevision
         self.generationState = generationState
         self.hasBody = hasBody
@@ -249,22 +256,6 @@ public struct NoteAttendeeDTO: Codable, Sendable {
         self.initials = initials
         self.name = name
         self.shortName = shortName
-    }
-}
-
-// MARK: - NoteFolderRefDTO
-public struct NoteFolderRefDTO: Codable, Sendable {
-    public let id: String
-    public let name: String
-
-    public enum CodingKeys: String, CodingKey {
-        case id = "id"
-        case name = "name"
-    }
-
-    public init(id: String, name: String) {
-        self.id = id
-        self.name = name
     }
 }
 
@@ -395,17 +386,20 @@ public enum NoteSearchField: String, Codable, Sendable {
 // MARK: - ModelCatalogInput
 public struct ModelCatalogInput: Codable, Sendable {
     public let apiKey: String?
+    public let baseUrl: String?
     public let provider: ID
     public let refresh: Bool?
 
     public enum CodingKeys: String, CodingKey {
         case apiKey = "apiKey"
+        case baseUrl = "baseUrl"
         case provider = "provider"
         case refresh = "refresh"
     }
 
-    public init(apiKey: String? = nil, provider: ID, refresh: Bool? = nil) {
+    public init(apiKey: String? = nil, baseUrl: String? = nil, provider: ID, refresh: Bool? = nil) {
         self.apiKey = apiKey
+        self.baseUrl = baseUrl
         self.provider = provider
         self.refresh = refresh
     }
@@ -415,6 +409,7 @@ public enum ID: String, Codable, Sendable {
     case anthropic = "anthropic"
     case elevenlabs = "elevenlabs"
     case openai = "openai"
+    case openaiCompatible = "openai_compatible"
     case openrouter = "openrouter"
 }
 
@@ -462,7 +457,6 @@ public struct AIModelDTO: Codable, Sendable {
 public enum Capability: String, Codable, Sendable {
     case language = "language"
     case liveTranscription = "live_transcription"
-    case transcription = "transcription"
 }
 
 // MARK: - ChatModelsDTO
@@ -497,6 +491,7 @@ public struct LanguageModelSelection: Codable, Sendable {
 public enum LanguageModelSelectionProvider: String, Codable, Sendable {
     case anthropic = "anthropic"
     case openai = "openai"
+    case openaiCompatible = "openai_compatible"
     case openrouter = "openrouter"
 }
 
@@ -1418,14 +1413,14 @@ public struct AdminSettingsDTO: Codable, Sendable {
     public let languageModel: String
     public let liveHoldSeconds: Int?
     public let liveMaxSessions: Int?
-    public let liveTranscriptionModel: LiveTranscriptionModelSelection?
+    public let liveTranscriptionModel: LiveTranscriptionModelSelection
     public let onboarding: OnboardingDTO?
+    public let openAiCompatible: OpenAICompatibleSettingsDTO?
     public let openRouterConfigured: Bool
     public let openRouterSource: ElevenLabsSourceEnum
     public let providers: [ProviderStatusDTO]
     public let signIn: SignInSettingsDTO?
     public let storage: StorageSettingsDTO?
-    public let transcriptionModel: TranscriptionModelSelection
     public let unusedEnvironment: [String]?
     public let updatedAt: String?
 
@@ -1444,17 +1439,17 @@ public struct AdminSettingsDTO: Codable, Sendable {
         case liveMaxSessions = "liveMaxSessions"
         case liveTranscriptionModel = "liveTranscriptionModel"
         case onboarding = "onboarding"
+        case openAiCompatible = "openAiCompatible"
         case openRouterConfigured = "openRouterConfigured"
         case openRouterSource = "openRouterSource"
         case providers = "providers"
         case signIn = "signIn"
         case storage = "storage"
-        case transcriptionModel = "transcriptionModel"
         case unusedEnvironment = "unusedEnvironment"
         case updatedAt = "updatedAt"
     }
 
-    public init(apps: AppsSettingsDTO? = nil, calendarLookAheadDays: Int, calendarRefreshMinutes: Int, chatModels: [LanguageModelSelection], elevenLabsConfigured: Bool, elevenLabsSource: ElevenLabsSourceEnum, generationModel: LanguageModelSelection, instanceLogo: String?, instanceName: String, languageModel: String, liveHoldSeconds: Int? = nil, liveMaxSessions: Int? = nil, liveTranscriptionModel: LiveTranscriptionModelSelection? = nil, onboarding: OnboardingDTO? = nil, openRouterConfigured: Bool, openRouterSource: ElevenLabsSourceEnum, providers: [ProviderStatusDTO], signIn: SignInSettingsDTO? = nil, storage: StorageSettingsDTO? = nil, transcriptionModel: TranscriptionModelSelection, unusedEnvironment: [String]? = nil, updatedAt: String?) {
+    public init(apps: AppsSettingsDTO? = nil, calendarLookAheadDays: Int, calendarRefreshMinutes: Int, chatModels: [LanguageModelSelection], elevenLabsConfigured: Bool, elevenLabsSource: ElevenLabsSourceEnum, generationModel: LanguageModelSelection, instanceLogo: String?, instanceName: String, languageModel: String, liveHoldSeconds: Int? = nil, liveMaxSessions: Int? = nil, liveTranscriptionModel: LiveTranscriptionModelSelection, onboarding: OnboardingDTO? = nil, openAiCompatible: OpenAICompatibleSettingsDTO? = nil, openRouterConfigured: Bool, openRouterSource: ElevenLabsSourceEnum, providers: [ProviderStatusDTO], signIn: SignInSettingsDTO? = nil, storage: StorageSettingsDTO? = nil, unusedEnvironment: [String]? = nil, updatedAt: String?) {
         self.apps = apps
         self.calendarLookAheadDays = calendarLookAheadDays
         self.calendarRefreshMinutes = calendarRefreshMinutes
@@ -1469,12 +1464,12 @@ public struct AdminSettingsDTO: Codable, Sendable {
         self.liveMaxSessions = liveMaxSessions
         self.liveTranscriptionModel = liveTranscriptionModel
         self.onboarding = onboarding
+        self.openAiCompatible = openAiCompatible
         self.openRouterConfigured = openRouterConfigured
         self.openRouterSource = openRouterSource
         self.providers = providers
         self.signIn = signIn
         self.storage = storage
-        self.transcriptionModel = transcriptionModel
         self.unusedEnvironment = unusedEnvironment
         self.updatedAt = updatedAt
     }
@@ -1569,20 +1564,42 @@ public struct OnboardingStepsDTO: Codable, Sendable {
     }
 }
 
+// MARK: - OpenAICompatibleSettingsDTO
+public struct OpenAICompatibleSettingsDTO: Codable, Sendable {
+    public let apiKeyHint: String?
+    public let apiKeySet: Bool
+    public let baseUrl: String?
+
+    public enum CodingKeys: String, CodingKey {
+        case apiKeyHint = "apiKeyHint"
+        case apiKeySet = "apiKeySet"
+        case baseUrl = "baseUrl"
+    }
+
+    public init(apiKeyHint: String? = nil, apiKeySet: Bool, baseUrl: String?) {
+        self.apiKeyHint = apiKeyHint
+        self.apiKeySet = apiKeySet
+        self.baseUrl = baseUrl
+    }
+}
+
 // MARK: - ProviderStatusDTO
 public struct ProviderStatusDTO: Codable, Sendable {
     public let configured: Bool
+    public let hint: String?
     public let id: ID
     public let source: ElevenLabsSourceEnum
 
     public enum CodingKeys: String, CodingKey {
         case configured = "configured"
+        case hint = "hint"
         case id = "id"
         case source = "source"
     }
 
-    public init(configured: Bool, id: ID, source: ElevenLabsSourceEnum) {
+    public init(configured: Bool, hint: String? = nil, id: ID, source: ElevenLabsSourceEnum) {
         self.configured = configured
+        self.hint = hint
         self.id = id
         self.source = source
     }
@@ -1593,6 +1610,7 @@ public struct SignInSettingsDTO: Codable, Sendable {
     public let allowedEmails: [String]
     public let google: Bool
     public let googleClientId: String?
+    public let googleClientSecretHint: String?
     public let googleClientSecretSet: Bool
     public let googleNeedsHttps: Bool?
     public let googleRedirectUris: [String]
@@ -1602,16 +1620,18 @@ public struct SignInSettingsDTO: Codable, Sendable {
         case allowedEmails = "allowedEmails"
         case google = "google"
         case googleClientId = "googleClientId"
+        case googleClientSecretHint = "googleClientSecretHint"
         case googleClientSecretSet = "googleClientSecretSet"
         case googleNeedsHttps = "googleNeedsHttps"
         case googleRedirectUris = "googleRedirectUris"
         case password = "password"
     }
 
-    public init(allowedEmails: [String], google: Bool, googleClientId: String?, googleClientSecretSet: Bool, googleNeedsHttps: Bool? = nil, googleRedirectUris: [String], password: Bool) {
+    public init(allowedEmails: [String], google: Bool, googleClientId: String?, googleClientSecretHint: String? = nil, googleClientSecretSet: Bool, googleNeedsHttps: Bool? = nil, googleRedirectUris: [String], password: Bool) {
         self.allowedEmails = allowedEmails
         self.google = google
         self.googleClientId = googleClientId
+        self.googleClientSecretHint = googleClientSecretHint
         self.googleClientSecretSet = googleClientSecretSet
         self.googleNeedsHttps = googleNeedsHttps
         self.googleRedirectUris = googleRedirectUris
@@ -1628,6 +1648,7 @@ public struct StorageSettingsDTO: Codable, Sendable {
     public let forcePathStyle: Bool
     public let storageSettingsDTOPrefix: String
     public let region: String?
+    public let secretAccessKeyHint: String?
     public let secretAccessKeySet: Bool
     public let source: StorageSettingsDTOSource
 
@@ -1639,11 +1660,12 @@ public struct StorageSettingsDTO: Codable, Sendable {
         case forcePathStyle = "forcePathStyle"
         case storageSettingsDTOPrefix = "prefix"
         case region = "region"
+        case secretAccessKeyHint = "secretAccessKeyHint"
         case secretAccessKeySet = "secretAccessKeySet"
         case source = "source"
     }
 
-    public init(accessKeyId: String?, backend: StorageBackend, bucket: String?, endpoint: String?, forcePathStyle: Bool, storageSettingsDTOPrefix: String, region: String?, secretAccessKeySet: Bool, source: StorageSettingsDTOSource) {
+    public init(accessKeyId: String?, backend: StorageBackend, bucket: String?, endpoint: String?, forcePathStyle: Bool, storageSettingsDTOPrefix: String, region: String?, secretAccessKeyHint: String? = nil, secretAccessKeySet: Bool, source: StorageSettingsDTOSource) {
         self.accessKeyId = accessKeyId
         self.backend = backend
         self.bucket = bucket
@@ -1651,6 +1673,7 @@ public struct StorageSettingsDTO: Codable, Sendable {
         self.forcePathStyle = forcePathStyle
         self.storageSettingsDTOPrefix = storageSettingsDTOPrefix
         self.region = region
+        self.secretAccessKeyHint = secretAccessKeyHint
         self.secretAccessKeySet = secretAccessKeySet
         self.source = source
     }
@@ -1665,27 +1688,6 @@ public enum StorageSettingsDTOSource: String, Codable, Sendable {
     case environment = "environment"
     case sourceDefault = "default"
     case stored = "stored"
-}
-
-// MARK: - TranscriptionModelSelection
-public struct TranscriptionModelSelection: Codable, Sendable {
-    public let model: String
-    public let provider: TranscriptionModelSelectionProvider
-
-    public enum CodingKeys: String, CodingKey {
-        case model = "model"
-        case provider = "provider"
-    }
-
-    public init(model: String, provider: TranscriptionModelSelectionProvider) {
-        self.model = model
-        self.provider = provider
-    }
-}
-
-public enum TranscriptionModelSelectionProvider: String, Codable, Sendable {
-    case elevenlabs = "elevenlabs"
-    case openai = "openai"
 }
 
 // MARK: - UpdateAdminSettingsInput
@@ -1704,10 +1706,11 @@ public struct UpdateAdminSettingsInput: Codable, Sendable {
     public let liveMaxSessions: Int?
     public let liveTranscriptionModel: LiveTranscriptionModelSelection?
     public let openAiApiKey: String?
+    public let openAiCompatibleApiKey: String?
+    public let openAiCompatibleBaseUrl: String?
     public let openRouterApiKey: String?
     public let signIn: UpdateSignInSettingsInput?
     public let storage: UpdateStorageSettingsInput?
-    public let transcriptionModel: TranscriptionModelSelection?
 
     public enum CodingKeys: String, CodingKey {
         case anthropicApiKey = "anthropicApiKey"
@@ -1724,13 +1727,14 @@ public struct UpdateAdminSettingsInput: Codable, Sendable {
         case liveMaxSessions = "liveMaxSessions"
         case liveTranscriptionModel = "liveTranscriptionModel"
         case openAiApiKey = "openAiApiKey"
+        case openAiCompatibleApiKey = "openAiCompatibleApiKey"
+        case openAiCompatibleBaseUrl = "openAiCompatibleBaseUrl"
         case openRouterApiKey = "openRouterApiKey"
         case signIn = "signIn"
         case storage = "storage"
-        case transcriptionModel = "transcriptionModel"
     }
 
-    public init(anthropicApiKey: String? = nil, apps: UpdateAppsSettingsInput? = nil, calendarLookAheadDays: Int? = nil, calendarRefreshMinutes: Int? = nil, chatModels: [LanguageModelSelection]? = nil, elevenLabsApiKey: String? = nil, generationModel: LanguageModelSelection? = nil, instanceLogo: String? = nil, instanceName: String? = nil, languageModel: String? = nil, liveHoldSeconds: Int? = nil, liveMaxSessions: Int? = nil, liveTranscriptionModel: LiveTranscriptionModelSelection? = nil, openAiApiKey: String? = nil, openRouterApiKey: String? = nil, signIn: UpdateSignInSettingsInput? = nil, storage: UpdateStorageSettingsInput? = nil, transcriptionModel: TranscriptionModelSelection? = nil) {
+    public init(anthropicApiKey: String? = nil, apps: UpdateAppsSettingsInput? = nil, calendarLookAheadDays: Int? = nil, calendarRefreshMinutes: Int? = nil, chatModels: [LanguageModelSelection]? = nil, elevenLabsApiKey: String? = nil, generationModel: LanguageModelSelection? = nil, instanceLogo: String? = nil, instanceName: String? = nil, languageModel: String? = nil, liveHoldSeconds: Int? = nil, liveMaxSessions: Int? = nil, liveTranscriptionModel: LiveTranscriptionModelSelection? = nil, openAiApiKey: String? = nil, openAiCompatibleApiKey: String? = nil, openAiCompatibleBaseUrl: String? = nil, openRouterApiKey: String? = nil, signIn: UpdateSignInSettingsInput? = nil, storage: UpdateStorageSettingsInput? = nil) {
         self.anthropicApiKey = anthropicApiKey
         self.apps = apps
         self.calendarLookAheadDays = calendarLookAheadDays
@@ -1745,10 +1749,11 @@ public struct UpdateAdminSettingsInput: Codable, Sendable {
         self.liveMaxSessions = liveMaxSessions
         self.liveTranscriptionModel = liveTranscriptionModel
         self.openAiApiKey = openAiApiKey
+        self.openAiCompatibleApiKey = openAiCompatibleApiKey
+        self.openAiCompatibleBaseUrl = openAiCompatibleBaseUrl
         self.openRouterApiKey = openRouterApiKey
         self.signIn = signIn
         self.storage = storage
-        self.transcriptionModel = transcriptionModel
     }
 }
 
@@ -1976,74 +1981,6 @@ public struct CalendarEventDTO: Codable, Sendable {
     }
 }
 
-// MARK: - UploadAudioChunkInput
-public struct UploadAudioChunkInput: Codable, Sendable {
-    public let audioBase64: String
-    public let channel: AudioChannel
-    public let sequence: Int
-    public let startMs: Int
-
-    public enum CodingKeys: String, CodingKey {
-        case audioBase64 = "audioBase64"
-        case channel = "channel"
-        case sequence = "sequence"
-        case startMs = "startMs"
-    }
-
-    public init(audioBase64: String, channel: AudioChannel, sequence: Int, startMs: Int) {
-        self.audioBase64 = audioBase64
-        self.channel = channel
-        self.sequence = sequence
-        self.startMs = startMs
-    }
-}
-
-public enum AudioChannel: String, Codable, Sendable {
-    case mic = "mic"
-    case system = "system"
-}
-
-// MARK: - AudioChunkDTO
-public struct AudioChunkDTO: Codable, Sendable {
-    public let channel: AudioChannel
-    public let durationMs: Int
-    public let error: String?
-    public let id: String
-    public let noteId: String
-    public let sequence: Int
-    public let startMs: Int
-    public let state: AudioChunkState
-
-    public enum CodingKeys: String, CodingKey {
-        case channel = "channel"
-        case durationMs = "durationMs"
-        case error = "error"
-        case id = "id"
-        case noteId = "noteId"
-        case sequence = "sequence"
-        case startMs = "startMs"
-        case state = "state"
-    }
-
-    public init(channel: AudioChannel, durationMs: Int, error: String?, id: String, noteId: String, sequence: Int, startMs: Int, state: AudioChunkState) {
-        self.channel = channel
-        self.durationMs = durationMs
-        self.error = error
-        self.id = id
-        self.noteId = noteId
-        self.sequence = sequence
-        self.startMs = startMs
-        self.state = state
-    }
-}
-
-public enum AudioChunkState: String, Codable, Sendable {
-    case failed = "failed"
-    case processing = "processing"
-    case queued = "queued"
-    case ready = "ready"
-}
-
 // MARK: - ChatInput
 public struct ChatInput: Codable, Sendable {
     public let history: [ChatMessageDTO]
@@ -2250,6 +2187,25 @@ public struct EvidenceRequestDTO: Codable, Sendable {
     }
 }
 
+// MARK: - EvidenceStreamEventDTO
+public struct EvidenceStreamEventDTO: Codable, Sendable {
+    public let evidence: EvidenceDTO?
+    public let text: String
+    public let type: EvidenceStreamEventDTOType
+
+    public enum CodingKeys: String, CodingKey {
+        case evidence = "evidence"
+        case text = "text"
+        case type = "type"
+    }
+
+    public init(evidence: EvidenceDTO? = nil, text: String, type: EvidenceStreamEventDTOType) {
+        self.evidence = evidence
+        self.text = text
+        self.type = type
+    }
+}
+
 // MARK: - EvidenceDTO
 public struct EvidenceDTO: Codable, Sendable {
     public let quotes: [EvidenceQuoteDTO]
@@ -2289,6 +2245,12 @@ public struct EvidenceQuoteDTO: Codable, Sendable {
         self.startMs = startMs
         self.text = text
     }
+}
+
+public enum EvidenceStreamEventDTOType: String, Codable, Sendable {
+    case delta = "delta"
+    case done = "done"
+    case error = "error"
 }
 
 // MARK: - CreateNoteInput
@@ -2351,6 +2313,11 @@ public struct TranscriptSegmentDTO: Codable, Sendable {
         self.startMs = startMs
         self.text = text
     }
+}
+
+public enum AudioChannel: String, Codable, Sendable {
+    case mic = "mic"
+    case system = "system"
 }
 
 // MARK: - UpdateNoteInput
@@ -2458,6 +2425,7 @@ public struct NoteDTO: Codable, Sendable {
     public let importedAt: String?
     public let recordingState: RecordingState
     public let title: String
+    public let transcriptGaps: [TranscriptGapDTO]?
     public let transcriptRevision: Int
     public let transcriptSegments: [TranscriptSegmentDTO]
     public let updatedAt: String
@@ -2474,12 +2442,13 @@ public struct NoteDTO: Codable, Sendable {
         case importedAt = "importedAt"
         case recordingState = "recordingState"
         case title = "title"
+        case transcriptGaps = "transcriptGaps"
         case transcriptRevision = "transcriptRevision"
         case transcriptSegments = "transcriptSegments"
         case updatedAt = "updatedAt"
     }
 
-    public init(body: String, createdAt: String, date: String, duration: String, enhanced: String, generatedRevision: Int?, generationState: GenerationState, id: String, importedAt: String? = nil, recordingState: RecordingState, title: String, transcriptRevision: Int, transcriptSegments: [TranscriptSegmentDTO], updatedAt: String) {
+    public init(body: String, createdAt: String, date: String, duration: String, enhanced: String, generatedRevision: Int?, generationState: GenerationState, id: String, importedAt: String? = nil, recordingState: RecordingState, title: String, transcriptGaps: [TranscriptGapDTO]? = nil, transcriptRevision: Int, transcriptSegments: [TranscriptSegmentDTO], updatedAt: String) {
         self.body = body
         self.createdAt = createdAt
         self.date = date
@@ -2491,9 +2460,29 @@ public struct NoteDTO: Codable, Sendable {
         self.importedAt = importedAt
         self.recordingState = recordingState
         self.title = title
+        self.transcriptGaps = transcriptGaps
         self.transcriptRevision = transcriptRevision
         self.transcriptSegments = transcriptSegments
         self.updatedAt = updatedAt
+    }
+}
+
+// MARK: - TranscriptGapDTO
+public struct TranscriptGapDTO: Codable, Sendable {
+    public let channel: AudioChannel
+    public let fromMs: Int
+    public let toMs: Int
+
+    public enum CodingKeys: String, CodingKey {
+        case channel = "channel"
+        case fromMs = "fromMs"
+        case toMs = "toMs"
+    }
+
+    public init(channel: AudioChannel, fromMs: Int, toMs: Int) {
+        self.channel = channel
+        self.fromMs = fromMs
+        self.toMs = toMs
     }
 }
 
@@ -3199,15 +3188,18 @@ public enum LiveFinalMessageType: String, Codable, Sendable {
 // MARK: - LiveSpeakersMessage
 public struct LiveSpeakersMessage: Codable, Sendable {
     public let merges: [LiveSpeakerMerge]
+    public let relabels: [LiveSpeakerRelabel]?
     public let type: LiveSpeakersMessageType
 
     public enum CodingKeys: String, CodingKey {
         case merges = "merges"
+        case relabels = "relabels"
         case type = "type"
     }
 
-    public init(merges: [LiveSpeakerMerge], type: LiveSpeakersMessageType) {
+    public init(merges: [LiveSpeakerMerge], relabels: [LiveSpeakerRelabel]? = nil, type: LiveSpeakersMessageType) {
         self.merges = merges
+        self.relabels = relabels
         self.type = type
     }
 }
@@ -3225,6 +3217,25 @@ public struct LiveSpeakerMerge: Codable, Sendable {
     public init(from: String, to: String) {
         self.from = from
         self.to = to
+    }
+}
+
+// MARK: - LiveSpeakerRelabel
+public struct LiveSpeakerRelabel: Codable, Sendable {
+    public let segmentId: String
+    public let speakerId: String
+    public let speakerLabel: String
+
+    public enum CodingKeys: String, CodingKey {
+        case segmentId = "segmentId"
+        case speakerId = "speakerId"
+        case speakerLabel = "speakerLabel"
+    }
+
+    public init(segmentId: String, speakerId: String, speakerLabel: String) {
+        self.segmentId = segmentId
+        self.speakerId = speakerId
+        self.speakerLabel = speakerLabel
     }
 }
 
@@ -3338,6 +3349,268 @@ public enum LiveErrorMessageType: String, Codable, Sendable {
     case error = "error"
 }
 
+// MARK: - ChatThreadDTO
+public struct ChatThreadDTO: Codable, Sendable {
+    public let createdAt: String
+    public let id: String
+    public let messages: [ChatThreadMessageDTO]
+    public let noteId: String?
+    public let title: String?
+    public let titleSource: ChatThreadTitleSource?
+    public let turnCount: Int
+    public let updatedAt: String
+
+    public enum CodingKeys: String, CodingKey {
+        case createdAt = "createdAt"
+        case id = "id"
+        case messages = "messages"
+        case noteId = "noteId"
+        case title = "title"
+        case titleSource = "titleSource"
+        case turnCount = "turnCount"
+        case updatedAt = "updatedAt"
+    }
+
+    public init(createdAt: String, id: String, messages: [ChatThreadMessageDTO], noteId: String?, title: String?, titleSource: ChatThreadTitleSource?, turnCount: Int, updatedAt: String) {
+        self.createdAt = createdAt
+        self.id = id
+        self.messages = messages
+        self.noteId = noteId
+        self.title = title
+        self.titleSource = titleSource
+        self.turnCount = turnCount
+        self.updatedAt = updatedAt
+    }
+}
+
+// MARK: - ChatThreadMessageDTO
+public struct ChatThreadMessageDTO: Codable, Sendable {
+    public let citations: [ChatCitationDTO]
+    public let content: String
+    public let createdAt: String
+    public let elapsedMs: Int?
+    public let error: String?
+    public let id: String
+    public let model: String?
+    public let role: ChatMessageDTORole
+    public let status: ChatThreadMessageStatus
+    public let tools: [ChatToolProgressDTO]
+    public let turn: Int
+    public let updatedAt: String
+
+    public enum CodingKeys: String, CodingKey {
+        case citations = "citations"
+        case content = "content"
+        case createdAt = "createdAt"
+        case elapsedMs = "elapsedMs"
+        case error = "error"
+        case id = "id"
+        case model = "model"
+        case role = "role"
+        case status = "status"
+        case tools = "tools"
+        case turn = "turn"
+        case updatedAt = "updatedAt"
+    }
+
+    public init(citations: [ChatCitationDTO], content: String, createdAt: String, elapsedMs: Int?, error: String?, id: String, model: String?, role: ChatMessageDTORole, status: ChatThreadMessageStatus, tools: [ChatToolProgressDTO], turn: Int, updatedAt: String) {
+        self.citations = citations
+        self.content = content
+        self.createdAt = createdAt
+        self.elapsedMs = elapsedMs
+        self.error = error
+        self.id = id
+        self.model = model
+        self.role = role
+        self.status = status
+        self.tools = tools
+        self.turn = turn
+        self.updatedAt = updatedAt
+    }
+}
+
+public enum ChatThreadMessageStatus: String, Codable, Sendable {
+    case complete = "complete"
+    case failed = "failed"
+    case interrupted = "interrupted"
+    case streaming = "streaming"
+}
+
+public enum ChatThreadTitleSource: String, Codable, Sendable {
+    case generated = "generated"
+    case question = "question"
+    case user = "user"
+}
+
+// MARK: - ChatThreadsPageDTO
+public struct ChatThreadsPageDTO: Codable, Sendable {
+    public let nextCursor: String?
+    public let threads: [ChatThreadSummaryDTO]
+    public let total: Int
+
+    public enum CodingKeys: String, CodingKey {
+        case nextCursor = "nextCursor"
+        case threads = "threads"
+        case total = "total"
+    }
+
+    public init(nextCursor: String?, threads: [ChatThreadSummaryDTO], total: Int) {
+        self.nextCursor = nextCursor
+        self.threads = threads
+        self.total = total
+    }
+}
+
+// MARK: - ChatThreadSummaryDTO
+public struct ChatThreadSummaryDTO: Codable, Sendable {
+    public let createdAt: String
+    public let id: String
+    public let noteId: String?
+    public let title: String?
+    public let titleSource: ChatThreadTitleSource?
+    public let turnCount: Int
+    public let updatedAt: String
+
+    public enum CodingKeys: String, CodingKey {
+        case createdAt = "createdAt"
+        case id = "id"
+        case noteId = "noteId"
+        case title = "title"
+        case titleSource = "titleSource"
+        case turnCount = "turnCount"
+        case updatedAt = "updatedAt"
+    }
+
+    public init(createdAt: String, id: String, noteId: String?, title: String?, titleSource: ChatThreadTitleSource?, turnCount: Int, updatedAt: String) {
+        self.createdAt = createdAt
+        self.id = id
+        self.noteId = noteId
+        self.title = title
+        self.titleSource = titleSource
+        self.turnCount = turnCount
+        self.updatedAt = updatedAt
+    }
+}
+
+// MARK: - CreateChatThreadInput
+public struct CreateChatThreadInput: Codable, Sendable {
+    public let id: String?
+    public let noteId: String?
+    public let title: String?
+
+    public enum CodingKeys: String, CodingKey {
+        case id = "id"
+        case noteId = "noteId"
+        case title = "title"
+    }
+
+    public init(id: String? = nil, noteId: String? = nil, title: String? = nil) {
+        self.id = id
+        self.noteId = noteId
+        self.title = title
+    }
+}
+
+// MARK: - AppendChatTurnInput
+public struct AppendChatTurnInput: Codable, Sendable {
+    public let answer: ChatTurnAnswerInput
+    public let question: String
+    public let replace: Bool?
+    public let turn: Int
+
+    public enum CodingKeys: String, CodingKey {
+        case answer = "answer"
+        case question = "question"
+        case replace = "replace"
+        case turn = "turn"
+    }
+
+    public init(answer: ChatTurnAnswerInput, question: String, replace: Bool? = nil, turn: Int) {
+        self.answer = answer
+        self.question = question
+        self.replace = replace
+        self.turn = turn
+    }
+}
+
+// MARK: - ChatTurnAnswerInput
+public struct ChatTurnAnswerInput: Codable, Sendable {
+    public let citations: [ChatCitationDTO]?
+    public let content: String
+    public let elapsedMs: Int?
+    public let error: String?
+    public let model: String?
+    public let status: ChatTurnAnswerStatus
+    public let tools: [ChatToolProgressDTO]?
+
+    public enum CodingKeys: String, CodingKey {
+        case citations = "citations"
+        case content = "content"
+        case elapsedMs = "elapsedMs"
+        case error = "error"
+        case model = "model"
+        case status = "status"
+        case tools = "tools"
+    }
+
+    public init(citations: [ChatCitationDTO]? = nil, content: String, elapsedMs: Int? = nil, error: String? = nil, model: String? = nil, status: ChatTurnAnswerStatus, tools: [ChatToolProgressDTO]? = nil) {
+        self.citations = citations
+        self.content = content
+        self.elapsedMs = elapsedMs
+        self.error = error
+        self.model = model
+        self.status = status
+        self.tools = tools
+    }
+}
+
+public enum ChatTurnAnswerStatus: String, Codable, Sendable {
+    case complete = "complete"
+    case failed = "failed"
+    case interrupted = "interrupted"
+}
+
+// MARK: - UpdateChatThreadInput
+public struct UpdateChatThreadInput: Codable, Sendable {
+    public let title: String
+
+    public enum CodingKeys: String, CodingKey {
+        case title = "title"
+    }
+
+    public init(title: String) {
+        self.title = title
+    }
+}
+
+// MARK: - ChatThreadStreamInput
+public struct ChatThreadStreamInput: Codable, Sendable {
+    public let includeSources: Bool?
+    public let message: String
+    public let model: String?
+    public let replace: Bool?
+    public let timeZone: String?
+    public let turn: Int
+
+    public enum CodingKeys: String, CodingKey {
+        case includeSources = "includeSources"
+        case message = "message"
+        case model = "model"
+        case replace = "replace"
+        case timeZone = "timeZone"
+        case turn = "turn"
+    }
+
+    public init(includeSources: Bool? = nil, message: String, model: String? = nil, replace: Bool? = nil, timeZone: String? = nil, turn: Int) {
+        self.includeSources = includeSources
+        self.message = message
+        self.model = model
+        self.replace = replace
+        self.timeZone = timeZone
+        self.turn = turn
+    }
+}
+
 
 extension NoteSummaryDTO {
     private enum ContractWireKeys: String, CodingKey {
@@ -3359,7 +3632,6 @@ extension NoteSummaryDTO {
         case meeting
         case attendees
         case organizationId
-        case folders
     }
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: ContractWireKeys.self)
@@ -3381,7 +3653,6 @@ extension NoteSummaryDTO {
         try container.encode(meeting, forKey: .meeting)
         try container.encode(attendees, forKey: .attendees)
         try container.encode(organizationId, forKey: .organizationId)
-        try container.encode(folders, forKey: .folders)
     }
 }
 
@@ -3674,6 +3945,7 @@ extension SignInSettingsDTO {
         case allowedEmails
         case googleClientId
         case googleClientSecretSet
+        case googleClientSecretHint
         case googleRedirectUris
         case googleNeedsHttps
     }
@@ -3684,6 +3956,7 @@ extension SignInSettingsDTO {
         try container.encode(allowedEmails, forKey: .allowedEmails)
         try container.encode(googleClientId, forKey: .googleClientId)
         try container.encode(googleClientSecretSet, forKey: .googleClientSecretSet)
+        try container.encodeIfPresent(googleClientSecretHint, forKey: .googleClientSecretHint)
         try container.encode(googleRedirectUris, forKey: .googleRedirectUris)
         try container.encodeIfPresent(googleNeedsHttps, forKey: .googleNeedsHttps)
     }
@@ -3698,8 +3971,8 @@ extension AdminSettingsDTO {
         case providers
         case chatModels
         case generationModel
-        case transcriptionModel
         case liveTranscriptionModel
+        case openAiCompatible
         case openRouterConfigured
         case elevenLabsConfigured
         case openRouterSource
@@ -3723,8 +3996,8 @@ extension AdminSettingsDTO {
         try container.encode(providers, forKey: .providers)
         try container.encode(chatModels, forKey: .chatModels)
         try container.encode(generationModel, forKey: .generationModel)
-        try container.encode(transcriptionModel, forKey: .transcriptionModel)
-        try container.encodeIfPresent(liveTranscriptionModel, forKey: .liveTranscriptionModel)
+        try container.encode(liveTranscriptionModel, forKey: .liveTranscriptionModel)
+        try container.encodeIfPresent(openAiCompatible, forKey: .openAiCompatible)
         try container.encode(openRouterConfigured, forKey: .openRouterConfigured)
         try container.encode(elevenLabsConfigured, forKey: .elevenLabsConfigured)
         try container.encode(openRouterSource, forKey: .openRouterSource)
@@ -3815,31 +4088,6 @@ extension CalendarEventDTO {
 }
 
 
-extension AudioChunkDTO {
-    private enum ContractWireKeys: String, CodingKey {
-        case id
-        case noteId
-        case channel
-        case sequence
-        case startMs
-        case durationMs
-        case state
-        case error
-    }
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: ContractWireKeys.self)
-        try container.encode(id, forKey: .id)
-        try container.encode(noteId, forKey: .noteId)
-        try container.encode(channel, forKey: .channel)
-        try container.encode(sequence, forKey: .sequence)
-        try container.encode(startMs, forKey: .startMs)
-        try container.encode(durationMs, forKey: .durationMs)
-        try container.encode(state, forKey: .state)
-        try container.encode(error, forKey: .error)
-    }
-}
-
-
 extension ChatCitationDTO {
     private enum ContractWireKeys: String, CodingKey {
         case id
@@ -3918,6 +4166,7 @@ extension NoteDTO {
         case createdAt
         case updatedAt
         case transcriptSegments
+        case transcriptGaps
         case recordingState
         case generationState
         case transcriptRevision
@@ -3935,6 +4184,7 @@ extension NoteDTO {
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
         try container.encode(transcriptSegments, forKey: .transcriptSegments)
+        try container.encodeIfPresent(transcriptGaps, forKey: .transcriptGaps)
         try container.encode(recordingState, forKey: .recordingState)
         try container.encode(generationState, forKey: .generationState)
         try container.encode(transcriptRevision, forKey: .transcriptRevision)
@@ -4062,6 +4312,7 @@ extension StorageSettingsDTO {
         case forcePathStyle
         case accessKeyId
         case secretAccessKeySet
+        case secretAccessKeyHint
     }
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: ContractWireKeys.self)
@@ -4074,6 +4325,7 @@ extension StorageSettingsDTO {
         try container.encode(forcePathStyle, forKey: .forcePathStyle)
         try container.encode(accessKeyId, forKey: .accessKeyId)
         try container.encode(secretAccessKeySet, forKey: .secretAccessKeySet)
+        try container.encodeIfPresent(secretAccessKeyHint, forKey: .secretAccessKeyHint)
     }
 }
 
@@ -4108,6 +4360,21 @@ extension AppsSettingsDTO {
 }
 
 
+extension OpenAICompatibleSettingsDTO {
+    private enum ContractWireKeys: String, CodingKey {
+        case baseUrl
+        case apiKeySet
+        case apiKeyHint
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: ContractWireKeys.self)
+        try container.encode(baseUrl, forKey: .baseUrl)
+        try container.encode(apiKeySet, forKey: .apiKeySet)
+        try container.encodeIfPresent(apiKeyHint, forKey: .apiKeyHint)
+    }
+}
+
+
 extension OnboardingDTO {
     private enum ContractWireKeys: String, CodingKey {
         case completedAt
@@ -4130,5 +4397,101 @@ extension GoogleVerificationStatusDTO {
         var container = encoder.container(keyedBy: ContractWireKeys.self)
         try container.encode(state, forKey: .state)
         try container.encode(reason, forKey: .reason)
+    }
+}
+
+
+extension ChatThreadMessageDTO {
+    private enum ContractWireKeys: String, CodingKey {
+        case id
+        case turn
+        case role
+        case content
+        case status
+        case error
+        case model
+        case citations
+        case tools
+        case elapsedMs
+        case createdAt
+        case updatedAt
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: ContractWireKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(turn, forKey: .turn)
+        try container.encode(role, forKey: .role)
+        try container.encode(content, forKey: .content)
+        try container.encode(status, forKey: .status)
+        try container.encode(error, forKey: .error)
+        try container.encode(model, forKey: .model)
+        try container.encode(citations, forKey: .citations)
+        try container.encode(tools, forKey: .tools)
+        try container.encode(elapsedMs, forKey: .elapsedMs)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+    }
+}
+
+
+extension ChatThreadSummaryDTO {
+    private enum ContractWireKeys: String, CodingKey {
+        case id
+        case noteId
+        case title
+        case titleSource
+        case turnCount
+        case createdAt
+        case updatedAt
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: ContractWireKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(noteId, forKey: .noteId)
+        try container.encode(title, forKey: .title)
+        try container.encode(titleSource, forKey: .titleSource)
+        try container.encode(turnCount, forKey: .turnCount)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+    }
+}
+
+
+extension ChatThreadDTO {
+    private enum ContractWireKeys: String, CodingKey {
+        case id
+        case noteId
+        case title
+        case titleSource
+        case turnCount
+        case createdAt
+        case updatedAt
+        case messages
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: ContractWireKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(noteId, forKey: .noteId)
+        try container.encode(title, forKey: .title)
+        try container.encode(titleSource, forKey: .titleSource)
+        try container.encode(turnCount, forKey: .turnCount)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encode(messages, forKey: .messages)
+    }
+}
+
+
+extension ChatThreadsPageDTO {
+    private enum ContractWireKeys: String, CodingKey {
+        case threads
+        case nextCursor
+        case total
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: ContractWireKeys.self)
+        try container.encode(threads, forKey: .threads)
+        try container.encode(nextCursor, forKey: .nextCursor)
+        try container.encode(total, forKey: .total)
     }
 }

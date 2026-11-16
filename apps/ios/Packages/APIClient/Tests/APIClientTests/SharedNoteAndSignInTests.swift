@@ -480,7 +480,7 @@ private func noteJSON(title: String, updatedAt: String, generated: Bool) -> Stri
     #"{"id":"\#(untitledID)","title":"\#(title)","body":"","enhanced":"\#(generated ? "## Summary" : "")","date":"2026-11-12","duration":"1:12","createdAt":"2026-11-12T10:00:00.000Z","updatedAt":"\#(updatedAt)","recordingState":"stopped","generationState":"\#(generated ? "ready" : "idle")","transcriptRevision":2,"generatedRevision":\#(generated ? "2" : "null"),"transcriptSegments":[]}"#
 }
 private func summaryJSON(title: String, updatedAt: String) -> String {
-    #"{"id":"\#(untitledID)","title":"\#(title)","date":"2026-11-12","duration":"1:12","createdAt":"2026-11-12T10:00:00.000Z","updatedAt":"\#(updatedAt)","recordingState":"stopped","generationState":"idle","transcriptRevision":2,"generatedRevision":null,"hasBody":false,"hasSummary":false,"hasTranscript":true,"speakerCount":1,"excerpt":"","meeting":null,"attendees":{"people":[],"others":0,"total":0},"organizationId":null,"folders":[]}"#
+    #"{"id":"\#(untitledID)","title":"\#(title)","date":"2026-11-12","duration":"1:12","createdAt":"2026-11-12T10:00:00.000Z","updatedAt":"\#(updatedAt)","recordingState":"stopped","generationState":"idle","transcriptRevision":2,"generatedRevision":null,"hasBody":false,"hasSummary":false,"hasTranscript":true,"speakerCount":1,"excerpt":"","meeting":null,"attendees":{"people":[],"others":0,"total":0},"organizationId":null}"#
 }
 
 /// Generating notes for an untitled note also gives it a title. The app must

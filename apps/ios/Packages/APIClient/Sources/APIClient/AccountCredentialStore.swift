@@ -193,18 +193,20 @@ public struct AccountStorage: Sendable {
         }
     }
 
-    /// Counts the recordings in an account's directory from its delivery
-    /// journal, its capture ledger and the capture folders themselves.
+    /// Counts the recordings in an account's directory from the delivery
+    /// journal an earlier version kept, its capture ledger and the capture
+    /// folders themselves. This version uploads no audio, so the journal is
+    /// only ever one left behind.
     public func summary(_ name: String) -> AccountDataSummary {
         guard let directory = try? directory(name) else { return AccountDataSummary() }
         let manager = FileManager.default
         var notes = Set<String>(), unsent = Set<String>(), deleted = Set<String>()
         if let data = try? Data(contentsOf: directory.appendingPathComponent("outbox.json")),
-           let entries = try? JSONDecoder().decode([AudioOutboxEntry].self, from: data) {
+           let entries = try? JSONDecoder().decode([LegacyDelivery].self, from: data) {
             for entry in entries {
                 let note = entry.noteID.lowercased()
                 notes.insert(note)
-                if entry.state == .pending { unsent.insert(note) }
+                if entry.state == "pending" { unsent.insert(note) }
             }
         }
         if let data = try? Data(contentsOf: directory.appendingPathComponent("captures.json")),
@@ -225,6 +227,7 @@ public struct AccountStorage: Sendable {
     }
 
     private struct Ledger: Decodable { let serverMissingSince: Date? }
+    private struct LegacyDelivery: Decodable { let noteID: String; let state: String }
 
     /// Deletes an account's directory and everything in it. Only a directory
     /// directly under the root, named by an account id, that is a real directory.

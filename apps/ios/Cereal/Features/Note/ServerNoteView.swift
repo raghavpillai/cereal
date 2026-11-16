@@ -91,7 +91,7 @@ struct ServerNoteView: View {
                         // The two documents cross-fade. Large text never animates its layout.
                         Group {
                             if content.isEmpty {
-                                Text(showMine ? "No typed notes yet. Choose Edit notes to add your own." : "Record this meeting, stop capture, then generate your notes.")
+                                Text(emptyText(note))
                                     .foregroundStyle(Theme.textTertiary).readingFont(.body)
                             } else if !showMine {
                                 ServerNoteMarkdown(text: content)
@@ -105,25 +105,20 @@ struct ServerNoteView: View {
                         // at once so two layouts never ghost over each other.
                         .id(DocumentIdentity(showMine: showMine, revision: note.generatedRevision))
                         .transition(.asymmetric(insertion: motion.fade, removal: .identity))
-                        if recording.isActive(ref) || recording.hasPendingAudio(ref) {
+                        if recording.isActive(ref), capturingHere || finishingHere || recording.error != nil {
+                            // While recording, the live stream's line, when it has something to say; after Stop, while
+                            // the stream hands over the rest, that it is finishing; then any problem.
                             VStack(alignment: .leading, spacing: 8) {
-                                Text(recording.status).font(.footnote).contentTransition(motion.reduceMotion ? .identity : .opacity)
+                                if capturingHere || finishingHere, let live = recording.transcript(for: ref) {
+                                    LiveStatusLine(live: live, finishing: finishingHere)
+                                } else if finishingHere {
+                                    Text(LiveStatusText.finishing).font(.footnote)
+                                }
                                 if let message = recording.error {
-                                    Text(message).foregroundStyle(Theme.danger)
-                                    Button("Retry audio delivery") { recording.retry(ref) }
-                                        .disabled(recording.isSyncing)
-                                        .frame(minHeight: 44, alignment: .leading).contentShape(Rectangle())
+                                    Text(message).font(.footnote).foregroundStyle(Theme.danger)
                                 }
                             }.foregroundStyle(Theme.textTertiary).padding(.top, 16)
                                 .transition(motion.rise)
-                        }
-                        if recording.hasPendingAudio(ref), !recording.isCapturing {
-                            HStack {
-                                if recording.isSyncing { ProgressView() }
-                                Text("Saved audio is waiting for transcription.").font(.footnote)
-                                Button("Retry") { recording.retry(ref) }.disabled(recording.isSyncing)
-                                    .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
-                            }
                         }
                     } else if let error {
                         errorView(error).padding(.top, 28)
@@ -132,11 +127,20 @@ struct ServerNoteView: View {
                 .padding(.leading, Theme.gutter).padding(.trailing, 8).clearsBottomChrome()
                 .animation(motion.snappy, value: error)
                 .animation(motion.snappy, value: note == nil)
-                .animation(motion.snappy, value: recording.status)
-                .animation(motion.snappy, value: recording.isSyncing)
+                .animation(motion.snappy, value: recording.error)
+                .animation(motion.snappy, value: generatingHere)
+                .animation(motion.snappy, value: finishingHere)
                 .animation(motion.snappy, value: note?.generatedRevision)
             }
             .refreshable { await load() }
+            // The "Chat with meeting transcript" link at the foot of this note's generated notes opens its chat
+            // here, signed in as the note's owner. Any other link goes to the system.
+            .environment(\.openURL, OpenURLAction { url in
+                guard let account, let link = AppLink.transcriptChat(url), link.noteID == noteID,
+                      let instance = server.instance, link.origin.isInstance(instance) else { return .systemAction }
+                router.path.append(.serverChat(account, noteID: noteID))
+                return .handled
+            })
         } leading: {
             BackButton()
         } standalone: {
@@ -182,8 +186,9 @@ struct ServerNoteView: View {
                 VStack(spacing: 12) {
                     // The button stays through the request and shows its own
                     // busy state, so one glass surface lasts the whole operation.
-                    if canGenerate || generating {
-                        GenerateButton(title: note?.generatedRevision == nil ? "Generate notes" : "Regenerate notes", busy: generating) { generate() }
+                    // After a Stop the notes are being written already, and it shows that.
+                    if canGenerate || generating || generatingHere {
+                        GenerateButton(title: note?.generatedRevision == nil ? "Generate notes" : "Regenerate notes", busy: generating || generatingHere) { generate() }
                             .glassMorph("generate", in: glass)
                     }
                     HStack(alignment: .center, spacing: 12) {
@@ -217,7 +222,7 @@ struct ServerNoteView: View {
             // through the keyboard's glass underneath it.
             .opacity(editingTitle ? 0 : 1)
             .animation(motion.snappy, value: editingTitle)
-            .animation(motion.animation(.gooey, entering: canGenerate || generating), value: canGenerate || generating)
+            .animation(motion.animation(.gooey, entering: canGenerate || generating || generatingHere), value: canGenerate || generating || generatingHere)
             .sensoryFeedback(.success, trigger: generatedCount)
             .sensoryFeedback(.success, trigger: copiedCount)
             .animation(motion.animation(.gooey, entering: indicatorHere), value: indicatorHere)
@@ -233,9 +238,8 @@ struct ServerNoteView: View {
             meetingContext = $0
             Task { await load() }
         } }
-        // While this note is being recorded its parts come and go every half minute; the
-        // page is read again when delivery settles after the recording, not at each part.
-        .onChange(of: recording.isSyncing) { _, syncing in if !syncing && !capturingHere { Task { await load() } } }
+        // The notes written after a Stop arrive with the note the server answered with; the page reads it.
+        .onChange(of: generatingHere) { _, writing in if !writing && !capturingHere { Task { await load() } } }
         .onChange(of: recording.isBusy) { _, busy in if !busy { Task { await load() } } }
         .onChange(of: router.serverCapture?.ref) { old, new in
             if CaptureNavigation.noteReloads(note: ref, captureWas: old, captureIs: new) { Task { await load() } }
@@ -251,10 +255,9 @@ struct ServerNoteView: View {
         .sheet(isPresented: $sharing) { ServerShareView(noteID: noteID) }
         .sheet(isPresented: $transcript) {
             if let note {
-                // While this device records the note, or its audio is still being transcribed,
-                // the sheet follows the growing transcript; afterwards it shows the saved note.
-                ServerTranscriptView(note: note, live: capturingHere || recording.hasPendingAudio(ref) ? recording.transcript(for: ref) : nil,
-                                     recording: capturingHere)
+                // While this device records the note the sheet follows the growing transcript;
+                // afterwards it shows the saved note.
+                ServerTranscriptView(note: note, live: capturingHere ? recording.transcript(for: ref) : nil, recording: capturingHere)
             }
         }
         .alert("Delete this note?", isPresented: $confirmDelete) {
@@ -295,6 +298,19 @@ struct ServerNoteView: View {
     }
 
     private var capturingHere: Bool { recording.isCapturing && recording.isActive(ref) }
+    /// The recording here was stopped and its notes are being written from the transcript.
+    private var generatingHere: Bool { recording.isGeneratingNotes(ref) }
+    /// The recording here was stopped and its audio is still being handed to the server.
+    private var finishingHere: Bool { recording.isFinishingTranscript(ref) }
+    /// What the page says while it has no document to show.
+    private func emptyText(_ note: NoteDTO) -> String {
+        if showMine { return "No typed notes yet. Choose Edit notes to add your own." }
+        if finishingHere { return LiveStatusText.finishing }
+        if generatingHere { return "Writing your notes from the transcript…" }
+        if capturingHere || note.recordingState == .recording { return "Your notes are written from the transcript when the recording stops." }
+        if ServerRecordingController.endedWithoutTranscript(note) { return ServerRecordingController.noTranscript }
+        return "Record this meeting. When you stop, your notes are written from the transcript."
+    }
     /// This note has a recording to return to: running, paused, or interrupted.
     private var indicatorHere: Bool { recording.isIndicator(ref) }
     private func openCapture() { if let ref { router.serverCapture = ServerCaptureTarget(ref) } }
@@ -305,8 +321,8 @@ struct ServerNoteView: View {
 
     private var canGenerate: Bool {
         guard let note else { return false }
-        return !busy && !recording.isBusy && !recording.isCapturing && !recording.isSyncing &&
-            !recording.hasPendingAudio(ref) && note.recordingState != .recording &&
+        return !busy && !recording.isBusy && !recording.isCapturing && !generatingHere &&
+            note.recordingState != .recording &&
             note.transcriptRevision > 0 && note.generatedRevision != note.transcriptRevision
     }
 
@@ -405,6 +421,9 @@ struct ServerNoteMarkdown: View {
                         Text(marker).foregroundStyle(Theme.textTertiary).monospacedDigit()
                         Text(inline(value)).frame(maxWidth: .infinity, alignment: .leading)
                     }.padding(.leading, CGFloat(min(4, depth) * 14))
+                // A Markdown rule (the one above the chat link at the foot of generated notes) is a hairline, as on the desktop and web.
+                case .paragraph(let value) where ["---", "***", "___"].contains(value.trimmingCharacters(in: .whitespaces)):
+                    Rectangle().fill(Theme.textTertiary.opacity(0.35)).frame(height: 1).padding(.vertical, 10).accessibilityHidden(true)
                 case .paragraph(let value): Text(inline(value)).frame(maxWidth: .infinity, alignment: .leading)
                 case .quote(let value):
                     HStack(alignment: .top, spacing: 12) {
@@ -426,12 +445,10 @@ struct ServerNoteMarkdown: View {
 
     private func inline(_ text: String) -> AttributedString {
         ChatMarkdownCache.inline(text, context: "note") {
-            var result = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
-            for run in Array(result.runs) {
-                if let link = run.link, !["http", "https", "mailto"].contains(link.scheme?.lowercased() ?? "") {
-                    result[run.range].link = nil
-                }
-            }
+            // Markdown, plus addresses written out in full (the chat link at the foot of generated notes), linked by
+            // the same rules as the desktop and web readers (WebAddresses). A link is the app's tint, underlined.
+            var result = WebAddresses.markdown(text)
+            for run in Array(result.runs) where run.link != nil { result[run.range].underlineStyle = .single }
             return result
         }
     }
@@ -529,16 +546,12 @@ struct ServerTranscriptView: View {
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: 20) {
                                 if note.transcriptSegments.isEmpty { Text("No transcript is saved for this note.") }
-                                ForEach(TranscriptPresentation.rows(note.transcriptSegments)) { row in
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        Text(row.caption).font(.caption).foregroundStyle(Theme.textSecondary)
-                                        Text(row.segment.text).readingFont(.body).opacity(row.segment.isFinal ? 1 : 0.6)
+                                // The lines, and in their place the stretches that were captured and never transcribed.
+                                ForEach(TranscriptPresentation.entries(note)) { entry in
+                                    switch entry {
+                                    case .gap(let gap): TranscriptGapRow(gap: gap).id(gap.id)
+                                    case .row(let row): savedRow(row)
                                     }
-                                    .padding(focusSegmentID == row.segment.id ? 10 : 0)
-                                    // The cited line is brighter as the sheet lands on it, then settles.
-                                    .background(focusSegmentID == row.segment.id ? Theme.accent.opacity(landed ? 0.12 : 0.30) : .clear, in: RoundedRectangle(cornerRadius: 8))
-                                    .accessibilityElement(children: .combine).id(row.segment.id)
-                                    .accessibilityIdentifier("transcript-segment-\(row.segment.id)")
                                 }
                             }.textSelection(.enabled).padding(Theme.gutter).frame(maxWidth: .infinity, alignment: .leading)
                         }
@@ -562,5 +575,17 @@ struct ServerTranscriptView: View {
         }
         // One colour whether or not a recording is running behind it.
         .glassSheet(background: Theme.sheet)
+    }
+
+    private func savedRow(_ row: TranscriptPresentation.Row) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(row.caption).font(.caption).foregroundStyle(Theme.textSecondary)
+            Text(row.segment.text).readingFont(.body).opacity(row.segment.isFinal ? 1 : 0.6)
+        }
+        .padding(focusSegmentID == row.segment.id ? 10 : 0)
+        // The cited line is brighter as the sheet lands on it, then settles.
+        .background(focusSegmentID == row.segment.id ? Theme.accent.opacity(landed ? 0.12 : 0.30) : .clear, in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityElement(children: .combine).id(row.segment.id)
+        .accessibilityIdentifier("transcript-segment-\(row.segment.id)")
     }
 }

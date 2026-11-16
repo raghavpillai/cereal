@@ -143,7 +143,7 @@ test("note chat, evidence and planner requests at the provider boundary",async()
 /** The whole streaming path used by POST /notes/:id/chat/stream. */
 async function throughProcessing(noteId:string,input:ChatInput,seed:ReadonlyArray<NoteDTO>,meetingFor?:string) {
   const r=recorder(),repository=makeMemoryRepository(seed,clock)
-  const processing=makeProcessingService(repository,{worker:false,clock,providers:makeProviderServices({openRouterKey:"fixture-key",languageModel:"openai/gpt-6-sol",fetch:r.transport}),
+  const processing=makeProcessingService(repository,{clock,providers:makeProviderServices({openRouterKey:"fixture-key",languageModel:"openai/gpt-6-sol",fetch:r.transport}),
     ...(meetingFor?{meetingContext:(requested:string)=>Effect.succeed(requested===meetingFor?meeting:null)}:{})})
   const events:ChatStreamEventDTO[]=[]
   await Effect.runPromise(Stream.runForEach(await Effect.runPromise(processing.chatStream(noteId,input)),event=>Effect.sync(()=>{events.push(event)})))
@@ -215,7 +215,7 @@ test("live-origin transcripts: speaker rule in the base prompt, voice tags, and 
   const t=recorder(),repository=makeMemoryRepository([{...liveNote,recordingState:"recording"}],clock)
   const hub={size:1,full:()=>false,connect:async()=>{throw new Error("not used")},active:()=>true,pendingRange:()=>null,flush:async()=>{},end:async()=>{},dispose:async()=>{},
     snapshot:()=>({asOfMs:31_000,state:"live" as const,tail:[{channel:"system" as const,text:"Thirty two people confirmed and catering needs the final count by",startMs:27_500,speakerId:"system:n:2"}]})}
-  const processing=makeProcessingService(repository,{worker:false,clock,live:hub,providers:makeProviderServices({openRouterKey:"fixture-key",languageModel:"openai/gpt-6-sol",fetch:t.transport})})
+  const processing=makeProcessingService(repository,{clock,live:hub,providers:makeProviderServices({openRouterKey:"fixture-key",languageModel:"openai/gpt-6-sol",fetch:t.transport})})
   const events:ChatStreamEventDTO[]=[]
   await Effect.runPromise(Stream.runForEach(await Effect.runPromise(processing.chatStream(liveNote.id,{message:"How many people confirmed?",history:[],includeSources:true})),event=>Effect.sync(()=>{events.push(event)})))
   await processing.dispose()
@@ -230,7 +230,7 @@ async function liveThread(options:Parameters<typeof makeProviderServices>[0],onl
   const repository=makeMemoryRepository([{...liveNote,recordingState:"recording",body:"- Skerryvore +11%",transcriptSegments:lines.slice(0,2)}],clock)
   let tail:Array<{channel:"mic"|"system";text:string;startMs:number;speakerId:string}>=[{channel:"mic",text:"Agreed. Put the evaluation on",startMs:15_000,speakerId:"mic:n:1"}]
   const hub={size:1,full:()=>false,connect:async()=>{throw new Error("not used")},active:()=>true,pendingRange:()=>null,flush:async()=>{},end:async()=>{},dispose:async()=>{},snapshot:()=>({asOfMs:17_000,state:"live" as const,tail})}
-  const processing=makeProcessingService(repository,{worker:false,clock,live:hub,liveConversations:makeLiveConversationStore(),providers:makeProviderServices({openRouterKey:"fixture-key",...options,fetch:r.transport})})
+  const processing=makeProcessingService(repository,{clock,live:hub,liveConversations:makeLiveConversationStore(),providers:makeProviderServices({openRouterKey:"fixture-key",...options,fetch:r.transport})})
   const thread:Array<ChatInput["history"][number]>=[]
   for(const [question,shown,speaking,notes] of [["What happened to prices?",2,true,"- Skerryvore +11%"],["Who tells finance?",3,false,"- Skerryvore +11%"],["Where is the offsite?",4,false,"- Skerryvore +11%\n- offsite 9 June"]] as const){
     if(!speaking)tail=[]
@@ -249,7 +249,7 @@ test("live chat thread: three turns at the wire, and the cache fields each provi
   check("live-chat/thread/openai-direct/turn-3",await liveThread({languageProvider:"openai",openAiKey:"fixture-key",languageModel:"gpt-6-sol"},"last"))
   // A finished note on an Anthropic model: breakpoints on the instructions and on the record, automatic caching for the thread.
   const r=recorder(),repository=makeMemoryRepository([pricing],clock)
-  const processing=makeProcessingService(repository,{worker:false,clock,providers:makeProviderServices({openRouterKey:"fixture-key",languageModel:"anthropic/claude-sonnet-5.5",fetch:r.transport})})
+  const processing=makeProcessingService(repository,{clock,providers:makeProviderServices({openRouterKey:"fixture-key",languageModel:"anthropic/claude-sonnet-5.5",fetch:r.transport})})
   await Effect.runPromise(Stream.runDrain(await Effect.runPromise(processing.chatStream(pricing.id,{message:"And what did she ask for?",history,includeSources:true,timeZone:"Europe/Stockholm"}))))
   await processing.dispose()
   check("note-chat/stream/openrouter-anthropic/follow-up",r.requests)

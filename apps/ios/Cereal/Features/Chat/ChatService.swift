@@ -33,7 +33,6 @@ struct LocalChatService: ChatService {
         for s in note.sections.prefix(2) {
             out += "\n**\(s.heading)**\n" + s.bullets.prefix(3).map { "- \($0)" }.joined(separator: "\n") + "\n"
         }
-        out += "\nThis on-device preview shows saved note text. Answers to your question will require a connected chat service."
         return out
     }
 }

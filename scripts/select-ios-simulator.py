@@ -15,8 +15,14 @@ for runtime, devices in snapshot.get("devices", {}).items():
     for device in devices:
         kind = device.get("deviceTypeIdentifier", "")
         if device.get("isAvailable") and (".iPhone-" in kind or device.get("name", "").startswith("iPhone")):
-            # Prefer the reference device shape, then the newest supported runtime.
-            score = (kind.endswith(".iPhone-17-Pro") or device["name"] == "iPhone 17 Pro", int(version[2] or 0), device["name"])
+            name = device.get("name", "")
+            # Other projects keep their own simulators on a shared machine: only this project's ("Cereal …") and
+            # Xcode's stock ones ("iPhone 17 Pro") are ours to use.
+            ours, stock = "cereal" in name.lower(), re.fullmatch(r"iPhone (\d+e?|Air|SE)( (Pro|Plus|Max|mini|\(\w+ generation\)))*", name) is not None
+            if not (ours or stock):
+                continue
+            # Prefer a Cereal device, then the plain reference device, then its shape, then the newest runtime.
+            score = (ours, name == "iPhone 17 Pro", kind.endswith(".iPhone-17-Pro"), int(version[2] or 0), name)
             candidates.append((score, device["udid"]))
 if not candidates:
     sys.exit("No available iPhone on an iOS 26 runtime; install the CI simulator runtime before testing.")

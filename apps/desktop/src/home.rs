@@ -93,8 +93,8 @@ pub fn search_snippet(note: &Note, query: &str) -> String {
     excerpt
 }
 
-type WorkspaceRevision = (u64, usize, usize, usize);
-type TranscriptKey = (u64, u64, usize, usize);
+type WorkspaceRevision = (u64, usize, usize);
+type TranscriptKey = (u64, u64, usize, usize, usize);
 type Cached<K, V> = std::cell::RefCell<Option<(K, std::rc::Rc<V>)>>;
 
 /// Data derived from the workspace that is expensive to rebuild and only
@@ -103,7 +103,7 @@ type Cached<K, V> = std::cell::RefCell<Option<(K, std::rc::Rc<V>)>>;
 /// re-parse a transcript.
 #[derive(Default)]
 pub struct Caches {
-    home: Cached<(WorkspaceRevision, Option<u64>, bool), Vec<HomeRow>>,
+    home: Cached<(WorkspaceRevision, bool), Vec<HomeRow>>,
     search: Cached<(WorkspaceRevision, String), Vec<u64>>,
     results: Cached<(WorkspaceRevision, String), Vec<SearchHit>>,
     utterances: Cached<TranscriptKey, Vec<crate::note::TranscriptUtterance>>,
@@ -129,8 +129,8 @@ pub fn home_rows(notes: &[&Note]) -> Vec<HomeRow> {
 
 impl Cereal {
     /// Rows for the current list, rebuilt only when the workspace changed.
-    pub fn list_rows(&self, folder: Option<u64>, favorites: bool) -> std::rc::Rc<Vec<HomeRow>> {
-        let key = (self.workspace.revision(), folder, favorites);
+    pub fn list_rows(&self, favorites: bool) -> std::rc::Rc<Vec<HomeRow>> {
+        let key = (self.workspace.revision(), favorites);
         let mut cache = self.caches.home.borrow_mut();
         if let Some((cached, rows)) = cache.as_ref()
             && *cached == key
@@ -138,7 +138,7 @@ impl Cereal {
             return rows.clone();
         }
         let rows = std::rc::Rc::new(home_rows(
-            &self.workspace.visible_notes(folder, favorites, ""),
+            &self.workspace.visible_notes(favorites, ""),
         ));
         *cache = Some((key, rows.clone()));
         rows
@@ -157,7 +157,7 @@ impl Cereal {
         }
         let ids = std::rc::Rc::new(
             self.workspace
-                .visible_notes(None, false, query)
+                .visible_notes(false, query)
                 .iter()
                 .map(|note| note.id)
                 .collect::<Vec<_>>(),
@@ -176,7 +176,7 @@ impl Cereal {
         {
             return hits.clone();
         }
-        let notes = self.workspace.visible_notes(None, false, query);
+        let notes = self.workspace.visible_notes(false, query);
         let hits = std::rc::Rc::new(
             home_rows(&notes)
                 .into_iter()
@@ -200,6 +200,7 @@ impl Cereal {
             note.transcript_revision,
             note.transcript.len(),
             note.server_transcript_segments.len(),
+            note.transcript_gaps.len(),
         );
         let mut cache = self.caches.utterances.borrow_mut();
         if let Some((cached, utterances)) = cache.as_ref()
@@ -221,21 +222,9 @@ impl Cereal {
     pub fn render_home(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme();
         let home = self.screen == Screen::Home;
-        let folder = if let Screen::Folder(id) = self.screen {
-            Some(id)
-        } else {
-            None
-        };
-        let notes = self.list_rows(folder, self.screen == Screen::Favorites);
+        let notes = self.list_rows(self.screen == Screen::Favorites);
         let title = match self.screen {
             Screen::Favorites => "Favorites".to_string(),
-            Screen::Folder(id) => self
-                .workspace
-                .folders
-                .iter()
-                .find(|f| f.id == id)
-                .map(|f| f.name.clone())
-                .unwrap_or("Notes".into()),
             _ => "My notes".into(),
         };
         // The list is a day caption followed by that day's rows, over and
@@ -304,7 +293,7 @@ impl Cereal {
                     ),
             );
         }
-        // Space pages (My notes, a folder, Favorites) are wider and open with
+        // Space pages (My notes, Favorites) are wider and open with
         // a centred hero; Home keeps the narrower column under "Coming up".
         let space = !home;
         // In pixels (see `page_column_width`): the page beside the sidebar,
@@ -317,23 +306,8 @@ impl Cereal {
             .flex()
             .flex_col()
             .flex_shrink_0();
-        if home && self.workspace.settings.show_upcoming {
+        if home {
             column = column.child(self.calendar(cx));
-        } else if home {
-            column = column.child(
-                div()
-                    .px(px(8.))
-                    .pt(px(14.))
-                    .pb(px(4.))
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .child(heading(title, t))
-                    .child(
-                        tool("collection-search", "search", t)
-                            .on_click(cx.listener(|this, _, w, cx| this.open_search(w, cx))),
-                    ),
-            );
         } else {
             column = column.child(self.space_hero(title, notes.len(), window, cx));
         }
@@ -366,10 +340,26 @@ impl Cereal {
             // The chat unfolds out of the ask bar and folds back into it.
             // Space pages ask from their inline composer instead of the bar.
             .when(!assistant.visible && !space, |home| {
-                home.child(self.ask_bar(cx))
+                home.child(self.ask_bar(window, cx))
             })
             .when(assistant.visible, |home| {
                 home.child(self.render_note_assistant(assistant, window, cx))
+                    // Under the panel, centred on the 9 px between it and
+                    // the window's edge.
+                    .child(
+                        div()
+                            .absolute()
+                            .bottom(px(8.))
+                            .left_0()
+                            .right_0()
+                            .flex()
+                            .justify_center()
+                            .text_size(px(11.))
+                            .line_height(px(12.))
+                            .text_color(t.muted)
+                            .opacity(assistant.value.clamp(0., 1.) * 0.8)
+                            .child("Cereal uses AI and can make mistakes."),
+                    )
             })
             .into_any_element()
     }
@@ -435,7 +425,7 @@ impl Cereal {
             .gap(px(16.))
             .px(px(8.))
             .rounded(px(12.))
-            .cursor_pointer()
+            .cursor_default()
             // Rows cascade in after navigation and squash under the pointer.
             .map(|row| crate::motion::lift(row, self.stage.cascade_next("page")))
             .child(row_feedback(t, 12.).reveals(hovered))
@@ -519,9 +509,8 @@ impl Cereal {
             Some(crate::motion::Pose::REST)
         };
         let (symbol, subtitle) = match self.screen {
-            Screen::MyNotes => ("lock-solid", "Notes from all of your private folders."),
             Screen::Favorites => ("star", "Notes you have marked as favorites."),
-            _ => ("folder", "Notes filed in this folder."),
+            _ => ("lock-solid", "All of your private notes."),
         };
         let plural = |count: usize, word: &str| {
             format!("{count} {word}{}", if count == 1 { "" } else { "s" })
@@ -537,10 +526,10 @@ impl Cereal {
             .text_color(t.muted);
         let meta = if private {
             meta.child(icon("lock-solid", 12., t.muted))
-                .child("Your private notes and folders")
+                .child("Your private notes")
                 .child("·")
-                .child(icon("folder", 13., t.muted))
-                .child(plural(self.workspace.folders.len(), "folder"))
+                .child(icon("document", 13., t.muted))
+                .child(plural(notes, "note"))
         } else {
             meta.child(icon("document", 13., t.muted))
                 .child(plural(notes, "note"))
@@ -667,7 +656,7 @@ impl Cereal {
                 )
             })
             .child(
-                // The composer and its recipe links sit 16 px in from the column.
+                // The composer sits 16 px in from the column.
                 div().mt(px(56.)).w_full().px(px(16.)).child(
                 div()
                     .w_full()
@@ -707,7 +696,6 @@ impl Cereal {
                     ),
                 ),
             )
-            .child(self.space_recipe_links(cx))
             .child(div().mt(px(41.)).w_full().px(px(8.)).child(separator(t)))
             .child(
                 div().mt(px(55.)).mb(px(9.)).w_full().flex().child(
@@ -731,52 +719,12 @@ impl Cereal {
             )
     }
 
-    /// Recipes under the space composer: quiet text links, not chips.
-    fn space_recipe_links(&self, cx: &mut Context<Self>) -> Div {
-        let t = self.theme();
-        let link = |id: ElementId, symbol: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .relative()
-                .h(px(22.))
-                .px(px(4.))
-                .flex()
-                .items_center()
-                .gap(px(5.))
-                .rounded(px(6.))
-                .text_size(px(13.))
-                .line_height(px(18.))
-                .text_color(t.muted)
-                .cursor_pointer()
-                .child(row_feedback(t, 6.))
-                .child(icon(symbol, 14., t.muted))
-                .child(label)
-        };
-        let mut row = div()
-            .mt(px(13.))
-            .w_full()
-            .max_w(px(712.))
-            .pl(px(18.))
-            .pr(px(25.))
-            .flex()
-            .items_center()
-            .gap(px(4.));
-        for (index, (title, _, prompt)) in crate::chat::BUILTIN_RECIPES.iter().enumerate().take(3) {
-            row = row.child(
-                link(("space-recipe", index).into(), "recipe", title).reach().on_click(cx.listener(
-                    move |this, _, _, cx| this.use_chat_recipe((*prompt).into(), true, cx),
-                )),
-            );
-        }
-        row.child(div().flex_1()).child(
-            link("space-all-recipes".into(), "grid", "All recipes").reach().on_click(
-                cx.listener(|this, _, window, cx| this.open_recipes_from_sidebar(window, cx)),
-            ),
-        )
-    }
-
     fn calendar(&self, cx: &mut Context<Self>) -> Div {
-        if crate::server::enabled() {
+        // Debug builds: `CEREAL_TOUR_LINKED_CALENDAR` draws the server calendar card from the
+        // tour's made-up events, so its layout can be captured without a server.
+        if crate::server::enabled()
+            || (cfg!(debug_assertions) && crate::environment::var_os("CEREAL_TOUR_LINKED_CALENDAR").is_some())
+        {
             return self.connected_calendar(cx);
         }
         let t = self.theme();
@@ -820,7 +768,7 @@ impl Cereal {
             if i > 0 {
                 row = row
                     .child(crate::motion::hover_probe(event_hover))
-                    .cursor_pointer()
+                    .cursor_default()
                     .reach().on_click(cx.listener(move |this, _, w, cx| {
                         let existing = this
                             .workspace
@@ -842,6 +790,17 @@ impl Cereal {
                             this.persist(cx);
                         }
                     }));
+            }
+            // Between days, the same dashed hairline as the signed-in card.
+            if i > 0 {
+                row = row.child(
+                    crate::calendar::dashed_rule(t.hairline)
+                        .absolute()
+                        .top(px(-hairline(0.5)))
+                        .left_0()
+                        .right_0()
+                        .h(px(hairline(0.5))),
+                );
             }
             row = row
                 .child(
@@ -998,11 +957,27 @@ impl Cereal {
             .child(rows)
     }
 
-    pub fn ask_bar(&self, cx: &mut Context<Self>) -> Div {
+    /// Home's composer. At rest it is a single "Ask anything" pill; focused
+    /// (or holding a draft) it grows the model, attachment and voice
+    /// controls, and folds back when the focus leaves with nothing typed.
+    /// Focused, it also stands in a tray with the recent-chats button above
+    /// it: the footprint the conversation then grows from.
+    /// Sending opens the conversation out of it (`render_note_assistant`).
+    pub fn ask_bar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let t = self.theme();
+        let focused = self.ask.read(cx).focus_handle.is_focused(window);
+        let typed = !self.ask.read(cx).content().trim().is_empty();
+        let tray = self
+            .stage
+            .presence(("ask-tray", 0), focused, crate::motion::SNAPPY);
+        let open = if tray.visible { tray.value.clamp(0., 1.) } else { 0. };
         div()
             .absolute()
-            .bottom(px(26.))
+            // 58 px tall and 27 px above the window's edge. At rest the bar
+            // is 675 px wide; focused it is 669 px, its 3 px focus ring
+            // inside a 683 px tray that starts 39 px above it and ends 4 px
+            // below, as the reference measures.
+            .bottom(px(27.))
             .left_0()
             .right_0()
             .flex()
@@ -1011,52 +986,74 @@ impl Cereal {
             .child(bar_scrim(t, 0.))
             .child(
                 div()
+                    .relative()
                     .w_full()
-                    .max_w(px(674.))
-                    .h(px(59.))
-                    .rounded_full()
-                    .bg(t.card)
-                    .border_1()
-                    .border_color(t.border)
-                    .shadow(vec![BoxShadow {
-                        color: rgba(0x2929290a).into(),
-                        offset: point(px(0.), px(2.)),
-                        blur_radius: px(5.),
-                        spread_radius: px(0.),
-                    }])
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .pl(px(22.))
-                    .pr(px(11.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(14.))
-                            .line_height(px(22.))
-                            .child(self.ask.clone())
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| {
-                                    if !this.chat_messages.is_empty() || this.chat_stream.is_some()
-                                    {
-                                        this.assistant_open = true;
-                                        cx.notify();
-                                    }
-                                }),
-                            ),
+                    .max_w(px(683.))
+                    .px(px(4. + 3. * open))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            if !this.chat_messages.is_empty() || this.chat_stream.is_some() {
+                                this.assistant_open = true;
+                                cx.notify();
+                            }
+                        }),
                     )
-                    .child(
-                        pill("ask-todos", "List recent todos", "recipe", t)
-                            .h(px(36.))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.ask.update(cx, |input, cx| {
-                                    input.set_content("List recent todos", cx)
-                                });
-                                this.submit_chat(cx);
-                            })),
-                    ),
+                    .when(tray.visible, |bar| {
+                        bar.child(
+                            div()
+                                .absolute()
+                                .top(px(-39.))
+                                .bottom(px(-4.))
+                                .left_0()
+                                .right_0()
+                                .rounded(px(31.))
+                                .border_1()
+                                .border_color(t.border)
+                                .bg(t.card)
+                                .opacity(tray.fade)
+                                .shadow(vec![BoxShadow {
+                                    color: rgba(0x2929290f).into(),
+                                    offset: point(px(0.), px(4.)),
+                                    blur_radius: px(16.),
+                                    spread_radius: px(0.),
+                                }])
+                                .child(
+                                    // The glyph is 14 px, centred 28 px in
+                                    // and 20 px down.
+                                    div().absolute().left(px(13.)).top(px(5.)).child(
+                                        with_tooltip(
+                                            div()
+                                                .id("home-chat-history")
+                                                .size(px(28.))
+                                                .rounded(px(6.))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .cursor_default()
+                                                .child(crate::motion::tactile(t.hover).radius(6.))
+                                                .child(icon("chat-history", 17., t.muted))
+                                                .reach(),
+                                            "Recent chats".into(),
+                                            t,
+                                        )
+                                        // On the press, not the click: the
+                                        // press is also what takes the focus
+                                        // from the field and folds the tray.
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.assistant_open = true;
+                                                this.chat_history_open = true;
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    ),
+                                ),
+                        )
+                    })
+                    .child(self.render_chat_composer(focused, !focused && !typed, cx)),
             )
     }
 }
@@ -1081,7 +1078,7 @@ mod tests {
     #[test]
     fn list_rows_carry_what_a_row_draws_in_list_order() {
         let workspace = Workspace::demo();
-        let notes = workspace.visible_notes(None, false, "");
+        let notes = workspace.visible_notes(false, "");
         let rows = home_rows(&notes);
         assert_eq!(rows.len(), notes.len());
         for (row, note) in rows.iter().zip(&notes) {
@@ -1142,7 +1139,7 @@ mod tests {
         // Reading never invalidates derived lists.
         let first = workspace.notes[0].id;
         let _ = workspace.note(first);
-        let _ = workspace.visible_notes(None, false, "sync");
+        let _ = workspace.visible_notes(false, "sync");
         assert_eq!(workspace.revision(), start);
         // Any mutable access might have changed a title, date or trash flag.
         workspace.note_mut(first).unwrap().trashed = true;
@@ -1151,7 +1148,7 @@ mod tests {
         workspace.create_note();
         let created = workspace.revision();
         assert_ne!(created, trashed);
-        workspace.add_folder("Research".into());
+        workspace.note_mut(first).unwrap().favorite = true;
         assert_ne!(workspace.revision(), created);
         // A replaced workspace (account switch, reload) is a different list.
         assert_ne!(

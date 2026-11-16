@@ -4,8 +4,8 @@ import Foundation
 /// followed by 16 kHz mono PCM16 little-endian samples and nothing else.
 ///
 /// The file is the clock of a recording. A sample's index is its position on
-/// the capture timeline, delivery parts are cut from it on sample boundaries
-/// and the live stream reads it through a cursor. Because no chunk ever follows
+/// the capture timeline, and the live stream reads it through a cursor, so
+/// the file is also the stream's buffer for a reconnect. Because no chunk ever follows
 /// the audio, the number of samples is given by the file's size; the header is
 /// kept current for other readers but is never the authority.
 public enum ContinuousCapture {

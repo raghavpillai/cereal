@@ -4,7 +4,7 @@ import APIClient
 enum CapturePipelineFailure: Error, Equatable, Sendable {
     /// A write to the capture file failed (most often a full disk).
     case write
-    /// Free space fell below the reserve needed to finish and deliver the capture.
+    /// Free space fell below the reserve needed to finish the capture.
     case lowDisk
     case conversion
 
@@ -32,12 +32,10 @@ enum CapturePipelineFailure: Error, Equatable, Sendable {
 /// conversion and one small write.
 final class CapturePipeline: @unchecked Sendable {
     struct Options: Sendable {
-        /// Report each time the capture grows past another multiple of this many samples.
-        var partFrames: Int64?
         /// The header on disk is at most this many samples behind the audio.
         var headerRefreshFrames: Int64 = Int64(ContinuousCapture.sampleRate)
         var freeSpaceCheckFrames: Int64 = Int64(ContinuousCapture.sampleRate) * 10
-        /// Room kept for the capture's last part and the delivery journal.
+        /// Room kept for the end of the capture and the capture ledger.
         var minimumFreeBytes: Int64 = 32 << 20
         var freeBytes: @Sendable (URL) -> Int64? = CapturePipeline.volumeFreeBytes
     }
@@ -47,13 +45,11 @@ final class CapturePipeline: @unchecked Sendable {
     private let lock = NSLock()
     private let writer: CaptureFileWriter
     private let options: Options
-    private let onPartBoundary: (@Sendable (Int64) -> Void)?
     private let onFailure: (@Sendable (CapturePipelineFailure) -> Void)?
     private var converter: AVAudioConverter?
     private var inputFormat: AVAudioFormat?
     private var output: AVAudioPCMBuffer?
     private var written: Int64 = 0
-    private var boundaries: Int64 = 0
     private var nextFreeSpaceCheck: Int64
     private var meter: Float = 0.12
     private var failed: CapturePipelineFailure?
@@ -61,11 +57,9 @@ final class CapturePipeline: @unchecked Sendable {
     private var builds = 0
 
     init(url: URL, options: Options = Options(),
-         onPartBoundary: (@Sendable (Int64) -> Void)? = nil,
          onFailure: (@Sendable (CapturePipelineFailure) -> Void)? = nil) throws {
         writer = try CaptureFileWriter(url: url)
         self.options = options
-        self.onPartBoundary = onPartBoundary
         self.onFailure = onFailure
         nextFreeSpaceCheck = 0
     }
@@ -80,7 +74,6 @@ final class CapturePipeline: @unchecked Sendable {
 
     /// Converts and appends one input buffer. Safe to call from the tap thread.
     func append(_ buffer: AVAudioPCMBuffer) {
-        var crossed: Int64?
         var problem: CapturePipelineFailure?
         lock.lock()
         if !finished, failed == nil, buffer.frameLength > 0 {
@@ -92,10 +85,6 @@ final class CapturePipeline: @unchecked Sendable {
                 }
                 try convertLocked(buffer)
                 try housekeepingLocked()
-                if let partFrames = options.partFrames, partFrames > 0, written / partFrames > boundaries {
-                    boundaries = written / partFrames
-                    crossed = written
-                }
             } catch let failure as CapturePipelineFailure {
                 failed = failure; problem = failure
             } catch {
@@ -103,7 +92,6 @@ final class CapturePipeline: @unchecked Sendable {
             }
         }
         lock.unlock()
-        if let crossed { onPartBoundary?(crossed) }
         if let problem { onFailure?(problem) }
     }
 

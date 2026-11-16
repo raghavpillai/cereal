@@ -88,7 +88,7 @@ struct NewNoteView: View {
         }
         .alert("Attachments", isPresented: $unsupportedAttachment) {
             Button("OK", role: .cancel) {}
-        } message: { Text("File attachments are not supported in the local demo.") }
+        } message: { Text("File attachments are not supported yet.") }
     }
 
     // MARK: Chrome

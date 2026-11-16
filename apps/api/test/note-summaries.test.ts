@@ -49,10 +49,10 @@ describe("notes list summaries",()=>{
     expect(page.total).toBe(1)
     expect(page.nextCursor).toBeNull()
     const row=page.notes[0]!
-    expect(Object.keys(row).sort()).toEqual(["attendees","createdAt","date","duration","excerpt","folders","generatedRevision","generationState","hasBody","hasSummary","hasTranscript","id","meeting","organizationId","recordingState","speakerCount","title","transcriptRevision","updatedAt"])
+    expect(Object.keys(row).sort()).toEqual(["attendees","createdAt","date","duration","excerpt","generatedRevision","generationState","hasBody","hasSummary","hasTranscript","id","meeting","organizationId","recordingState","speakerCount","title","transcriptRevision","updatedAt"])
     expect(row).toMatchObject({id:note.id,title:"Pricing review",date:"2026-10-20",duration:"31:07",hasBody:true,hasSummary:true,hasTranscript:true,speakerCount:2,
       recordingState:"idle",generationState:"idle",transcriptRevision:1,generatedRevision:null,updatedAt:note.updatedAt,createdAt:note.createdAt,
-      excerpt:"Pricing holds until March. Follow up with legal.",meeting:null,attendees:{people:[],others:0,total:0},organizationId:null,folders:[]})
+      excerpt:"Pricing holds until March. Follow up with legal.",meeting:null,attendees:{people:[],others:0,total:0},organizationId:null})
     const wire=JSON.stringify(page)
     expect(wire).not.toContain("PRIVATE_BODY_SENTINEL")
     expect(wire).not.toContain("PRIVATE_TRANSCRIPT_SENTINEL")

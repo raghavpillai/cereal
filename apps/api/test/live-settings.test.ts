@@ -13,8 +13,9 @@ function fixture(environment: NodeJS.ProcessEnv = {}) {
     // ElevenLabs' model list holds voice models only; Scribe is not in it.
     return Response.json(String(input).includes("elevenlabs") ? [{ model_id: "eleven_multilingual", can_do_text_to_speech: true }] : { data: [] })
   }, { preconnect: () => {} }) as typeof fetch
-  const admin = makeAdministrationService(makeMemoryCalendarStore(makeMemoryRepository()), undefined, { fetch: transport, environment })
-  return { admin, requests }
+  const store = makeMemoryCalendarStore(makeMemoryRepository())
+  const admin = makeAdministrationService(store, undefined, { fetch: transport, environment })
+  return { admin, requests, store }
 }
 
 test("live transcription defaults to Scribe v3 Live and runs once its provider has a key", async () => {
@@ -37,10 +38,10 @@ test("an administrator selects a streaming model from the catalogue and can turn
   const f = fixture()
   const catalogue = await run(f.admin.getModelCatalog({ provider: "elevenlabs", apiKey: "draft-eleven-key" }))
   expect(catalogue.models.filter(model => model.capabilities.includes("live_transcription")).map(model => model.id).sort()).toEqual(["scribe_v2_realtime", "scribe_v3_live"])
-  // A batch model is not a streaming model, and the reverse.
-  expect(catalogue.models.find(model => model.id === "scribe_v3")!.capabilities).toEqual(["transcription"])
-  await expect(run(f.admin.updateSettings({ elevenLabsApiKey: "stored-eleven-key", liveTranscriptionModel: { provider: "elevenlabs", model: "scribe_v3" } }))).rejects.toMatchObject({ error: "invalid_request" })
-  await expect(run(f.admin.updateSettings({ elevenLabsApiKey: "stored-eleven-key", transcriptionModel: { provider: "elevenlabs", model: "scribe_v3_live" } }))).rejects.toMatchObject({ error: "invalid_request" })
+  // Only streaming speech models are offered, and only they are accepted.
+  expect(catalogue.models.every(model => model.capabilities.includes("live_transcription"))).toBe(true)
+  for (const model of ["scribe_v3", "scribe_v2", "scribe_v1", "gpt-transcribe", "whisper-1"])
+      await expect(run(f.admin.updateSettings({ elevenLabsApiKey: "stored-eleven-key", liveTranscriptionModel: { provider: "elevenlabs", model } }))).rejects.toMatchObject({ error: "invalid_request", message: expect.stringContaining("Only live transcription models") })
   // Without a key the provider must be connected first.
   await expect(run(f.admin.updateSettings({ liveTranscriptionModel: { provider: "elevenlabs", model: "scribe_v2_realtime" } }))).rejects.toMatchObject({ error: "invalid_request" })
   const on = await run(f.admin.updateSettings({ elevenLabsApiKey: "stored-eleven-key", liveTranscriptionModel: { provider: "elevenlabs", model: "scribe_v3_live" } }))
@@ -48,14 +49,15 @@ test("an administrator selects a streaming model from the catalogue and can turn
   const configured = await f.admin.liveConfiguration()
   expect(configured).toMatchObject({ provider: "elevenlabs", model: "scribe_v3_live" })
   expect(await configured!.apiKey()).toBe("stored-eleven-key")
-  // Unrelated edits keep it; null turns it off.
+  // Unrelated edits keep it. It cannot be turned off: the server refuses null whoever sends it, and keeps the model.
   expect((await run(f.admin.updateSettings({ instanceName: "Studio" }))).liveTranscriptionModel).toEqual({ provider: "elevenlabs", model: "scribe_v3_live" })
-  expect((await run(f.admin.updateSettings({ liveTranscriptionModel: null }))).liveTranscriptionModel).toBeNull()
-  expect(await f.admin.liveConfiguration()).toBeNull()
-  // Off is remembered: later edits do not bring the default back.
-  expect((await run(f.admin.updateSettings({ instanceName: "Studio again" }))).liveTranscriptionModel).toBeNull()
+  await expect(run(f.admin.updateSettings({ liveTranscriptionModel: null } as never))).rejects.toMatchObject({ error: "invalid_request", message: expect.stringContaining("always on") })
+  expect((await run(f.admin.getSettings())).liveTranscriptionModel).toEqual({ provider: "elevenlabs", model: "scribe_v3_live" })
+  expect(await f.admin.liveConfiguration()).toMatchObject({ provider: "elevenlabs", model: "scribe_v3_live" })
   const other = await run(f.admin.updateSettings({ liveTranscriptionModel: { provider: "elevenlabs", model: "scribe_v2_realtime" } }))
   expect(other.liveTranscriptionModel).toEqual({ provider: "elevenlabs", model: "scribe_v2_realtime" })
+  // The removed batch setting is not part of the settings any more.
+  expect("transcriptionModel" in other).toBe(false)
 })
 
 test("LIVE_TRANSCRIPTION_PROVIDER=fake serves the built-in recogniser without any key", async () => {

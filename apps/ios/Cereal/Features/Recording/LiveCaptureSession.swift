@@ -1,7 +1,22 @@
 import Foundation
-import Network
 import APIClient
 import Contracts
+
+/// How a capture's stream ended.
+enum LiveDrain: Equatable, Sendable {
+    /// The server confirmed every sample of the capture.
+    case delivered
+    /// The server refused the stream for good before it had all of it.
+    case refused(LiveUnavailableReason)
+    /// The stream was cancelled (its account went) before it had delivered everything.
+    case interrupted
+}
+
+/// The stream of a capture that has just ended, and the capture's file name.
+struct LiveEnding {
+    let fileName: String?
+    let task: Task<LiveDrain, Never>
+}
 
 /// One capture's live stream, seen from the main actor: it starts the client,
 /// applies what the server says to the note's growing transcript, and keeps
@@ -9,14 +24,12 @@ import Contracts
 @MainActor
 final class LiveCaptureSession {
     let transcript: LiveTranscript
-    var onStatus: ((LiveTranscriptStatus) -> Void)?
     private let client: LiveTranscriptClient
     private let readNote: @MainActor () async -> NoteDTO?
     private var pump: Task<Void, Never>?
     private var commands: Task<Void, Never>?
     private var reading: Task<Void, Never>?
     private var readAgain = false
-    private var monitor: NWPathMonitor?
 
     /// `readNote` returns the note from the server, for stored text the stream did not carry.
     init(client: LiveTranscriptClient, transcript: LiveTranscript, readNote: @escaping @MainActor () async -> NoteDTO?) {
@@ -30,36 +43,33 @@ final class LiveCaptureSession {
         // The pump keeps this session alive until the stream has finished, so the
         // server's last text is applied even after the recorder has let go of it.
         pump = Task { for await event in events { self.handle(event) } }
+        // The stream is the recording's only transcript, so it runs on any network path, Low Data Mode included.
         enqueue { await $0.start() }
-        // Low Data Mode: the stream waits and the durable parts carry the recording.
-        let monitor = NWPathMonitor()
-        monitor.pathUpdateHandler = { [client] path in
-            let constrained = path.isConstrained
-            Task { await client.setConstrained(constrained) }
-        }
-        monitor.start(queue: .global(qos: .utility))
-        self.monitor = monitor
     }
 
     func pause(atSample sample: Int64) { enqueue { await $0.pause(atSample: sample) } }
     func resume() { enqueue { await $0.resume() } }
 
-    /// Sends the rest of the capture and waits, for a bounded time, for the
-    /// server's last text. The returned task finishes when the stream has.
-    func end(atSample sample: Int64) -> Task<Void, Never> {
-        monitor?.cancel(); monitor = nil
+    /// Sends the rest of the capture, paced, and waits until the server has
+    /// confirmed all of it and sent its last text, for as long as that takes.
+    /// The returned task finishes when the stream has, with how it ended.
+    func end(atSample sample: Int64) -> Task<LiveDrain, Never> {
         enqueue { await $0.end(atSample: sample) }
         let last = commands
         let pump = pump
+        let client = client
         return Task {
             await last?.value
             await pump?.value // every event the server sent has been applied
+            if await client.delivered { return .delivered }
+            if case .unavailable(let reason) = await client.status { return .refused(reason) }
+            return .interrupted
         }
     }
 
+    /// Stops at once, also in the middle of `end`.
     func cancel() {
-        monitor?.cancel(); monitor = nil
-        enqueue { await $0.cancel() }
+        Task { [client] in await client.cancel() }
     }
 
     private func enqueue(_ command: @escaping @Sendable (LiveTranscriptClient) async -> Void) {
@@ -72,7 +82,6 @@ final class LiveCaptureSession {
 
     private func handle(_ event: LiveTranscriptEvent) {
         if transcript.apply(event) { readStoredTranscript() }
-        if case .status(let status) = event { onStatus?(status) }
     }
 
     /// One read at a time; a request that arrives during a read runs once after it.

@@ -5,7 +5,7 @@ import { parseNoteStamp } from "../src/note-import"
 
 /** `updatedAt|transcriptRevision|generatedRevision` as the apps build it; the last part is empty when nothing was generated. */
 const stamp = (note: Pick<NoteDTO, "updatedAt" | "transcriptRevision" | "generatedRevision">) => `${note.updatedAt}|${note.transcriptRevision}|${note.generatedRevision ?? ""}`
-const query = (parameters: { ifStamp?: string; ifChunks?: number | string }) => "?" + Object.entries(parameters).map(([key, value]) => `${key}=${encodeURIComponent(String(value))}`).join("&")
+const query = (parameters: { ifStamp?: string }) => "?" + Object.entries(parameters).map(([key, value]) => `${key}=${encodeURIComponent(String(value))}`).join("&")
 const changed = { error: "conflict", message: "The note changed since it was read, so it was not deleted" }
 
 test("a stamp is three parts and nothing else", () => {
@@ -26,33 +26,28 @@ for (const kind of ["memory", "postgres"] as Kind[]) {
     const read = async (s: Stack, id: string) => (await s.call("alice", `/notes/${id}`)).json as NoteDTO
     const exists = async (s: Stack, id: string) => (await s.call("alice", `/notes/${id}`)).status === 200
 
-    test("matching stamp deletes, with the note's audio", async () => {
+    test("matching stamp deletes", async () => {
       const s = await start(), note = await create(s)
       await s.record("alice", note.id, 0); await s.record("alice", note.id, 1)
-      expect(await s.audioFiles(note.id)).toBe(2)
       const current = await read(s, note.id)
-      const deleted = await s.call("alice", `/notes/${note.id}${query({ ifStamp: stamp(current), ifChunks: 2 })}`, "DELETE")
+      const deleted = await s.call("alice", `/notes/${note.id}${query({ ifStamp: stamp(current) })}`, "DELETE")
       expect([deleted.status, deleted.json]).toEqual([200, { deleted: true }])
       expect(await exists(s, note.id)).toBe(false)
-      expect(await s.audioFiles(note.id)).toBe(0)
       // Gone is gone: the same request again is a 404, which a move treats as done.
-      expect((await s.call("alice", `/notes/${note.id}${query({ ifStamp: stamp(current), ifChunks: 2 })}`, "DELETE")).status).toBe(404)
+      expect((await s.call("alice", `/notes/${note.id}${query({ ifStamp: stamp(current) })}`, "DELETE")).status).toBe(404)
     })
 
-    test("a note edited between read and delete answers 409 and still has its audio", async () => {
+    test("a note edited between read and delete answers 409 and keeps its transcript", async () => {
       const s = await start(), note = await create(s)
       await s.record("alice", note.id)
       const seen = await read(s, note.id)
       await Bun.sleep(5)
       expect((await s.call("alice", `/notes/${note.id}`, "PATCH", { body: "Typed on another device during the window" })).status).toBe(200)
-      const refused = await s.call("alice", `/notes/${note.id}${query({ ifStamp: stamp(seen), ifChunks: 1 })}`, "DELETE")
+      const refused = await s.call("alice", `/notes/${note.id}${query({ ifStamp: stamp(seen) })}`, "DELETE")
       expect([refused.status, refused.json]).toEqual([409, changed])
       const kept = await read(s, note.id)
       expect(kept.body).toBe("Typed on another device during the window")
       expect(kept.transcriptSegments).toHaveLength(1)
-      const parts = (await s.call("alice", `/notes/${note.id}/audio/chunks`)).json
-      expect(parts.map((part: { state: string }) => part.state)).toEqual(["ready"])
-      expect(await s.audioFiles(note.id)).toBe(1)
       // Every kind of change moves the stamp: the title, the transcript, generated notes.
       for (const change of [() => s.call("alice", `/notes/${note.id}`, "PATCH", { title: "Renamed" }), () => s.record("alice", note.id, 1), () => s.call("alice", `/notes/${note.id}/generate`, "POST", { expectedTranscriptRevision: 2 })]) {
         const before = await read(s, note.id)
@@ -64,7 +59,7 @@ for (const kind of ["memory", "postgres"] as Kind[]) {
       // With what is there now, it goes.
       const now = await read(s, note.id)
       expect(now.generatedRevision).toBe(2)
-      expect((await s.call("alice", `/notes/${note.id}${query({ ifStamp: stamp(now), ifChunks: 2 })}`, "DELETE")).status).toBe(200)
+      expect((await s.call("alice", `/notes/${note.id}${query({ ifStamp: stamp(now) })}`, "DELETE")).status).toBe(200)
     })
 
     test("a recording note answers 409", async () => {
@@ -72,11 +67,11 @@ for (const kind of ["memory", "postgres"] as Kind[]) {
       expect((await s.call("alice", `/notes/${note.id}/recording`, "POST", { command: "start" })).status).toBe(200)
       const recording = await read(s, note.id)
       // The stamp is the current one and the count is right: it is refused because it is recording.
-      for (const parameters of [{ ifStamp: stamp(recording) }, { ifChunks: 0 }, { ifStamp: stamp(recording), ifChunks: 0 }])
+      for (const parameters of [{ ifStamp: stamp(recording) }])
         expect((await s.call("alice", `/notes/${note.id}${query(parameters)}`, "DELETE")).json).toEqual(changed)
       expect(await exists(s, note.id)).toBe(true)
       expect((await s.call("alice", `/notes/${note.id}/recording`, "POST", { command: "stop" })).status).toBe(200)
-      expect((await s.call("alice", `/notes/${note.id}${query({ ifStamp: stamp(await read(s, note.id)), ifChunks: 0 })}`, "DELETE")).status).toBe(200)
+      expect((await s.call("alice", `/notes/${note.id}${query({ ifStamp: stamp(await read(s, note.id)) })}`, "DELETE")).status).toBe(200)
       // An imported note that was resumed here is a recording note like any other.
       const moved = importBody()
       expect((await s.call("alice", "/notes/import", "POST", moved)).status).toBe(200)
@@ -84,41 +79,9 @@ for (const kind of ["memory", "postgres"] as Kind[]) {
       expect((await s.call("alice", `/notes/${moved.id}${query({ ifStamp: stamp(await read(s, moved.id)) })}`, "DELETE")).status).toBe(409)
     })
 
-    test("ifChunks alone works", async () => {
-      const s = await start(), note = await create(s)
-      await s.record("alice", note.id)
-      for (const wrong of [0, 2, 100]) expect((await s.call("alice", `/notes/${note.id}${query({ ifChunks: wrong })}`, "DELETE")).status, String(wrong)).toBe(409)
-      expect(await s.audioFiles(note.id)).toBe(1)
-      // A part that arrived after the count was read (another device finished uploading).
-      await s.record("alice", note.id, 1)
-      expect((await s.call("alice", `/notes/${note.id}${query({ ifChunks: 1 })}`, "DELETE")).status).toBe(409)
-      expect((await s.call("alice", `/notes/${note.id}${query({ ifChunks: 2 })}`, "DELETE")).status).toBe(200)
-      expect(await exists(s, note.id)).toBe(false)
-      // A note without audio, counted as none.
-      const plain = await create(s)
-      expect((await s.call("alice", `/notes/${plain.id}${query({ ifChunks: 1 })}`, "DELETE")).status).toBe(409)
-      expect((await s.call("alice", `/notes/${plain.id}${query({ ifChunks: 0 })}`, "DELETE")).status).toBe(200)
-    })
-
-    test("a part that is not ready answers 409, queued or failed", async () => {
-      let fails = false
-      const s = await start({ transcribeFails: () => fails }), note = await create(s)
-      await s.record("alice", note.id, 0, false)
-      const queued = await read(s, note.id)
-      expect((await s.call("alice", `/notes/${note.id}/audio/chunks`)).json[0].state).toBe("queued")
-      for (const parameters of [{ ifStamp: stamp(queued) }, { ifChunks: 1 }, { ifStamp: stamp(queued), ifChunks: 1 }])
-        expect((await s.call("alice", `/notes/${note.id}${query(parameters)}`, "DELETE")).status).toBe(409)
-      fails = true
-      await s.processing.runPending()
-      expect((await s.call("alice", `/notes/${note.id}/audio/chunks`)).json[0].state).toBe("failed")
-      expect((await s.call("alice", `/notes/${note.id}${query({ ifStamp: stamp(await read(s, note.id)), ifChunks: 1 })}`, "DELETE")).status).toBe(409)
-      expect(await s.audioFiles(note.id)).toBe(1)
-      expect(await exists(s, note.id)).toBe(true)
-    })
-
     test("a precondition that cannot be read is a 400, never ignored", async () => {
       const s = await start(), note = await create(s)
-      for (const bad of ["?ifStamp=garbage", "?ifStamp=", `?ifStamp=${encodeURIComponent(note.updatedAt)}`, `?ifStamp=${encodeURIComponent(note.updatedAt + "|0")}`, `?ifStamp=${encodeURIComponent(note.updatedAt + "|0||")}`, "?ifChunks=-1", "?ifChunks=1.5", "?ifChunks=many", "?ifChunks=", "?ifChunks=01", `?ifStamp=${encodeURIComponent(stamp(note))}&ifChunks=x`, `?ifStamp=${"9".repeat(200)}`]) {
+      for (const bad of ["?ifStamp=garbage", "?ifStamp=", `?ifStamp=${encodeURIComponent(note.updatedAt)}`, `?ifStamp=${encodeURIComponent(note.updatedAt + "|0")}`, `?ifStamp=${encodeURIComponent(note.updatedAt + "|0||")}`, `?ifStamp=${"9".repeat(200)}`]) {
         expect((await s.call("alice", `/notes/${note.id}${bad}`, "DELETE")).status, bad).toBe(400)
         expect(await exists(s, note.id)).toBe(true)
       }
@@ -132,7 +95,7 @@ for (const kind of ["memory", "postgres"] as Kind[]) {
 
     test("somebody else's note, and a note that is not there, are 404 whatever the precondition", async () => {
       const s = await start(), note = await create(s)
-      for (const parameters of [{ ifStamp: stamp(note) }, { ifChunks: 0 }, { ifStamp: "2020-01-01T00:00:00.000Z|0|" }]) {
+      for (const parameters of [{ ifStamp: stamp(note) }, { ifStamp: "2020-01-01T00:00:00.000Z|0|" }]) {
         expect((await s.call("bob", `/notes/${note.id}${query(parameters)}`, "DELETE")).status).toBe(404)
         expect((await s.call("alice", `/notes/${crypto.randomUUID()}${query(parameters)}`, "DELETE")).status).toBe(404)
       }
@@ -143,10 +106,9 @@ for (const kind of ["memory", "postgres"] as Kind[]) {
     test("without the parameters a delete is what it was: unconditional", async () => {
       const s = await start(), note = await create(s)
       expect((await s.call("alice", `/notes/${note.id}/recording`, "POST", { command: "start" })).status).toBe(200)
-      await s.record("alice", note.id, 0, false)
+      await s.record("alice", note.id, 0)
       const deleted = await s.call("alice", `/notes/${note.id}`, "DELETE")
       expect([deleted.status, deleted.json]).toEqual([200, { deleted: true }])
-      expect(await s.audioFiles(note.id)).toBe(0)
       expect((await s.call("alice", `/notes/${note.id}`, "DELETE")).status).toBe(404)
     })
 
@@ -156,7 +118,7 @@ for (const kind of ["memory", "postgres"] as Kind[]) {
         const note = await create(s)
         const [edit, removal] = await Promise.all([
           s.call("alice", `/notes/${note.id}`, "PATCH", { body: `Edit ${round}` }),
-          s.call("alice", `/notes/${note.id}${query({ ifStamp: stamp(note), ifChunks: 0 })}`, "DELETE"),
+          s.call("alice", `/notes/${note.id}${query({ ifStamp: stamp(note) })}`, "DELETE"),
         ])
         const survived = await exists(s, note.id)
         if (removal.status === 200) { expect(edit.status).toBe(404); expect(survived).toBe(false) }

@@ -26,10 +26,10 @@ const settings = async (admin: ReturnType<ReturnType<typeof fixture>["start"]>) 
 test("each moved setting is imported once, secrets sealed, and the environment is not read for it again", async () => {
   const f = fixture(), admin = f.start()
   // Before the first start-up import the environment is still what applies (an upgrade in progress).
-  expect((await settings(admin)).providers.find(provider => provider.id === "openrouter")).toEqual({ id: "openrouter", configured: true, source: "environment" })
+  expect((await settings(admin)).providers.find(provider => provider.id === "openrouter")).toEqual({ id: "openrouter", configured: true, source: "environment", hint: expect.stringMatching(/^(?:sk-|sk-or-v1-)?…/) })
   expect((await settings(admin)).unusedEnvironment).toEqual([])
   const imported = await admin.importEnvironment()
-  expect(imported.sort()).toEqual(["ELEVENLABS_API_KEY", "ELEVENLABS_STT_MODEL", "IOS_APP_IDS", "IOS_APP_STORE_ID", "LIVE_HOLD_SECONDS", "LIVE_MAX_SESSIONS", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MODEL"])
+  expect(imported.sort()).toEqual(["ELEVENLABS_API_KEY", "IOS_APP_IDS", "IOS_APP_STORE_ID", "LIVE_HOLD_SECONDS", "LIVE_MAX_SESSIONS", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MODEL"])
   const stored = (await f.store.getSettings())!
   // Sealed at rest; no value of the environment is stored in the clear or reported.
   for (const secret of [stored.openRouterSecret, stored.openAiSecret, stored.elevenLabsSecret]) expect(secret).toMatch(/^v1\./)
@@ -37,11 +37,11 @@ test("each moved setting is imported once, secrets sealed, and the environment i
   expect(stored.anthropicSecret).toBeNull()
   for (const value of [ENV.OPENROUTER_API_KEY, ENV.OPENAI_API_KEY, ENV.ELEVENLABS_API_KEY]) expect(JSON.stringify(stored) + JSON.stringify(imported) + JSON.stringify(await settings(admin))).not.toContain(value)
   const now = await settings(admin)
-  expect(now.providers).toEqual([{ id: "openrouter", configured: true, source: "stored" }, { id: "openai", configured: true, source: "stored" }, { id: "anthropic", configured: false, source: "none" }, { id: "elevenlabs", configured: true, source: "stored" }])
-  expect(now).toMatchObject({ languageModel: "anthropic/claude-sonnet-5.5", generationModel: { provider: "openrouter", model: "anthropic/claude-sonnet-5.5" }, transcriptionModel: { provider: "elevenlabs", model: "scribe_v2" }, liveMaxSessions: 7, liveHoldSeconds: 120, apps: { iosAppIds: ["ABCDE12345.com.example.notes"], iosAppStoreId: "6471234567" } })
+  expect(now.providers).toEqual([{ id: "openrouter", configured: true, source: "stored", hint: "sk-…0001" }, { id: "openai", configured: true, source: "stored", hint: "sk-…0002" }, { id: "anthropic", configured: false, source: "none", hint: null }, { id: "elevenlabs", configured: true, source: "stored", hint: "sk_…0003" }, { id: "openai_compatible", configured: false, source: "none", hint: null }])
+  expect(now).toMatchObject({ languageModel: "anthropic/claude-sonnet-5.5", generationModel: { provider: "openrouter", model: "anthropic/claude-sonnet-5.5" }, liveTranscriptionModel: { provider: "elevenlabs", model: "scribe_v3_live" }, liveMaxSessions: 7, liveHoldSeconds: 120, apps: { iosAppIds: ["ABCDE12345.com.example.notes"], iosAppStoreId: "6471234567" } })
   // Every moved variable that is set is now reported as unused; variables that stay in the environment are not.
   expect([...now.unusedEnvironment!].sort()).toEqual(Object.keys(ENV).filter(name => (MOVED_VARIABLES as ReadonlyArray<string>).includes(name)).sort())
-  expect(await admin.configuration("generation")).toMatchObject({ openRouterKey: ENV.OPENROUTER_API_KEY, openAiKey: ENV.OPENAI_API_KEY, anthropicKey: "", elevenLabsKey: ENV.ELEVENLABS_API_KEY, languageModel: "anthropic/claude-sonnet-5.5", transcriptionModel: "scribe_v2" })
+  expect(await admin.configuration("generation")).toMatchObject({ openRouterKey: ENV.OPENROUTER_API_KEY, openAiKey: ENV.OPENAI_API_KEY, anthropicKey: "", elevenLabsKey: ENV.ELEVENLABS_API_KEY, languageModel: "anthropic/claude-sonnet-5.5" })
   // A second start imports nothing and writes nothing.
   const again = f.start()
   expect(await again.importEnvironment()).toEqual([])
@@ -70,17 +70,18 @@ test("a stored value is never overwritten by the environment, and a cleared one 
   for (const service of [admin, f.start()]) {
     expect(await service.importEnvironment()).toEqual([])
     const now = await settings(service)
-    expect(now.providers.filter(provider => provider.id === "openrouter" || provider.id === "openai")).toEqual([{ id: "openrouter", configured: false, source: "none" }, { id: "openai", configured: false, source: "none" }])
+    expect(now.providers.filter(provider => provider.id === "openrouter" || provider.id === "openai")).toEqual([{ id: "openrouter", configured: false, source: "none", hint: null }, { id: "openai", configured: false, source: "none", hint: null }])
     expect(now.apps!.iosAppStoreId).toBeNull()
     expect(await service.configuration()).toMatchObject({ openRouterKey: "", openAiKey: "" })
   }
 })
 
 test("values that are not usable are not imported, and nothing set means nothing happens", async () => {
-  const f = fixture({ OPENROUTER_API_KEY: "short", LIVE_MAX_SESSIONS: "many", LIVE_HOLD_SECONDS: "-5", IOS_APP_IDS: "nonsense", IOS_APP_STORE_ID: "abc", OPENROUTER_MODEL: "has spaces in it", ELEVENLABS_STT_MODEL: "  " })
+  const f = fixture({ OPENROUTER_API_KEY: "short", LIVE_MAX_SESSIONS: "many", LIVE_HOLD_SECONDS: "-5", IOS_APP_IDS: "nonsense", IOS_APP_STORE_ID: "abc", OPENROUTER_MODEL: "has spaces in it", ELEVENLABS_STT_MODEL: "scribe_v2" })
   const admin = f.start()
   expect(await admin.importEnvironment()).toEqual([])
-  expect(await settings(admin)).toMatchObject({ languageModel: "openai/gpt-6-sol", transcriptionModel: { provider: "elevenlabs", model: "scribe_v3" }, liveMaxSessions: 20, liveHoldSeconds: 300, apps: { iosAppIds: [DEFAULT_IOS_APP_ID], iosAppStoreId: null } })
+  // The batch speech model variable is never imported: speech models must stream.
+  expect(await settings(admin)).toMatchObject({ languageModel: "openai/gpt-6-sol", liveTranscriptionModel: { provider: "elevenlabs", model: "scribe_v3_live" }, liveMaxSessions: 20, liveHoldSeconds: 300, apps: { iosAppIds: [DEFAULT_IOS_APP_ID], iosAppStoreId: null } })
   expect((await settings(admin)).providers.every(provider => !provider.configured)).toBe(true)
   const empty = fixture({}), fresh = empty.start()
   expect(await fresh.importEnvironment()).toEqual([])

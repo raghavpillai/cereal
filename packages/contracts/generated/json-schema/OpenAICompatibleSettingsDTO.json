@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/OpenAICompatibleSettingsDTO",
+  "$defs": {
+    "OpenAICompatibleSettingsDTO": {
+      "type": "object",
+      "properties": {
+        "baseUrl": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "apiKeySet": {
+          "type": "boolean"
+        },
+        "apiKeyHint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "baseUrl",
+        "apiKeySet"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

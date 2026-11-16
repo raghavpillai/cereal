@@ -3,7 +3,7 @@ import APIClient
 
 @main
 struct CerealApp: App {
-    @State private var store = NoteStore()
+    @State private var store = NoteStore.forThisBuild()
     @State private var router = Router()
     @State private var accounts = AppAccounts.make()
     @State private var connectionMode = ConnectionMode()
@@ -213,10 +213,12 @@ struct RootView: View {
             Signpost.ui.endInterval("Launch.Restore", interval)
             restoring = false
             openPendingLink()
+            // The app needs a server. With no account it opens on the sign-in screen.
+            if accounts.sessions.isEmpty, LaunchContext.asksForServer, !connectionMode.isDemo, router.path.isEmpty { router.showConnection = true }
             await orphans
         }
         .fullScreenCover(item: $router.serverCapture) { target in
-            RailMetricsReader { NavigationStack { AccountScope(target.ref.account) { ServerCaptureView(noteID: target.ref.id) } } }
+            RailMetricsReader { NavigationStack { AccountScope(target.ref.account) { ServerCaptureView(noteID: target.ref.id, discardsIfEmpty: target.createdForRecording) } } }
                 .zoomDestination(ZoomID.capture, enabled: CaptureNavigation.zoomsFromSource(path: router.path, note: target.ref))
                 .environment(\.zoomNamespace, zoom)
         }
@@ -268,8 +270,11 @@ struct RootView: View {
 /// A server note's recording screen, as something to present.
 struct ServerCaptureTarget: Identifiable, Hashable {
     let ref: NoteRef
+    /// The note was made a moment ago only to be recorded into. If it still holds
+    /// nothing when the screen is closed (the recording never started), it is removed.
+    var createdForRecording = false
     var id: NoteRef { ref }
-    init(_ ref: NoteRef) { self.ref = ref }
+    init(_ ref: NoteRef, createdForRecording: Bool = false) { self.ref = ref; self.createdForRecording = createdForRecording }
 }
 
 /// A screen of one account. Everything inside asks that account's own model,
@@ -352,12 +357,14 @@ extension RootView {
         if open(url) { return }
         guard let link = RecordingActivityLinkPolicy.link(url) else { return }
         if restoring { pendingRecording = url; return }
-        // A server recording can stay active while the user browses the
-        // local demo. Its Live Activity returns to its own account and note.
+        // A server recording can stay active while QA browses the debug demo.
+        // Its Live Activity returns to its own account and note.
         switch RecordingActivityLinkPolicy.target(link, active: serverRecording.active, accounts: accounts.sessions.map(\.id),
                                                   ledger: { serverRecording.ledger(of: $0) }) {
         case .note(let ref) where serverRecording.active == ref || !connectionMode.isDemo:
+            #if DEBUG
             connectionMode.isDemo = false
+            #endif
             router.path = [.serverNote(ref)]
         case .note, .home:
             guard connectionMode.isDemo, store.note(link.noteID) != nil else {
@@ -410,6 +417,9 @@ extension RootView {
             let account = try? await accounts.connect(instance: environment["CEREAL_QA_INSTANCE_URL"] ?? "", token: environment["CEREAL_QA_OWNER_TOKEN"] ?? "")
             if let account, let id = environment["CEREAL_QA_NOTE_ID"], UUID(uuidString: id) != nil {
                 router.path = [.serverNote(NoteRef(account: account, id: id))]
+            } else if let account, environment["CEREAL_QA_CHAT"] == "workspace" {
+                // The chat across all notes, for checking saved chats.
+                router.path = [.serverChat(account, noteID: nil)]
             }
             return true
         }
@@ -453,7 +463,7 @@ extension RootView {
               let flow = UserDefaults.standard.string(forKey: "qa.flow"), flow.hasPrefix("record"),
               let created = try? await session.notes.create(title: "", body: "") else { return }
         let note = NoteRef(account: session.id, id: created.id)
-        router.serverCapture = ServerCaptureTarget(note)
+        router.serverCapture = ServerCaptureTarget(note, createdForRecording: true)
         guard flow != "record" else { return }
         let delay = max(2, UserDefaults.standard.double(forKey: "qa.leaveAfter"))
         try? await Task.sleep(for: .seconds(delay))
@@ -466,9 +476,11 @@ extension RootView {
     }
     #endif
 
-    /// `-screen note|chat|search|sidebar|new|mic` deep-links for screenshots and UI tests.
-    /// Navigation targets are re-applied when the account identity settles;
-    /// targets that create a note or present a sheet run once.
+    #if DEBUG
+    /// Debug QA only: `-screen home|note|chat|search|sidebar|new|mic|regenerate` opens the
+    /// on-device demo with its example notes, for screenshots and UI tests. Release builds
+    /// have no way into the demo. Navigation targets are re-applied when the account
+    /// identity settles; targets that create a note or present a sheet run once.
     fileprivate func openDebugScreen(first isFirst: Bool) {
         let args = ProcessInfo.processInfo.arguments
         guard let i = args.firstIndex(of: "-screen"), i + 1 < args.count else { return }
@@ -499,6 +511,26 @@ extension RootView {
             }
         default: break
         }
+    }
+    #endif
+}
+
+/// What this launch is for.
+enum LaunchContext {
+    /// Unit tests run inside the app; they are not a person opening it.
+    static var isTestHost: Bool { ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil }
+
+    /// False for test hosts and debug QA launches that open a screen of their own.
+    static var asksForServer: Bool { !isTestHost && !opensQAScreen }
+
+    /// Debug QA launches that show a screen of their own, or keep accounts of their own.
+    static var opensQAScreen: Bool {
+        #if DEBUG
+        let arguments = ProcessInfo.processInfo.arguments
+        return arguments.contains("-screen") || arguments.contains("-qa-live-activity") || arguments.contains("-qa-accounts")
+        #else
+        return false
+        #endif
     }
 }
 

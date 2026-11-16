@@ -27,7 +27,7 @@ const lines=[
   seg(6,"system",2,"Legal needs the data processing agreement two weeks before that.",140_000),
   seg(7,"mic",1,"Understood. I will ask Tomasz to draft it this week.",260_000),
 ]
-const silent:ProviderServices={transcribe:()=>Effect.succeed([]),generate:()=>Effect.succeed(""),chat:()=>Effect.succeed("")}
+const silent:ProviderServices={generate:()=>Effect.succeed(""),chat:()=>Effect.succeed("")}
 type Turn=ChatInput["history"][number]
 type Tail=LiveTranscriptState["tail"]
 
@@ -411,7 +411,7 @@ test("through the endpoint: the answer the client received is what the next requ
   const stored=note({transcriptSegments:lines.slice(0,3),transcriptRevision:3}),repository=makeMemoryRepository([stored]),requests:LanguageMessage[][]=[]
   const answers=["Ines asked for a revised quote [[S3]] [[S99]].","Forty [[S4]]."]
   const providers:ProviderServices={...silent,async *chatStream(prepared,input){requests.push(chatAnswerMessages(prepared,input));yield answers[requests.length-1]!}}
-  const processing=makeProcessingService(repository,{worker:false,providers,liveConversations:makeLiveConversationStore()})
+  const processing=makeProcessingService(repository,{providers,liveConversations:makeLiveConversationStore()})
   const run=async(input:ChatInput)=>{const events:ChatStreamEventDTO[]=[];await Effect.runPromise(Stream.runForEach(await Effect.runPromise(processing.chatStream(stored.id,input)),event=>Effect.sync(()=>{events.push(event)})));return events.filter(event=>event.type==="delta").map(event=>event.text).join("")}
   const first=await run({message:"What did Ines ask for?",history:[],includeSources:true})
   // A marker the server did not issue never reaches the client, and so is not in the thread either.

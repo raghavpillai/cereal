@@ -42,7 +42,7 @@ struct HomeView: View {
             }
             .scrollIndicators(.hidden)
         } standalone: {
-            GlassCircleButton(systemImage: "folder") { SidebarModel.shared.open() }
+            GlassCircleButton(systemImage: "sidebar.left") { SidebarModel.shared.open() }
         } rail: {
             RailGroup {
                 RailIcon(systemImage: "magnifyingglass") { router.path.append(.search) }
