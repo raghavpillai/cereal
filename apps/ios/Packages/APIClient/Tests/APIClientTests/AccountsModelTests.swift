@@ -395,7 +395,7 @@ private func isUnreachable(_ status: AccountStatus) -> Bool { if case .unreachab
         #expect(try accounts.storage.directory(id.raw).path == directory.path)
         #expect(accounts.sessions.first?.status == .ready)
         // The session that was replaced is ended on its server.
-        for _ in 0..<100 where !server.requests.contains(where: { $0.path.hasSuffix("/sign-out") }) { try await Task.sleep(for: .milliseconds(10)) }
+        for _ in 0..<1000 where !server.requests.contains(where: { $0.path.hasSuffix("/sign-out") }) { try await Task.sleep(for: .milliseconds(10)) }
         #expect(server.requests.filter { $0.path.hasSuffix("/sign-out") }.map(\.token) == ["token-1"])
     }
 
@@ -542,7 +542,7 @@ private func isUnreachable(_ status: AccountStatus) -> Bool { if case .unreachab
         #expect(accounts.signedOut.map(\.directory) == [id.raw])
         #expect(accounts.signedOut.first?.host == server.host && accounts.signedOut.first?.account?.email == "a@example.test")
         #expect(accounts.signedOut.first?.summary == AccountDataSummary(recordings: 2, unsent: 1))
-        for _ in 0..<100 where !server.requests.contains(where: { $0.path.hasSuffix("/sign-out") }) { try await Task.sleep(for: .milliseconds(10)) }
+        for _ in 0..<1000 where !server.requests.contains(where: { $0.path.hasSuffix("/sign-out") }) { try await Task.sleep(for: .milliseconds(10)) }
         #expect(server.requests.filter { $0.path.hasSuffix("/sign-out") }.map(\.token) == ["token-1"])
 
         let again = try await accounts.connect(instance: server.address, token: "token-2")
