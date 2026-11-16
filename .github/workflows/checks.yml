@@ -50,6 +50,24 @@ jobs:
       - run: bun run build
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test -p meeting-notes-api-types --locked
+  desktop:
+    runs-on: macos-26
+    timeout-minutes: 40
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: desktop-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - run: cargo test -p cereal --locked
+      # Release builds leave out debug-only code; a call into it compiles in tests and fails only here.
+      - run: cargo build -p cereal --release --locked
   swift-packages:
     runs-on: macos-latest
     steps:
