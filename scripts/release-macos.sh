@@ -44,6 +44,7 @@ done < <(security list-keychains -d user)
 cleanup() {
   security list-keychains -d user -s "${saved_keychains[@]}" >/dev/null 2>&1 || true
   security delete-keychain "$keychain" >/dev/null 2>&1 || true
+  mount | grep -qF " $work/" && return 0  # an image still mounted inside: leave the folder, never fail the release here
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -131,7 +132,12 @@ xcrun stapler validate "$dmg" >/dev/null
 mount="$work/mount"
 mkdir -p "$mount"
 hdiutil attach "$dmg" -mountpoint "$mount" -readonly -nobrowse -quiet
-detach() { hdiutil detach "$mount" -quiet || true; }
+# Spotlight or the verifier can hold the image for a moment after the checks; retry, then force, so the
+# cleanup never tries to delete files inside a read-only image that is still mounted.
+detach() {
+  for _ in 1 2 3 4 5; do hdiutil detach "$mount" -quiet 2>/dev/null && return 0; sleep 1; done
+  hdiutil detach "$mount" -force -quiet 2>/dev/null || true
+}
 trap 'detach; cleanup' EXIT
 mounted="$mount/Cereal.app"
 codesign --verify --deep --strict "$mounted"
