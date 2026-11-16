@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { AdminSettingsDTO, ModelCatalogDTO } from '@meeting-notes/contracts'
-import { claimFailure, claimServer, initialLanguageProvider, initialModels, modelLabel, modelsPatch, needsOnboarding, ownerProblem, plausibleKey, resumeStep, serverAddress, serverHost, setupCode, setupLanding, stepsFor, suggestLanguageModel } from './onboarding'
+import { googleClientProblem, googleDestination, googleFailure, googleRedirectAddresses, proveWithGoogle, startGoogleClaim, startGoogleSwitch, claimFailure, claimServer, initialLanguageProvider, initialModels, modelLabel, modelsPatch, needsOnboarding, ownerProblem, plausibleKey, resumeStep, serverAddress, serverHost, setupCode, setupLanding, stepsFor, suggestLanguageModel } from './onboarding'
 
 const code = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
 const steps = { owner: true, name: false, language: false, speech: false, models: false, signIn: false, storage: false }
@@ -18,8 +18,11 @@ const transport = (handler: (request: Request, init: RequestInit) => Response | 
 
 describe('setup flow helpers', () => {
   test('the claim step is walked only on a server nobody has claimed', () => {
-    expect(stepsFor(true)).toEqual(['claim', 'name', 'language', 'speech', 'models', 'signIn', 'storage', 'apps'])
-    expect(stepsFor(false)).toEqual(['name', 'language', 'speech', 'models', 'signIn', 'storage', 'apps'])
+    // "Who may join" is a step only on a server that signs in with Google.
+    expect(stepsFor(true, true)).toEqual(['claim', 'name', 'language', 'speech', 'models', 'signIn', 'storage', 'apps'])
+    expect(stepsFor(true)).toEqual(['claim', 'name', 'language', 'speech', 'models', 'storage', 'apps'])
+    expect(stepsFor(false, true)).toEqual(['name', 'language', 'speech', 'models', 'signIn', 'storage', 'apps'])
+    expect(stepsFor(false)).toEqual(['name', 'language', 'speech', 'models', 'storage', 'apps'])
   })
 
   test('a reload resumes at the first step the server has not finished', () => {
@@ -78,6 +81,82 @@ describe('setup flow helpers', () => {
     expect(offline.ok).toBe(false)
     // No message repeats the code.
     for (const status of [400, 401, 403, 409, 429, 500]) expect(claimFailure(status).message).not.toContain(code)
+  })
+
+  test('claiming with Google sends the setup code once as the bearer, and only the client in the body', async () => {
+    let seen: { url: string; authorization: string | null; credentials: string; body: string } | null = null
+    const started = await startGoogleClaim(code, { clientId: ' 1234567890-harbour.apps.googleusercontent.com ', clientSecret: ' GOCSPX-secret-value ' }, undefined, transport(async (request, init) => {
+      seen = { url: request.url, authorization: request.headers.get('authorization'), credentials: init.credentials ?? '', body: await request.text() }
+      return Response.json({ authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth?client_id=x&state=y' })
+    }))
+    expect(started).toEqual({ ok: true, url: 'https://accounts.google.com/o/oauth2/v2/auth?client_id=x&state=y' })
+    expect(seen!.url).toBe('https://notes.example.test/api/v1/admin/owner/setup/google')
+    expect(seen!.authorization).toBe(`Bearer ${code}`)
+    // The answer sets the HttpOnly cookie that binds the sign-in to this browser, so the browser has to be allowed to keep it.
+    expect(seen!.credentials).toBe('same-origin')
+    expect(JSON.parse(seen!.body)).toEqual({ clientId: '1234567890-harbour.apps.googleusercontent.com', clientSecret: 'GOCSPX-secret-value' })
+    expect(seen!.url + seen!.body).not.toContain(code)
+    // Switching, from the panel, carries no setup code at all: only this origin's session cookie.
+    let switching: { authorization: string | null; credentials: string } | null = null
+    await startGoogleSwitch({ clientId: '1234567890-harbour.apps.googleusercontent.com', clientSecret: 'GOCSPX-secret-value' }, undefined, transport((request, init) => { switching = { authorization: request.headers.get('authorization'), credentials: init.credentials ?? '' }; return Response.json({ authorizationUrl: 'https://accounts.google.com/x' }) }))
+    expect(switching!).toEqual({ authorization: null, credentials: 'same-origin' })
+  })
+
+  test('the browser is only ever sent to a web address, and each refusal says what to look at', async () => {
+    const answer = (status: number, body: unknown, headers: Record<string, string> = {}) => startGoogleClaim(code, { clientId: '1234567890-harbour.apps.googleusercontent.com', clientSecret: 'GOCSPX-secret-value' }, undefined, transport(() => Response.json(body, { status, headers })))
+    for (const hostile of ['javascript:alert(1)', 'cereal://auth', 'data:text/html,x', '', 42, 'https://user:pw@accounts.google.com/']) expect((await answer(200, { authorizationUrl: hostile })).ok).toBe(false)
+    expect(googleDestination('https://accounts.google.com/o/oauth2/v2/auth?x=1')).toBe('https://accounts.google.com/o/oauth2/v2/auth?x=1')
+    expect(await answer(401, { error: 'unauthorized' })).toMatchObject({ ok: false, failure: { field: 'code' } })
+    expect(await answer(409, { error: 'conflict' })).toMatchObject({ ok: false, failure: { field: 'email' } })
+    expect(await answer(429, { error: 'rate_limited' }, { 'Retry-After': '30' })).toMatchObject({ ok: false, failure: { field: null, waitSeconds: 30 } })
+    expect(await answer(400, { message: 'Enter the Google client secret exactly as Google Cloud shows it' })).toMatchObject({ ok: false, failure: { field: 'clientSecret' } })
+    expect(await answer(400, { message: 'Enter the Google client ID exactly as Google Cloud shows it' })).toMatchObject({ ok: false, failure: { field: 'clientId' } })
+    expect(await answer(400, { message: 'Google sign-in needs an HTTPS address. This server is reached over plain HTTP.' })).toMatchObject({ ok: false, failure: { field: null, message: 'Google sign-in needs an HTTPS address. This server is reached over plain HTTP.' } })
+  })
+
+  test('a Google client is checked before anything is sent, and every way the proof can fail has its own sentence', () => {
+    expect(googleClientProblem({ clientId: '', clientSecret: 'x' })?.field).toBe('clientId')
+    expect(googleClientProblem({ clientId: 'not a client id', clientSecret: 'GOCSPX-secret-value' })?.field).toBe('clientId')
+    expect(googleClientProblem({ clientId: '1234567890-harbour.apps.googleusercontent.com', clientSecret: '' })?.field).toBe('clientSecret')
+    expect(googleClientProblem({ clientId: '1234567890-harbour.apps.googleusercontent.com', clientSecret: 'has a space' })?.field).toBe('clientSecret')
+    expect(googleClientProblem({ clientId: ' 1234567890-harbour.apps.googleusercontent.com ', clientSecret: ' GOCSPX-secret-value ' })).toBeNull()
+    const reasons = ['invalid_client', 'redirect_uri_mismatch', 'cancelled', 'unverified_email', 'email_taken', 'google_account_in_use', 'already_claimed', 'expired', 'blocked', 'failed']
+    expect(new Set(reasons.map(reason => googleFailure(reason).message)).size).toBe(reasons.length)
+    // The two the owner asked about say exactly what to fix.
+    expect(googleFailure('invalid_client')).toMatchObject({ field: 'clientSecret' })
+    expect(googleFailure('invalid_client').message).toContain('client secret')
+    expect(googleFailure('redirect_uri_mismatch').message).toContain('Authorized redirect URIs')
+    for (const reason of reasons.slice(0, 3)) expect(googleFailure(reason).message).toMatch(/[Nn]othing was saved|try again/)
+    expect(googleFailure('something Google made up <script>').message).toBe(googleFailure(null).message)
+    expect(googleRedirectAddresses('https://notes.example.test/')).toEqual(['https://notes.example.test/api/v1/auth/google/callback', 'https://notes.example.test/api/integrations/google/callback'])
+  })
+
+  test('the proof runs in its own window and the page waits for the server to say how it went', async () => {
+    const window_ = () => { const log: string[] = []; return { log, popup: { location: { replace: (url: string) => log.push(`go:${url}`) }, close: () => log.push('close') } as unknown as Window } }
+    const start = async () => ({ ok: true as const, url: 'https://accounts.google.com/auth' })
+    const statuses = (...states: Array<[string, string | null]>) => { let at = 0; return async () => { const [state, reason] = states[Math.min(at++, states.length - 1)]!; return { state, reason } as { state: 'pending' | 'done' | 'failed' | 'none'; reason: string | null } } }
+    const wait = async () => {}
+    // Opened first, sent to Google, closed when the server says it is done.
+    const good = window_()
+    expect(await proveWithGoogle(start, new AbortController().signal, { open: () => good.popup, status: statuses(['pending', null], ['pending', null], ['done', null]), wait })).toEqual({ ok: true })
+    expect(good.log).toEqual(['go:https://accounts.google.com/auth', 'close'])
+    // A failure comes back as its sentence.
+    const bad = window_()
+    expect(await proveWithGoogle(start, new AbortController().signal, { open: () => bad.popup, status: statuses(['pending', null], ['failed', 'redirect_uri_mismatch']), wait })).toMatchObject({ ok: false, failure: { message: googleFailure('redirect_uri_mismatch').message } })
+    expect(bad.log.at(-1)).toBe('close')
+    // A refused start closes the window and never polls.
+    const refused = window_(); let asked = 0
+    expect(await proveWithGoogle(async () => ({ ok: false as const, failure: { field: 'code' as const, message: 'no', waitSeconds: 0 } }), new AbortController().signal, { open: () => refused.popup, status: async () => { asked++; return { state: 'done', reason: null } }, wait })).toMatchObject({ ok: false, failure: { field: 'code' } })
+    expect(refused.log).toEqual(['close']); expect(asked).toBe(0)
+    // Calling it off closes the window.
+    const cancelled = window_(), controller = new AbortController()
+    await expect(proveWithGoogle(start, controller.signal, { open: () => cancelled.popup, status: async () => { controller.abort(); return { state: 'pending', reason: null } }, wait })).rejects.toThrow()
+    expect(cancelled.log.at(-1)).toBe('close')
+    // A browser that will not open a window: the whole page goes to Google instead.
+    let left = ''
+    void proveWithGoogle(start, new AbortController().signal, { open: () => null, status: statuses(['done', null]), wait, leave: url => { left = url } })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(left).toBe('https://accounts.google.com/auth')
   })
 
   test('the provider step opens on one that already has a key', () => {

@@ -34,6 +34,8 @@ struct ServerShareView: View {
                             busy = false
                         }
                     }.buttonStyle(.glassProminent).tint(Theme.accent)
+                        // Dark on gold, as on every other gold control.
+                        .foregroundStyle(busy || (!includeBody && !includeEnhanced) ? Theme.textTertiary : Theme.onAccent)
                         .disabled(busy || (!includeBody && !includeEnhanced))
                 } header: { Text("Read-only snapshot") } footer: {
                     Text("Anyone with the link can read the selected content. Transcripts are never shared. Later edits stay private; create a new link to share a newer version.")
@@ -44,17 +46,17 @@ struct ServerShareView: View {
                         Button("Copy link", systemImage: "doc.on.doc") { UIPasteboard.general.string = url.absoluteString }
                     } footer: { Text("The link is only available here after creation. It is not saved to app preferences.") }
                 }
-                if busy { Section { ProgressView("Updating shared links…") } }
+                if busy { Section { InlineProgress(text: "Updating shared links…") } }
                 if let error { Section { Text(error).foregroundStyle(Theme.danger); Button("Retry") { Task { await reload() } }.disabled(busy) } }
                 Section("Existing links") {
                     if shares.isEmpty { Text("No shared links.").foregroundStyle(Theme.textTertiary) }
                     ForEach(shares, id: \.id) { share in
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Created \(share.createdAt.prefix(10))").font(.subheadline)
+                            Text("Created \(Self.day(share.createdAt))").font(.subheadline)
                             if share.revokedAt != nil {
                                 Text("Revoked").font(.caption).foregroundStyle(Theme.textTertiary)
                             } else {
-                                Text(share.expiresAt.map { "Expires \($0.prefix(10))" } ?? "No expiration")
+                                Text(share.expiresAt.map { "Expires \(Self.day($0))" } ?? "No expiration")
                                     .font(.caption).foregroundStyle(Theme.textTertiary)
                                 Button("Revoke link", role: .destructive) {
                                     busy = true; error = nil
@@ -70,6 +72,10 @@ struct ServerShareView: View {
                                         busy = false
                                     }
                                 }.disabled(busy)
+                                    // Its own 44 pt target, and only it revokes: not a tap anywhere on the row.
+                                    .buttonStyle(.borderless)
+                                    .frame(minHeight: 44, alignment: .leading).contentShape(Rectangle())
+                                    .padding(.vertical, -8)
                             }
                         }.padding(.vertical, 4)
                     }
@@ -85,6 +91,12 @@ struct ServerShareView: View {
             .interactiveDismissDisabled(busy)
             .task { await reload() }
         }.glassSheet()
+    }
+
+    /// A server timestamp as a day and time in the reader's own format, not the raw ISO text.
+    static func day(_ timestamp: String) -> String {
+        guard let date = Date.serverTimestamp(timestamp) else { return String(timestamp.prefix(10)) }
+        return date.formatted(.dateTime.day().month(.abbreviated).year().hour().minute())
     }
 
     private func reload() async {

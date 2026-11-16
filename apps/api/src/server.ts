@@ -69,7 +69,7 @@ function testGoogleEndpoints(raw:string|undefined){
   return{endpoints:{authorization:origin+"/authorize",token:origin+"/token",userinfo:origin+"/userinfo"}}
 }
 // Sign-in methods, the allow list and the Google client are read from the database on every use, so a change on the admin panel applies at once.
-const authentication=makeAuthenticationService(database,adminToken,{secret:authSecret,baseURL:publicBaseURL,trustedOrigins:process.env.AUTH_TRUSTED_ORIGINS?.split(",").map(origin=>origin.trim()).filter(Boolean),signIn:()=>administration.signInPolicy(),google:testGoogleEndpoints(process.env.GOOGLE_OAUTH_TEST_ORIGIN)})
+const authentication=makeAuthenticationService(database,adminToken,{secret:authSecret,baseURL:publicBaseURL,trustedOrigins:process.env.AUTH_TRUSTED_ORIGINS?.split(",").map(origin=>origin.trim()).filter(Boolean),signIn:()=>administration.signInPolicy(),useGoogle:client=>administration.useGoogle(client),google:testGoogleEndpoints(process.env.GOOGLE_OAUTH_TEST_ORIGIN)})
 // The Google client saved on the admin panel, else GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET from the environment.
 const google=makeGoogleService(makePrismaGoogleStore(database),secretBox,{credentials:()=>administration.googleCredentials(),baseURL:publicBaseURL,worker:true})
 const mcpStore=createMcpStore(database)

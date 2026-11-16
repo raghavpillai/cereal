@@ -1,4 +1,5 @@
 import { createAuthClient } from 'better-auth/react'
+import { classifyOrigin, type Transport } from '@meeting-notes/contracts/transport'
 import { oauthProviderClient } from '@better-auth/oauth-provider/client'
 
 /** Better Auth owns the HttpOnly session cookie. No passwords or session tokens
@@ -25,14 +26,17 @@ export function signInProblem(status?: number): string {
 }
 
 /** What this server lets people sign in with. Public: it is read before anyone is signed in. */
-export interface AuthMethods { password: boolean; google: boolean; instanceName: string; /** Nobody has claimed this server yet: the admin panel shows "Claim this server" in place of sign-in. */ setupRequired: boolean }
+export interface AuthMethods { password: boolean; google: boolean; instanceName: string; /** Nobody has claimed this server yet: the admin panel shows "Claim this server" in place of sign-in. */ setupRequired: boolean; /** How this server is reached: the pages warn when it is plain HTTP on a public address. */ transport: Transport }
 /** A server from before sign-in settings answers 404: it only ever had email and password. */
-export async function fetchAuthMethods(signal?: AbortSignal, transport: typeof fetch = globalThis.fetch): Promise<AuthMethods> {
+export async function fetchAuthMethods(signal?: AbortSignal, transport: typeof fetch = globalThis.fetch, address: string | undefined = typeof window === 'undefined' ? undefined : window.location.origin): Promise<AuthMethods> {
   const response = await transport('/api/v1/auth/methods', { signal, credentials: 'omit', cache: 'no-store', redirect: 'error', referrerPolicy: 'no-referrer' })
-  if (response.status === 404) return { password: true, google: false, instanceName: 'Cereal', setupRequired: false }
+  // The server says how it is reached; one that does not is judged, by the same rules, from the address this page was opened at.
+  const judged: Transport = address ? classifyOrigin(address) : 'secure'
+  if (response.status === 404) return { password: true, google: false, instanceName: 'Cereal', setupRequired: false, transport: judged }
   if (!response.ok) throw new Error('Sign-in methods are unavailable')
   const body = await response.json() as Partial<AuthMethods>
-  return { password: body.password !== false, google: body.google === true, instanceName: typeof body.instanceName === 'string' && body.instanceName.trim() ? body.instanceName : 'Cereal', setupRequired: body.setupRequired === true }
+  return { password: body.password !== false, google: body.google === true, instanceName: typeof body.instanceName === 'string' && body.instanceName.trim() ? body.instanceName : 'Cereal', setupRequired: body.setupRequired === true,
+    transport: body.transport === 'secure' || body.transport === 'private' || body.transport === 'public-http' ? body.transport : judged }
 }
 
 /** The `?error=` codes the server sends back to the sign-in page after a refused Google sign-in. */

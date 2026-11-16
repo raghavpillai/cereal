@@ -7,17 +7,8 @@ import type { CreateCalendarInput, CreateUserInput, UpdateAdminSettingsInput, Up
 
 type Client = HttpApiClient.ForApi<typeof MeetingsApi>
 
-export class AdminClientError extends Error {
-  constructor(readonly status: number) {
-    super(status === 401 ? 'Your session has ended. Sign in again.'
-      : status === 403 ? 'Your account does not have permission to do this.'
-      : status === 400 ? 'Check the values and try again.'
-      : status === 404 ? 'This item is no longer available. Refresh and try again.'
-      : status === 409 ? 'This change conflicts with existing information. Refresh and try again.'
-      : 'The server could not finish this request. Please try again.')
-    this.name = 'AdminClientError'
-  }
-}
+import { AdminClientError } from './client-error'
+export { AdminClientError }
 
 /** Same-origin cookie transport. JavaScript never reads the HttpOnly session cookie
  * or a bootstrap token. Responses use the canonical Effect HttpApi schemas. */
@@ -91,6 +82,8 @@ export function createAdminClient(baseUrl: string, transport: typeof fetch = glo
     recordOnboardingStep: (payload: OnboardingStepInput, signal?: AbortSignal) => execute(c => c.owner.recordOnboardingStep({ payload }), signal),
     completeOnboarding: (signal?: AbortSignal) => execute(c => c.owner.completeOnboarding(), signal),
     restartOnboarding: (signal?: AbortSignal) => execute(c => c.owner.restartOnboarding(), signal),
+    /** Makes email and password the one way to sign in, after giving the signed-in administrator this password. */
+    switchToPassword: (payload: { password: string }, signal?: AbortSignal) => execute(c => c.owner.switchToPassword({ payload }), signal),
     /** Tries the storage settings with a draft laid over them: a small file is written, read back and deleted. Nothing is saved. */
     testStorage: (payload: StorageTestInput, signal?: AbortSignal) => execute(c => c.owner.testStorage({ payload }), signal),
     listCalendars: (signal?: AbortSignal) => execute(c => c.owner.listCalendars(), signal),

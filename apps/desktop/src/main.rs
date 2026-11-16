@@ -16,6 +16,7 @@ mod live;
 mod live_view;
 mod login;
 mod meeting;
+mod menubar;
 mod model;
 mod motion;
 mod note;
@@ -90,6 +91,7 @@ fn main() {
                 MenuItem::action("Hide Cereal", app::Hide),
                 MenuItem::separator(),
                 MenuItem::action("Quit", app::Quit),
+                MenuItem::action("Quit Completely", app::QuitCompletely),
             ],
         }]);
         let compact = std::env::args().any(|a| a == "--compact");
@@ -206,6 +208,7 @@ fn main() {
             .and_then(|seconds| seconds.parse::<u64>().ok());
         pill::install(handle, if probe.is_some() { "pill" } else { &mode }, cx);
         store::install(handle, cx);
+        menubar::install(handle, cx);
         shared_view::install(handle, cx);
         // What an earlier update left behind is cleared away.
         update::tidy();
@@ -249,7 +252,9 @@ fn main() {
             );
             tour::welcome(handle, name, cx);
         }
-        if std::env::args().any(|a| a == "--motion-tour") {
+        if std::env::args().any(|a| a == "--motion-tour")
+            || (cfg!(debug_assertions) && crate::environment::var_os("CEREAL_AUDIT").is_some())
+        {
             assert!(
                 crate::environment::var_os("CEREAL_DATA_DIR").is_some(),
                 "The motion tour requires an isolated CEREAL_DATA_DIR"

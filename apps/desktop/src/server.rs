@@ -84,7 +84,7 @@ fn load_calendar_events_with_client(
     let start = chrono::DateTime::parse_from_rfc3339(from)
         .map_err(|_| "Invalid calendar date range".to_string())?;
     let end = start + chrono::Duration::days(i64::from(look_ahead));
-    let events = client.request_with_cancel(
+    let listed: Vec<Value> = client.request_with_cancel(
         "GET",
         &format!(
             "/api/v1/calendar/events?from={}&to={}",
@@ -92,17 +92,84 @@ fn load_calendar_events_with_client(
             range(&end.to_rfc3339())?
         ),
         None,
-        Some(cancel),
+        Some(cancel.clone()),
     )?;
+    let (events, attendees) = calendar_events(listed)?;
+    // The person's own calendars, selected or not, for Settings › Calendar.
+    let mut personal = Vec::new();
+    for connection in &google.connections {
+        if uuid::Uuid::parse_str(&connection.id).is_err() {
+            continue;
+        }
+        let calendars: Vec<meeting_notes_api_types::GoogleCalendarDTO> = client
+            .request_with_cancel(
+                "GET",
+                &format!(
+                    "/api/v1/integrations/google/connections/{}/calendars",
+                    connection.id
+                ),
+                None,
+                Some(cancel.clone()),
+            )?;
+        personal.extend(calendars);
+    }
     Ok(crate::calendar::CalendarSnapshot {
         look_ahead_days: look_ahead,
         sources: calendars,
         events,
+        attendees,
+        personal,
         personal_linked: !google.connections.is_empty(),
         personal_issue: google.connections.iter().any(|c| {
             c.status == meeting_notes_api_types::GoogleConnectionDtoStatus::ReconnectRequired
         }),
     })
+}
+
+/// The listed events, and for each one the server counts attendees of, how
+/// many other people are invited (`attendeeCount`). A server that does not
+/// send the count leaves the map empty.
+fn calendar_events(
+    listed: Vec<Value>,
+) -> Result<
+    (
+        Vec<meeting_notes_api_types::CalendarEventDTO>,
+        HashMap<String, u32>,
+    ),
+    String,
+> {
+    let mut attendees = HashMap::new();
+    let mut events = Vec::with_capacity(listed.len());
+    for value in listed {
+        let count = value
+            .get("attendeeCount")
+            .and_then(Value::as_u64)
+            .and_then(|count| u32::try_from(count).ok());
+        let event: meeting_notes_api_types::CalendarEventDTO = serde_json::from_value(value)
+            .map_err(|_| "The server sent a calendar event this app cannot read".to_string())?;
+        if let Some(count) = count {
+            attendees.insert(event.id.clone(), count);
+        }
+        events.push(event);
+    }
+    Ok((events, attendees))
+}
+
+/// The server this app is signed in to, as notes record it.
+pub fn origin() -> Option<String> {
+    Client::new().ok().map(|client| client.url)
+}
+
+/// Select or deselect one of the signed-in person's own calendars.
+pub fn select_personal_calendar(id: &str, selected: bool) -> Result<(), String> {
+    uuid::Uuid::parse_str(id).map_err(|_| "Invalid calendar".to_string())?;
+    let client = Client::new()?;
+    let _: meeting_notes_api_types::GoogleCalendarDTO = client.request(
+        "PATCH",
+        &format!("/api/v1/integrations/google/calendars/{id}"),
+        Some(json!({ "selected": selected })),
+    )?;
+    Ok(())
 }
 
 pub fn note_for_calendar_event(
@@ -574,16 +641,15 @@ impl Client {
         let credentials = crate::account::credentials()?;
         let url = credentials.url;
         let token = credentials.token;
-        // Credentials go only to HTTPS, except explicit loopback development.
-        let local = ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"]
-            .iter()
-            .any(|p| url.starts_with(p));
-        if (!url.starts_with("https://") && !local)
+        // The session goes to the address it was issued for and nowhere
+        // else (it is stored with that address): HTTPS, or plain HTTP for a
+        // server on a private network.
+        if !(url.starts_with("https://") || url.starts_with("http://"))
             || url.contains(['\n', '\r', '"', '@', '?', '#'])
             || token.len() < 32
             || token.contains(['\n', '\r'])
         {
-            return Err("Configure CEREAL_SERVER_URL (HTTPS or loopback) and CEREAL_SERVER_TOKEN before connecting".into());
+            return Err("Configure CEREAL_SERVER_URL (https:// or http://) and CEREAL_SERVER_TOKEN before connecting".into());
         }
         let storage_root = crate::model::audio_directory()?;
         if epoch != crate::account::epoch() {
@@ -2648,6 +2714,24 @@ mod tests {
             snapshot.sources.is_empty() && snapshot.events.is_empty() && !snapshot.personal_linked
         );
         server.join().unwrap();
+    }
+
+    #[test]
+    fn listed_events_carry_an_attendee_count_only_where_the_server_sends_one() {
+        let event = |id: &str| {
+            serde_json::json!({"id":id,"calendarId":"c","calendarName":"Work","color":"#87e5e8","title":"Meeting","startAt":"2026-11-26T10:00:00Z","endAt":"2026-11-26T11:00:00Z","allDay":false,"startDate":"2026-11-26","endDate":"2026-11-26","timeZone":null,"location":null,"meetingUrl":null,"noteId":null})
+        };
+        let mut counted = event("counted");
+        counted["attendeeCount"] = serde_json::json!(3);
+        let mut alone = event("alone");
+        alone["attendeeCount"] = serde_json::json!(0);
+        let (events, attendees) =
+            super::calendar_events(vec![counted, alone, event("unknown")]).unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(attendees.get("counted"), Some(&3));
+        assert_eq!(attendees.get("alone"), Some(&0));
+        assert_eq!(attendees.get("unknown"), None);
+        assert!(super::calendar_events(vec![serde_json::json!({"id": 1})]).is_err());
     }
 
     #[test]

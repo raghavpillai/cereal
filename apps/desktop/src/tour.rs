@@ -1387,6 +1387,574 @@ fn gap_still_steps() -> Vec<Step> {
     ]
 }
 
+/// The audit's own stills, `a-…`: states the other sets do not reach. Run
+/// without `--motion-tour` (`CEREAL_AUDIT=1`) they act on the notes of the
+/// server the data directory is signed in to, found by title.
+fn audit_steps() -> Vec<Step> {
+    /// The note whose title starts with `prefix`.
+    fn titled(view: &Cereal, prefix: &str) -> Option<u64> {
+        view.workspace
+            .notes
+            .iter()
+            .find(|note| {
+                !note.trashed
+                    && if prefix.is_empty() {
+                        note.title.trim().is_empty()
+                    } else {
+                        note.title.starts_with(prefix)
+                    }
+            })
+            .map(|note| note.id)
+    }
+    fn open(name: &'static str, prefix: &'static str) -> Step {
+        step(name, 900, move |view, cx| {
+            view.navigate(Screen::Home, cx);
+            match titled(view, prefix) {
+                Some(id) => view.open_note(id, cx),
+                None => eprintln!("tour: no note titled {prefix:?}"),
+            }
+        })
+    }
+    fn wheel(name: &'static str, x: f32, y: f32, by: f32) -> Step {
+        input(name, 600, move |window, cx| scroll(window, cx, x, y, by))
+    }
+    /// Follow the `index`th link of `CEREAL_AUDIT_LINKS`.
+    fn follow(view: &mut Cereal, index: usize, cx: &mut Context<Cereal>) {
+        let links = std::env::var("CEREAL_AUDIT_LINKS").unwrap_or_default();
+        match links
+            .split_whitespace()
+            .nth(index)
+            .and_then(crate::link::AppLink::parse)
+        {
+            Some(link) => view.open_link(link, cx),
+            None => eprintln!("tour: no link {index}"),
+        }
+    }
+    /// Put the open note on the calendar, starting `minutes` from now.
+    fn meeting(view: &mut Cereal, minutes: i64) {
+        let at = |minutes: i64| {
+            (crate::menubar::now() + chrono::Duration::minutes(minutes))
+                .with_timezone(&chrono::Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        };
+        let person = |name: &str, email: &str, organizer: bool| {
+            serde_json::json!({"id":uuid::Uuid::new_v4().to_string(),"email":email,"displayName":name,"givenName":null,"familyName":null,"nameSource":"unknown","isSelf":false,"isOrganizer":organizer,"isResource":false,"responseStatus":"accepted"})
+        };
+        let context = serde_json::from_value(serde_json::json!({"eventId":"00000000-0000-4000-8000-000000000002","provider":"google","title":"Northwind onboarding call","calendarName":"Work","startAt":at(minutes),"endAt":at(minutes + 45),"allDay":false,"timeZone":null,"location":"Meeting room with a very long name on the fourth floor, gjpqy","meetingUrl":"https://meet.example.com/abc-defg-hij","eventUrl":null,"organizer":person("Dana Whitfield-Montgomery","dana@northwind.example",true),"participants":[person("Priya Raman","priya@northwind.example",false),person("A Very Long Participant Name That Should Truncate Somewhere Sensible","long.participant.name@northwind.example",false),person("عمر","omar@northwind.example",false)]}));
+        match context {
+            Ok(context) => {
+                if let Some(note) = view.current_note.and_then(|id| view.workspace.note_mut(id)) {
+                    note.meeting_context = Some(context);
+                }
+            }
+            Err(error) => eprintln!("tour: meeting context: {error}"),
+        }
+    }
+    fn update(name: &'static str, state: &'static str) -> Step {
+        step(name, 900, move |view, cx| {
+            view.open_settings(crate::screens::SettingsTab::About, cx);
+            view.updates.review(state);
+        })
+    }
+    const ANSWER: &str = "Here is the plan, with gjpqy descenders.\n\n## Owners\n\n| Owner | Task | Due | Notes |\n| --- | --- | --- | --- |\n| Sam | Missing key banner | Wed | Shows on the note and in the admin panel; must not block recording |\n| Priya | iPhone upload with privacy manifest and export compliance flag set | Wed noon | — |\n| Dana | Announcement | Tue | aVeryLongUnbrokenCellValueThatShouldNotPushTheTableOutOfTheColumn_0123456789 |\n\n```rust\nfn main() {\n    let very_long_line_of_code_that_goes_on_and_on = some_function_with_a_long_name(argument_one, argument_two, argument_three, argument_four);\n    println!(\"{very_long_line_of_code_that_goes_on_and_on}\");\n}\n```\n\n1. First step with `inline code gjpqy`\n2. Second step, **bold** and *italic*\n   - Nested point that is long enough to wrap onto a second line in the compact assistant panel at any width\n\nhttps://example.com/aVeryLongPathSegmentThatNeverBreaksBecauseItHasNoSpacesOrHyphensAtAll_0123456789_abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMNOPQRSTUVWXYZ\n\nمرحبا بالعالم 🚀 final line gjpqy.";
+    let mut steps = vec![
+        step("a-home", 900, |view, cx| view.navigate(Screen::Home, cx)),
+        wheel("a-home-list", 700., 500., -420.),
+        input("a-home-row-hover", 600, |window, cx| pointer(window, cx, 700., 300.)),
+        input("a-home-row-menu", 600, |window, cx| {
+            window.dispatch_event(
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Right,
+                    position: point(px(700.), px(300.)),
+                    click_count: 1,
+                    ..Default::default()
+                }),
+                cx,
+            );
+        }),
+        menu("a-home-row-menu-close-quiet", 300, None),
+        wheel("a-home-list-2", 700., 500., -700.),
+        wheel("a-home-list-deep", 700., 500., -9000.),
+        wheel("a-home-list-end", 700., 500., -900_000.),
+        step("a-home-sidebar-closed", 900, |view, cx| {
+            view.navigate(Screen::Home, cx);
+            view.sidebar_open = false;
+        }),
+        step("a-search-open", 900, |view, _| {
+            view.sidebar_open = true;
+            view.search_open = true;
+        }),
+        windowed("a-search-query", 900, |view, _, cx| {
+            view.search
+                .update(cx, |input, cx| input.set_content("gjpqy", cx));
+            cx.notify();
+        }),
+        windowed("a-search-no-match", 900, |view, _, cx| {
+            view.search
+                .update(cx, |input, cx| input.set_content("zzzzqqqq nothing matches this", cx));
+            cx.notify();
+        }),
+        windowed("a-search-results", 900, |view, _, cx| {
+            view.search
+                .update(cx, |input, cx| input.set_content("launch", cx));
+            view.open_search_results(cx);
+            view.search_open = false;
+        }),
+        wheel("a-search-results-end", 700., 400., -90_000.),
+        step("a-my-notes", 900, |view, cx| view.navigate(Screen::MyNotes, cx)),
+        step("a-favorites", 900, |view, cx| view.navigate(Screen::Favorites, cx)),
+        step("a-trash", 900, |view, cx| view.navigate(Screen::Trash, cx)),
+        step("a-shared", 900, |view, cx| view.navigate(Screen::Shared, cx)),
+        windowed("a-shared-paste-invalid", 900, |view, _, cx| {
+            view.links
+                .paste
+                .update(cx, |input, cx| input.set_content("not a link at all gjpqy", cx));
+            view.open_pasted_link(cx);
+        }),
+        step("a-connect", 900, |view, cx| view.navigate(Screen::Connect, cx)),
+        step("a-account", 900, |view, cx| view.navigate(Screen::Account, cx)),
+        open("a-note-long-title", "Quarterly planning, budgeting"),
+        menu("a-note-long-title-menu", 900, Some(Menu::Note)),
+        menu("a-note-long-title-share", 900, Some(Menu::Share)),
+        menu("a-note-long-title-details", 900, Some(Menu::NoteDetails)),
+        menu("a-note-long-title-folder", 900, Some(Menu::MoveTo)),
+        menu("a-note-long-title-templates", 900, Some(Menu::Templates)),
+        menu("a-note-menus-close-quiet", 300, None),
+        step("a-note-long-title-own", 900, |view, _| view.active_tab = NoteTab::Notes),
+        step("a-note-long-title-transcript", 900, |view, _| {
+            view.transcript_open = true;
+            view.transcript_epoch = view.transcript_epoch.wrapping_add(1);
+        }),
+        open("a-note-unbroken-title", "AVeryLongUnbrokenTitle"),
+        open("a-note-empty", ""),
+        open("a-note-rtl", "مراجعة"),
+        open("a-note-emoji", "🚀🚀 Launch"),
+        open("a-note-hostile", "Hostile content"),
+    ];
+    for name in [
+        "a-note-hostile-2",
+        "a-note-hostile-3",
+        "a-note-hostile-4",
+        "a-note-hostile-5",
+        "a-note-hostile-6",
+    ] {
+        steps.push(wheel(name, 600., 400., -560.));
+    }
+    steps.push(step("a-note-hostile-own", 900, |view, _| {
+        view.active_tab = NoteTab::Notes
+    }));
+    for name in ["a-note-hostile-own-2", "a-note-hostile-own-3"] {
+        steps.push(wheel(name, 600., 400., -560.));
+    }
+    steps.extend([
+        step("a-note-hostile-transcript", 900, |view, _| {
+            view.active_tab = NoteTab::Enhanced;
+            view.transcript_open = true;
+            view.transcript_epoch = view.transcript_epoch.wrapping_add(1);
+        }),
+        step("a-note-hostile-chat", 900, |view, cx| {
+            view.transcript_open = false;
+            view.transcript_epoch = view.transcript_epoch.wrapping_add(1);
+            view.chat_messages.push((
+                "Summarise the launch plan in a table, with the code we discussed, and keep going for a while so that the question itself wraps onto several lines gjpqy".into(),
+                ANSWER.into(),
+            ));
+            view.assistant_open = true;
+            cx.notify();
+        }),
+        wheel("a-note-hostile-chat-2", 600., 600., -300.),
+        wheel("a-note-hostile-chat-3", 600., 600., -300.),
+        step("a-note-hostile-chat-max", 900, |view, _| view.chat_maximized = true),
+        wheel("a-note-hostile-chat-max-2", 600., 500., -500.),
+        step("a-chat-full", 900, |view, cx| {
+            view.chat_maximized = false;
+            view.close_chat_surface(cx);
+            view.navigate(Screen::Chat, cx);
+            view.chat_messages.clear();
+            view.chat_messages.push((
+                "Summarise the launch plan in a table, with the code we discussed, and keep going for a while so that the question itself wraps onto several lines gjpqy".into(),
+                ANSWER.into(),
+            ));
+            view.chat_messages
+                .push(("And then?".into(), ANSWER.repeat(2)));
+            cx.notify();
+        }),
+        wheel("a-chat-full-2", 700., 400., -500.),
+        wheel("a-chat-full-3", 700., 400., -500.),
+        wheel("a-chat-full-end", 700., 400., -90_000.),
+        step("a-chat-full-end-check-quiet", 600, |view, _| {
+            eprintln!(
+                "tour: chat scroll offset {:?} of max {:?}, viewport {:?}",
+                view.chat_scroll.offset().y,
+                view.chat_scroll.max_offset().height,
+                view.chat_scroll.bounds().size.height
+            );
+        }),
+        wheel("a-chat-full-end-again", 700., 400., -90_000.),
+        step("a-chat-full-end-check-2-quiet", 600, |view, _| {
+            eprintln!(
+                "tour: chat scroll offset {:?} of max {:?}; column {:?}; turns: {}",
+                view.chat_scroll.offset().y,
+                view.chat_scroll.max_offset().height,
+                view.chat_scroll.bounds_for_item(0).map(|bounds| bounds.size),
+                crate::lazy::describe("chat-turns")
+            );
+        }),
+        step("a-chat-queued", 900, |view, cx| {
+            view.chat_to_bottom();
+            view.chat_queue = vec![
+                "A queued question gjpqy".into(),
+                "A second queued question that is long enough to need truncating or wrapping in the queue above the composer, gjpqy".into(),
+            ];
+            cx.notify();
+        }),
+        step("a-chat-history", 900, |view, cx| {
+            view.chat_queue.clear();
+            view.chat_history_open = true;
+            cx.notify();
+        }),
+        step("a-chat-recipes", 900, |view, cx| {
+            view.chat_history_open = false;
+            view.chat_recipes_open = true;
+            cx.notify();
+        }),
+        step("a-chat-empty", 900, |view, cx| {
+            view.close_chat_recipes(cx);
+            view.clear_chat(cx);
+        }),
+        open("a-transcript-long-note", "Two thousand line"),
+        wheel("a-transcript-long-note-2", 600., 400., -3000.),
+        step("a-transcript-long", 1200, |view, _| {
+            view.transcript_open = true;
+            view.transcript_epoch = view.transcript_epoch.wrapping_add(1);
+        }),
+        wheel("a-transcript-long-up", 400., 420., 2000.),
+        step("a-transcript-find", 900, |view, _| view.transcript_find_open = true),
+        step("a-settings-preferences", 900, |view, cx| {
+            view.transcript_open = false;
+            view.open_settings(crate::screens::SettingsTab::Preferences, cx)
+        }),
+        wheel("a-settings-preferences-end", 700., 400., -9000.),
+        step("a-settings-profile", 900, |view, cx| {
+            view.open_settings(crate::screens::SettingsTab::Profile, cx)
+        }),
+        step("a-settings-calendar", 900, |view, cx| {
+            view.open_settings(crate::screens::SettingsTab::Calendar, cx)
+        }),
+        wheel("a-settings-calendar-end", 700., 400., -9000.),
+        step("a-settings-notifications", 900, |view, cx| {
+            view.open_settings(crate::screens::SettingsTab::Notifications, cx)
+        }),
+        step("a-settings-about", 900, |view, cx| {
+            view.open_settings(crate::screens::SettingsTab::About, cx)
+        }),
+        update("a-update-checking", "checking"),
+        update("a-update-available", "available"),
+        update("a-update-downloading", "downloading"),
+        update("a-update-verifying", "verifying"),
+        update("a-update-ready", "ready"),
+        update("a-update-failed", "failed"),
+        step("a-update-over-note", 900, |view, cx| {
+            view.updates.review("available");
+            view.navigate(Screen::Home, cx);
+            if let Some(id) = titled(view, "Quarterly planning, budgeting") {
+                view.open_note(id, cx);
+            }
+        }),
+        // The notice over Home's list: the pointer rests on the notice,
+        // where a row's "More actions" button lies underneath it.
+        step("a-update-over-home-quiet", 900, |view, cx| {
+            view.navigate(Screen::Home, cx);
+        }),
+        input("a-update-over-home-scrolled-quiet", 700, |window, cx| {
+            scroll(window, cx, 700., 400., -400.)
+        }),
+        input("a-update-over-home-pointer-quiet", 900, |window, cx| {
+            let size = window.viewport_size();
+            pointer(
+                window,
+                cx,
+                f32::from(size.width) - 216.,
+                f32::from(size.height) - 46.,
+            )
+        }),
+        input("a-update-over-home-hover", 1200, |window, cx| {
+            let size = window.viewport_size();
+            pointer(
+                window,
+                cx,
+                f32::from(size.width) - 215.,
+                f32::from(size.height) - 46.,
+            )
+        }),
+        // The sign-in form in each of its states (nothing is asked of any
+        // server; the session is left alone).
+        step("a-account-password", 900, |view, cx| {
+            view.updates.review("idle");
+            view.navigate(Screen::Account, cx);
+            view.account.update(cx, |account, cx| account.review("password", cx));
+        }),
+        step("a-account-google", 900, |view, cx| {
+            view.account.update(cx, |account, cx| account.review("google", cx));
+        }),
+        step("a-account-both", 900, |view, cx| {
+            view.account.update(cx, |account, cx| account.review("both", cx));
+        }),
+        step("a-account-waiting", 900, |view, cx| {
+            view.account.update(cx, |account, cx| account.review("waiting", cx));
+        }),
+        step("a-account-checking", 900, |view, cx| {
+            view.account.update(cx, |account, cx| account.review("checking", cx));
+        }),
+        step("a-account-unreachable", 900, |view, cx| {
+            view.account.update(cx, |account, cx| account.review("unreachable", cx));
+        }),
+        step("a-account-wrong-password", 900, |view, cx| {
+            view.account.update(cx, |account, cx| account.review("wrong-password", cx));
+        }),
+        step("a-account-http-private", 900, |view, cx| {
+            view.account.update(cx, |account, cx| account.review("http-private", cx));
+        }),
+        step("a-account-http-public", 900, |view, cx| {
+            view.account.update(cx, |account, cx| account.review("http-public", cx));
+        }),
+        // Links (`CEREAL_AUDIT_LINKS`, separated by spaces): a shared note,
+        // a second one, one that has been revoked, a shared note on another
+        // server and a note of one's own on another server.
+        step("a-link-shared", 2500, |view, cx| {
+            view.navigate(Screen::Home, cx);
+            follow(view, 0, cx);
+        }),
+        wheel("a-link-shared-2", 600., 400., -560.),
+        wheel("a-link-shared-end", 600., 400., -90_000.),
+        step("a-link-shared-second", 2500, |view, cx| follow(view, 1, cx)),
+        step("a-link-unavailable", 2500, |view, cx| follow(view, 2, cx)),
+        step("a-link-other-server", 1500, |view, cx| follow(view, 3, cx)),
+        step("a-link-note-other-server", 1500, |view, cx| follow(view, 4, cx)),
+        step("a-shared-entries", 900, |view, cx| view.navigate(Screen::Shared, cx)),
+        input("a-shared-entries-hover", 900, |window, cx| {
+            let width = f32::from(window.viewport_size().width);
+            pointer(window, cx, (width + 192.) / 2., 188.)
+        }),
+        // A meeting on the calendar that has not been recorded: the control
+        // says when it starts, then that it has started.
+        open("a-event-note-quiet", "🚀🚀 Launch"),
+        step("a-event-note-starts", 900, |view, _| meeting(view, 25)),
+        step("a-event-note-starts-open", 900, |view, _| {
+            view.transcript_open = true;
+            view.transcript_epoch = view.transcript_epoch.wrapping_add(1);
+        }),
+        step("a-event-note-started", 900, |view, _| {
+            view.transcript_open = false;
+            view.transcript_epoch = view.transcript_epoch.wrapping_add(1);
+            meeting(view, -5)
+        }),
+        step("a-event-note-details", 900, |view, _| {
+            view.menu = Some(Menu::NoteDetails);
+        }),
+        // A tooltip that is up when the app stops being the active one.
+        open("a-tooltip-setup-quiet", "Two thousand line"),
+        step("a-tooltip-panel-quiet", 1200, |view, _| {
+            view.menu = None;
+            view.transcript_open = true;
+            view.transcript_epoch = view.transcript_epoch.wrapping_add(1);
+        }),
+        input("a-tooltip-hover-quiet", 1200, |window, cx| {
+            let size = window.viewport_size();
+            pointer(window, cx, f32::from(size.width) / 2. - 150., f32::from(size.height) - 160.)
+        }),
+        input("a-tooltip-shown", 600, |window, cx| {
+            let size = window.viewport_size();
+            pointer(window, cx, f32::from(size.width) / 2. - 149., f32::from(size.height) - 160.)
+        }),
+        step("a-tooltip-app-inactive", 1500, |_, _| {
+            let _ = std::process::Command::new("/usr/bin/osascript")
+                .args(["-e", "tell application \"Finder\" to activate"])
+                .status();
+        }),
+        step("a-tooltip-app-active-again", 900, |_, cx| cx.activate(true)),
+        // The app menu's commands with the main window closed.
+        windowed("a-window-closed-quiet", 800, |view, window, cx| {
+            view.transcript_open = false;
+            view.navigate(Screen::Home, cx);
+            crate::pill::hide_main_window(window, cx);
+        }),
+        input("a-window-closed-new-note", 1500, |_, cx| {
+            let available = cx.is_action_available(&crate::app::NewNote);
+            eprintln!("tour: window closed, New Note available: {available}");
+            // As the menu sends it: from outside any window's own update.
+            cx.defer(|cx| cx.dispatch_action(&crate::app::Search));
+        }),
+        step("a-window-closed-result", 900, |view, _| {
+            eprintln!("tour: after Search Notes with the window closed, search open: {}", view.search_open);
+            view.search_open = false;
+        }),
+        step("a-toast", 600, |view, cx| {
+            view.updates.review("idle");
+            view.navigate(Screen::Home, cx);
+            view.show_toast("Note copied to clipboard", cx)
+        }),
+        step("a-toast-long", 600, |view, cx| {
+            view.show_toast("The server could not be reached at http://127.0.0.1:3000 — check that it is running and that this Mac can reach it, gjpqy", cx)
+        }),
+    ]);
+    steps
+}
+
+/// Render accounting on the signed-in account's own content, `c-…` (run
+/// with `CEREAL_AUDIT=1` and `CEREAL_TOUR=c-`): two seconds of steady
+/// scrolling through Home with every note the account has, a very long
+/// note, a very long transcript and a long conversation; a long note opened
+/// and closed twenty times, with the process's resident size before and
+/// after.
+fn audit_bench_steps() -> Vec<Step> {
+    fn titled(view: &Cereal, prefix: &str) -> Option<u64> {
+        view.workspace
+            .notes
+            .iter()
+            .find(|note| !note.trashed && note.title.starts_with(prefix))
+            .map(|note| note.id)
+    }
+    fn wheels(steps: &mut Vec<Step>, x: f32, y: f32, by: f32) {
+        for _ in 0..40 {
+            steps.push((
+                "c-wheel",
+                50,
+                Action::Input(Box::new(move |window, cx| scroll(window, cx, x, y, by))),
+            ));
+        }
+    }
+    fn resident() -> String {
+        std::process::Command::new("/bin/ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .ok()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            .unwrap_or_default()
+    }
+    const LONG: &str = "Two thousand line";
+    let mut steps = vec![step("c-home", 1500, |view, cx| view.navigate(Screen::Home, cx))];
+    wheels(&mut steps, 700., 500., -90.);
+    steps.push(step("c-scroll-home-2s", 600, |_, _| {}));
+    wheels(&mut steps, 700., 500., 90.);
+    steps.push(step("c-scroll-home-back-2s", 600, |_, _| {}));
+    steps.push(step("c-long-note", 2000, |view, cx| {
+        if let Some(id) = titled(view, LONG) {
+            view.open_note(id, cx);
+        }
+    }));
+    wheels(&mut steps, 600., 400., -90.);
+    steps.push(step("c-scroll-long-note-2s", 600, |_, _| {}));
+    steps.push(step("c-transcript", 2000, |view, _| {
+        view.transcript_open = true;
+        view.transcript_epoch = view.transcript_epoch.wrapping_add(1);
+    }));
+    wheels(&mut steps, 600., 500., 90.);
+    steps.push(step("c-scroll-transcript-up-2s", 600, |_, _| {}));
+    steps.push(step("c-chat", 2000, |view, cx| {
+        view.transcript_open = false;
+        view.navigate(Screen::Chat, cx);
+        view.chat_messages.clear();
+        for turn in 0..12 {
+            view.chat_messages.push((
+                format!("Question {turn}: what did we decide about the launch?"),
+                "Here is the plan.\n\n## Owners\n\n| Owner | Task | Due |\n| --- | --- | --- |\n| Sam | Missing key banner | Wed |\n| Priya | iPhone upload | Wed noon |\n\n```rust\nfn main() {\n    println!(\"launch\");\n}\n```\n\n1. First step\n2. Second step\n   - Nested point that is long enough to wrap onto a second line in the column at any width of the window\n\nThe launch stays on Thursday. Desktop and web are the commitment and the phone follows if review is slow.".into(),
+            ));
+        }
+        cx.notify();
+    }));
+    wheels(&mut steps, 700., 400., 90.);
+    steps.push(step("c-scroll-chat-up-2s", 600, |_, _| {}));
+    steps.push(step("c-memory-before", 1500, |view, cx| {
+        view.clear_chat(cx);
+        view.navigate(Screen::Home, cx);
+        eprintln!("tour: resident before {} KB", resident());
+    }));
+    for _ in 0..20 {
+        steps.push(step("c-open", 700, |view, cx| {
+            if let Some(id) = titled(view, LONG) {
+                view.open_note(id, cx);
+                view.transcript_open = true;
+                view.transcript_epoch = view.transcript_epoch.wrapping_add(1);
+            }
+        }));
+        steps.push(step("c-open", 500, |view, cx| view.navigate(Screen::Home, cx)));
+    }
+    steps.push(step("c-memory-after-20-opens", 3000, |_, _| {
+        eprintln!("tour: resident after {} KB", resident());
+    }));
+    // Twenty more: what the first twenty added was either kept for good
+    // (caches that fill once) or is added again each time (a leak).
+    for _ in 0..20 {
+        steps.push(step("c-open", 700, |view, cx| {
+            if let Some(id) = titled(view, LONG) {
+                view.open_note(id, cx);
+                view.transcript_open = true;
+                view.transcript_epoch = view.transcript_epoch.wrapping_add(1);
+            }
+        }));
+        steps.push(step("c-open", 500, |view, cx| view.navigate(Screen::Home, cx)));
+    }
+    steps.push(step("c-memory-after-40-opens", 3000, |_, _| {
+        eprintln!("tour: resident after forty {} KB", resident());
+    }));
+    steps
+}
+
+/// The pill's popup opening under the pointer and folding away again,
+/// `d-pill-…` (run with `--view=pill`): the same events AppKit's tracking
+/// areas send, so the real pointer is not used.
+fn pill_steps() -> Vec<Step> {
+    vec![
+        step("d-pill-rest", 1500, |_, _| {}),
+        input("d-pill-hover", 1400, |_, cx| {
+            cx.defer(|cx| crate::pill::smoke_pointer_move(point(px(21.), px(34.)), cx));
+        }),
+        input("d-pill-leave", 1400, |_, cx| {
+            cx.defer(|cx| {
+                crate::pill::smoke_pointer_event(
+                    false,
+                    PlatformInput::MouseExited(MouseExitEvent::default()),
+                    cx,
+                )
+            });
+        }),
+        step("d-pill-closed", 1200, |_, _| {}),
+        input("d-pill-hover-again", 1400, |_, cx| {
+            cx.defer(|cx| crate::pill::smoke_pointer_move(point(px(21.), px(34.)), cx));
+        }),
+        step("d-pill-loud", 900, |view, _| view.recording.set_audio_levels(0.85, 0.2)),
+        step("d-pill-quiet", 900, |view, _| view.recording.set_audio_levels(0.0, 0.0)),
+        step("d-pill-attention", 1200, |view, _| {
+            view.recording
+                .set_transcription_attention(crate::recording::TranscriptionAttention::Warning);
+        }),
+        input("d-pill-leave-again", 1400, |_, cx| {
+            cx.defer(|cx| {
+                crate::pill::smoke_pointer_event(
+                    false,
+                    PlatformInput::MouseExited(MouseExitEvent::default()),
+                    cx,
+                )
+            });
+        }),
+        step("d-pill-end", 1200, |_, _| {}),
+    ]
+}
+
+/// Two minutes with the main window closed, `e-…`, for an outside tool to
+/// sample the process (run with `CEREAL_AUDIT=1` for the signed-in app).
+fn closed_window_steps() -> Vec<Step> {
+    let mut steps = Vec::new();
+    steps.push(windowed("e-window-closed-setup", 5000, |view, window, cx| {
+        view.navigate(Screen::Home, cx);
+        crate::pill::hide_main_window(window, cx);
+        eprintln!("tour: window closed");
+    }));
+    steps.push(step("e-window-closed-120s", 122_000, |_, _| {}));
+    steps
+}
+
 /// Wait until the window has stopped rendering, so a still state is captured
 /// at rest and never mid-transition. Gives up after a few seconds: a state
 /// with a deliberate loop (a spinner) never goes quiet.
@@ -1431,10 +1999,49 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
             .chain(gold_steps())
             .chain(icon_steps())
             .chain(idle_steps());
+        // `CEREAL_TOUR_SIZE=760x580` resizes the window first, and
+        // `CEREAL_TOUR_SHOTS=<directory>` holds each still (`p-…`, `a-…`)
+        // until `<directory>/<name>.png` exists: an outside tool takes the
+        // picture when it sees `tour … shot <name>` on stderr.
+        if let Some((width, height)) = std::env::var("CEREAL_TOUR_SIZE").ok().and_then(|size| {
+            let (width, height) = size.split_once('x')?;
+            Some((width.parse::<f32>().ok()?, height.parse::<f32>().ok()?))
+        }) {
+            let _ = handle.update(cx, |_, window, _| window.resize(size(px(width), px(height))));
+        }
+        let shots = std::env::var_os("CEREAL_TOUR_SHOTS").map(std::path::PathBuf::from);
+        // Without `--motion-tour` the tour runs against the server the data
+        // directory is signed in to: wait for its notes before starting.
+        if crate::server::enabled() {
+            for _ in 0..600 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+                let ready = handle
+                    .update(cx, |view, _, _| {
+                        crate::account::identity().is_some()
+                            && view.server_pending == 0
+                            && !view.workspace.notes.is_empty()
+                    })
+                    .unwrap_or(true);
+                if ready {
+                    break;
+                }
+            }
+        }
         settle(cx).await;
         crate::motion::stats::report("launch");
-        for (name, hold, action) in all {
-            if only.is_empty() && ["p-", "b-", "i-"].iter().any(|kind| name.starts_with(kind)) {
+        for (name, hold, action) in all
+            .chain(audit_steps())
+            .chain(audit_bench_steps())
+            .chain(pill_steps())
+            .chain(closed_window_steps())
+        {
+            if only.is_empty()
+                && ["p-", "b-", "i-", "a-", "c-", "d-", "e-"]
+                    .iter()
+                    .any(|kind| name.starts_with(kind))
+            {
                 continue;
             }
             if !only.is_empty() && !only.iter().any(|prefix| name.starts_with(prefix.as_str())) {
@@ -1460,8 +2067,25 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
                 return;
             }
             // Still states are held only once the window has come to rest.
-            if name.starts_with("p-") {
+            if name.starts_with("p-") || name.starts_with("a-") {
                 settle(cx).await;
+                if let Some(directory) = shots.as_ref().filter(|_| !name.ends_with("-quiet")) {
+                    eprintln!("tour {stamp} shot {name}");
+                    let picture = directory.join(format!("{name}.png"));
+                    for _ in 0..600 {
+                        if picture.exists() {
+                            break;
+                        }
+                        cx.background_executor()
+                            .timer(Duration::from_millis(50))
+                            .await;
+                    }
+                    cx.background_executor()
+                        .timer(Duration::from_millis(150))
+                        .await;
+                    crate::motion::stats::report(name);
+                    continue;
+                }
             }
             cx.background_executor()
                 .timer(slow(Duration::from_millis(hold)))
@@ -1475,6 +2099,8 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
                     | "b-live-update"
                     | "b-live-wheel"
                     | "b-first-wheel"
+                    | "c-wheel"
+                    | "c-open"
             ) {
                 crate::motion::stats::report(name);
             }
@@ -2125,6 +2751,8 @@ pub fn live_probe(handle: WindowHandle<Cereal>, seconds: u64, cx: &mut App) {
 /// * `leave-at-audio`: walks to the audio step and quits there, to check
 ///   that the next launch resumes on it.
 /// * `report`: says which screen and step the app opened on, then quits.
+/// * `http`: the address line for a loopback, a private and a public
+///   plain-HTTP address, and a sign-in over `CEREAL_WELCOME_SERVER`.
 /// * `signed-in`: signs in and shows the server step at rest afterwards.
 /// * `audio-asking`: the audio step alone, held between pressing Allow
 ///   and the answer.
@@ -2615,6 +3243,84 @@ pub fn welcome(handle: WindowHandle<Cereal>, name: String, cx: &mut App) {
                     until(handle, cx, 5, step(Step::Server)).await;
                     pause(cx, 900).await;
                     shot(cx, "2-server-signed-in").await;
+                }
+            }
+            "http" => {
+                // A server reached over plain HTTP at an address that is not
+                // this Mac's loopback (`CEREAL_WELCOME_SERVER`): what the
+                // address line says for each kind of address, then a real
+                // sign-in there and what the session can read.
+                pause(cx, 1200).await;
+                press(handle, cx, "welcome-continue").await;
+                until(handle, cx, 5, step(Step::Server)).await;
+                let kind = |view: &mut Cereal, _: &mut Window, cx: &mut Context<Cereal>| {
+                    let typed = view.account.read(cx).url.read(cx).content();
+                    format!("{typed} is {:?}", crate::link::address_transport(&typed))
+                };
+                type_into(handle, cx, 0, "http://127.0.0.1:3000", 10).await;
+                until(handle, cx, 30, offered).await;
+                say(&handle.update(cx, kind).unwrap_or_default());
+                pause(cx, 900).await;
+                shot(cx, "1-secure-loopback").await;
+                type_into(handle, cx, 0, "http://notes.cereal.invalid", 10).await;
+                until(handle, cx, 30, |view, cx| matches!(view.onboarding_offer(cx), ServerOffer::Unreachable(_))).await;
+                say(&handle.update(cx, kind).unwrap_or_default());
+                pause(cx, 900).await;
+                shot(cx, "3-public-http").await;
+                type_into(handle, cx, 0, &server, 10).await;
+                let found = until(handle, cx, 30, offered).await;
+                say(&handle.update(cx, kind).unwrap_or_default());
+                say(&format!("discovery over {server}: {found}"));
+                pause(cx, 900).await;
+                shot(cx, "2-private").await;
+                if let Some((email, password)) = &login {
+                    type_into(handle, cx, 1, email, 8).await;
+                    type_into(handle, cx, 2, password, 8).await;
+                    press(handle, cx, "welcome-continue").await;
+                }
+                let signed_in = until(handle, cx, 40, |view, _| view.onboarding_facts().signed_in).await;
+                say(&format!(
+                    "password sign-in over {server}: {signed_in} ({:?})",
+                    handle.update(cx, |view, _, cx| view.account.read(cx).error().map(str::to_owned)).ok().flatten()
+                ));
+                if signed_in {
+                    until(handle, cx, 10, step(Step::Audio)).await;
+                    pause(cx, 800).await;
+                    // What the session reads from that server.
+                    until(handle, cx, 30, |view, _| view.server_pending == 0 && !view.calendars.loading).await;
+                    say(&handle
+                        .update(cx, |view, _, _| {
+                            format!(
+                                "session at {}: {} notes read, server status {:?}, calendars loaded {} ({} sources, error {:?})",
+                                crate::account::configured_url(),
+                                view.workspace.notes.iter().filter(|note| note.server_id.is_some()).count(),
+                                view.server_status,
+                                view.calendars.loaded,
+                                view.calendars.sources.len(),
+                                view.calendars.error
+                            )
+                        })
+                        .unwrap_or_default());
+                    let _ = handle.update(cx, |view, _, cx| view.finish_onboarding(cx));
+                    pause(cx, 3500).await;
+                    shot(cx, "4-home-over-http").await;
+                    let _ = handle.update(cx, |view, _, cx| view.check_for_updates(cx));
+                    pause(cx, 6000).await;
+                    say(&format!(
+                        "check for updates: {:?}",
+                        handle.update(cx, |view, _, _| view.updates.row().0.to_string()).ok()
+                    ));
+                    // The account screen says the same about the address.
+                    let _ = handle.update(cx, |view, _, cx| view.navigate(Screen::Account, cx));
+                    pause(cx, 1500).await;
+                    shot(cx, "5-account-private").await;
+                    let _ = handle.update(cx, |view, _, cx| {
+                        let input = view.account.read(cx).url.clone();
+                        input.update(cx, |input, cx| input.set_content("http://notes.cereal.invalid", cx));
+                        cx.notify();
+                    });
+                    pause(cx, 2500).await;
+                    shot(cx, "6-account-public-http").await;
                 }
             }
             "audio-asking" => {

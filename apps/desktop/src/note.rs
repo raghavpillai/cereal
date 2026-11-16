@@ -126,7 +126,7 @@ impl Cereal {
             );
         };
         let enhanced = !note.enhanced.trim().is_empty() || self.generation.is_running_for(note.id);
-        let (date, people) = metadata_labels(note, Local::now().date_naive());
+        let (date, people) = metadata_labels(note, crate::menubar::now().date_naive());
         let text_width = |label: &str| {
             let text: SharedString = label.to_owned().into();
             let runs = [TextRun {
@@ -337,16 +337,14 @@ impl Cereal {
         }
         let content = match display_tab {
             NoteTab::Notes=>div().w(body_width).min_h(px(300.)).text_size(px(16.)).line_height(px(24.)).child(self.editor.clone()).into_any_element(),
-            NoteTab::Enhanced if generating=>div().w(body_width).flex().flex_col().gap(px(12.))
-                .child(div().text_size(px(16.)).line_height(px(24.)).text_color(t.muted).child("Add your thoughts…"))
-                .child(self.render_generation_status(body_width + px(48.), chip))
-                .when(!note.enhanced.trim().is_empty(), |d| d.child(self.render_enhanced_content(&note,t,body_width,window,cx)))
-                .into_any_element(),
-            // Generation just ended: the chip collapses into its leading edge
-            // and its 88 px (placeholder, chip and their gaps) close up with
-            // it, so the notes slide into place instead of jumping.
-            NoteTab::Enhanced if chip.visible=>div().w(body_width).flex().flex_col()
-                // Clipped to the closing block (which is widened to the chip's
+            // The chip and the placeholder over it take 88 px (the two and
+            // their gaps). That block opens as generation starts and closes
+            // up when it ends, with the chip: notes that are already there
+            // (a regeneration) slide down to make room and the new ones
+            // slide into place, instead of jumping by the block's height in
+            // a single frame.
+            NoteTab::Enhanced if generating || chip.visible=>div().w(body_width).flex().flex_col()
+                // Clipped to the block (which is widened to the chip's
                 // 24 px overhang), so the chip is covered as the notes rise
                 // rather than drawn across their first heading.
                 .child(div().h(px(88. * chip.value.clamp(0., 1.))).mx(px(-24.)).px(px(24.)).overflow_hidden().flex().flex_col().gap(px(12.))
@@ -369,7 +367,7 @@ impl Cereal {
                 NaiveDate::parse_from_str(&note.date, "%Y-%m-%d")
                     .unwrap_or_else(|_| Local::now().date_naive())
             });
-        let (date_label, people_label) = metadata_labels(&note, Local::now().date_naive());
+        let (date_label, people_label) = metadata_labels(&note, crate::menubar::now().date_naive());
         let month = parsed_date.with_day(1).unwrap_or(parsed_date);
         let document = div()
             .flex()
@@ -596,7 +594,20 @@ impl Cereal {
                     // into it; the bar only returns once the panel has landed.
                     .when(!transcript.visible, |d| d.child(footer))
                     .when(transcript.visible, |d| {
+                        // The panel stands where the bar did, so the page
+                        // under it ends the same way: nothing of the note
+                        // shows in the strip between the panel and the
+                        // bottom of the window.
                         d.child(
+                            div()
+                                .absolute()
+                                .bottom(px(26.))
+                                .left(px(24.))
+                                .right(px(24.))
+                                .h(px(58.))
+                                .child(bar_scrim(t, 24.)),
+                        )
+                        .child(
                             self.render_transcript_panel(
                                 id,
                                 (document_width + px(8.)).min(px(682.)),
@@ -629,20 +640,36 @@ impl Cereal {
                     .when(
                         crate::server::enabled() && self.server_status.is_some(),
                         |d| {
+                            // A chip of its own, like the generation
+                            // status: the note scrolls behind it, and a
+                            // bare line of text there was set on top of the
+                            // note's own lines.
+                            let retry = self.server_pending == 0;
                             d.child(
                                 div()
                                     .absolute()
-                                    .bottom(px(102.))
+                                    .bottom(px(96.))
                                     .left(px(24.))
                                     .right(px(24.))
                                     .flex()
-                                    .items_center()
                                     .justify_center()
-                                    .gap(px(12.))
+                                    .child(
+                                div()
+                                    .h(px(32.))
+                                    .pl(px(12.))
+                                    .pr(px(if retry { 4. } else { 12. }))
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(t.border)
+                                    .bg(t.card)
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
                                     .text_size(px(12.))
+                                    .line_height(px(16.))
                                     .text_color(t.muted)
                                     .child(self.server_status.clone().unwrap_or_default())
-                                    .when(self.server_pending == 0, |d| {
+                                    .when(retry, |d| {
                                         d.child(
                                             div()
                                                 .id("retry-server-transcription")
@@ -665,6 +692,7 @@ impl Cereal {
                                                 })),
                                         )
                                     }),
+                                    ),
                             )
                         },
                     )
@@ -701,35 +729,38 @@ impl Cereal {
         let generate =
             self.stage
                 .presence(("generate-notes", id), offer_generate, crate::motion::GOOEY);
+        // What floats above the footer bar (the call to generate notes, the
+        // notice that the transcript has changed) clears whichever panel is
+        // open.
+        let expanded_height = if self.transcript_open {
+            Some(
+                (window.viewport_size().height - px(100.))
+                    .min(px(465.))
+                    .max(px(280.)),
+            )
+        } else if self.assistant_open {
+            Some(
+                (px(if self.chat_recipes_open {
+                    465.
+                } else if self
+                    .chat_messages
+                    .iter()
+                    .any(|(_, answer)| !answer.is_empty())
+                {
+                    // (The history list opens over a conversation
+                    // without resizing the panel: see the panel itself.)
+                    465.
+                } else if self.chat_history_open {
+                    360.
+                } else {
+                    220.
+                }) + px(if self.chat_editing.is_some() { 44. } else { 0. }))
+                .min(window.viewport_size().height - px(90.)),
+            )
+        } else {
+            None
+        };
         if generate.visible {
-            let expanded_height = if self.transcript_open {
-                Some(
-                    (window.viewport_size().height - px(100.))
-                        .min(px(465.))
-                        .max(px(280.)),
-                )
-            } else if self.assistant_open {
-                Some(
-                    (px(if self.chat_recipes_open {
-                        465.
-                    } else if self
-                        .chat_messages
-                        .iter()
-                        .any(|(_, answer)| !answer.is_empty())
-                    {
-                        // (The history list opens over a conversation
-                        // without resizing the panel: see the panel itself.)
-                        465.
-                    } else if self.chat_history_open {
-                        360.
-                    } else {
-                        220.
-                    }) + px(if self.chat_editing.is_some() { 44. } else { 0. }))
-                    .min(window.viewport_size().height - px(90.)),
-                )
-            } else {
-                None
-            };
             // While it leaves it keeps the position it had.
             let bottom = if offer_generate {
                 expanded_height
@@ -743,8 +774,15 @@ impl Cereal {
             };
             result = result.child(self.render_generate_notes_cta(id, bottom, generate, cx));
         }
+        // The notice needs room above an open panel. In a short window a
+        // panel reaches to just under the note's title, and the notice waits
+        // until the panel is closed rather than lie across the title.
+        let room_for_notice = expanded_height.is_none_or(|height| {
+            window.viewport_size().height - (height + px(36.)) - px(54.) >= px(140.)
+        });
         let offer_regenerate = !live
             && !generating
+            && room_for_notice
             && (!crate::server::enabled() || self.server_pending == 0)
             && note.needs_regeneration()
             && self.regeneration_notice_dismissed != Some((id, note.transcript_revision));
@@ -757,7 +795,11 @@ impl Cereal {
             result = result.child(self.render_regeneration_notice(
                 id,
                 note.transcript_revision,
+                expanded_height
+                    .map(|height| height + px(36.))
+                    .unwrap_or(px(98.)),
                 regenerate,
+                window,
                 cx,
             ));
         }
@@ -1701,10 +1743,10 @@ impl Cereal {
         if self.chat_messages.is_empty() {
             messages = messages.child(self.render_chat_recipe_suggestions(cx));
         }
-        for (index, (question, answer)) in self.chat_messages.iter().enumerate() {
-            messages = messages.child(self.render_chat_turn(index, question, answer, true, cx));
+        if !self.chat_messages.is_empty() {
+            messages = messages.child(self.render_chat_turns(1, true, window, cx));
         }
-        if let Some(queue) = self.render_chat_queue(true, cx) {
+        if let Some(queue) = self.render_chat_queue(true, window, cx) {
             messages = messages.child(queue);
         }
         if has_answer && self.chat_messages.len() == 1 && self.chat_stream.is_none() {

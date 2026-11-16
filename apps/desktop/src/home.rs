@@ -1,5 +1,5 @@
 use crate::{
-    app::{Cereal, Menu, Screen},
+    app::{Cereal, Screen},
     model::Note,
     ui::*,
 };
@@ -34,17 +34,63 @@ pub struct SearchHit {
 /// The matching line shown under a search result: the first line of the
 /// body, summary or transcript containing `query`, else the title.
 pub fn search_snippet(note: &Note, query: &str) -> String {
+    /// The most of a line an excerpt shows, an ellipsis included.
+    const LIMIT: usize = 140;
+    /// How much of the line is kept before the match when the line has to
+    /// be entered part of the way along.
+    const LEAD: usize = 40;
     let needle = query.to_lowercase();
-    note.body
+    let line = note
+        .body
         .lines()
         .chain(note.enhanced.lines())
         .chain(note.transcript.lines())
         .find(|line| line.to_lowercase().contains(&needle))
         .unwrap_or(&note.title)
-        .trim()
-        .chars()
-        .take(140)
-        .collect()
+        .trim();
+    // The words, not the Markdown that marks them as a heading or a bullet.
+    let unmarked = line.trim_start_matches('#');
+    let line = if unmarked.len() < line.len() && unmarked.starts_with(' ') {
+        unmarked.trim_start()
+    } else {
+        line.strip_prefix("- ")
+            .or_else(|| line.strip_prefix("* "))
+            .unwrap_or(line)
+    };
+    let characters: Vec<char> = line.chars().collect();
+    if characters.len() <= LIMIT {
+        return line.to_owned();
+    }
+    // A long line is entered a little before the match, so that what was
+    // searched for is in the excerpt, and every cut end says it was cut.
+    let lower: Vec<char> = line.to_lowercase().chars().collect();
+    let wanted: Vec<char> = needle.chars().collect();
+    let found = (lower.len() == characters.len() && !wanted.is_empty())
+        .then(|| lower.windows(wanted.len()).position(|part| part == wanted))
+        .flatten()
+        .unwrap_or(0);
+    let start = if found + wanted.len() <= LIMIT - 1 {
+        0
+    } else {
+        (found.saturating_sub(LEAD)).min(characters.len() - (LIMIT - 1))
+    };
+    let leading = start > 0;
+    let room = LIMIT - usize::from(leading);
+    let trailing = start + room < characters.len();
+    let end = if trailing {
+        start + room - 1
+    } else {
+        characters.len()
+    };
+    let mut excerpt = String::new();
+    if leading {
+        excerpt.push('…');
+    }
+    excerpt.extend(characters[start..end].iter());
+    if trailing {
+        excerpt.push('…');
+    }
+    excerpt
 }
 
 type WorkspaceRevision = (u64, usize, usize, usize);
@@ -260,16 +306,18 @@ impl Cereal {
         // Space pages (My notes, a folder, Favorites) are wider and open with
         // a centred hero; Home keeps the narrower column under "Coming up".
         let space = !home;
+        // In pixels (see `page_column_width`): the page beside the sidebar,
+        // less the scroll bar's gutter.
+        let page = f32::from(window.viewport_size().width) - 192. * self.sidebar_level - 10.;
         let mut column = div()
-            .w_full()
-            .max_w(px(if space { 768. } else { 674. }))
+            .w(px(page.clamp(240., if space { 768. } else { 674. })))
             .px(px(24.))
             .pb(px(130.))
             .flex()
             .flex_col()
             .flex_shrink_0();
         if home && self.workspace.settings.show_upcoming {
-            column = column.child(self.calendar(cx)).child(self.voice_card(cx));
+            column = column.child(self.calendar(cx));
         } else if home {
             column = column.child(
                 div()
@@ -538,11 +586,7 @@ impl Cereal {
             )
             .child(meta)
             .when(private && banner.is_some(), |hero| {
-                let (fill, edge) = if self.workspace.settings.dark_mode {
-                    (rgb(0x2c3441), rgb(0x424955))
-                } else {
-                    (rgb(0xe8f2fe), rgb(0xc8d0d4))
-                };
+                let (fill, edge) = (t.info_fill, t.info_edge);
                 // Dismissed, the banner fades while the space it took (its
                 // measured height and the 40 px above it) closes up, so the
                 // composer below slides into place instead of jumping.
@@ -953,81 +997,6 @@ impl Cereal {
             .child(rows)
     }
 
-    fn voice_card(&self, cx: &mut Context<Self>) -> Div {
-        let t = self.theme();
-        let mut waveform = div()
-            .flex()
-            .items_center()
-            .justify_center()
-            .gap(px(2.))
-            .w(px(40.))
-            .h(px(17.))
-            .rounded_full()
-            .bg(rgb(0x292929));
-        for height in [2., 4., 6., 3., 8., 4., 2., 5., 2.] {
-            waveform = waveform.child(div().w(px(1.)).h(px(height)).bg(rgb(0xd5a200)));
-        }
-        div()
-            .mt(px(14.))
-            .h(px(79.))
-            .flex_shrink_0()
-            .px(px(16.))
-            .flex()
-            .items_center()
-            .gap(px(12.))
-            .rounded(px(17.))
-            .border_1()
-            .border_color(t.border)
-            .bg(t.card)
-            .child(
-                div()
-                    .w(px(91.))
-                    .h(px(45.))
-                    .flex_shrink_0()
-                    .rounded(px(7.))
-                    .border_1()
-                    .border_color(t.info_edge)
-                    .bg(t.info_fill)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(waveform),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(4.))
-                    .font_family(DISPLAY)
-                    .text_size(px(16.))
-                    .line_height(px(24.))
-                    .child("Try dictating with")
-                    .child(div().text_color(t.accent).child("voice typing"))
-                    .child("for free"),
-            )
-            .child(
-                div()
-                    .id("try-voice")
-                    .px(px(13.))
-                    .h(px(29.))
-                    .flex()
-                    .items_center()
-                    .rounded_full()
-                    .bg(t.text)
-                    .text_color(t.card)
-                    .text_size(px(13.))
-                    .cursor_pointer()
-                    .child(crate::motion::tactile(neutral_wash(0.16)).round())
-                    .child("Try it out")
-                    .reach().on_click(cx.listener(|this, _, w, cx| {
-                        this.menu = Some(Menu::Voice);
-                        this.focus.focus(w);
-                        cx.notify();
-                    })),
-            )
-    }
-
     pub fn ask_bar(&self, cx: &mut Context<Self>) -> Div {
         let t = self.theme();
         div()
@@ -1145,6 +1114,24 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(search_snippet(&long, "x").chars().count(), 140);
+        assert!(search_snippet(&long, "x").ends_with('…'));
+        // A match far along a long line is still in the excerpt, which says
+        // at both ends that it is a part.
+        let far = Note {
+            body: format!("{} needle {}", "a ".repeat(200), "b ".repeat(200)),
+            ..Default::default()
+        };
+        let excerpt = search_snippet(&far, "needle");
+        assert!(excerpt.contains("needle"));
+        assert!(excerpt.starts_with('…') && excerpt.ends_with('…'));
+        assert_eq!(excerpt.chars().count(), 140);
+        // Markdown's own marks are not part of the words.
+        let marked = Note {
+            enhanced: "## Launch scope\n- Ship the launch on Thursday".into(),
+            ..Default::default()
+        };
+        assert_eq!(search_snippet(&marked, "scope"), "Launch scope");
+        assert_eq!(search_snippet(&marked, "thursday"), "Ship the launch on Thursday");
     }
 
     #[test]

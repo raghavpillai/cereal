@@ -5,7 +5,7 @@ import {NoteListFilter,NoteSummariesPageDTO,NoteSearchPageDTO} from "./index"
 import {AuthMethodsDTO,AppHandoffInput,AppHandoffDTO,AppHandoffExchangeInput,AppHandoffTokenDTO} from "./index"
 import {DownloadsDTO} from "./index"
 import {StorageTestInput,StorageTestDTO} from "./index"
-import {OnboardingStepInput} from "./index"
+import {OnboardingStepInput,GoogleVerificationInput,GoogleVerificationStartDTO,GoogleVerificationStatusDTO,SwitchToPasswordInput} from "./index"
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, HttpApiSecurity, OpenApi } from "effect/http-api"
 import { OrganizationDTO, OrganizationsDTO, OrganizationMemberDTO, OrganizationInvitationDTO, OrganizationDetailsDTO, OrganizationInvitationsDTO, CreateOrganizationInput, UpdateOrganizationInput, SetActiveOrganizationInput, InviteOrganizationMemberInput, UpdateOrganizationMemberRoleInput, ManualParticipantInput, GoogleStatusDTO, GoogleConnectInput, GoogleConnectDTO, GoogleCalendarsDTO, GoogleCalendarDTO, UpdateGoogleCalendarInput, NoteContextDTO, UpdateNoteContextInput, AuthSessionDTO, UsersDTO, UserDTO, CreateUserInput, UpdateUserRoleInput, CalendarPreferencesDTO, CalendarEventsDTO, CalendarsDTO, CalendarDTO, CreateCalendarInput, UpdateCalendarInput, AdminSettingsDTO, UpdateAdminSettingsInput, Timestamp, ChatStreamEventDTO, EvidenceRequestDTO, EvidenceDTO, AudioChunkDTO, AudioChunksDTO, UploadAudioChunkInput, RecordingCommandDTO, GenerateNotesCommandDTO, ChatInput, ChatAnswerDTO, CreateNoteInput, CreateShareInput, CreatedShareDTO, DeletedDTO, HealthDTO, NoteDTO, NotesDTO, SharedNoteDTO, ShareDTO, SharesDTO, UUID, UpdateNoteInput } from "./index"
 
@@ -38,6 +38,9 @@ export const MeetingsApi = HttpApi.make("MeetingNotesApi")
   .add(HttpApiGroup.make("public")
     .add(HttpApiEndpoint.get("health", "/api/v1/health", { success: HealthDTO }))
     .add(HttpApiEndpoint.get("getAuthMethods", "/api/v1/auth/methods", { success: AuthMethodsDTO, error: [Unavailable] }))
+    // How this browser's proving Google sign-in went (claiming with Google, or switching to Google). Answered from
+    // the HttpOnly cookie that sign-in set; a browser that did not start one is told "none".
+    .add(HttpApiEndpoint.get("getGoogleVerification", "/api/v1/auth/google/verification", { success: GoogleVerificationStatusDTO, error: [Unavailable] }))
     .add(HttpApiEndpoint.post("exchangeAppHandoff", "/api/v1/auth/app-handoff/exchange", { payload: AppHandoffExchangeInput, success: AppHandoffTokenDTO, error: [InvalidRequest, InvalidCode, RateLimited, Unavailable] }))
     // The apps for the version this server is running, and the files themselves. Both are public.
     .add(HttpApiEndpoint.get("getDownloads", "/api/v1/downloads", { success: DownloadsDTO, error: [Unavailable] }))
@@ -83,6 +86,15 @@ export const MeetingsApi = HttpApi.make("MeetingNotesApi")
     .add(HttpApiEndpoint.get("getCalendarPreferences", "/api/v1/calendar/preferences", {success:CalendarPreferencesDTO,error:errors}))
     .add(HttpApiEndpoint.get("getAdminSettings", "/api/v1/admin/settings", { success: AdminSettingsDTO, error: errors }))
     .add(HttpApiEndpoint.patch("updateAdminSettings", "/api/v1/admin/settings", { payload: UpdateAdminSettingsInput, success: AdminSettingsDTO, error: errors }))
+    // Claiming a fresh server with Google: the setup code as bearer, like owner/setup, and the same attempt limit.
+    // Nothing is saved yet. The browser is sent to Google; when Google hands back a verified identity the server is
+    // claimed for it, Google becomes the one way to sign in, and the account never has a password.
+    .add(HttpApiEndpoint.post("setupOwnerWithGoogle", "/api/v1/admin/owner/setup/google", {payload:GoogleVerificationInput,success:GoogleVerificationStartDTO,error:[...errors,RateLimited]}))
+    // Changing the one way to sign in, from a browser session of an administrator. To Google: the same proving
+    // sign-in, and the Google account is tied to that administrator. To email and password: the administrator sets
+    // the password they will use. Either way the new method works for them before the old one stops.
+    .add(HttpApiEndpoint.post("switchToGoogle", "/api/v1/admin/sign-in/google", {payload:GoogleVerificationInput,success:GoogleVerificationStartDTO,error:errors}))
+    .add(HttpApiEndpoint.post("switchToPassword", "/api/v1/admin/sign-in/password", {payload:SwitchToPasswordInput,success:AdminSettingsDTO,error:errors}))
     // First-run setup. Each answers with the settings as they now stand, so `onboarding` is always current.
     // Recording a step and finishing are for the owner and administrators; finishing is refused (409) until the
     // required steps (owner, language, speech) are done. Starting over is the owner's alone.

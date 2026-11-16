@@ -920,7 +920,27 @@ impl Cereal {
                     );
                 } else {
                     body.push(field(&inputs.0, typing[0], t).into_any_element());
+                    // How what is typed here would travel: nothing for a
+                    // secure address, a remark for plain HTTP on a private
+                    // network, a warning for plain HTTP anywhere else.
+                    let transport = crate::link::address_transport(&address);
+                    if let Some((transport, note)) =
+                        transport.and_then(|transport| Some((transport, transport.note()?)))
+                    {
+                        body.push(if transport.warns() {
+                            status(
+                                icon("warning", 16., t.warning_ink).into_any_element(),
+                                note,
+                                t.warning_ink,
+                            )
+                            .items_start()
+                            .into_any_element()
+                        } else {
+                            small(note, t).into_any_element()
+                        });
+                    }
                     match &offer {
+                        ServerOffer::Address if transport.is_some() => {}
                         ServerOffer::Address => body.push(
                             small("It looks like https://notes.example.com", t).into_any_element(),
                         ),

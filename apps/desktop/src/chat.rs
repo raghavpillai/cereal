@@ -41,6 +41,20 @@ impl ChatTurnAnnotations {
     }
 }
 
+/// The name a conversation is listed under: the start of its first
+/// question, on one line, ending in an ellipsis when it has been cut.
+pub(crate) fn chat_title(question: &str) -> String {
+    const LIMIT: usize = 70;
+    let line = question.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= LIMIT {
+        return line;
+    }
+    let mut title: String = line.chars().take(LIMIT - 1).collect();
+    title.truncate(title.trim_end().len());
+    title.push('…');
+    title
+}
+
 pub(crate) fn valid_citation_id(id: &str) -> bool {
     id.strip_prefix('S').is_some_and(|number| {
         number.len() <= 3
@@ -236,7 +250,7 @@ impl Chats<'_> {
             title: self
                 .messages
                 .first()
-                .map(|(question, _)| question.chars().take(70).collect())
+                .map(|(question, _)| chat_title(question))
                 .unwrap_or_default(),
             messages: self.messages.clone(),
             interrupted: self.interrupted.iter().copied().collect(),
@@ -1003,7 +1017,7 @@ impl crate::app::Cereal {
             let entry = ArchivedChat {
                 id: self.chat_thread_id.clone(),
                 note_id: self.current_note.unwrap_or(0),
-                title: self.chat_messages[0].0.chars().take(70).collect(),
+                title: chat_title(&self.chat_messages[0].0),
                 messages: self.chat_messages.clone(),
                 interrupted: self.chat_interrupted.iter().copied().collect(),
                 annotations: self.chat_annotations.clone(),
@@ -1452,6 +1466,10 @@ impl crate::app::Cereal {
         self.chat_interrupted.clear();
         self.chat_annotations.clear();
         self.chat_history_open = false;
+        // A new conversation is read from its top: in a short window the
+        // empty page scrolls, and it would otherwise open where the last
+        // conversation was left, with its greeting out of sight.
+        self.chat_scroll.set_offset(Point::default());
         self.ask.update(cx, |input, cx| {
             input.set_content("", cx);
             input.set_placeholder("Ask anything", cx);
@@ -1520,7 +1538,7 @@ impl crate::app::Cereal {
             // Sent as soon as the answer that is arriving has finished.
             self.chat_queue.push(question);
             self.ask.update(cx, |input, cx| input.set_content("", cx));
-            self.chat_scroll.scroll_to_bottom();
+            self.chat_to_bottom();
             cx.notify();
             return true;
         }
@@ -1565,7 +1583,7 @@ impl crate::app::Cereal {
         if begun.index == 0 {
             self.chat_scroll.set_offset(Point::default());
         } else {
-            self.chat_scroll.scroll_to_bottom();
+            self.chat_to_bottom();
         }
         self.spawn_chat_stream(thread, begun, note, question, cx);
         cx.notify();
@@ -1709,11 +1727,17 @@ impl crate::app::Cereal {
 
     /// The questions waiting behind the answer that is arriving, shown under
     /// the conversation.
-    pub fn render_chat_queue(&self, compact: bool, cx: &mut Context<Self>) -> Option<Div> {
+    pub fn render_chat_queue(
+        &self,
+        compact: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
         if self.chat_queue.is_empty() {
             return None;
         }
         let t = self.theme();
+        let (_, widest) = self.chat_question_width(compact, window);
         Some(
             div()
                 .flex()
@@ -1729,7 +1753,7 @@ impl crate::app::Cereal {
                         .when(compact, |d| d.pr(px(10.)))
                         .child(
                             div()
-                                .max_w(px(if compact { 614. } else { 594. }))
+                                .max_w(px(widest))
                                 .rounded(px(12.))
                                 .rounded_br(px(3.))
                                 .px(px(if compact { 11. } else { 14. }))
@@ -1764,12 +1788,115 @@ impl crate::app::Cereal {
         )
     }
 
+    /// Everything that decides how tall a turn is drawn: its words, whether
+    /// its answer is still arriving, and what is shown of its tools,
+    /// sources and errors.
+    fn chat_turn_key(&self, index: usize) -> u64 {
+        let Some((question, answer)) = self.chat_messages.get(index) else {
+            return 0;
+        };
+        let active = self.chat_stream.as_ref().is_some_and(|a| a.index == index);
+        let notes = self.chat_annotations.get(&index).map(|item| {
+            let mut open: Vec<&String> = item.expanded_tools.iter().collect();
+            open.sort_unstable();
+            (
+                serde_json::to_string(item).unwrap_or_default(),
+                item.expanded,
+                open.into_iter().cloned().collect::<Vec<_>>(),
+            )
+        });
+        crate::lazy::key((
+            index,
+            question,
+            answer,
+            active,
+            self.chat_interrupted.contains(&index),
+            notes,
+        ))
+    }
+
+    /// The conversation's turns. Only those near the viewport are built
+    /// (see `lazy`); the others keep their measured height. A long
+    /// conversation with tables and code then costs a frame what its
+    /// visible part costs, while scrolling and while an answer arrives.
+    /// `surface` tells the three places a conversation is drawn apart
+    /// (the page, the note's panel, the panel opened wide): a turn is not
+    /// the same height in each.
+    pub(crate) fn render_chat_turns(
+        &self,
+        surface: u8,
+        compact: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let keys: Vec<u64> = (0..self.chat_messages.len())
+            .map(|index| self.chat_turn_key(index))
+            .collect();
+        let (wraps_to, widest) = self.chat_question_width(compact, window);
+        crate::lazy::column(
+            "chat-turns",
+            &keys,
+            wraps_to + 100_000. * f32::from(surface),
+            0.,
+            &self.chat_scroll,
+            window,
+            |index| {
+                let (question, answer) = &self.chat_messages[index];
+                self.render_chat_turn(index, question, answer, compact, widest, cx)
+                    .into_any_element()
+            },
+        )
+        // As tall as its turns, whatever container it is in: see the
+        // conversation's column in `render_context_chat`.
+        .flex_shrink_0()
+    }
+
+    /// The width a conversation's turns wrap to, and the widest a question's
+    /// bubble may be there. A question is a bubble at most 594 px wide (614
+    /// in the note's panel) and never wider than its column, so that in a
+    /// narrow window it wraps inside the column instead of running out of
+    /// its left side.
+    pub(crate) fn chat_question_width(&self, compact: bool, window: &Window) -> (f32, f32) {
+        let viewport = f32::from(window.viewport_size().width);
+        if compact {
+            // The note's panel (also the assistant over Home, beside the
+            // sidebar) is at most 682 px wide and 16 px inside the window
+            // on each side; its turns have 16 px of padding and the bubble
+            // a further 10 px at its trailing edge.
+            let beside = if self.current_note.is_none() {
+                192. * self.sidebar_level
+            } else {
+                0.
+            };
+            let panel = (viewport - beside - 32.).min(682.);
+            (panel, (panel - 48.).clamp(120., 614.))
+        } else {
+            // The page beside the sidebar: a column of at most 672 px with
+            // 24 px of padding either side, and room for the scroll bar.
+            let column = self.chat_column_width(window);
+            (column, (column - 72.).clamp(120., 594.))
+        }
+    }
+
+    /// The width of a conversation's column on a page of its own: the page
+    /// beside the sidebar, up to 672 px.
+    pub(crate) fn chat_column_width(&self, window: &Window) -> f32 {
+        (f32::from(window.viewport_size().width) - 192. * self.sidebar_level).clamp(240., 672.)
+    }
+
+    /// Show the newest end of the conversation.
+    pub(crate) fn chat_to_bottom(&self) {
+        self.chat_scroll.scroll_to_bottom();
+        crate::lazy::to_end("chat-turns");
+    }
+
     pub fn render_chat_turn(
         &self,
         index: usize,
         question: &str,
         answer: &str,
         compact: bool,
+        widest_question: f32,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let t = self.theme();
@@ -1795,7 +1922,7 @@ impl crate::app::Cereal {
                     .when(compact, |d| d.pr(px(10.)))
                     .child(
                         div()
-                            .max_w(px(if compact { 614. } else { 594. }))
+                            .max_w(px(widest_question))
                             .rounded(px(12.))
                             .rounded_br(px(3.))
                             .px(px(if compact { 11. } else { 14. }))
@@ -2883,7 +3010,7 @@ impl crate::app::Cereal {
                     .bg(t.card)
                     .shadow_sm()
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.chat_scroll.scroll_to_bottom();
+                        this.chat_to_bottom();
                         cx.notify();
                     })),
             )
@@ -2941,13 +3068,14 @@ impl crate::app::Cereal {
         let t = self.theme();
         let note = self.current_note.and_then(|id| self.workspace.note(id));
         let mut content = div()
-            .w_full()
-            .max_w(px(672.))
+            // A width in pixels: see the conversation's page.
+            .w(px(self.chat_column_width(window)))
             .px(px(24.))
             .pt(px(32.))
             .pb(px(20.))
             .flex()
-            .flex_col();
+            .flex_col()
+            .flex_shrink_0();
         if let Some(note) = note {
             content = content.child(
                 div().flex().justify_end().mb(px(16.)).child(
@@ -2974,8 +3102,8 @@ impl crate::app::Cereal {
         if self.chat_messages.is_empty() {
             content = content.child(div().pt(px(80.)).text_size(px(28.)).child("Ask anything"));
         }
-        for (index, (q, a)) in self.chat_messages.iter().enumerate() {
-            content = content.child(self.render_chat_turn(index, q, a, false, cx));
+        if !self.chat_messages.is_empty() {
+            content = content.child(self.render_chat_turns(2, false, window, cx));
         }
         div()
             .relative()
@@ -3478,6 +3606,23 @@ mod tests {
         valid_citation_id,
     };
     use crate::ui::Theme;
+    #[test]
+    fn a_conversation_is_listed_under_the_start_of_its_first_question() {
+        use super::chat_title;
+        assert_eq!(chat_title("List recent todos"), "List recent todos");
+        // On one line, whatever the question's own line breaks.
+        assert_eq!(chat_title("  Summarise\nthe   launch plan "), "Summarise the launch plan");
+        // Cut to seventy characters, and it says so.
+        let long = "Summarise the launch plan in a table, with the code we discussed, and keep going";
+        let title = chat_title(long);
+        assert!(title.chars().count() <= 70 && title.chars().count() >= 60);
+        assert!(title.ends_with('…'));
+        assert!(long.starts_with(title.trim_end_matches('…')));
+        // Seventy characters exactly are kept whole, in any script.
+        let exact = "é".repeat(70);
+        assert_eq!(chat_title(&exact), exact);
+    }
+
     #[test]
     fn an_answer_already_seen_is_not_parsed_again() {
         let source = "## Plan\n\n- one\n- two";

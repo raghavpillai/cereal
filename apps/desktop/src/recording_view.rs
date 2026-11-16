@@ -455,11 +455,14 @@ impl Cereal {
         } else {
             Phase::Idle
         };
-        let future = if phase == Phase::Idle {
+        // A meeting on the calendar that has not been recorded: the control
+        // says when it starts (or that it has started) instead of offering a
+        // recording, and "Start now" is in the transcript panel it opens.
+        let scheduled = if phase == Phase::Idle {
             self.workspace
                 .note(id)
                 .and_then(|n| n.meeting_context.as_ref())
-                .and_then(crate::meeting::future_start_label)
+                .and_then(|meeting| crate::meeting::start_label(meeting, crate::menubar::now()))
         } else {
             None
         };
@@ -564,8 +567,18 @@ impl Cereal {
             );
         let capsule_target = if processing || compact_complete {
             58.
-        } else if future.is_some() {
-            150.
+        } else if let Some(label) = &scheduled {
+            // The label as it is drawn: 13 px in the body face.
+            let face = cx.text_system().resolve_font(&font(FONT));
+            let text: f32 = label
+                .chars()
+                .map(|character| {
+                    cx.text_system()
+                        .advance(face, px(13.), character)
+                        .map_or(7., |size| f32::from(size.width))
+                })
+                .sum();
+            scheduled_capsule_width(text, open)
         } else {
             capsule_width(phase)
         };
@@ -635,16 +648,40 @@ impl Cereal {
                     })),
             );
         } else if !processing && !compact_complete {
-            let label = match phase {
-                Phase::Idle => self
-                    .workspace
-                    .note(id)
-                    .and_then(|n| n.meeting_context.as_ref())
-                    .and_then(crate::meeting::future_start_label)
-                    .unwrap_or_else(|| "Start now".into()),
+            if let Some(label) = scheduled.clone() {
+                // Not a button of its own: pressing it opens or closes the
+                // transcript, like the indicator beside it.
+                capsule = capsule.child(
+                    div()
+                        .id("scheduled-start-label")
+                        .h(px(48.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .pr(px(SCHEDULED_LABEL_GAP))
+                        .text_size(px(13.))
+                        .line_height(px(16.))
+                        .text_color(t.secondary)
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .cursor(CursorStyle::Arrow)
+                        .opacity(label_fade)
+                        .child(label)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.focus.focus(window);
+                            this.transcript_open = !this.transcript_open;
+                            this.transcript_epoch = this.transcript_epoch.wrapping_add(1);
+                            cx.notify();
+                        })),
+                );
+            }
+            let label: SharedString = match phase {
+                Phase::Idle => "Start now".into(),
                 Phase::Held | Phase::Failed => "Retry".into(),
                 _ => "Resume".into(),
             };
+            // A scheduled meeting offers "Start now" only in the open panel.
+            if scheduled.is_none() || open {
             capsule = capsule.child(
                 div()
                     .id("start-transcript-button")
@@ -680,6 +717,7 @@ impl Cereal {
                     })
                     .child(label),
             );
+            }
         }
         // The warning badge blobs in and, once transcription recovers, shrinks
         // back into the capsule's corner rather than vanishing.
@@ -822,16 +860,33 @@ impl Cereal {
         &self,
         id: u64,
         revision: u64,
+        bottom: Pixels,
         pose: crate::motion::Pose,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = self.theme();
-        crate::motion::pop(
+        // In the place of the call to generate notes (the two are never up
+        // together): centred above the footer bar, and above whichever panel
+        // is open. In the window's corner it lay across the end of the ask
+        // bar for as long as it was up, and under the chat panel's edge.
+        let bottom = px(self
+            .stage
+            .aim(("generate-notes-bottom", 0), f32::from(bottom), GOOEY));
+        div()
+            .absolute()
+            .bottom(bottom)
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(crate::motion::pop(
             div()
-                .absolute()
-                .right(px(16.))
-                .bottom(px(16.))
+                .id("regeneration-notice")
+                // Nothing behind the notice is under the pointer.
+                .occlude()
                 .w(px(392.))
+                .max_w(window.viewport_size().width - px(32.))
                 .h(px(54.))
                 .px(px(12.))
                 .rounded(px(12.))
@@ -869,9 +924,10 @@ impl Cereal {
                             cx.notify();
                         })),
                 ),
-            crate::motion::Pop::chip((1., 1.)),
+            crate::motion::Pop::chip((0.5, 1.)),
             pose,
-        )
+            ))
+            .into_any_element()
     }
 
     pub fn transcription_language_settings(&self, cx: &mut Context<Self>) -> Div {
@@ -1005,6 +1061,16 @@ impl Cereal {
                     })),
             )
     }
+}
+
+/// Space between a scheduled meeting's label and what follows it.
+const SCHEDULED_LABEL_GAP: f32 = 10.;
+
+/// The capsule of a scheduled meeting: the 48 px indicator inside 4 px of
+/// padding, the label (`text` px wide), and in the open panel the 80 px
+/// "Start now" beside it.
+fn scheduled_capsule_width(text: f32, open: bool) -> f32 {
+    (56. + text + SCHEDULED_LABEL_GAP + if open { 80. } else { 0. }).ceil()
 }
 
 fn capsule_width(phase: Phase) -> f32 {

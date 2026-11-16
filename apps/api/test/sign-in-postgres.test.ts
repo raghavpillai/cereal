@@ -78,10 +78,11 @@ describe.skipIf(!enabled)("sign-in settings, Google sign-in and the app handoff 
 
   test("sign-in settings: defaults, validation, and a client secret that is sealed and never returned", async () => {
     const initial = await (await request("/api/v1/admin/settings", "GET", undefined, asOwner)).json()
-    expect(initial.signIn).toEqual({ password: true, google: false, allowedEmails: [], googleClientId: null, googleClientSecretSet: false, googleRedirectUris: [baseURL + "/api/v1/auth/google/callback", baseURL + "/api/integrations/google/callback"] })
-    expect(await (await request("/api/v1/auth/methods")).json()).toEqual({ password: true, google: false, instanceName: initial.instanceName, setupRequired: expect.any(Boolean) })
+    expect(initial.signIn).toEqual({ password: true, google: false, allowedEmails: [], googleClientId: null, googleClientSecretSet: false, googleRedirectUris: [baseURL + "/api/v1/auth/google/callback", baseURL + "/api/integrations/google/callback"], googleNeedsHttps: false })
+    expect(await (await request("/api/v1/auth/methods")).json()).toEqual({ password: true, google: false, instanceName: initial.instanceName, setupRequired: expect.any(Boolean), transport: "secure" })
 
-    expect((await settings({ password: false })).status).toBe(400) // at least one method stays on
+    expect((await settings({ password: false })).status).toBe(400) // turning password off is choosing Google, which has no client yet
+    expect((await settings({ password: true, google: true, googleClientId: clientId, googleClientSecret: clientSecret })).status).toBe(400) // one method, never both
     expect((await settings({ google: true })).status).toBe(400) // no client stored yet
     expect((await settings({ google: true, googleClientId: clientId })).status).toBe(400) // a client id alone is not enough
     expect((await settings({ allowedEmails: ["not-an-address"] })).status).toBe(400)
@@ -104,7 +105,8 @@ describe.skipIf(!enabled)("sign-in settings, Google sign-in and the app handoff 
     const row = await db!.instanceSettings.findUniqueOrThrow({ where: { id: "sign-in-test" } })
     expect(row.googleClientSecret).toStartWith("v1.")
     expect(JSON.stringify(row)).not.toContain(clientSecret)
-    expect(await (await request("/api/v1/auth/methods")).json()).toMatchObject({ password: true, google: true })
+    // Choosing Google turned password off: a server has exactly one way to sign in.
+    expect(await (await request("/api/v1/auth/methods")).json()).toMatchObject({ password: false, google: true })
 
     expect((await settings({ googleClientSecret: null })).status).toBe(400) // not while Google sign-in depends on it
     // The same stored client is what the Google Calendar connection uses, read at the time of use.
@@ -112,6 +114,9 @@ describe.skipIf(!enabled)("sign-in settings, Google sign-in and the app handoff 
   })
 
   test("only administrators change sign-in settings, and a cookie needs a trusted origin to do it", async () => {
+    // Back to email and password for the accounts this file signs in with.
+    expect((await settings({ password: true })).status).toBe(200)
+    expect(await (await request("/api/v1/auth/methods")).json()).toMatchObject({ password: true, google: false })
     aliceId = await createUser("Alice", "alice@signin.test"); bobId = await createUser("Bob", "bob@signin.test")
     const alice = await passwordSignIn("alice@signin.test"); expect(alice.status).toBe(200)
     aliceCookie = cookiesOf(alice); aliceToken = alice.headers.get("set-auth-token")!
@@ -122,7 +127,7 @@ describe.skipIf(!enabled)("sign-in settings, Google sign-in and the app handoff 
     expect((await request("/api/v1/admin/settings", "GET", undefined, { Authorization: "Bearer " + aliceToken })).status).toBe(403)
   })
 
-  test("password sign-in turned off refuses everyone, keeps sessions and the bootstrap owner token, and comes back when turned on", async () => {
+  test("with Google as the method, password sign-in refuses everyone, keeps sessions and the bootstrap owner token, and comes back when chosen again", async () => {
     expect((await settings({ password: false })).status).toBe(200)
     expect(await (await request("/api/v1/auth/methods")).json()).toMatchObject({ password: false, google: true })
     const refused = await passwordSignIn("alice@signin.test")
@@ -136,9 +141,12 @@ describe.skipIf(!enabled)("sign-in settings, Google sign-in and the app handoff 
     expect((await whoAmI({ Authorization: "Bearer " + aliceToken }))?.id).toBe(aliceId)
     expect((await whoAmI({ Cookie: aliceCookie }))?.id).toBe(aliceId)
     expect((await whoAmI(asOwner))?.id).toBe(BOOTSTRAP_OWNER_ID)
-    expect((await settings({ google: false })).status).toBe(400) // that would leave no way in
-    expect((await settings({ password: true })).status).toBe(200)
+    expect((await settings({ google: false, password: false })).status).toBe(400) // that would leave no way in
+    expect((await settings({ google: false })).status).toBe(200) // turning Google off is choosing email and password
+    expect(await (await request("/api/v1/auth/methods")).json()).toMatchObject({ password: true, google: false })
     expect((await passwordSignIn("alice@signin.test")).status).toBe(200)
+    // The tests that follow are about Google sign-in.
+    expect((await settings({ google: true })).status).toBe(200)
   })
 
   test("Google sign-in sends the browser to Google with PKCE and a browser-bound state, storing neither in the clear", async () => {
@@ -334,6 +342,7 @@ describe.skipIf(!enabled)("sign-in settings, Google sign-in and the app handoff 
     for (let index = 0; index < 7; index++) await handoff(aliceCookie)
     expect(await db!.appSignInHandoff.count({ where: { userId: aliceId } })).toBe(5)
     // An account that is gone takes its codes with it.
+    expect((await settings({ password: true })).status).toBe(200) // this account signs in with a password
     const doomedId = await createUser("Doomed", "doomed@signin.test"), doomedSignIn = await passwordSignIn("doomed@signin.test")
     const doomed = await handoff(cookiesOf(doomedSignIn))
     await db!.user.delete({ where: { id: doomedId } })

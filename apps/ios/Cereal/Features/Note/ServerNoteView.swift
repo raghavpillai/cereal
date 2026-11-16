@@ -108,6 +108,7 @@ struct ServerNoteView: View {
                                     Text(message).foregroundStyle(Theme.danger)
                                     Button("Retry audio delivery") { recording.retry(noteID: noteID) }
                                         .disabled(recording.isSyncing)
+                                        .frame(minHeight: 44, alignment: .leading).contentShape(Rectangle())
                                 }
                             }.foregroundStyle(Theme.textTertiary).padding(.top, 16)
                                 .transition(motion.rise)
@@ -117,11 +118,12 @@ struct ServerNoteView: View {
                                 if recording.isSyncing { ProgressView() }
                                 Text("Saved audio is waiting for transcription.").font(.footnote)
                                 Button("Retry") { recording.retry(noteID: noteID) }.disabled(recording.isSyncing)
+                                    .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
                             }
                         }
                     } else if let error {
                         errorView(error).padding(.top, 28)
-                    } else { ProgressView("Loading note…").padding(.top, 28) }
+                    } else { InlineProgress(text: "Loading note…").padding(.top, 28) }
                 }
                 .padding(.leading, Theme.gutter).padding(.trailing, 8).clearsBottomChrome()
                 .animation(motion.snappy, value: error)
@@ -207,6 +209,10 @@ struct ServerNoteView: View {
                 }
             }
             .padding(.horizontal, 4)
+            // Out of the way of the "Edit title" alert: the gold button otherwise glows
+            // through the keyboard's glass underneath it.
+            .opacity(editingTitle ? 0 : 1)
+            .animation(motion.snappy, value: editingTitle)
             .animation(motion.animation(.gooey, entering: canGenerate || generating), value: canGenerate || generating)
             .sensoryFeedback(.success, trigger: generatedCount)
             .sensoryFeedback(.success, trigger: copiedCount)
@@ -214,6 +220,9 @@ struct ServerNoteView: View {
             .animation(motion.animation(.gooey, entering: showsScheduledStart), value: showsScheduledStart)
         }
         .navigationBarBackButtonHidden().toolbarVisibility(.visible, for: .navigationBar)
+        // This page has no field of its own. The keyboard here belongs to the
+        // "Edit title" alert, and the bar must not ride up underneath that alert.
+        .ignoresSafeArea(.keyboard, edges: .bottom)
         .task(id: "\(server.accountIdentity ?? "")/\(noteID)") { await load() }
         .sheet(isPresented: $showingMeeting) { MeetingContextSheet(noteID: noteID, initial: meetingContext) {
             meetingContext = $0
@@ -334,6 +343,7 @@ struct ServerNoteView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text(message).foregroundStyle(Theme.textSecondary)
             Button("Retry") { Task { await load() } }
+                .frame(minWidth: 44, minHeight: 44, alignment: .leading).contentShape(Rectangle())
         }
     }
 }
@@ -370,25 +380,34 @@ private struct DocumentIdentity: Hashable {
 /// A note someone else shared is drawn by this same view.
 struct ServerNoteMarkdown: View {
     let text: String
-    private enum Block {
-        case heading(String), bullet(String, Int), paragraph(String), code(String), space
-    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let _ = PerfProbe.hit("ServerNoteMarkdown.body")
+        // The same blocks as a chat answer, parsed once per text and kept: a long
+        // note was split into lines and its Markdown read again on every pass.
+        let blocks = ChatMarkdownCache.blocks(text)
+        // Lazy: a note of several thousand lines lays out the screenful being read.
+        LazyVStack(alignment: .leading, spacing: 10) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 switch block {
                 case .heading(let value):
                     Text(inline(value)).readingFont(.heading).accessibilityAddTraits(.isHeader)
                         .foregroundStyle(Theme.textPrimary).padding(.top, 10)
-                case .bullet(let value, let depth):
+                case .list(let marker, let value, let depth):
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Text("•").foregroundStyle(Theme.textTertiary)
+                        // A number keeps its own width, so the text of a wrapped item hangs clear of it.
+                        Text(marker).foregroundStyle(Theme.textTertiary).monospacedDigit()
                         Text(inline(value)).frame(maxWidth: .infinity, alignment: .leading)
-                    }.padding(.leading, CGFloat(depth * 14))
-                case .paragraph(let value): Text(inline(value))
+                    }.padding(.leading, CGFloat(min(4, depth) * 14))
+                case .paragraph(let value): Text(inline(value)).frame(maxWidth: .infinity, alignment: .leading)
+                case .quote(let value):
+                    HStack(alignment: .top, spacing: 12) {
+                        RoundedRectangle(cornerRadius: 2).fill(Theme.textTertiary).frame(width: 3)
+                        Text(inline(value)).frame(maxWidth: .infinity, alignment: .leading)
+                    }.fixedSize(horizontal: false, vertical: true)
                 case .code(let value):
-                    Text(verbatim: value).font(.system(size: 14, design: .monospaced))
+                    Text(verbatim: value).readingFont(.code).frame(maxWidth: .infinity, alignment: .leading)
+                case .table(let header, let rows): MarkdownTable(header: header, rows: rows, inline: inline)
                 case .space: Color.clear.frame(height: 4)
                 }
             }
@@ -397,33 +416,16 @@ struct ServerNoteMarkdown: View {
         .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var blocks: [Block] {
-        var code = false
-        return text.components(separatedBy: .newlines).compactMap { line in
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("```") { code.toggle(); return nil }
-            if code { return .code(line) }
-            if trimmed.isEmpty { return .space }
-            let hashes = trimmed.prefix { $0 == "#" }.count
-            if (1...6).contains(hashes), trimmed.dropFirst(hashes).first == " " {
-                return .heading(String(trimmed.dropFirst(hashes + 1)))
-            }
-            if ["- ", "* ", "• "].contains(where: trimmed.hasPrefix) {
-                let depth = min(4, line.prefix { $0.isWhitespace }.count / 2)
-                return .bullet(String(trimmed.dropFirst(2)), depth)
-            }
-            return .paragraph(line)
-        }
-    }
-
     private func inline(_ text: String) -> AttributedString {
-        var result = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
-        for run in Array(result.runs) {
-            if let link = run.link, !["http", "https", "mailto"].contains(link.scheme?.lowercased() ?? "") {
-                result[run.range].link = nil
+        ChatMarkdownCache.inline(text, context: "note") {
+            var result = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+            for run in Array(result.runs) {
+                if let link = run.link, !["http", "https", "mailto"].contains(link.scheme?.lowercased() ?? "") {
+                    result[run.range].link = nil
+                }
             }
+            return result
         }
-        return result
     }
 }
 

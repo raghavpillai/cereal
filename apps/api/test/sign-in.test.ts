@@ -45,10 +45,13 @@ test("allow-list entries are a full address or a whole domain, compared without 
 test("sign-in settings: defaults, at least one method, Google only with a stored client, and a sealed secret that is never returned", async () => {
   const f = fixture()
   expect((await run(f.admin.getSettings())).signIn).toEqual({ password: true, google: false, allowedEmails: [], googleClientId: null, googleClientSecretSet: false,
-    googleRedirectUris: ["https://notes.example.test/api/v1/auth/google/callback", "https://notes.example.test/api/integrations/google/callback"] })
+    googleRedirectUris: ["https://notes.example.test/api/v1/auth/google/callback", "https://notes.example.test/api/integrations/google/callback"], googleNeedsHttps: false })
   expect(await f.admin.signInPolicy()).toEqual({ password: true, google: false, allowedEmails: [], googleCredentials: null, instanceName: "Cereal" })
 
-  expect((await failure(f.admin.updateSettings({ signIn: { password: false } }))).message).toBe("Keep at least one sign-in method turned on")
+  // One method, never both and never neither. Turning password off is choosing Google, which needs its client.
+  expect((await failure(f.admin.updateSettings({ signIn: { password: false } }))).message).toBe("Add a Google client ID and client secret before turning on Google sign-in")
+  expect((await failure(f.admin.updateSettings({ signIn: { password: false, google: false } }))).message).toBe("Keep one sign-in method turned on")
+  expect((await failure(f.admin.updateSettings({ signIn: { password: true, google: true, googleClientId: clientId, googleClientSecret: clientSecret } }))).message).toBe("A server has one way to sign in: choose email and password, or Google")
   expect((await failure(f.admin.updateSettings({ signIn: { google: true } }))).message).toBe("Add a Google client ID and client secret before turning on Google sign-in")
   expect((await failure(f.admin.updateSettings({ signIn: { google: true, googleClientId: clientId } }))).error).toBe("invalid_request")
   expect((await failure(f.admin.updateSettings({ signIn: { google: true, googleClientSecret: clientSecret } }))).error).toBe("invalid_request")
@@ -59,19 +62,29 @@ test("sign-in settings: defaults, at least one method, Google only with a stored
   expect(await f.store.getSettings()).toBeNull()
 
   const saved = await run(f.admin.updateSettings({ signIn: { google: true, googleClientId: ` ${clientId} `, googleClientSecret: clientSecret, allowedEmails: ["B@Example.test", "@Team.example", "b@example.test"] } }))
-  expect(saved.signIn).toMatchObject({ password: true, google: true, allowedEmails: ["b@example.test", "@team.example"], googleClientId: clientId, googleClientSecretSet: true })
+  expect(saved.signIn).toMatchObject({ password: false, google: true, allowedEmails: ["b@example.test", "@team.example"], googleClientId: clientId, googleClientSecretSet: true })
   expect(JSON.stringify(saved)).not.toContain(clientSecret)
   const stored = await f.store.getSettings()
   expect(JSON.stringify(stored)).not.toContain(clientSecret)
   expect(f.box.open(stored!.googleClientSecret!)).toBe(clientSecret)
-  expect(await f.admin.signInPolicy()).toMatchObject({ password: true, google: true, googleCredentials: { clientId, clientSecret } })
+  // Choosing Google turned password off in the same save.
+  expect(await f.admin.signInPolicy()).toMatchObject({ password: false, google: true, googleCredentials: { clientId, clientSecret } })
+  expect((await f.store.getSettings())).toMatchObject({ signInGoogle: true, signInPassword: false })
 
-  // Other edits leave sign-in alone; password can now go, Google cannot follow it.
+  // Other edits leave sign-in alone; while Google is the method its client cannot be removed.
   expect((await run(f.admin.updateSettings({ instanceName: "Product studio" }))).signIn).toEqual(saved.signIn)
   expect((await run(f.admin.updateSettings({ signIn: { password: false } }))).signIn).toMatchObject({ password: false, google: true })
-  expect((await failure(f.admin.updateSettings({ signIn: { google: false } }))).message).toBe("Keep at least one sign-in method turned on")
   expect((await failure(f.admin.updateSettings({ signIn: { googleClientSecret: null } }))).message).toBe("Turn off Google sign-in before removing its client ID or secret")
   expect((await failure(f.admin.updateSettings({ signIn: { googleClientId: null } }))).error).toBe("invalid_request")
+  // Turning Google off is choosing email and password; saying so either way gives the same answer.
+  expect((await run(f.admin.updateSettings({ signIn: { google: false } }))).signIn).toMatchObject({ password: true, google: false, googleClientSecretSet: true })
+  expect(await f.admin.signInPolicy()).toMatchObject({ password: true, google: false })
+  expect((await run(f.admin.updateSettings({ signIn: { google: true } }))).signIn).toMatchObject({ password: false, google: true })
+  expect((await run(f.admin.updateSettings({ signIn: { password: true, googleClientSecret: null } }))).signIn).toMatchObject({ password: true, google: false, googleClientSecretSet: false })
+  // A server from before this rule that had both on reads as email and password.
+  await f.store.saveSettings({ signInPassword: true, signInGoogle: true, googleClientSecret: f.box.seal(clientSecret) })
+  expect((await run(f.admin.getSettings())).signIn).toMatchObject({ password: true, google: false })
+  expect(await f.admin.signInPolicy()).toMatchObject({ password: true, google: false })
   // Swapping methods in one save is fine, and the client can then be removed.
   const swapped = await run(f.admin.updateSettings({ signIn: { password: true, google: false, googleClientId: null, googleClientSecret: null } }))
   expect(swapped.signIn).toMatchObject({ password: true, google: false, googleClientId: null, googleClientSecretSet: false })
@@ -111,7 +124,7 @@ test("the Google Calendar connection uses the stored client, falls back to the e
   // With neither, the integration reports itself unconfigured instead of failing.
   const bare = fixture(), unconfigured = makeGoogleService(makeMemoryGoogleStore(bare.repository), bare.box, { baseURL: "http://localhost:3000", credentials: () => bare.admin.googleCredentials() })
   try {
-    expect(await run(unconfigured.getStatus(user))).toEqual({ configured: false, redirectUri: null, connections: [] })
+    expect(await run(unconfigured.getStatus(user))).toEqual({ configured: false, redirectUri: null, connections: [], needsHttps: false })
     expect((await failure(unconfigured.beginConnect(user, session))).error).toBe("unavailable")
     await run(bare.admin.updateSettings({ signIn: { googleClientId: clientId, googleClientSecret: clientSecret } }))
     expect((await run(unconfigured.getStatus(user))).configured).toBe(true)
@@ -125,12 +138,12 @@ test("the public sign-in methods need no credentials and say nothing about the G
   try {
     const methods = await api.handler(new Request("http://localhost/api/v1/auth/methods"))
     expect(methods.status).toBe(200)
-    expect(await methods.json()).toEqual({ password: true, google: false, instanceName: "Cereal", setupRequired: false })
+    expect(await methods.json()).toEqual({ password: true, google: false, instanceName: "Cereal", setupRequired: false, transport: "secure" })
     await run(f.admin.updateSettings({ instanceName: "Product studio", signIn: { google: true, googleClientId: clientId, googleClientSecret: clientSecret } }))
     const text = await (await api.handler(new Request("http://localhost/api/v1/auth/methods"))).text()
     expect(text).not.toContain(clientId); expect(text).not.toContain(clientSecret)
     // Without an account service nobody can finish a Google sign-in, so it is not offered.
-    expect(JSON.parse(text)).toEqual({ password: true, google: false, instanceName: "Product studio", setupRequired: false })
+    expect(JSON.parse(text)).toEqual({ password: false, google: false, instanceName: "Product studio", setupRequired: false, transport: "secure" })
     expect((await api.handler(new Request("http://localhost/api/v1/auth/google/start"))).headers.get("location")).toBe("/login?error=google_unavailable")
     expect((await api.handler(new Request("http://localhost/api/v1/auth/app-handoff/exchange", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: "a".repeat(43), verifier: "b".repeat(43) }) }))).status).toBe(503)
   } finally { await api.dispose() }

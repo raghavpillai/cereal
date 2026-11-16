@@ -5,21 +5,24 @@ import type { AdminSettingsDTO, AIProvider, OnboardingStep } from '@meeting-note
 import { AdminClientError, type AdminClient } from '../../lib/admin-client'
 import { authClient } from '../../lib/auth-client'
 import { getDownloads } from '../../lib/downloads'
-import { instanceDraft, instancePatch, providerKeyFields, providerNames, signInProblem, storageDraft, storagePatch, storageProblem, storageTestInput, type SignInDraft, type StorageDraft } from '../../lib/instance-settings'
-import { claimServer, initialLanguageProvider, initialModels, modelLabel, modelsPatch, OPTIONAL_STEPS, ownerProblem, plausibleKey, resumeStep, serverAddress, serverHost, setupCode, STEP_TITLES, stepsFor, type LanguageProvider, type ModelsDraft, type StepId } from '../../lib/onboarding'
+import { instanceDraft, providerKeyFields, providerNames, storageDraft, storagePatch, storageProblem, storageTestInput, type SignInDraft, type StorageDraft } from '../../lib/instance-settings'
+import { claimServer, fetchGoogleVerification, googleClientProblem, googleFailure, GOOGLE_STUCK_HINT, proveWithGoogle, startGoogleClaim, initialLanguageProvider, initialModels, modelLabel, modelsPatch, OPTIONAL_STEPS, ownerProblem, plausibleKey, resumeStep, serverAddress, serverHost, setupCode, STEP_TITLES, stepsFor, type LanguageProvider, type ModelsDraft, type StepId } from '../../lib/onboarding'
 import { modelLogo, type CatalogState } from '../admin/settings-panel'
+import type { Transport } from '@meeting-notes/contracts/transport'
+import { TransportWarning } from '../kit/transport-notice'
+import { rememberSetup } from '../../lib/session-probe'
 import { reducedMotion, StepDots, type BuddyHandle, type Mood } from './kit'
 import { LittleScreen, type ScreenView } from './screens'
-import { AppsFields, ClaimFields, LanguageFields, ModelFields, NameFields, SignInFields, SpeechFields, StorageFields, type DownloadsState, type KeyCheck, type OwnerFields, type StorageTest } from './steps'
+import { AppsFields, ClaimFields, LanguageFields, ModelFields, NameFields, SignInFields, SpeechFields, StorageFields, type DownloadsState, type KeyCheck, type OwnerFields, type OwnerProblems, type StorageTest } from './steps'
 import '../../onboarding.css'
 
 const HELP: Record<StepId, string> = {
-  claim: 'Paste the setup code from the machine Cereal runs on, then make the owner account. That’s you.',
+  claim: 'Paste the setup code from the machine Cereal runs on, then choose the one way people will sign in. You go first, and become the owner.',
   name: 'This is what your team sees in the apps and on the sign-in page.',
   language: 'Pick who writes your notes and answers questions about them, then paste its API key.',
   speech: 'ElevenLabs turns what was said into a transcript. Paste its API key.',
   models: 'These are good defaults for the keys you added. Keep them, or pick your own.',
-  signIn: 'Choose how people get in. You can add accounts from the admin panel afterwards.',
+  signIn: 'Say whose Google accounts may join. You can change this from the admin panel at any time.',
   storage: 'Recordings stay on this server unless you would rather keep them in a bucket.',
   apps: 'Cereal records on your Mac and iPhone. Point the apps at this server and you are done.',
 }
@@ -45,8 +48,10 @@ const draftsFor = (settings: AdminSettingsDTO | null): Omit<Drafts, 'owner'> => 
   storage: settings?.storage ? storageDraft(settings.storage) : EMPTY_STORAGE,
 })
 
-export function Onboarding({ client, initial, expired: sessionEnded, finished }: {
+export function Onboarding({ client, initial, expired: sessionEnded, finished, transport }: {
   client: AdminClient
+  /** How the server is reached: the claim step says so when it is plain HTTP on a public address. */
+  transport?: Transport
   /** An unclaimed server starts at "Claim this server"; a claimed one resumes at its first unfinished step,
    * or at the first step when the owner asked to see setup again. */
   initial: { kind: 'claim'; instanceName: string } | { kind: 'ready'; settings: AdminSettingsDTO; fromStart?: boolean }
@@ -57,17 +62,31 @@ export function Onboarding({ client, initial, expired: sessionEnded, finished }:
   const ended = useRef(sessionEnded); ended.current = sessionEnded
   const expired = useCallback(() => ended.current(), [])
   const [claiming] = useState(initial.kind === 'claim')
-  const steps = useMemo(() => stepsFor(claiming), [claiming])
   const [settings, setSettings] = useState<AdminSettingsDTO | null>(initial.kind === 'ready' ? initial.settings : null)
   const [step, setStep] = useState<StepId>(() => initial.kind === 'claim' ? 'claim' : initial.fromStart ? 'name' : resumeStep(initial.settings.onboarding!.steps))
+  const [drafts, setDrafts] = useState<Drafts>(() => ({ owner: { code: '', method: 'password', name: '', email: '', password: '', clientId: '', clientSecret: '' }, ...draftsFor(initial.kind === 'ready' ? initial.settings : null) }))
+  // "Who may join" is a step only where people sign in with Google: known from the server once claimed, from the choice before.
+  const google = settings ? settings.signIn?.google === true : drafts.owner.method === 'google'
+  const steps = useMemo(() => stepsFor(claiming, google), [claiming, google])
   const [panes, setPanes] = useState<{ current: StepId; leaving: StepId | null; direction: 'forward' | 'backward' }>({ current: step, leaving: null, direction: 'forward' })
   if (panes.current !== step) setPanes({ current: step, leaving: panes.current, direction: steps.indexOf(step) >= steps.indexOf(panes.current) ? 'forward' : 'backward' })
-  const [drafts, setDrafts] = useState<Drafts>(() => ({ owner: { code: '', name: '', email: '', password: '' }, ...draftsFor(initial.kind === 'ready' ? initial.settings : null) }))
+  // Plain HTTP off this machine: Google will not redirect here.
+  const googleNeedsHttps = transport !== undefined && transport !== 'secure'
+  // Came back from Google in this tab (the browser would not open a window): say how it went.
+  useEffect(() => {
+    if (initial.kind !== 'claim') return
+    const controller = new AbortController()
+    fetchGoogleVerification(controller.signal).then(found => { if (!controller.signal.aborted && found.state === 'failed') { update({ owner: { ...drafts.owner, method: 'google' } }); setProblem(googleFailure(found.reason).message) } }, () => {})
+    return () => controller.abort()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   const [busy, setBusy] = useState(false)
   const [problem, setProblem] = useState<string | null>(null)
-  const [ownerProblems, setOwnerProblems] = useState<Partial<Record<keyof OwnerFields, string>>>({})
+  const [ownerProblems, setOwnerProblems] = useState<OwnerProblems>({})
   const [wait, setWait] = useState(0)
   const [accepted, setAccepted] = useState(false)
+  // The proving Google sign-in is under way in its own window; `proving` lets the person call it off.
+  const [waiting, setWaiting] = useState(false), proving = useRef<AbortController | null>(null)
   const [nameProblem, setNameProblem] = useState<string | null>(null)
   const [catalogs, setCatalogs] = useState<Partial<Record<AIProvider, CatalogState>>>({})
   const [storageTest, setStorageTest] = useState<StorageTest>({ state: 'idle' })
@@ -76,6 +95,8 @@ export function Onboarding({ client, initial, expired: sessionEnded, finished }:
   const buddy = useRef<BuddyHandle>(null), title = useRef<HTMLHeadingElement>(null)
   const alive = useRef(true), requests = useRef(new Set<AbortController>())
   useEffect(() => { alive.current = true; return () => { alive.current = false; requests.current.forEach(request => request.abort()) } }, [])
+  // While setup is on screen the tab is marked, so a reload opens on setup without the site header flashing by.
+  useEffect(() => { rememberSetup(true) }, [])
   const update = useCallback((next: Partial<Drafts>) => setDrafts(old => ({ ...old, ...next })), [])
   const index = steps.indexOf(step), origin = typeof window === 'undefined' ? '' : window.location.origin
 
@@ -152,16 +173,40 @@ export function Onboarding({ client, initial, expired: sessionEnded, finished }:
   /** Tells the server the step is finished (or passed over) and keeps what it answers. */
   const record = useCallback(async (name: OnboardingStep, state: 'done' | 'skipped', signal: AbortSignal) => { const next = await client.recordOnboardingStep({ step: name, state }, signal); if (alive.current) setSettings(next); return next }, [client])
   const signInSaved = settings?.signIn ?? null, storageSaved = settings?.storage ?? null
-  const signInTrouble = signInSaved ? signInProblem(drafts.signIn, signInSaved.googleClientSecretSet) : null
   const storageTrouble = storageSaved ? storageProblem(drafts.storage, storageSaved.secretAccessKeySet) : null
 
+  /** After the server is claimed, either way: the settings are read with the new session and setup moves on. */
+  async function claimed(signal: AbortSignal) {
+    const [loaded, session] = await Promise.all([client.getSettings(signal), client.getSession(signal).catch(() => null)])
+    if (!alive.current) return
+    if (session) update({ owner: { ...drafts.owner, code: '', password: '', clientSecret: '', name: drafts.owner.name || session.user.name, email: session.user.email } })
+    setSettings(loaded); setDrafts(old => ({ owner: { ...old.owner, code: '', password: '', clientSecret: '', email: session?.user.email ?? old.owner.email }, ...draftsFor(loaded) })); go('name')
+  }
   async function claim() {
-    const code = setupCode(drafts.owner.code), trouble = ownerProblem(drafts.owner)
+    const code = setupCode(drafts.owner.code), google = drafts.owner.method === 'google'
     if (!code) { setOwnerProblems({ code: drafts.owner.code.trim() ? 'That does not look like a setup code. It is one long line of letters and numbers.' : 'Paste the setup code to continue.' }); buddy.current?.wobble(); return }
+    const trouble = google ? googleClientProblem(drafts.owner) : ownerProblem(drafts.owner)
     if (trouble) { setOwnerProblems({ [trouble.field]: trouble.message }); buddy.current?.wobble(); return }
     setOwnerProblems({})
     const controller = new AbortController(); requests.current.add(controller)
     try {
+      if (google) {
+        // One real Google sign-in, in its own window: it proves the client, and the account that signs in becomes the owner.
+        proving.current = controller; setWaiting(true)
+        let outcome: Awaited<ReturnType<typeof proveWithGoogle>>
+        try { outcome = await proveWithGoogle(signal => startGoogleClaim(code, drafts.owner, signal), controller.signal) }
+        finally { proving.current = null; if (alive.current) setWaiting(false) }
+        if (!alive.current) return
+        if (!outcome.ok) {
+          const { field, message, waitSeconds } = outcome.failure
+          if (field) setOwnerProblems({ [field]: message }); else setProblem(message)
+          setWait(waitSeconds); buddy.current?.wobble(); return
+        }
+        setAccepted(true); buddy.current?.hop()
+        await new Promise(resolve => window.setTimeout(resolve, reducedMotion() ? 200 : 900))
+        await claimed(controller.signal)
+        return
+      }
       const result = await claimServer(code, drafts.owner, controller.signal)
       if (!alive.current) return
       if (!result.ok) {
@@ -177,10 +222,8 @@ export function Onboarding({ client, initial, expired: sessionEnded, finished }:
       if (!alive.current) return
       // The account exists either way; if signing in did not work here, the sign-in page takes over.
       if (signedIn.error) { window.location.replace('/login?return=%2Fadmin'); return }
-      const loaded = await client.getSettings(controller.signal)
-      if (!alive.current) return
-      setSettings(loaded); setDrafts(old => ({ owner: old.owner, ...draftsFor(loaded) })); go('name')
-    } catch { if (alive.current && !controller.signal.aborted) { setProblem('The server could not be reached. Check your connection and try again.'); buddy.current?.wobble() } }
+      await claimed(controller.signal)
+    } catch (error) { if (alive.current && !(error instanceof DOMException && error.name === 'AbortError')) { setProblem('The server could not be reached. Check your connection and try again.'); buddy.current?.wobble() } }
     finally { requests.current.delete(controller) }
   }
 
@@ -221,9 +264,9 @@ export function Onboarding({ client, initial, expired: sessionEnded, finished }:
           return
         }
         case 'signIn': {
-          if (signInTrouble) { setProblem(signInTrouble); buddy.current?.wobble(); return }
-          const patch = instancePatch({ ...instanceDraft(settings), signIn: drafts.signIn }, settings).signIn
-          const saved = await attempt(async signal => { if (patch) await client.updateSettings({ signIn: patch }, signal); return record('signIn', 'done', signal) }, 'Those sign-in settings were not accepted. Check the Google client ID and secret.')
+          // Only the list of who may join is set here; the method itself was chosen, and proved, in the first step.
+          const changed = JSON.stringify(drafts.signIn.allowedEmails) !== JSON.stringify(settings.signIn?.allowedEmails ?? [])
+          const saved = await attempt(async signal => { if (changed) await client.updateSettings({ signIn: { allowedEmails: drafts.signIn.allowedEmails } }, signal); return record('signIn', 'done', signal) }, 'That list was not accepted. Each entry is an email address or a domain such as @example.com.')
           if (saved) { update({ signIn: instanceDraft(saved).signIn ?? EMPTY_SIGN_IN }); buddy.current?.nod(); forward() }
           return
         }
@@ -263,7 +306,7 @@ export function Onboarding({ client, initial, expired: sessionEnded, finished }:
   }
 
   /* ── What each step can do right now ───────────────────────────────────── */
-  const canContinue = step === 'claim' ? wait === 0
+  const canContinue = step === 'claim' ? wait === 0 && !waiting
     : step === 'language' ? languageCheck.state === 'connected'
     : step === 'speech' ? speechCheck.state === 'connected'
     : step === 'models' ? drafts.models !== null
@@ -273,12 +316,12 @@ export function Onboarding({ client, initial, expired: sessionEnded, finished }:
 
   const fields = (which: StepId): ReactNode => {
     switch (which) {
-      case 'claim': return <ClaimFields value={drafts.owner} disabled={busy || accepted} problems={ownerProblems} change={next => { update({ owner: { ...drafts.owner, ...next } }); setOwnerProblems({}); setProblem(null) }} />
+      case 'claim': return <ClaimFields value={drafts.owner} disabled={busy || accepted} problems={ownerProblems} googleNeedsHttps={googleNeedsHttps} origin={origin} change={next => { update({ owner: { ...drafts.owner, ...next } }); setOwnerProblems({}); setProblem(null) }} />
       case 'name': return <NameFields name={drafts.name} logo={drafts.logo} problem={nameProblem} change={next => { update(next); setNameProblem(null) }} />
       case 'language': return <LanguageFields provider={drafts.provider} keyValue={drafts.languageKey} check={languageCheck} saved={configured} change={next => { update({ ...(next.provider ? { provider: next.provider } : {}), ...(next.key !== undefined ? { languageKey: next.key } : {}) }); setProblem(null) }} />
       case 'speech': return <SpeechFields keyValue={drafts.speechKey} check={speechCheck} saved={configured('elevenlabs')} change={speechKey => { update({ speechKey }); setProblem(null) }} />
       case 'models': return settings && <ModelFields draft={drafts.models} settings={settings} catalogs={catalogs} available={configured} load={loadCatalog} change={models => { update({ models }); setProblem(null) }} />
-      case 'signIn': return signInSaved && <SignInFields draft={drafts.signIn} saved={signInSaved} change={signIn => { update({ signIn }); setProblem(null) }} />
+      case 'signIn': return signInSaved && <SignInFields draft={drafts.signIn} owner={drafts.owner.email} change={signIn => { update({ signIn }); setProblem(null) }} />
       case 'storage': return storageSaved && <StorageFields draft={drafts.storage} saved={storageSaved} test={storageTest} runTest={() => void runStorageTest()} problem={storageTrouble}
         change={next => { update({ storage: { ...drafts.storage, ...next } }); setStorageTest({ state: 'idle' }); setProblem(null) }} />
       case 'apps': return <AppsFields downloads={downloads} address={serverAddress(origin)} retry={() => void loadDownloads()} />
@@ -289,14 +332,20 @@ export function Onboarding({ client, initial, expired: sessionEnded, finished }:
     {/* Focus lands here when the step changes; Enter from here continues, as it does from a field. */}
     <h1 ref={leaving ? undefined : title} tabIndex={-1} onKeyDown={event => { if (event.key === 'Enter' && event.target === event.currentTarget && !leaving && canContinue) { event.preventDefault(); void submit() } }}>{STEP_TITLES[which]}</h1>
     <p className="onb-help">{HELP[which]}</p>
+    {which === 'claim' && transport === 'public-http' && <div className="onb-transport"><TransportWarning transport={transport} /></div>}
     {fields(which)}
+    {!leaving && which === 'claim' && waiting && <div className="onb-waiting" role="status">
+      <p><span className="spinner" aria-hidden="true" /><strong>Waiting for Google.</strong> Sign in to Google in the window that opened; this page carries on by itself.</p>
+      <p className="onb-hint">{GOOGLE_STUCK_HINT}</p>
+      <button type="button" className="quiet-button" onClick={() => proving.current?.abort()}>Cancel</button>
+    </div>}
     {!leaving && problem && <p className="onb-problem is-step" role="alert">{problem}</p>}
     <div className="onb-actions">
       {!leaving && previous && <button type="button" className="quiet-button onb-back" disabled={busy || celebrating} onClick={() => go(previous)}><svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><path d="M6.5 1.5 3 5l3.5 3.5" /></svg>Back</button>}
       <span className="onb-actions-end">
         {OPTIONAL_STEPS.includes(which) && <button type="button" className="quiet-button" disabled={leaving || busy} onClick={() => void submit(true)}>Skip for now</button>}
         <button type="submit" className="button is-large onb-continue" disabled={leaving || busy || celebrating || !canContinue} data-busy={busy ? '' : undefined}>
-          <span>{waitingOn ?? CONTINUE[which] ?? 'Continue'}</span>
+          <span>{waitingOn ?? (which === 'claim' && drafts.owner.method === 'google' ? 'Continue with Google' : CONTINUE[which]) ?? 'Continue'}</span>
           {busy ? <span className="spinner" aria-hidden="true" /> : <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><path d="M2 6h7.5M6.5 2.7 9.8 6 6.5 9.3" /></svg>}
         </button>
       </span>
@@ -310,7 +359,7 @@ export function Onboarding({ client, initial, expired: sessionEnded, finished }:
   const view: ScreenView = {
     step, host: serverHost(origin),
     instanceName: step === 'claim' ? '' : drafts.name, instanceLogo: drafts.logo,
-    claim: { typed: Math.min(1, drafts.owner.code.trim().length / 32), accepted, owner: drafts.owner.name },
+    claim: { accepted, owner: drafts.owner.name, method: drafts.owner.method, email: drafts.owner.email.trim(), waiting },
     language: { provider: drafts.provider, state: languageCheck.state === 'idle' ? 'waiting' : languageCheck.state },
     speech: { state: speechCheck.state === 'idle' ? 'waiting' : speechCheck.state },
     models: modelCards ? [
@@ -319,7 +368,7 @@ export function Onboarding({ client, initial, expired: sessionEnded, finished }:
       { role: 'Speech to text', logo: modelCards.speech.provider, name: modelLabel(modelCards.speech, lookup) },
       { role: 'Live transcription', logo: modelCards.live ? modelCards.live.provider : null, name: modelCards.live ? modelLabel(modelCards.live, lookup) : 'Off', live: !!modelCards.live },
     ] : [],
-    signIn: { password: drafts.signIn.password, google: drafts.signIn.google, allowed: drafts.signIn.allowedEmails },
+    signIn: { password: !google, google, allowed: [...(drafts.owner.email ? [drafts.owner.email] : []), ...drafts.signIn.allowedEmails] },
     storage: { backend: drafts.storage.backend, bucket: drafts.storage.bucket, test: storageTest.state === 'testing' ? 'testing' : storageTest.state === 'done' ? (storageTest.result.ok ? 'ok' : 'failed') : 'idle' },
     apps: { mac: downloads.state === 'ready' && !!downloads.downloads.mac, iphone: downloads.state === 'ready' && !!downloads.downloads.iosAppStoreUrl },
   }

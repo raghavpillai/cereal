@@ -6,7 +6,8 @@
     ".": "./src/index.ts",
     "./api": "./src/api.ts",
     "./client": "./src/client.ts",
-    "./live": "./src/live.ts"
+    "./live": "./src/live.ts",
+    "./transport": "./src/transport.ts"
   },
   "scripts": {
     "check": "tsc --noEmit",

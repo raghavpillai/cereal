@@ -185,6 +185,9 @@ impl LineWrapper {
         // e.g. `a-b`, `var_name`, `I'm`, '@mention`, `#hashtag`, `100%`, `3.1415`,
         // `2^3`, `a~b`, `a=1`, `Self::new`, etc.
         matches!(c, '-' | '_' | '.' | '\'' | '$' | '%' | '@' | '#' | '^' | '~' | ',' | '=' | ':') ||
+        // The typographic apostrophe, as in `what’s`: a line must not end in
+        // the middle of such a word any more than in `what's`.
+        c == '\u{2019}' ||
         // `⋯` character is special used in Zed, to keep this at the end of the line.
         matches!(c, '⋯')
     }

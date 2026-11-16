@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
-import { AdminClientError } from '../../lib/admin-client'
+import { AdminClientError } from '../../lib/client-error'
 
 export function Notice({ children, error = false }: { children: ReactNode; error?: boolean }) {
   return <div className={`admin-notice${error ? ' is-error' : ''}`} role={error ? 'alert' : 'status'}>{children}</div>

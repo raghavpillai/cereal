@@ -44,7 +44,6 @@ pub enum Menu {
     MoveTo,
     NewFolder,
     Shortcuts,
-    Voice,
     /// Right-click menu of a note row in a list.
     NoteRow,
 }
@@ -172,6 +171,8 @@ pub struct Cereal {
     pub updates: crate::update_view::Updates,
     /// The first-run welcome: its step, and what this Mac has allowed.
     pub onboarding: crate::onboarding_view::Onboarding,
+    /// The menu bar item (see `menubar.rs`).
+    pub menu_bar: crate::menubar::State,
     pub focus: FocusHandle,
     pub _subscriptions: Vec<Subscription>,
     /// Registered with the window on the first frame: see `render`.
@@ -190,6 +191,7 @@ actions!(
         CloseWindow,
         Hide,
         Quit,
+        QuitCompletely,
         OpenSettings,
         CheckForUpdates,
         FocusNext,
@@ -480,6 +482,7 @@ impl Cereal {
             links,
             updates: Default::default(),
             onboarding: crate::onboarding_view::Onboarding::new(welcome, cx),
+            menu_bar: Default::default(),
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
             focus_lost: None,
@@ -526,6 +529,9 @@ impl Cereal {
         self.search_open = false;
         if screen == Screen::Home {
             self.connect_server(cx);
+        }
+        if screen == Screen::Settings {
+            self.refresh_login_item();
         }
         cx.notify();
     }
@@ -821,6 +827,8 @@ impl Cereal {
             return;
         }
         self.search_results_query = query;
+        // Each search is read from its first result.
+        crate::lazy::scroll("search-results").set_offset(Point::default());
         self.navigate(Screen::SearchResults, cx);
     }
     pub fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1074,6 +1082,15 @@ impl Render for Cereal {
             if self.current_note.is_none() && self.list_shown != Some((list_key, folder)) {
                 self.list_shown = Some((list_key, folder));
                 self.stage.mark("page");
+                // The lists of notes share one scroll position. A list that
+                // is shown anew starts at its top, not where the one before
+                // it was left.
+                if matches!(
+                    self.screen,
+                    Screen::Home | Screen::MyNotes | Screen::Folder(_) | Screen::Favorites
+                ) {
+                    self.home_scroll.set_offset(Point::default());
+                }
             }
         }
         let root = div()
@@ -1128,7 +1145,14 @@ impl Render for Cereal {
                     }
                 }
             }))
-            .on_action(cx.listener(|this, _: &Quit, _, cx| this.quit_after_audio_stop(cx)))
+            // "Quit" leaves Cereal in the menu bar; "Quit Completely" exits
+            // (see `menubar::quit_plan`).
+            .on_action(cx.listener(|this, _: &Quit, window, cx| {
+                this.quit_requested(crate::menubar::QuitKind::Quit, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &QuitCompletely, window, cx| {
+                this.quit_requested(crate::menubar::QuitKind::Completely, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &CheckForUpdates, _, cx| this.check_for_updates(cx)))
             .on_action(cx.listener(|_, _: &CloseWindow, window, cx| {
                 crate::pill::hide_main_window(window, cx)
@@ -1241,6 +1265,10 @@ impl Render for Cereal {
                 s.child(crate::motion::pop(
                     div()
                         .id("toast-notification")
+                        // What is under a notice is not under the pointer:
+                        // no row lights up through it and no tooltip of a
+                        // control behind it shows on top of it.
+                        .occlude()
                         .absolute()
                         // A toast sits above the update notice while that is up.
                         .bottom(px(if update_pose.visible {
@@ -1347,6 +1375,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-w", CloseWindow, Some("Cereal")),
         KeyBinding::new("cmd-h", Hide, Some("Cereal")),
         KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-alt-q", QuitCompletely, None),
     ]);
 }
 

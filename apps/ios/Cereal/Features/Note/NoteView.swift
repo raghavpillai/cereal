@@ -121,6 +121,8 @@ struct NoteView: View {
         }
         .toolbarVisibility(.visible, for: .navigationBar)
         .navigationBarBackButtonHidden()
+        // The keyboard here belongs to the "Edit title" alert; the bar stays where it is.
+        .ignoresSafeArea(.keyboard, edges: .bottom)
         .sensoryFeedback(.success, trigger: copied)
         .sheet(isPresented: $showTranscript) { TranscriptView(note: note) }
         .sheet(isPresented: $editingNotes) { EditNotesSheet(note: note) }

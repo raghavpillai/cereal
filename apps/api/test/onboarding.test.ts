@@ -44,7 +44,8 @@ function fixture(environment: Record<string, string> = {}) {
   const settings = async (account: Account = "owner") => await (await call(account, "/admin/settings")).json() as AdminSettingsDTO
   return { admin, store, call, settings, advance: (ms: number) => { time += ms } }
 }
-const nothingDone = { owner: true, name: false, language: false, speech: false, models: false, signIn: false, storage: false }
+// A new server signs in with email and password, where "who may join" is not a step: it reads as done.
+const nothingDone = { owner: true, name: false, language: false, speech: false, models: false, signIn: true, storage: false }
 
 test("a fresh server reports setup as not finished, with every step read from what is stored", async () => {
   const f = fixture()
@@ -166,7 +167,7 @@ test("only the owner can show setup again; restarting forgets confirmations, not
   const restarted = await f.call("owner", "/admin/onboarding/restart", "POST")
   expect(restarted.status).toBe(200)
   const after = await restarted.json() as AdminSettingsDTO
-  expect(after.onboarding).toEqual({ completedAt: null, steps: { owner: true, name: true, language: true, speech: true, models: false, signIn: false, storage: false } })
+  expect(after.onboarding).toEqual({ completedAt: null, steps: { owner: true, name: true, language: true, speech: true, models: false, signIn: true, storage: false } })
   expect(after.instanceName).toBe("Harbour Studio")
   expect(after.providers.filter(provider => provider.configured).map(provider => provider.id).sort()).toEqual(["elevenlabs", "openai"])
   // And it can be finished again.
@@ -189,7 +190,7 @@ test("the public sign-in methods say whether the server still has to be claimed"
   const f = fixture()
   const methods = await (await f.call(null, "/auth/methods")).json()
   // Without an account service there is no owner account to wait for.
-  expect(methods).toEqual({ password: true, google: false, instanceName: "Cereal", setupRequired: false })
+  expect(methods).toEqual({ password: true, google: false, instanceName: "Cereal", setupRequired: false, transport: "secure" })
 })
 
 test("claiming is limited to a few attempts a minute per client", async () => {

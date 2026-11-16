@@ -30,7 +30,9 @@ final class SignInDiscoveryModel {
     }
 
     /// The address in the field is now `text`. `again` asks about the same address once more.
-    func check(_ text: String, again: Bool = false) {
+    /// `typed` is false for an address nobody is typing (the one the sheet opens with): it is
+    /// asked about at once, so the form's rows arrive while the sheet does, not after it has landed.
+    func check(_ text: String, again: Bool = false, typed: Bool = true) {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard again || text != address else { return }
         address = text
@@ -41,7 +43,7 @@ final class SignInDiscoveryModel {
         state = .idle
         guard !text.isEmpty else { task = nil; return }
         task = Task { [weak self, pause, methods] in
-            try? await Task.sleep(for: pause)
+            if typed { try? await Task.sleep(for: pause) }
             guard let self, asked == self.question else { return }
             let target: InstanceURL
             do { target = try InstanceURL(text) }
@@ -80,6 +82,13 @@ struct ConnectionView: View {
 
     private var address: String { instance.trimmingCharacters(in: .whitespacesAndNewlines) }
 
+    /// The address field. Each change is handed to discovery as the field makes
+    /// it, not when the view next compares values: a character typed while the
+    /// form was redrawing for an earlier answer was otherwise never asked about.
+    private var addressField: Binding<String> {
+        Binding(get: { instance }, set: { instance = $0; discovery.check($0) })
+    }
+
     private func completeConnection() {
         if case .loaded = server.state {
             mode.isDemo = false
@@ -113,11 +122,15 @@ struct ConnectionView: View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("https://notes.example.com", text: $instance)
+                    TextField("https://notes.example.com", text: addressField)
                         .textContentType(.URL).keyboardType(.URL)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                         .accessibilityLabel("Instance URL")
                         .accessibilityIdentifier("connection-instance")
+                    if (try? InstanceURL(address)).map(ServerAddress.kind(of:)) == .privateNetwork {
+                        Text(ServerAddress.notEncrypted).font(.footnote).foregroundStyle(Theme.textSecondary)
+                            .accessibilityIdentifier("connection-not-encrypted")
+                    }
                     switch discovery.state {
                     case .idle: EmptyView()
                     case .checking:
@@ -141,7 +154,10 @@ struct ConnectionView: View {
                             } label: {
                                 HStack { Text("Sign in"); Spacer(); if busy && !inBrowser { ProgressView() } }
                             }.buttonStyle(.glassProminent).tint(Theme.accent)
+                                .foregroundStyle(busy || email.isEmpty || password.isEmpty || address.isEmpty ? Theme.textTertiary : Theme.onAccent)
                                 .disabled(busy || email.isEmpty || password.isEmpty || address.isEmpty)
+                                // The line under the button starts with the others, not at the button's own text.
+                                .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] }
                         }
                         if let label = methods.browserLabel {
                             if methods.password {
@@ -153,12 +169,14 @@ struct ConnectionView: View {
                                 Button(action: continueInBrowser) {
                                     HStack { Text(label); Spacer(); if busy { ProgressView() } }
                                 }.buttonStyle(.glassProminent).tint(Theme.accent)
+                                    .foregroundStyle(busy ? Theme.textTertiary : Theme.onAccent)
+                                    .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] }
                                     .accessibilityIdentifier("connection-browser")
                             }
                         }
                     }
                 } header: { Text("Your server") } footer: {
-                    Text("Sign in to your account on your self-hosted server. Your session is kept in this device’s Keychain. Passwords are never saved. HTTPS is required except for localhost development.")
+                    Text("Sign in to your account on your self-hosted server. Your session is kept in this device’s Keychain. Passwords are never saved. Use HTTPS, or plain HTTP on a private network.")
                 }
                 DisclosureGroup("Advanced: access token", isExpanded: $advanced) {
                     SecureField("Instance access token", text: $token)
@@ -213,7 +231,10 @@ struct ConnectionView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() }.disabled(busy) } }
             .interactiveDismissDisabled(busy)
-            .onAppear { instance = router.signInAddress ?? server.instance?.description ?? "" }
+            .onAppear {
+                instance = router.signInAddress ?? server.instance?.description ?? ""
+                discovery.check(instance, typed: false)
+            }
             .onDisappear { password = ""; token = ""; router.signInAddress = nil }
         }
         .glassSheet()

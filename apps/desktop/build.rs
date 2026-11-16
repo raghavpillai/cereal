@@ -83,6 +83,7 @@ fn main() {
             "-emit-object",
             "native/MeetingAudio.swift",
             "native/AudioWatchdog.swift",
+            "native/MenuBar.swift",
             "-o",
         ])
         .arg(&swift_object));
@@ -96,7 +97,15 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", swift_lib.display());
     println!("cargo:rustc-link-search=native={sdk}/usr/lib/swift");
     println!("cargo:rustc-link-lib=static=meeting_audio");
-    for framework in ["AVFoundation", "AudioToolbox", "CoreAudio", "Foundation"] {
+    for framework in [
+        "AVFoundation",
+        "AppKit",
+        "AudioToolbox",
+        "CoreAudio",
+        "Foundation",
+        "ServiceManagement",
+        "UserNotifications",
+    ] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
     println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");

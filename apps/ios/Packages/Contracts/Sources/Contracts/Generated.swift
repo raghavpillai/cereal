@@ -107,6 +107,10 @@
 //   let onboardingStepsDTO = try? JSONDecoder().decode(OnboardingStepsDTO.self, from: jsonData)
 //   let onboardingDTO = try? JSONDecoder().decode(OnboardingDTO.self, from: jsonData)
 //   let onboardingStepInput = try? JSONDecoder().decode(OnboardingStepInput.self, from: jsonData)
+//   let googleVerificationInput = try? JSONDecoder().decode(GoogleVerificationInput.self, from: jsonData)
+//   let googleVerificationStartDTO = try? JSONDecoder().decode(GoogleVerificationStartDTO.self, from: jsonData)
+//   let googleVerificationStatusDTO = try? JSONDecoder().decode(GoogleVerificationStatusDTO.self, from: jsonData)
+//   let switchToPasswordInput = try? JSONDecoder().decode(SwitchToPasswordInput.self, from: jsonData)
 //   let liveHelloMessage = try? JSONDecoder().decode(LiveHelloMessage.self, from: jsonData)
 //   let liveMarkMessage = try? JSONDecoder().decode(LiveMarkMessage.self, from: jsonData)
 //   let liveReadyMessage = try? JSONDecoder().decode(LiveReadyMessage.self, from: jsonData)
@@ -932,17 +936,20 @@ public struct ManualParticipantInput: Codable, Sendable {
 public struct GoogleStatusDTO: Codable, Sendable {
     public let configured: Bool
     public let connections: [GoogleConnectionDTO]
+    public let needsHttps: Bool?
     public let redirectUri: String?
 
     public enum CodingKeys: String, CodingKey {
         case configured = "configured"
         case connections = "connections"
+        case needsHttps = "needsHttps"
         case redirectUri = "redirectUri"
     }
 
-    public init(configured: Bool, connections: [GoogleConnectionDTO], redirectUri: String?) {
+    public init(configured: Bool, connections: [GoogleConnectionDTO], needsHttps: Bool?, redirectUri: String?) {
         self.configured = configured
         self.connections = connections
+        self.needsHttps = needsHttps
         self.redirectUri = redirectUri
     }
 }
@@ -1313,20 +1320,29 @@ public struct AuthMethodsDTO: Codable, Sendable {
     public let instanceName: String
     public let password: Bool
     public let setupRequired: Bool?
+    public let transport: ServerTransport?
 
     public enum CodingKeys: String, CodingKey {
         case google = "google"
         case instanceName = "instanceName"
         case password = "password"
         case setupRequired = "setupRequired"
+        case transport = "transport"
     }
 
-    public init(google: Bool, instanceName: String, password: Bool, setupRequired: Bool?) {
+    public init(google: Bool, instanceName: String, password: Bool, setupRequired: Bool?, transport: ServerTransport?) {
         self.google = google
         self.instanceName = instanceName
         self.password = password
         self.setupRequired = setupRequired
+        self.transport = transport
     }
+}
+
+public enum ServerTransport: String, Codable, Sendable {
+    case publichttp = "public-http"
+    case secure = "secure"
+    case serverTransportPrivate = "private"
 }
 
 // MARK: - AppHandoffInput
@@ -1574,6 +1590,7 @@ public struct SignInSettingsDTO: Codable, Sendable {
     public let google: Bool
     public let googleClientId: String?
     public let googleClientSecretSet: Bool
+    public let googleNeedsHttps: Bool?
     public let googleRedirectUris: [String]
     public let password: Bool
 
@@ -1582,15 +1599,17 @@ public struct SignInSettingsDTO: Codable, Sendable {
         case google = "google"
         case googleClientId = "googleClientId"
         case googleClientSecretSet = "googleClientSecretSet"
+        case googleNeedsHttps = "googleNeedsHttps"
         case googleRedirectUris = "googleRedirectUris"
         case password = "password"
     }
 
-    public init(allowedEmails: [String], google: Bool, googleClientId: String?, googleClientSecretSet: Bool, googleRedirectUris: [String], password: Bool) {
+    public init(allowedEmails: [String], google: Bool, googleClientId: String?, googleClientSecretSet: Bool, googleNeedsHttps: Bool?, googleRedirectUris: [String], password: Bool) {
         self.allowedEmails = allowedEmails
         self.google = google
         self.googleClientId = googleClientId
         self.googleClientSecretSet = googleClientSecretSet
+        self.googleNeedsHttps = googleNeedsHttps
         self.googleRedirectUris = googleRedirectUris
         self.password = password
     }
@@ -2766,6 +2785,71 @@ public enum OnboardingStep: String, Codable, Sendable {
     case storage = "storage"
 }
 
+// MARK: - GoogleVerificationInput
+public struct GoogleVerificationInput: Codable, Sendable {
+    public let clientId: String
+    public let clientSecret: String
+
+    public enum CodingKeys: String, CodingKey {
+        case clientId = "clientId"
+        case clientSecret = "clientSecret"
+    }
+
+    public init(clientId: String, clientSecret: String) {
+        self.clientId = clientId
+        self.clientSecret = clientSecret
+    }
+}
+
+// MARK: - GoogleVerificationStartDTO
+public struct GoogleVerificationStartDTO: Codable, Sendable {
+    public let authorizationUrl: String
+
+    public enum CodingKeys: String, CodingKey {
+        case authorizationUrl = "authorizationUrl"
+    }
+
+    public init(authorizationUrl: String) {
+        self.authorizationUrl = authorizationUrl
+    }
+}
+
+// MARK: - GoogleVerificationStatusDTO
+public struct GoogleVerificationStatusDTO: Codable, Sendable {
+    public let reason: String?
+    public let state: State
+
+    public enum CodingKeys: String, CodingKey {
+        case reason = "reason"
+        case state = "state"
+    }
+
+    public init(reason: String?, state: State) {
+        self.reason = reason
+        self.state = state
+    }
+}
+
+public enum State: String, Codable, Sendable {
+    case done = "done"
+    case failed = "failed"
+    case none = "none"
+    case pending = "pending"
+}
+
+// MARK: - SwitchToPasswordInput
+public struct SwitchToPasswordInput: Codable, Sendable {
+    public let password: String
+
+    public enum CodingKeys: String, CodingKey {
+        case password = "password"
+    }
+
+    public init(password: String) {
+        self.password = password
+    }
+}
+
 // MARK: - LiveHelloMessage
 public struct LiveHelloMessage: Codable, Sendable {
     public let captureId: String
@@ -3371,12 +3455,14 @@ extension GoogleStatusDTO {
         case configured
         case redirectUri
         case connections
+        case needsHttps
     }
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: ContractWireKeys.self)
         try container.encode(configured, forKey: .configured)
         try container.encode(redirectUri, forKey: .redirectUri)
         try container.encode(connections, forKey: .connections)
+        try container.encodeIfPresent(needsHttps, forKey: .needsHttps)
     }
 }
 
@@ -3490,6 +3576,7 @@ extension SignInSettingsDTO {
         case googleClientId
         case googleClientSecretSet
         case googleRedirectUris
+        case googleNeedsHttps
     }
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: ContractWireKeys.self)
@@ -3499,6 +3586,7 @@ extension SignInSettingsDTO {
         try container.encode(googleClientId, forKey: .googleClientId)
         try container.encode(googleClientSecretSet, forKey: .googleClientSecretSet)
         try container.encode(googleRedirectUris, forKey: .googleRedirectUris)
+        try container.encodeIfPresent(googleNeedsHttps, forKey: .googleNeedsHttps)
     }
 }
 
@@ -3891,5 +3979,18 @@ extension OnboardingDTO {
         var container = encoder.container(keyedBy: ContractWireKeys.self)
         try container.encode(completedAt, forKey: .completedAt)
         try container.encode(steps, forKey: .steps)
+    }
+}
+
+
+extension GoogleVerificationStatusDTO {
+    private enum ContractWireKeys: String, CodingKey {
+        case state
+        case reason
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: ContractWireKeys.self)
+        try container.encode(state, forKey: .state)
+        try container.encode(reason, forKey: .reason)
     }
 }

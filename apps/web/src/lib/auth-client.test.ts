@@ -12,14 +12,22 @@ describe('sign-in page helpers', () => {
   test('sign-in methods come from the public endpoint without credentials; a server from before them means password only', async () => {
     let credentials = ''
     const methods = await fetchAuthMethods(undefined, transport((request, init) => { credentials = init.credentials ?? ''; expect(new URL(request.url).pathname).toBe('/api/v1/auth/methods'); return Response.json({ password: false, google: true, instanceName: 'Product studio' }) }))
-    expect(methods).toEqual({ password: false, google: true, instanceName: 'Product studio', setupRequired: false })
+    expect(methods).toEqual({ password: false, google: true, instanceName: 'Product studio', setupRequired: false, transport: 'secure' })
     expect(credentials).toBe('omit')
-    expect(await fetchAuthMethods(undefined, transport(() => Response.json({ error: 'not_found' }, { status: 404 })))).toEqual({ password: true, google: false, instanceName: 'Cereal', setupRequired: false })
+    expect(await fetchAuthMethods(undefined, transport(() => Response.json({ error: 'not_found' }, { status: 404 })))).toEqual({ password: true, google: false, instanceName: 'Cereal', setupRequired: false, transport: 'secure' })
     // Anything unexpected in the answer never turns a method on by accident.
-    expect(await fetchAuthMethods(undefined, transport(() => Response.json({ google: 'yes', instanceName: '', setupRequired: 'yes' })))).toEqual({ password: true, google: false, instanceName: 'Cereal', setupRequired: false })
+    expect(await fetchAuthMethods(undefined, transport(() => Response.json({ google: 'yes', instanceName: '', setupRequired: 'yes' })))).toEqual({ password: true, google: false, instanceName: 'Cereal', setupRequired: false, transport: 'secure' })
     // A server nobody has claimed says so, and only a plain `true` counts.
     expect((await fetchAuthMethods(undefined, transport(() => Response.json({ password: true, google: false, instanceName: 'Cereal', setupRequired: true })))).setupRequired).toBe(true)
     expect(fetchAuthMethods(undefined, transport(() => Response.json({}, { status: 503 })))).rejects.toThrow()
+    // How the server is reached is the server's word; without it, or with nonsense, the page's own address is judged by the same rules.
+    const reached = async (body: unknown, address?: string) => (await fetchAuthMethods(undefined, transport(() => Response.json(body)), address)).transport
+    expect(await reached({ transport: 'public-http' }, 'https://notes.example.test')).toBe('public-http')
+    expect(await reached({ transport: 'private' }, 'https://notes.example.test')).toBe('private')
+    expect(await reached({}, 'http://10.30.1.77:3000')).toBe('private')
+    expect(await reached({ transport: 'encrypted, honest' }, 'http://notes.example.test')).toBe('public-http')
+    expect(await reached({}, 'http://localhost:3000')).toBe('secure')
+    expect((await fetchAuthMethods(undefined, transport(() => Response.json({ error: 'not_found' }, { status: 404 })), 'http://192.168.1.20:3000')).transport).toBe('private')
   })
 
   test('each refusal code has its own sentence, and an unknown code shows nothing', () => {
@@ -63,6 +71,8 @@ describe('sign-in page helpers', () => {
     const url = new URL(appCallbackURL(code, 'state-_value', origin))
     expect(url.protocol).toBe('cereal:'); expect(url.host).toBe('auth')
     expect(Object.fromEntries(url.searchParams)).toEqual({ code, state: 'state-_value', server: origin })
+    // A server on plain HTTP is handed over as it is: the app must come back to the same address.
+    expect(new URL(appCallbackURL(code, 'state-_value', 'http://10.30.1.77:3000')).searchParams.get('server')).toBe('http://10.30.1.77:3000')
     expect(appCallbackURL('a&b=c', 's&t', 'https://x.test/?a=1&b=2')).toBe('cereal://auth?code=a%26b%3Dc&state=s%26t&server=https%3A%2F%2Fx.test%2F%3Fa%3D1%26b%3D2')
   })
 

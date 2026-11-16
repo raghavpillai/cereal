@@ -84,6 +84,24 @@ thread_local! {
     static COLUMNS: RefCell<HashMap<&'static str, Column>> = RefCell::new(HashMap::new());
 }
 
+/// What a column last knew, for the scripted tour: how many heights it has
+/// measured, their sum and where the column starts.
+#[cfg(debug_assertions)]
+pub fn describe(name: &'static str) -> String {
+    COLUMNS.with(|columns| {
+        columns.borrow().get(name).map_or("no such column".into(), |column| {
+            let mut heights: Vec<f32> = column.heights.values().copied().collect();
+            heights.sort_by(f32::total_cmp);
+            format!(
+                "{} heights {:?}, top {}",
+                heights.len(),
+                heights,
+                column.top
+            )
+        })
+    })
+}
+
 /// A key for one item: everything that can change its height.
 pub fn key(parts: impl Hash) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -283,6 +301,16 @@ pub fn estimated(
     )
 }
 
+/// Where the viewport starts within a column `total` tall, for choosing what
+/// to build. A wheel event moves the scroll offset by whatever it carries and
+/// the container only brings it back into range when it is next laid out,
+/// after the column has been built: an offset far past either end would
+/// otherwise select no items at all, and the frame that then shows the end
+/// of the list would show an empty spacer in its place.
+fn within(start: f32, total: f32, view_height: f32) -> f32 {
+    start.clamp(-view_height, (total - view_height).max(-view_height))
+}
+
 /// How an item is to be built this frame.
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -351,7 +379,13 @@ fn windowed(
                     None => column.reveal = None,
                 }
             }
-            let start = scrolled - column.top;
+            let total: f32 = heights.iter().flatten().sum::<f32>()
+                + gap * keys.len().saturating_sub(1) as f32;
+            let start = if to_end {
+                (total - view_height).max(0.)
+            } else {
+                within(scrolled - column.top, total, view_height)
+            };
             let visible = start - OVERSCAN..start + view_height + OVERSCAN;
             let plan = slots(&heights, gap, visible);
             return (plan, vec![Mode::Measured; keys.len()], again);
@@ -423,7 +457,7 @@ fn windowed(
         let start = if to_end {
             (total - view_height).max(0.)
         } else {
-            scrolled - column.top
+            within(scrolled - column.top, total, view_height)
         };
         let visible = start - OVERSCAN..start + view_height + OVERSCAN;
         let known: Vec<Option<f32>> = heights.iter().copied().map(Some).collect();
@@ -573,6 +607,19 @@ mod tests {
         let plan = slots(&heights, 0., 0.0..200.);
         assert!(plan.contains(&Slot::Item(90)));
         assert!(!plan.contains(&Slot::Item(60)));
+    }
+
+    #[test]
+    fn an_offset_past_either_end_still_builds_that_end() {
+        // 500 rows of 48 px in a 800 px viewport: the last screenful starts
+        // at 23,200.
+        assert_eq!(within(900_000., 24_000., 800.), 23_200.);
+        assert_eq!(within(-900_000., 24_000., 800.), -800.);
+        // In range, the offset is what it is, also above the column's top.
+        assert_eq!(within(1_000., 24_000., 800.), 1_000.);
+        assert_eq!(within(-300., 24_000., 800.), -300.);
+        // A column shorter than the viewport.
+        assert_eq!(within(5_000., 200., 800.), -600.);
     }
 
     #[test]

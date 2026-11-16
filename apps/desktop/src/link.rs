@@ -10,9 +10,11 @@ pub const SCHEME: &str = "cereal";
 const MAXIMUM_LENGTH: usize = 2048;
 
 /// Where a Cereal server lives: scheme, host and port, with nothing after
-/// them. HTTPS, or HTTP on this Mac's own loopback addresses for
-/// development. The host is kept in its ASCII form, so a look-alike name is
-/// shown as what it is.
+/// them. HTTPS, or plain HTTP for a server on a private network (what that
+/// means for a given address is said by [`ServerOrigin::transport`]). The
+/// scheme is part of the origin: `http://host` and `https://host` are two
+/// different servers. The host is kept in its ASCII form, so a look-alike
+/// name is shown as what it is.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ServerOrigin {
     secure: bool,
@@ -64,6 +66,18 @@ impl ServerOrigin {
         }
     }
 
+    /// How what is sent to this server travels.
+    pub fn transport(&self) -> Transport {
+        if self.secure {
+            return Transport::Secure;
+        }
+        match host_reach(&self.host) {
+            Reach::Loopback => Transport::Secure,
+            Reach::Private => Transport::Private,
+            Reach::Public => Transport::PublicHttp,
+        }
+    }
+
     /// `scheme://host[:port]`, with no trailing slash.
     pub fn url(&self) -> String {
         format!(
@@ -71,6 +85,119 @@ impl ServerOrigin {
             if self.secure { "https" } else { "http" },
             self.display_host()
         )
+    }
+}
+
+/// How what is sent to a server address travels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    /// HTTPS, or this Mac talking to itself.
+    Secure,
+    /// Plain HTTP to an address that only exists on a private network: a
+    /// private or link-local IP address, a name under `.local`, `.internal`,
+    /// `.lan` or `.home.arpa`, or a bare name with no dot in it.
+    Private,
+    /// Plain HTTP to anything else.
+    PublicHttp,
+}
+
+impl Transport {
+    /// What is said under the field the address is typed in, if anything.
+    pub fn note(self) -> Option<&'static str> {
+        match self {
+            Transport::Secure => None,
+            Transport::Private => Some("Not encrypted. Fine on a private network."),
+            Transport::PublicHttp => Some(
+                "This address is not encrypted. Your password and notes would travel in the clear.",
+            ),
+        }
+    }
+
+    /// Whether [`Transport::note`] is a warning rather than a remark.
+    pub fn warns(self) -> bool {
+        self == Transport::PublicHttp
+    }
+}
+
+/// How a server address a person typed would travel, whatever path follows
+/// it. `None` while it is not an address yet.
+pub fn address_transport(text: &str) -> Option<Transport> {
+    ServerOrigin::of_server(text.trim().trim_end_matches('/')).map(|origin| origin.transport())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reach {
+    Loopback,
+    Private,
+    Public,
+}
+
+/// Where a host (lower-case ASCII, an IPv6 address without its brackets) can
+/// be: on this Mac, on a private network, or anywhere. Anything that reads
+/// as a number but is not a plain dotted IPv4 address (`0x7f.1`, `010.0.0.1`,
+/// `167772161`) is taken to be anywhere: other software reads those forms as
+/// addresses this function would have to guess at.
+fn host_reach(host: &str) -> Reach {
+    if host.contains(':') {
+        return match host.parse::<std::net::Ipv6Addr>() {
+            Ok(address) => match address.to_ipv4_mapped() {
+                Some(mapped) => ipv4_reach(mapped.octets()),
+                None if address.is_loopback() => Reach::Loopback,
+                // fc00::/7 (unique local) and fe80::/10 (link-local).
+                None if address.segments()[0] & 0xfe00 == 0xfc00
+                    || address.segments()[0] & 0xffc0 == 0xfe80 =>
+                {
+                    Reach::Private
+                }
+                None => Reach::Public,
+            },
+            Err(_) => Reach::Public,
+        };
+    }
+    let last = host.rsplit('.').next().unwrap_or("");
+    if !last.is_empty() && (last.bytes().all(|byte| byte.is_ascii_digit()) || last.starts_with("0x")) {
+        return dotted_ipv4(host).map_or(Reach::Public, ipv4_reach);
+    }
+    if host == "localhost" {
+        return Reach::Loopback;
+    }
+    let private_name = !host.contains('.')
+        || [".local", ".internal", ".lan", ".home.arpa"]
+            .iter()
+            .any(|suffix| host.ends_with(suffix) && host.len() > suffix.len());
+    if private_name {
+        Reach::Private
+    } else {
+        Reach::Public
+    }
+}
+
+/// `a.b.c.d` with four decimal numbers of 0 to 255 and no leading zeros.
+fn dotted_ipv4(host: &str) -> Option<[u8; 4]> {
+    let mut octets = [0u8; 4];
+    let mut labels = host.split('.');
+    for octet in &mut octets {
+        let label = labels.next()?;
+        if label.is_empty()
+            || label.len() > 3
+            || (label.len() > 1 && label.starts_with('0'))
+            || !label.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        *octet = label.parse().ok()?;
+    }
+    labels.next().is_none().then_some(octets)
+}
+
+fn ipv4_reach(octets: [u8; 4]) -> Reach {
+    match octets {
+        [127, ..] => Reach::Loopback,
+        // RFC 1918, carrier-grade NAT (100.64.0.0/10) and link-local.
+        [10, ..] | [192, 168, ..] | [169, 254, ..] => Reach::Private,
+        [172, second, ..] if (16..=31).contains(&second) => Reach::Private,
+        [100, second, ..] if (64..=127).contains(&second) => Reach::Private,
+        _ => Reach::Public,
     }
 }
 
@@ -266,9 +393,6 @@ fn split_origin(text: &str) -> Option<(ServerOrigin, &str)> {
             Some(number as u16)
         }
     };
-    if !secure && !matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1") {
-        return None;
-    }
     let port = port.filter(|port| *port != if secure { 443 } else { 80 });
     Some((ServerOrigin { secure, host, port }, rest))
 }
@@ -536,13 +660,20 @@ mod tests {
             "cereal://auth?code=&state=xyz",
             "cereal://auth?code=abc&code=def&state=xyz",
             "cereal://auth?code=abc&state=xyz&server=",
-            "cereal://auth?code=abc&state=xyz&server=http%3A%2F%2Fevil.example",
+            "cereal://auth?code=abc&state=xyz&server=http%3A%2F%2Fuser%4010.30.1.77",
+            "cereal://auth?code=abc&state=xyz&server=http%3A%2F%2F10.30.1.77%2Fbase",
             "cereal://auth?code=abc&state=xyz&server=https%3A%2F%2Fa.example&server=https%3A%2F%2Fb.example",
             "cereal://auth?code=a%20b&state=xyz",
             "cereal://auth?code=abc&state=x%0Ay",
         ] {
             assert_eq!(AppLink::parse(refused), None, "{refused}");
         }
+        // The server it names may be one reached over plain HTTP. Whether it
+        // is the server the sign-in was started for is the sign-in's to say.
+        assert!(matches!(
+            AppLink::parse("cereal://auth?code=abc&state=xyz&server=http%3A%2F%2F10.30.1.77%3A3000"),
+            Some(AppLink::Auth(AuthCallback { origin: Some(origin), .. })) if origin.url() == "http://10.30.1.77:3000"
+        ));
         let long = "a".repeat(1025);
         assert_eq!(AppLink::parse(&format!("cereal://auth?code={long}&state=xyz")), None);
         let long = "a".repeat(257);
@@ -580,32 +711,168 @@ mod tests {
     }
 
     #[test]
-    fn plain_http_is_only_for_this_macs_own_loopback() {
-        for refused in [
-            format!("http://notes.example.com/s/{TOKEN}"),
-            format!("http://192.168.1.10/s/{TOKEN}"),
-            format!("http://127.0.0.2/s/{TOKEN}"),
-            format!("http://localhost.example.com/s/{TOKEN}"),
-            format!("http://127.0.0.1.example.com/s/{TOKEN}"),
-            format!("http://127.0.0.1@evil.example/s/{TOKEN}"),
-            format!("http://evil.example#@127.0.0.1/s/{TOKEN}"),
-            format!("http://evil.example?@127.0.0.1/s/{TOKEN}"),
-        ] {
-            assert_eq!(AppLink::parse(&refused), None, "{refused}");
-            assert_eq!(AppLink::parse(&app_shared(&refused)), None, "{refused}");
-        }
+    fn plain_http_links_are_read_for_any_host_and_tricks_are_still_refused() {
         for accepted in [
             format!("http://localhost:3000/s/{TOKEN}"),
             format!("http://127.0.0.1:3000/s/{TOKEN}"),
             format!("http://[::1]:3000/s/{TOKEN}"),
+            format!("http://10.30.1.77:3000/s/{TOKEN}"),
+            format!("http://192.168.1.10/s/{TOKEN}"),
+            format!("http://notes.example.com/s/{TOKEN}"),
+            format!("http://cereal.local:3000/s/{TOKEN}"),
+            format!("http://[fd12:3456::1]:3000/s/{TOKEN}"),
         ] {
             assert!(shared(&accepted).is_some(), "{accepted}");
             assert!(shared(&app_shared(&accepted)).is_some(), "{accepted}");
+        }
+        // The host is what it says, not what it is dressed up as.
+        for refused in [
+            format!("http://127.0.0.1@evil.example/s/{TOKEN}"),
+            format!("http://10.30.1.77@evil.example/s/{TOKEN}"),
+            format!("http://evil.example#@127.0.0.1/s/{TOKEN}"),
+            format!("http://evil.example?@10.30.1.77/s/{TOKEN}"),
+            format!("http://10.30.1.77\\@evil.example/s/{TOKEN}"),
+            format!("http:/10.30.1.77/s/{TOKEN}"),
+            format!("http://10.30.1.77:0/s/{TOKEN}"),
+            format!("ftp://10.30.1.77/s/{TOKEN}"),
+        ] {
+            assert_eq!(AppLink::parse(&refused), None, "{refused}");
+            assert_eq!(AppLink::parse(&app_shared(&refused)), None, "{refused}");
         }
         assert_eq!(
             shared(&format!("http://[::1]:3000/s/{TOKEN}")).unwrap().origin.display_host(),
             "[::1]:3000"
         );
+        assert_eq!(
+            shared(&format!("http://10.30.1.77:3000/s/{TOKEN}")).unwrap().origin.url(),
+            "http://10.30.1.77:3000"
+        );
+        // A note link and a sign-in answer name an http server the same way.
+        let note = "cereal://note?server=http%3A%2F%2F10.30.1.77%3A3000&id=0c9a1f5e-7c1d-4b6a-9f43-2f1f7a2b9d10";
+        assert!(matches!(AppLink::parse(note), Some(AppLink::Note(link)) if link.origin.url() == "http://10.30.1.77:3000"));
+    }
+
+    #[test]
+    fn a_session_belongs_to_one_scheme_host_and_port() {
+        let server = ServerOrigin::parse("http://10.30.1.77:3000").unwrap();
+        assert!(server.is_server("http://10.30.1.77:3000"));
+        assert!(server.is_server("http://10.30.1.77:3000/"));
+        // The same host over HTTPS, on another port, or under another name
+        // is another server: no session goes there.
+        for other in [
+            "https://10.30.1.77:3000",
+            "http://10.30.1.77",
+            "http://10.30.1.77:3001",
+            "http://10.30.1.78:3000",
+            "http://10.30.1.77.evil.example:3000",
+            "http://10.30.1.77:3000/base",
+            "http://user@10.30.1.77:3000",
+        ] {
+            assert!(!server.is_server(other), "{other}");
+            let link = shared(&format!("http://10.30.1.77:3000/s/{TOKEN}")).unwrap();
+            assert_eq!(access(&link.origin, Some(other), true), Access::SignIn { offered: false }, "{other}");
+        }
+        let link = shared(&format!("http://10.30.1.77:3000/s/{TOKEN}")).unwrap();
+        assert_eq!(access(&link.origin, Some("http://10.30.1.77:3000"), true), Access::Read);
+        // And the other way: a session on the HTTPS server is not sent to
+        // the same host over plain HTTP.
+        let secure = ServerOrigin::parse("https://notes.example.com").unwrap();
+        assert!(!secure.is_server("http://notes.example.com"));
+        assert_ne!(ServerOrigin::parse("http://notes.example.com:443"), Some(secure));
+    }
+
+    #[test]
+    fn an_address_is_secure_private_or_public_http() {
+        use Transport::*;
+        let kind = |text: &str| address_transport(text);
+        for secure in [
+            "https://notes.example.com",
+            "https://10.30.1.77:3000",
+            "https://cereal.local",
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://127.8.9.10",
+            "http://[::1]:3000",
+            "  http://127.0.0.1:3000/  ",
+            "HTTP://LOCALHOST:3000",
+        ] {
+            assert_eq!(kind(secure), Some(Secure), "{secure}");
+        }
+        for private in [
+            "http://10.30.1.77:3000",
+            "http://10.0.0.1",
+            "http://172.16.0.1",
+            "http://172.31.255.254:8080",
+            "http://192.168.1.10",
+            "http://100.64.0.1",
+            "http://100.127.255.254",
+            "http://169.254.10.20",
+            "http://[fd12:3456:789a::1]:3000",
+            "http://[fc00::1]",
+            "http://[fe80::1]",
+            "http://[::ffff:10.30.1.77]:3000",
+            "http://cereal.local:3000",
+            "http://notes.corp.internal",
+            "http://nas.lan",
+            "http://server.home.arpa",
+            "http://cereal:3000",
+            "http://mac-mini",
+            "http://local",
+            "http://10.30.1.77:3000/base/",
+        ] {
+            assert_eq!(kind(private), Some(Private), "{private}");
+        }
+        for public in [
+            "http://notes.example.com",
+            "http://8.8.8.8",
+            "http://172.15.0.1",
+            "http://172.32.0.1",
+            "http://100.63.255.255",
+            "http://100.128.0.1",
+            "http://192.169.1.1",
+            "http://11.0.0.1",
+            "http://[2001:db8::1]",
+            "http://[::ffff:8.8.8.8]",
+            // A private address worn as part of a public name.
+            "http://10.30.1.77.evil.example",
+            "http://192.168.1.10.nip.io",
+            "http://evil.example.local.attacker.com",
+            "http://notlan.example",
+            "http://localhost.evil.example",
+            // Forms other software reads as numbers: never taken on trust.
+            "http://167772161",
+            "http://0x0a1e014d",
+            "http://010.30.1.77",
+            "http://10.30.1",
+            "http://10.30.1.0x4d",
+            "http://256.1.1.1",
+            "http://1.2.3.4.5",
+        ] {
+            assert_eq!(kind(public), Some(PublicHttp), "{public}");
+        }
+        // Not an address at all: nothing to say yet.
+        for nothing in [
+            "",
+            "http",
+            "http://",
+            "10.30.1.77:3000",
+            "http://10.30.1.77:3000?x=1",
+            "http://user@10.30.1.77",
+            "http://10.30.1.77:99999",
+            "http://exa mple.com",
+            "http://cereal.local.",
+            "http://.local",
+            "http://[fe80::1%en0]",
+            "javascript://10.30.1.77",
+            "http://10.30.1.77\\@evil.example",
+        ] {
+            assert_eq!(kind(nothing), None, "{nothing}");
+        }
+        // Only the two plain-HTTP kinds say anything, and only one warns.
+        assert_eq!(Secure.note(), None);
+        assert!(Private.note().unwrap().starts_with("Not encrypted. Fine"));
+        assert!(PublicHttp.note().unwrap().contains("travel in the clear"));
+        assert!(PublicHttp.warns() && !Private.warns() && !Secure.warns());
     }
 
     #[test]
@@ -716,7 +983,8 @@ mod tests {
             "https%3A%2F%2Fnotes.example.com%2Fbase",
             "https%3A%2F%2Fnotes.example.com%3Fq%3D1",
             "https%3A%2F%2Fuser%3Apass%40notes.example.com",
-            "http%3A%2F%2Fnotes.example.com",
+            "http%3A%2F%2Fuser%4010.30.1.77%3A3000",
+            "http%3A%2F%2F10.30.1.77%3A3000%2Fbase",
             "ftp%3A%2F%2Fnotes.example.com",
             "notes.example.com",
             "",
@@ -725,6 +993,11 @@ mod tests {
             assert_eq!(AppLink::parse(&text), None, "{server}");
         }
         assert_eq!(AppLink::parse(&format!("cereal://note?id={NOTE}")), None);
+        // A server reached over plain HTTP is named the same way.
+        for server in ["http%3A%2F%2Fnotes.example.com", "http%3A%2F%2F10.30.1.77%3A3000"] {
+            let text = format!("cereal://note?server={server}&id={NOTE}");
+            assert!(matches!(AppLink::parse(&text), Some(AppLink::Note(_))), "{server}");
+        }
     }
 
     #[test]

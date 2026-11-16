@@ -1,3 +1,4 @@
+import { googleNeedsHttps } from '@meeting-notes/contracts/transport'
 import { createHash, randomBytes } from 'node:crypto'
 import { Effect } from 'effect'
 import type { GoogleCalendarDTO, GoogleStatusDTO, MeetingContextDTO, MeetingParticipantDTO } from '@meeting-notes/contracts'
@@ -83,7 +84,10 @@ export function makeGoogleService(store: GoogleStore, box: SecretBox, options: {
 }) {
   const base = new URL(options.baseURL), fixed = options.clientId && options.clientSecret ? { clientId: options.clientId, clientSecret: options.clientSecret } : null
   const credentials = async () => options.credentials ? await options.credentials() : fixed
-  if (base.protocol !== 'https:' && !(base.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(base.hostname))) throw new Error('Google callback requires HTTPS except loopback development')
+  if (!['https:', 'http:'].includes(base.protocol)) throw new Error('The public address must be an http or https address')
+  // Google redirects only to HTTPS addresses and to this machine. A server on plain HTTP elsewhere starts and
+  // works; connecting a calendar is refused here, with the reason, instead of failing on Google's own page.
+  const needsHttps = googleNeedsHttps(base.origin)
   const redirectUri = `${base.origin}/api/integrations/google/callback`, transport = options.fetch ?? globalThis.fetch, now = options.clock ?? (() => new Date())
   const shutdown = new AbortController(), running = new Map<string, Promise<void>>()
   let disposed = false, ticking = false
@@ -176,7 +180,7 @@ export function makeGoogleService(store: GoogleStore, box: SecretBox, options: {
     })
     running.set(key,job);try{await job}finally{if(running.get(key)===job)running.delete(key)}
   }
-  async function status(userId: string): Promise<GoogleStatusDTO> { const configured = !!await credentials(); return { configured, redirectUri: configured ? redirectUri : null, connections: (await store.listConnections(userId)).map(safeConnection) } }
+  async function status(userId: string): Promise<GoogleStatusDTO> { const configured = !!await credentials(); return { configured, redirectUri: configured ? redirectUri : null, connections: (await store.listConnections(userId)).map(safeConnection), needsHttps } }
   let timer: ReturnType<typeof setInterval> | undefined
   // The client can be added on the admin panel after start, so the worker always runs and checks each time.
   if (options.worker) {
@@ -185,6 +189,7 @@ export function makeGoogleService(store: GoogleStore, box: SecretBox, options: {
   const service = {
     getStatus: (userId: string) => boundary(() => status(userId)),
     beginConnect: (userId: string, sessionHash: string, contacts = false) => boundary(async () => {
+      if (needsHttps) throw new Failure({ error: 'invalid_request', message: 'Google Calendar needs an HTTPS address. This server is reached over plain HTTP.' })
       const client = await requireConfigured(); if (!/^[a-f\d]{64}$/.test(sessionHash)) throw new Failure({ error: 'forbidden', message: 'A signed-in browser session is required' })
       const state = randomBytes(32).toString('base64url'), verifier = randomBytes(48).toString('base64url')
       await store.saveState({ stateHash: sha(state), userId, sessionHash, encryptedVerifier: box.seal(verifier), contacts, expiresAt: new Date(now().getTime() + 10 * 60_000).toISOString() })

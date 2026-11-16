@@ -162,6 +162,8 @@ pub fn reopen_preview(cx: &mut App) -> bool {
 
 /// Restore a minimized main window before GPUI orders it to the front.
 pub fn reveal_main_window(window: &Window) {
+    // "Quit" takes the app out of the Dock; its window brings it back.
+    crate::menubar::show_in_dock();
     native::reveal(window);
 }
 
@@ -388,7 +390,11 @@ fn sync(host: &SharedHost, cx: &mut App) {
     let state = live(&host.borrow(), cx);
     let visible = {
         let h = host.borrow();
-        state.is_some() && (!h.active || h.force_preview)
+        // "Live meeting indicator" in Settings turns the capsule off; a
+        // review fixture always shows it.
+        state.is_some()
+            && (h.force_preview
+                || (!h.active && crate::desktop_preferences::meeting().live_indicator))
     };
     if !visible {
         close_all(host, cx);
@@ -1672,6 +1678,16 @@ mod native {
                 let _: () = msg_send![window,setHidesOnDeactivate:NO];
                 let _: () = msg_send![window,setFloatingPanel:YES];
                 let _: () = msg_send![window,setHasShadow:NO];
+                // A titled window is given a one-pixel highlight along its
+                // top edge by the system. On these see-through panels it was
+                // a faint line above the capsule, and across the top of the
+                // popup's window while the popup itself was folded away.
+                // Neither panel has a title bar to lose.
+                const TITLED: u64 = 1;
+                let mask: u64 = msg_send![window, styleMask];
+                if mask & TITLED != 0 {
+                    let _: () = msg_send![window, setStyleMask: mask & !TITLED];
+                }
             }
         }
     }

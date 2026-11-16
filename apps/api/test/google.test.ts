@@ -60,7 +60,7 @@ function fixture(configured = true) {
 describe('personal Google OAuth and context', () => {
   test('unconfigured instances expose an honest status and no fake authorization URL', async () => {
     const f = fixture(false)
-    expect(await Effect.runPromise(f.service.getStatus(alice.id))).toEqual({ configured: false, redirectUri: null, connections: [] })
+    expect(await Effect.runPromise(f.service.getStatus(alice.id))).toEqual({ configured: false, redirectUri: null, connections: [], needsHttps: false })
     await expect(f.begin()).rejects.toThrow()
     expect(await Effect.runPromise(f.service.listEvents(alice.id, { from: '2026-11-12T00:00:00Z', to: '2026-11-20T00:00:00Z' }))).toEqual([])
     expect(f.seen).toHaveLength(0)
@@ -89,7 +89,7 @@ describe('personal Google OAuth and context', () => {
     expect(f.box.open(raw.encryptedGrant)).toContain('private-refresh-token')
     const status = await Effect.runPromise(f.service.getStatus(alice.id))
     expect(JSON.stringify(status)).not.toContain('private-access-token')
-    expect(await Effect.runPromise(f.service.getStatus(bob.id))).toEqual({ configured: true, redirectUri: 'http://localhost:3000/api/integrations/google/callback', connections: [] })
+    expect(await Effect.runPromise(f.service.getStatus(bob.id))).toEqual({ configured: true, redirectUri: 'http://localhost:3000/api/integrations/google/callback', connections: [], needsHttps: false })
     await expect(Effect.runPromise(f.service.listCalendars(bob.id, c.id))).rejects.toThrow()
     const calendars = await Effect.runPromise(f.service.listCalendars(alice.id, c.id))
     expect(calendars.filter(v => v.selected)).toHaveLength(1)

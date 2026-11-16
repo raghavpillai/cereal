@@ -2,6 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$ref": "#/$defs/AuthMethodsDTO",
   "$defs": {
+    "ServerTransport": {
+      "type": "string",
+      "enum": [
+        "secure",
+        "private",
+        "public-http"
+      ]
+    },
     "AuthMethodsDTO": {
       "type": "object",
       "properties": {
@@ -16,6 +24,9 @@
         },
         "setupRequired": {
           "type": "boolean"
+        },
+        "transport": {
+          "$ref": "#/$defs/ServerTransport"
         }
       },
       "required": [

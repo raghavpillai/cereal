@@ -40,8 +40,21 @@ targets:
         NSSupportsLiveActivities: true
         CFBundleURLTypes:
           - CFBundleURLSchemes: [cereal]
+        # Plain HTTP is for private networks only (see ServerAddress in the API client).
+        # Local networking covers IP addresses, .local names and names with no dot. The
+        # other private-only names need an exception each; arbitrary loads stay off.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+          NSExceptionDomains:
+            lan:
+              NSExceptionAllowsInsecureHTTPLoads: true
+              NSIncludesSubdomains: true
+            internal:
+              NSExceptionAllowsInsecureHTTPLoads: true
+              NSIncludesSubdomains: true
+            home.arpa:
+              NSExceptionAllowsInsecureHTTPLoads: true
+              NSIncludesSubdomains: true
         UIBackgroundModes: [audio]
         UILaunchScreen: {}
         # Lets Core Animation use refresh rates above 60 Hz on ProMotion iPhones.

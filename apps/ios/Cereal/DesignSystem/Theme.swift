@@ -70,24 +70,26 @@ extension Color {
 /// measured ones at the default setting; chrome keeps fixed sizes.
 enum ReadingFont {
     case body, heading, rowTitle, rowSubtitle
+    /// Literal code inside a note or an answer. It grows with the text around it.
+    case code
 
     var size: CGFloat {
         switch self {
         case .body: 16
         case .heading: 23
         case .rowTitle: 15
-        case .rowSubtitle: 14
+        case .rowSubtitle, .code: 14
         }
     }
     var weight: Font.Weight {
         switch self {
-        case .body, .rowSubtitle: .regular
+        case .body, .rowSubtitle, .code: .regular
         case .heading, .rowTitle: .semibold
         }
     }
     var style: Font.TextStyle {
         switch self {
-        case .body: .body
+        case .body, .code: .body
         case .heading: .title2
         case .rowTitle, .rowSubtitle: .subheadline
         }
@@ -104,7 +106,7 @@ private struct ReadingFontModifier: ViewModifier {
     }
 
     func body(content: Content) -> some View {
-        content.font(.system(size: size, weight: kind.weight))
+        content.font(.system(size: size, weight: kind.weight, design: kind == .code ? .monospaced : .default))
     }
 }
 

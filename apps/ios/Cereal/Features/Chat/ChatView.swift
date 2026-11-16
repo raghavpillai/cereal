@@ -38,6 +38,7 @@ struct ChatView: View {
                     .padding(.top, RailMetrics.chatTitleInsets(compact: verticalSizeClass == .compact).top)
                     .padding(.bottom, RailMetrics.chatTitleInsets(compact: verticalSizeClass == .compact).bottom)
                     .padding(.leading, Theme.gutter)
+                    .padding(.trailing, ChatColumn.trailing)
 
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -70,6 +71,7 @@ struct ChatView: View {
                     // Follow the reply only while the reader is at the end, through to the
                     // actions that appear under it when it finishes.
                     .followsChatTail(followsTail, room: $room)
+                    .chatTopFade()
                     .onChange(of: messages.count) { followsTail = true; proxy.scrollTo("bottom", anchor: .chatEnd) }
                     // The composer floats over the conversation, so messages pass
                     // under its glass instead of being cut off above it.
@@ -364,8 +366,9 @@ struct MarkdownBlocks: View {
                     }.fixedSize(horizontal: false, vertical: true).foregroundStyle(Theme.textSecondary)
                 case .code(let value):
                     ScrollView(.horizontal) {
-                        Text(verbatim: value).font(.system(size: 14, design: .monospaced)).padding(12)
+                        Text(verbatim: value).readingFont(.code).padding(12)
                     }.background(Theme.surface, in: RoundedRectangle(cornerRadius: 10))
+                case .table(let header, let rows): MarkdownTable(header: header, rows: rows, inline: inline)
                 case .space: Color.clear.frame(height: 3)
                 }
                 }
@@ -412,6 +415,8 @@ private extension View {
 
 enum ChatMarkdownBlock: Equatable, Sendable {
     case heading(String), list(marker: String, text: String, depth: Int), paragraph(String), quote(String), code(String), space
+    /// A pipe table: the cells of its header row, when it has one, and of each row under it.
+    case table(header: [String], rows: [[String]])
 }
 
 enum ChatMarkdownParser {
@@ -432,6 +437,16 @@ enum ChatMarkdownParser {
                 blocks.append(.heading(String(line.dropFirst(hashes + 1)))); continue
             }
             if line.hasPrefix("> ") { blocks.append(.quote(String(line.dropFirst(2)))); continue }
+            if let cells = tableCells(line) {
+                // Rows gather into the table above them. The line of dashes under the
+                // first row makes that row the header and is not a row itself.
+                if case .table(let header, let rows)? = blocks.last {
+                    if isTableRule(cells) {
+                        if header.isEmpty, rows.count == 1 { blocks[blocks.count - 1] = .table(header: rows[0], rows: []) }
+                    } else { blocks[blocks.count - 1] = .table(header: header, rows: rows + [cells]) }
+                } else if !isTableRule(cells) { blocks.append(.table(header: [], rows: [cells])) }
+                continue
+            }
             let depth = min(6, raw.prefix { $0.isWhitespace }.count / 2)
             if ["- ", "* ", "• "].contains(where: line.hasPrefix) {
                 blocks.append(.list(marker: "•", text: String(line.dropFirst(2)), depth: depth)); continue
@@ -445,6 +460,60 @@ enum ChatMarkdownParser {
         }
         if let code { blocks.append(.code(code.joined(separator: "\n"))) }
         return blocks
+    }
+
+    /// The cells of a table line (`| a | b |`), or nil for any other line.
+    static func tableCells(_ line: String) -> [String]? {
+        guard line.hasPrefix("|"), line.count > 1 else { return nil }
+        var cells = line.split(separator: "|", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) }
+        cells.removeFirst()
+        if cells.last?.isEmpty == true { cells.removeLast() }
+        return cells.isEmpty ? nil : cells
+    }
+
+    /// The `|---|:--:|` line between a table's header and its rows.
+    static func isTableRule(_ cells: [String]) -> Bool {
+        cells.allSatisfy { cell in cell.contains("-") && cell.allSatisfy { $0 == "-" || $0 == ":" } }
+    }
+}
+
+/// A Markdown table, in a note or an answer: the header in the primary colour,
+/// a hairline under each row, on the same surface as a code block. Columns
+/// share the width and their text wraps, so a table never runs off the page.
+struct MarkdownTable: View {
+    let header: [String]
+    let rows: [[String]]
+    let inline: (String) -> AttributedString
+    @Environment(\.displayScale) private var displayScale
+
+    private var columns: Int { max(header.count, rows.map(\.count).max() ?? 0) }
+
+    var body: some View {
+        Grid(alignment: .topLeading, horizontalSpacing: 14, verticalSpacing: 8) {
+            if !header.isEmpty {
+                row(header).fontWeight(.semibold).foregroundStyle(Theme.textPrimary)
+            }
+            ForEach(Array(rows.enumerated()), id: \.offset) { index, cells in
+                if index > 0 || !header.isEmpty {
+                    Rectangle().fill(Theme.stroke).frame(height: 1 / displayScale).gridCellUnsizedAxes(.horizontal)
+                }
+                row(cells)
+            }
+        }
+        .lineSpacing(3)
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .contain)
+    }
+
+    private func row(_ cells: [String]) -> some View {
+        GridRow {
+            ForEach(0..<columns, id: \.self) { column in
+                Text(inline(column < cells.count ? cells[column] : ""))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
     }
 }
 

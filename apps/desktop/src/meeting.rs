@@ -119,14 +119,27 @@ pub fn meeting_time(meeting: &MeetingContextDTO) -> String {
         start.format("%-I:%M")
     )
 }
-pub fn future_start_label(meeting: &MeetingContextDTO) -> Option<String> {
+/// What the recording control says of a meeting that has not been recorded:
+/// "Starts 5:00 PM" until it begins and "Started 5:00 PM" while it is on.
+/// Nothing once it is over, or for an all-day event that has begun.
+pub fn start_label(meeting: &MeetingContextDTO, now: DateTime<Local>) -> Option<String> {
     let start = DateTime::parse_from_rfc3339(&meeting.start_at).ok()?;
     if meeting.all_day {
-        return (start.date_naive() > Local::now().date_naive())
+        return (start.date_naive() > now.date_naive())
             .then(|| format!("Starts {}", start.format("%b %-d")));
     }
     let start = start.with_timezone(&Local);
-    (start > Local::now()).then(|| format!("Starts {}", start.format("%-I:%M %p")))
+    let time = start.format("%-I:%M %p");
+    if start > now {
+        return Some(if start.date_naive() == now.date_naive() {
+            format!("Starts {time}")
+        } else {
+            // Another day: the time alone would read as today's.
+            format!("Starts {}, {time}", start.format("%b %-d"))
+        });
+    }
+    let end = DateTime::parse_from_rfc3339(&meeting.end_at).ok()?;
+    (now < end).then(|| format!("Started {time}"))
 }
 
 fn safe_url(value: Option<&String>) -> Option<String> {
@@ -700,7 +713,8 @@ impl Cereal {
 
 #[cfg(test)]
 mod tests {
-    use super::{future_start_label, meeting_time, participant_name, participants};
+    use super::{meeting_time, participant_name, participants, start_label};
+    use chrono::{Duration, Local, TimeZone};
     use meeting_notes_api_types::{MeetingContextDTO, MeetingParticipantDTO};
     use serde_json::json;
     fn person(email: Option<&str>, name: Option<&str>, resource: bool) -> MeetingParticipantDTO {
@@ -745,6 +759,37 @@ mod tests {
         let mut context = meeting(vec![]);
         assert_eq!(meeting_time(&context), "Thu, Nov 26 · All day");
         context.start_at = "not-a-time".into();
-        assert!(future_start_label(&context).is_none());
+        assert!(start_label(&context, Local::now()).is_none());
+    }
+    #[test]
+    fn the_recording_control_says_when_a_meeting_starts_then_that_it_started() {
+        let start = Local.with_ymd_and_hms(2026, 11, 16, 17, 0, 0).earliest().unwrap();
+        let mut context = meeting(vec![]);
+        context.all_day = false;
+        context.start_at = start.to_rfc3339();
+        context.end_at = (start + Duration::minutes(30)).to_rfc3339();
+        let label = |now| start_label(&context, now);
+        assert_eq!(label(start - Duration::hours(5)).as_deref(), Some("Starts 5:00 PM"));
+        assert_eq!(label(start - Duration::seconds(1)).as_deref(), Some("Starts 5:00 PM"));
+        // From the minute it begins until it ends.
+        assert_eq!(label(start).as_deref(), Some("Started 5:00 PM"));
+        assert_eq!(
+            label(start + Duration::minutes(29)).as_deref(),
+            Some("Started 5:00 PM")
+        );
+        // Over: the control is an ordinary one again.
+        assert_eq!(label(start + Duration::minutes(30)), None);
+        assert_eq!(label(start + Duration::days(2)), None);
+        // On an earlier day the date is part of it.
+        assert_eq!(
+            label(start - Duration::days(1)).as_deref(),
+            Some("Starts Nov 16, 5:00 PM")
+        );
+        // An all-day event is named by its date, until that date.
+        let all_day = meeting(vec![]);
+        let before = Local.with_ymd_and_hms(2026, 11, 20, 9, 0, 0).earliest().unwrap();
+        assert_eq!(start_label(&all_day, before).as_deref(), Some("Starts Nov 26"));
+        let on_the_day = Local.with_ymd_and_hms(2026, 11, 26, 9, 0, 0).earliest().unwrap();
+        assert_eq!(start_label(&all_day, on_the_day), None);
     }
 }

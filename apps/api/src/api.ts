@@ -115,7 +115,12 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
   const publicHandlers = HttpApiBuilder.group(MeetingsApi, "public", (handlers) => handlers
     .handle("health", () => Effect.succeed({ status: "ok", version: "v1" } as const))
     // What the sign-in page and the apps offer. Nothing here depends on who is asking.
-    .handle("getAuthMethods", () => Effect.tryPromise({try:async()=>{const[policy,claimed]=await Promise.all([administration.signInPolicy(),ownerReady()]);return{password:policy.password,google:policy.google&&!!options.authentication,instanceName:policy.instanceName,setupRequired:!claimed}},catch:()=>({error:"unavailable",message:"Sign-in is temporarily unavailable"} as const)}))
+    .handle("getAuthMethods", () => Effect.tryPromise({try:async()=>{const[policy,claimed]=await Promise.all([administration.signInPolicy(),ownerReady()]);return{password:policy.password,google:policy.google&&!!options.authentication,instanceName:policy.instanceName,setupRequired:!claimed,transport:administration.transport}},catch:()=>({error:"unavailable",message:"Sign-in is temporarily unavailable"} as const)}))
+    .handle("getGoogleVerification", () => Effect.gen(function*(){
+      const request=yield* HttpServerRequest.HttpServerRequest,authentication=options.authentication
+      if(!authentication)return {state:"none" as const,reason:null}
+      return yield* Effect.tryPromise({try:()=>authentication.signIn.verificationStatus(new Headers(request.headers)),catch:()=>({error:"unavailable",message:"Sign-in is temporarily unavailable"} as const)})
+    }))
     .handle("getDownloads", () => Effect.tryPromise({try:()=>downloads.manifest(),catch:()=>({error:"unavailable",message:"Downloads are temporarily unavailable"} as const)}))
     // The files are answered in `handler` below, before the typed routes, because they need byte ranges and
     // HEAD. This is only reached if that ever stops matching, and then says what a missing file says.
@@ -169,7 +174,19 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
     .handle("createUser", ({payload}) => adminOnly(accountOperation(headers=>options.authentication?.createUser(payload,headers))))
     .handle("createAdministrator", ({payload}) => ownerOnly(accountOperation(headers=>options.authentication?.createAdministrator(payload,headers))))
     .handle("updateUserRole", ({params,payload}) => ownerOnly(accountOperation(headers=>options.authentication?.updateUserRole(params.id,payload.role,headers))))
-    .handle("setupOwner", ({payload}) => Effect.flatMap(AuthPrincipal,principal=>principal.role==="owner"&&principal.source==="bootstrap"?accounts(options.authentication?.setupOwner(payload)):Effect.fail({error:"forbidden",message:"The bootstrap owner credential is required"} as const)))
+    // Claiming with email and password: the account is made and email and password becomes the one way to sign in.
+    .handle("setupOwner", ({payload}) => Effect.flatMap(AuthPrincipal,principal=>principal.role==="owner"&&principal.source==="bootstrap"?Effect.tap(accounts(options.authentication?.setupOwner(payload)),()=>Effect.promise(()=>administration.usePassword().catch(()=>{}))):Effect.fail({error:"forbidden",message:"The bootstrap owner credential is required"} as const)))
+    // These two are answered in `handler` below because they set a cookie; reached only if that stops matching.
+    .handle("setupOwnerWithGoogle", () => Effect.fail({error:"unavailable",message:"Account service is not configured"} as const))
+    .handle("switchToGoogle", () => Effect.fail({error:"unavailable",message:"Account service is not configured"} as const))
+    .handle("switchToPassword", ({payload}) => adminOnly(Effect.gen(function*(){
+      const principal=yield* AuthPrincipal,request=yield* HttpServerRequest.HttpServerRequest
+      // The password is for the person asking, so it has to be a person: a browser session, not a token.
+      if(principal.source!=="session"||!principal.sessionId||request.headers.authorization)return yield* Effect.fail({error:"forbidden",message:"Sign in through the browser to change how people sign in"} as const)
+      yield* accounts(options.authentication?.setPassword(principal.id,payload.password))
+      yield* Effect.promise(()=>administration.usePassword())
+      return yield* administration.getSettings(ownerReady)
+    })))
     .handle("getCalendarPreferences", () => Effect.map(administration.getSettings(),settings=>({lookAheadDays:settings.calendarLookAheadDays})))
     .handle("getChatModels", () => administration.getChatModels())
     .handle("getModelCatalog", ({payload}) => adminOnly(administration.getModelCatalog(payload)))
@@ -255,9 +272,40 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
       }
       const pathname=new URL(request.url).pathname
       // Claiming the server: counted before the code is looked at, so guesses are slowed whatever they are.
-      if(pathname==="/api/v1/admin/owner/setup"&&request.method==="POST"){
+      if((pathname==="/api/v1/admin/owner/setup"||pathname==="/api/v1/admin/owner/setup/google")&&request.method==="POST"){
         const client=request.headers.get("x-forwarded-for")?.split(",")[0]?.trim().slice(0,64)||"direct"
         if(!setupOverall("all")||!setupByClient(client))return Response.json({error:"rate_limited",message:"Too many attempts. Wait a minute and try again."},{status:429,headers:{"Retry-After":"60","Cache-Control":"no-store","Referrer-Policy":"no-referrer","X-Content-Type-Options":"nosniff"}})
+      }
+      // Starting the Google sign-in that proves a client. Outside the typed routes because the answer sets a cookie.
+      if((pathname==="/api/v1/admin/owner/setup/google"||pathname==="/api/v1/admin/sign-in/google")&&request.method==="POST"){
+        const headers={"Cache-Control":"no-store","Referrer-Policy":"no-referrer","X-Content-Type-Options":"nosniff","Content-Type":"application/json"}
+        const answer=(status:number,error:string,message:string)=>new Response(JSON.stringify({error,message}),{status,headers})
+        const authentication=options.authentication
+        if(!authentication)return answer(503,"unavailable","Account service is not configured")
+        const claiming=pathname.endsWith("/owner/setup/google")
+        try{
+          let userId:string|undefined
+          if(claiming){
+            // The setup code, sent as the bearer of this one request (the attempt limit above has already counted it).
+            if(!isBootstrapToken(request.headers,adminToken))return answer(401,"unauthorized","Authentication required")
+          }else{
+            // An administrator's own browser session, from this origin: never a token.
+            const origin=request.headers.get("origin")
+            if(request.headers.has("authorization")||!origin||!authentication.isTrustedOrigin(origin))return answer(403,"forbidden","A same-origin browser session is required")
+            const principal=await authentication.resolve(request.headers)
+            if(!principal)return answer(401,"unauthorized","Authentication required")
+            if(principal.source!=="session"||(principal.role!=="owner"&&principal.role!=="admin"))return answer(403,"forbidden","Administrator access required")
+            userId=principal.id
+          }
+          const body:unknown=await request.json().catch(()=>null)
+          const input=body&&typeof body==="object"?body as {clientId?:unknown;clientSecret?:unknown}:{}
+          if(typeof input.clientId!=="string"||typeof input.clientSecret!=="string")return answer(400,"invalid_request","Enter the Google client ID and client secret")
+          const started=await authentication.signIn.beginVerification({purpose:claiming?"claim":"switch",...(userId?{userId}:{}),clientId:input.clientId,clientSecret:input.clientSecret})
+          return new Response(JSON.stringify({authorizationUrl:started.authorizationUrl}),{status:200,headers:{...headers,"Set-Cookie":started.cookie}})
+        }catch(error){
+          if(error instanceof SignInFailure)return answer(error.code==="forbidden"?409:error.code==="invalid_request"?400:503,error.code==="forbidden"?"conflict":error.code==="invalid_request"?"invalid_request":"unavailable",error.message)
+          return answer(503,"unavailable","Sign-in is temporarily unavailable")
+        }
       }
       // A published app file: public, cacheable for a few minutes, with byte ranges. Its headers are its own.
       if(pathname.startsWith(DOWNLOAD_FILES_PATH)&&!pathname.slice(DOWNLOAD_FILES_PATH.length).includes("/")&&pathname.length>DOWNLOAD_FILES_PATH.length)

@@ -6,7 +6,10 @@ import { Icon } from '../kit/icon'
 
 /** Bubbles mounted at once. A long meeting has thousands; the rest follow in a
  * low-priority pass so opening the transcript never waits on all of them. */
-const FIRST_ROWS = 150, MORE_ROWS = 600
+const FIRST_ROWS = 150, MORE_ROWS = 300
+/** Bubbles are kept in runs of this many. A run that is off screen is not laid out or painted at all, so the
+ * card scrolls through two thousand bubbles as it does through fifty; each run is one list. */
+const RUN = 50
 
 /** The transcript, as the desktop app shows it: a card that unfolds from the capsule at
  * the foot of the note, one bubble for each thing said, the reader's own microphone on
@@ -18,6 +21,12 @@ export const TranscriptPanel = memo(function TranscriptPanel({ segments, close, 
   // The newest rows are mounted first, because the panel opens on the newest text.
   useEffect(() => { if (mounted < rows.length) startTransition(() => setMounted(count => count + MORE_ROWS)) }, [mounted, rows.length])
   const from = Math.max(0, rows.length - mounted)
+  // Runs are cut at fixed places in the meeting, so mounting older rows adds runs above and never reshuffles the ones on screen.
+  const runs = useMemo(() => {
+    const out: Array<{ at: number; rows: Utterance[] }> = []
+    for (let at = from; at < rows.length;) { const end = Math.min(rows.length, (Math.floor(at / RUN) + 1) * RUN); out.push({ at, rows: rows.slice(at, end) }); at = end }
+    return out
+  }, [rows, from])
   // Opening the panel shows the newest text; rows mounted above it afterwards leave the reader where they are.
   const fromEnd = useRef(0)
   useLayoutEffect(() => { const element = body.current; if (element) element.scrollTop = element.scrollHeight - element.clientHeight - fromEnd.current }, [from])
@@ -32,7 +41,7 @@ export const TranscriptPanel = memo(function TranscriptPanel({ segments, close, 
         <span className="sr-only" role="status">{copied ? 'Transcript copied' : ''}</span>
       </div>
       <div className="transcript-body" ref={body} tabIndex={0} role="region" aria-label="What was said" onScroll={event => { const element = event.currentTarget; fromEnd.current = element.scrollHeight - element.clientHeight - element.scrollTop }}>
-        <ol className="transcript-rows">{rows.slice(from).map((row, at) => <Bubble key={row.id} row={row} first={from + at === 0} last={from + at === rows.length - 1} />)}</ol>
+        <div className="transcript-rows">{runs.map(run => <ol className="transcript-run" key={Math.floor(run.at / RUN)}>{run.rows.map((row, at) => <Bubble key={row.id} row={row} first={run.at + at === 0} last={run.at + at === rows.length - 1} />)}</ol>)}</div>
       </div>
       <div className="app-separator" />
       <div className="transcript-foot">

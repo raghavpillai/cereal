@@ -1,4 +1,5 @@
 import { useEffect, useState, type KeyboardEvent } from 'react'
+import { copyText } from '../../lib/clipboard'
 import { markdownFileName } from '../../lib/notes'
 import { Icon } from '../kit/icon'
 import { Popover } from '../kit/popover'
@@ -31,12 +32,23 @@ export function NoteViews({ shown, show }: { shown: NoteTab; show: (tab: NoteTab
   </div>
 }
 
+/** A note's header actions, drawn in place and dimmed while the note is still on its way, so the rest of the
+ * header does not slide across when they arrive. Nothing here can be pressed or focused. `open` adds the
+ * "Open in Cereal" pill, for the moment before the page that owns the real one is running. */
+export function PendingNoteActions({ open = false }: { open?: boolean }) {
+  return <span className="header-pending" aria-hidden="true">
+    {open && <span className="app-pill open-in-app"><span className="mark" /><span className="open-in-app-label">Open in Cereal</span></span>}
+    <span className="app-tool"><Icon name="more" size={15} /></span>
+    <span className="share-split"><span className="share-button"><Icon name="lock-solid" size={13} /><span>Share</span></span><span className="share-link-button"><Icon name="link-chain" size={14} /></span></span>
+  </span>
+}
+
 /** The note's own menu: copy what is on screen, or save it as Markdown. Nothing is kept in browser storage. */
 export function NoteOptions({ title, markdown, shown }: { title: string; markdown: string; shown: NoteTab }) {
   const [notice, setNotice] = useState('')
   useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(''), 1800); return () => window.clearTimeout(timer) }, [notice])
   async function copy() {
-    try { await navigator.clipboard.writeText(markdown); setNotice('Copied') } catch { setNotice('Couldn’t copy. Select the text and copy it instead.') }
+    try { await copyText(markdown); setNotice('Copied') } catch { setNotice('Couldn’t copy. Select the text and copy it instead.') }
   }
   function save() {
     const url = URL.createObjectURL(new Blob([markdown], { type: 'text/markdown;charset=utf-8' }))

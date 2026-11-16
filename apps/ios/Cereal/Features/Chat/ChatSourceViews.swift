@@ -167,7 +167,7 @@ struct ChatMeetingContextPicker: View {
                     Button { onSelect(note) } label: {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(note.title.isEmpty ? "Untitled note" : note.title).foregroundStyle(Theme.textPrimary)
-                            Text(note.date).font(.caption).foregroundStyle(Theme.textSecondary)
+                            Text(Self.day(note)).font(.caption).foregroundStyle(Theme.textSecondary)
                         }.padding(.vertical, 5)
                     }.listRowBackground(Theme.surface)
                         .onAppear { if note.id == server.list.rows.last?.id { Task { await server.loadMore() } } }
@@ -178,6 +178,15 @@ struct ChatMeetingContextPicker: View {
             .navigationTitle("Meeting context").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }.glassSheet()
+    }
+
+    /// The meeting's day as Home writes it ("Today 7:47 AM", "12 Nov 7:47 AM"), not the raw ISO date.
+    private static func day(_ note: ServerNoteRow) -> String {
+        let created = Date.serverTimestamp(note.createdAt)
+        guard let day = MeetingPresentation.timelineDate(noteDate: note.date, createdAt: note.createdAt) else { return created?.noteMetaString ?? note.date }
+        // A note made on its meeting's day has a time; an imported one has only its day.
+        if let created, Calendar.current.isDate(created, inSameDayAs: day) { return created.noteMetaString }
+        return day.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated))
     }
 }
 

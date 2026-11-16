@@ -433,6 +433,10 @@ struct RailScaffold<Content: View, Rail: View, Bottom: View>: View {
                     .safeAreaPadding(.leading, metrics.extraLeading)
                     .safeAreaPadding(.trailing, metrics.extraTrailing)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                // Text that scrolls up behind the status bar is gone before it reaches the clock.
+                TopFade(height: proxy.safeAreaInsets.top)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .ignoresSafeArea()
                 if Bottom.self != EmptyView.self {
                     // Edge to edge, so the fade has no visible sides on the flat background.
                     BottomFade(height: 64)
@@ -823,6 +827,41 @@ struct BottomFade: View {
         LinearGradient(colors: [Self.end.opacity(0), Self.end], startPoint: .top, endPoint: .bottom)
             .frame(height: height)
             .allowsHitTesting(false)
+    }
+}
+
+/// Covers content that has scrolled up behind the status bar and thins out
+/// across the row of navigation controls beneath it. The system's own edge
+/// effect only dims: on this dark page a row title stayed readable through the
+/// clock. Flat `bgTop`, so the fade has no visible edge on the page.
+struct TopFade: View {
+    /// The top safe-area inset: the status bar and the navigation controls.
+    let height: CGFloat
+    /// The share of `height` that is fully covered (the status bar).
+    static let solid = 0.5
+    var body: some View {
+        LinearGradient(stops: [
+            .init(color: Theme.bgTop, location: 0),
+            .init(color: Theme.bgTop, location: Self.solid),
+            .init(color: Theme.bgTop.opacity(0), location: 1),
+        ], startPoint: .top, endPoint: .bottom)
+            .frame(height: max(0, height))
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
+/// A wait with its reason beside it: the spinner leads the line it belongs to.
+/// A labelled `ProgressView` centres its spinner over the words, which reads as
+/// misplaced above a line of leading-aligned text.
+struct InlineProgress: View {
+    let text: String
+    var body: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+            Text(text).foregroundStyle(Theme.textSecondary)
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 

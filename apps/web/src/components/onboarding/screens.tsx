@@ -11,7 +11,7 @@ export interface ScreenView {
   host: string
   instanceName: string
   instanceLogo: string | null
-  claim: { /** How much of a code has been typed, 0 to 1. */ typed: number; accepted: boolean; owner: string }
+  claim: { accepted: boolean; /** The name to greet once the server is claimed. */ owner: string; method: 'password' | 'google'; email: string; /** The proving Google sign-in is under way. */ waiting: boolean }
   language: { provider: LanguageProvider; state: 'waiting' | 'checking' | 'connected' | 'failed' }
   speech: { state: 'waiting' | 'checking' | 'connected' | 'failed' }
   models: Array<{ role: string; logo: AIProvider | null; name: string; live?: boolean }>
@@ -94,32 +94,17 @@ const ProviderMark = ({ provider }: { provider: AIProvider }) => <img className=
 const Logo = ({ view, className = '' }: { view: ScreenView; className?: string }) =>
   <span className={`sc-logo ${className}`} key={view.instanceLogo ? 'logo' : 'mark'}>{view.instanceLogo ? <img src={view.instanceLogo} alt="" /> : <span className="mark" />}</span>
 
-/* ── 1. Claim: a door, and the key that fits it ────────────────────────── */
+/* ── 1. Set up sign-in: the card people will sign in with, for the method chosen ── */
 function ClaimScene({ view }: { view: ScreenView }) {
-  const { typed, accepted, owner } = view.claim
+  const { accepted, owner, method, email, waiting } = view.claim
   const first = owner.trim().split(/\s+/)[0] ?? ''
-  return <div className="sc sc-claim" data-accepted={accepted ? '' : undefined} style={var_({ '--typed': typed })}>
-    <svg className="sc-door" viewBox="0 0 240 160" width="240" height="160" focusable="false">
-      <path className="sc-door-light" d="M78 152V62a42 42 0 0 1 84 0v90z" />
-      <g className="sc-door-leaf">
-        <path className="sc-door-panel" d="M78 152V62a42 42 0 0 1 84 0v90z" />
-        <path className="sc-door-inset" d="M92 138V66a28 28 0 0 1 56 0v72z" />
-        <g className="sc-keyhole"><circle cx="120" cy="96" r="6.5" /><path d="M116.6 99h6.8l2 13h-10.8z" /></g>
-      </g>
-      <path className="sc-door-frame" d="M70 152V62a50 50 0 0 1 100 0v90" />
-      <line className="sc-door-floor" x1="34" y1="152" x2="206" y2="152" />
-      <g className="sc-key">
-        <g className="sc-key-shape">
-          <circle cx="30" cy="0" r="9" /><circle className="sc-key-eye" cx="30" cy="0" r="3.4" />
-          <path d="M22 -2.2H2v4.4h4v4.6h4.4V2.2h3v3.6h4V2.2H22z" />
-        </g>
-      </g>
-    </svg>
-    <div className="sc-terminal ls-extra">
-      <span><i>$</i> grep ADMIN_API_TOKEN .env</span>
-      <span className="sc-terminal-code">ADMIN_API_TOKEN=<b>{'•'.repeat(Math.round(typed * 18))}</b><em /></span>
+  return <div className="sc sc-signin sc-claim" data-accepted={accepted ? '' : undefined} data-waiting={waiting ? '' : undefined}>
+    <div className="sc-card">
+      <span className="sc-card-head ls-extra"><Logo view={view} className="is-small" /><b>Welcome back.</b><small>Sign in to read your notes</small></span>
+      <Fold open={method === 'google'}><span className="sc-google"><GoogleMark />Continue with Google{waiting && <i className="sc-google-wait" />}</span></Fold>
+      <Fold open={method === 'password'}><span className="sc-input" data-filled={email ? '' : undefined}>{email || 'Email address'}</span><span className="sc-input">Password</span><span className="sc-submit">Sign in</span></Fold>
     </div>
-    <p className="sc-welcome">{first ? `Welcome, ${first}.` : 'Welcome.'}</p>
+    <p className="sc-welcome">{accepted ? <><DrawnCheck size={20} />{first ? `Welcome, ${first}.` : 'Welcome.'}</> : method === 'google' ? 'One button. No passwords here.' : 'You add people yourself.'}</p>
   </div>
 }
 

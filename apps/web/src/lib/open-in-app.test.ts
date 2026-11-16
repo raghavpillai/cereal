@@ -21,16 +21,21 @@ describe('the address handed to the app', () => {
     // A page address, with its path and query, still names only the origin.
     expect(noteAppURL(`https://notes.example.com/notes/${noteId}?from=mail#top`, noteId.toUpperCase())).toBe(`cereal://note?server=https%3A%2F%2Fnotes.example.com&id=${noteId}`)
   })
-  test('a server on this machine may be plain http; any other must be https', () => {
+  test('a server may be plain http, on this machine or any other, and its address is carried unchanged', () => {
     expect(noteAppURL('http://127.0.0.1:3000', noteId)).toBe(`cereal://note?server=http%3A%2F%2F127.0.0.1%3A3000&id=${noteId}`)
     expect(appOrigin('http://localhost:3000/')).toBe('http://localhost:3000')
     expect(appOrigin('http://[::1]:3000')).toBe('http://[::1]:3000')
-    expect(appOrigin('http://192.168.1.20:3000')).toBeNull()
-    expect(appOrigin('http://notes.example.com')).toBeNull()
+    // A server on a private network is reached over plain http: its links carry that address unchanged.
+    expect(appOrigin('http://192.168.1.20:3000')).toBe('http://192.168.1.20:3000')
+    expect(appOrigin('http://notes.example.com/anything?x=1')).toBe('http://notes.example.com')
+    expect(noteAppURL('http://10.30.1.77:3000', noteId)).toBe(`cereal://note?server=http%3A%2F%2F10.30.1.77%3A3000&id=${noteId}`)
+    expect(appOrigin('ftp://notes.example.com')).toBeNull()
+    expect(appOrigin('javascript:alert(1)')).toBeNull()
     expect(appOrigin('https://user:secret@notes.example.com')).toBeNull()
     expect(appOrigin('cereal://note')).toBeNull()
     expect(appOrigin('not an address')).toBeNull()
-    expect(noteAppURL('http://notes.example.com', noteId)).toBeNull()
+    expect(noteAppURL('http://notes.example.com', noteId)).toBe(`cereal://note?server=http%3A%2F%2Fnotes.example.com&id=${noteId}`)
+    expect(sharedAppURL('http://10.30.1.77:3000', token)).toBe(`cereal://shared?url=http%3A%2F%2F10.30.1.77%3A3000%2Fs%2F${token}`)
   })
   test('a shared link is passed whole, as one encoded value', () => {
     expect(sharedAppURL('https://notes.example.com', token)).toBe(`cereal://shared?url=https%3A%2F%2Fnotes.example.com%2Fs%2F${token}`)

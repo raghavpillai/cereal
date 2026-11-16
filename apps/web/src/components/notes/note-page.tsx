@@ -1,4 +1,5 @@
 import { Link } from '@tanstack/react-router'
+import { copyText } from '../../lib/clipboard'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { NoteDTO, NoteSummaryDTO } from '@meeting-notes/contracts'
 import { NoteText } from '../../lib/markdown'
@@ -9,7 +10,7 @@ import { useResource } from '../admin/shared'
 import { HeaderPageActions } from '../kit/header-slot'
 import { Icon } from '../kit/icon'
 import { Popover } from '../kit/popover'
-import { DetailsChip, NoteOptions, NoteViews, type NoteTab } from './note-parts'
+import { DetailsChip, NoteOptions, NoteViews, PendingNoteActions, type NoteTab } from './note-parts'
 import { OpenInApp } from '../open-in-app'
 import { ReaderLoading } from '../reader-state'
 import { MeetingCard } from './meeting-card'
@@ -31,7 +32,7 @@ export function NotePage({ noteId }: { noteId: string }) {
 
   if (!note && !row) return fresh.error
     ? <section className="reader-state" role="alert"><h1 className="app-heading">This note didn’t open.</h1><p>{fresh.error}</p><div className="reader-state-actions"><button type="button" className="app-pill" onClick={() => void fresh.reload()}><span>Try again</span></button><Link to="/notes" className="app-pill"><span>All notes</span></Link></div></section>
-    : <ReaderLoading />
+    : <><HeaderPageActions><OpenInApp appURL={appURL} /><PendingNoteActions /></HeaderPageActions><ReaderLoading /></>
   // The web reads finished notes. A meeting that is still being recorded is live in the apps.
   if (note ? !noteIsFinished(note) : !isFinished(row!)) return <section className="reader-state">
     <HeaderPageActions><OpenInApp appURL={appURL} /></HeaderPageActions>
@@ -67,13 +68,14 @@ function NoteReader({ note, row, folder, appURL, refreshError, retry, focusTitle
   useEffect(() => { if (focusTitle && document.activeElement === document.body) heading.current?.focus({ preventScroll: true }) }, [focusTitle])
 
   const copyTranscript = useCallback(async () => {
-    try { await navigator.clipboard.writeText(transcriptMarkdown(note.transcriptSegments)); return true } catch { return false }
+    try { await copyText(transcriptMarkdown(note.transcriptSegments)); return true } catch { return false }
   }, [note.transcriptSegments])
   const loading = row !== null && (shown === 'enhanced' ? has.enhanced : has.body)
 
   return <>
     <HeaderPageActions>
       <OpenInApp appURL={appURL} />
+      {row && (has.enhanced || has.body) && <PendingNoteActions />}
       {!row && (has.enhanced || has.body) && <NoteOptions title={title} markdown={noteMarkdown(note, shown === 'enhanced' ? 'summary' : 'notes')} shown={shown} />}
       {!row && (has.enhanced || has.body) && <ShareControl noteId={note.id} session={session} has={has} expired={expired} />}
     </HeaderPageActions>

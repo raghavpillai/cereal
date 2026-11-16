@@ -18,7 +18,7 @@ import {AuthPrincipal,type PrincipalData,type ApiError} from "@meeting-notes/con
 import {loadSecretBox,secretBoxFromKey} from "./admin-secrets"
 import {makeSignInService,passwordOnly,type GoogleEndpoints,type SignInPolicy} from "./sign-in"
 import {withAccountMutation} from "./account-mutations"
-import {makeMcpAuthPlugins,makeMcpAuthentication} from "./mcp-auth"
+import {makeMcpAuthPlugins,makeMcpAuthentication,MCP_NEEDS_HTTPS} from "./mcp-auth"
 export {AuthPrincipal}
 export const BOOTSTRAP_OWNER_ID="00000000-0000-4000-8000-000000000001"
 export const bootstrapPrincipal:PrincipalData={id:BOOTSTRAP_OWNER_ID,name:"Owner",email:"owner@localhost.invalid",role:"owner",source:"bootstrap",expiresAt:null,createdAt:"2026-01-01T00:00:00.000Z"}
@@ -88,12 +88,18 @@ export function makeAuthenticationService(db:Database,bootstrapToken:string,opti
  /** The sign-in settings as they are right now. Without it only email and password sign-in exists. */
  signIn?:()=>Promise<SignInPolicy>;
  /** Google's endpoints and transport; only tests replace them. */
- google?:{endpoints?:GoogleEndpoints;fetch?:typeof fetch};clock?:()=>Date}){
+ google?:{endpoints?:GoogleEndpoints;fetch?:typeof fetch};clock?:()=>Date;
+ /** Makes Google, with a client Google has just accepted, the server's one way to sign in; returns how to undo it. */
+ useGoogle?:(client:{clientId:string;clientSecret:string})=>Promise<()=>Promise<void>>}){
  const base=new URL(options.baseURL)
- if(!["https:","http:"].includes(base.protocol)||base.username||base.password||base.pathname!=="/"||base.search||base.hash||base.protocol==="http:"&&!["localhost","127.0.0.1","[::1]"].includes(base.hostname))throw new Error("PUBLIC_BASE_URL must use HTTPS except for loopback development")
+ // Plain HTTP is accepted for any host: a server on a private network has no certificate to offer. What follows
+ // from the scheme is decided where it matters: cookies are `Secure` only over HTTPS, Google is offered only
+ // where Google will redirect, and the web app says so when an address is not encrypted (contracts/transport.ts).
+ if(!["https:","http:"].includes(base.protocol)||base.username||base.password||base.pathname!=="/"||base.search||base.hash)throw new Error("PUBLIC_BASE_URL must be an http or https address with no path, such as http://10.0.0.5:3000 or https://notes.example.com")
  if(options.secret.length<32)throw new Error("Authentication secret must contain at least 32 characters")
- const origins=[base.origin];if(base.protocol==="http:"){const alias=new URL(base);alias.hostname=base.hostname==="localhost"?"127.0.0.1":"localhost";origins.push(alias.origin)}
- for(const raw of options.trustedOrigins??[]){const origin=new URL(raw);if(raw!==origin.origin||origin.username||origin.password||origin.protocol!=="https:"&&!(origin.protocol==="http:"&&["localhost","127.0.0.1","[::1]"].includes(origin.hostname)))throw new Error("AUTH_TRUSTED_ORIGINS must contain explicit HTTPS origins or loopback development origins");if(!origins.includes(origin.origin))origins.push(origin.origin)}
+ // On this machine "localhost" and "127.0.0.1" are the same server: either may be typed. No other address has an alias.
+ const origins=[base.origin];if(base.protocol==="http:"&&["localhost","127.0.0.1"].includes(base.hostname)){const alias=new URL(base);alias.hostname=base.hostname==="localhost"?"127.0.0.1":"localhost";origins.push(alias.origin)}
+ for(const raw of options.trustedOrigins??[]){let origin:URL;try{origin=new URL(raw)}catch{throw new Error("AUTH_TRUSTED_ORIGINS must contain explicit http or https origins, such as https://notes.example.com")}if(raw!==origin.origin||origin.username||origin.password||!["https:","http:"].includes(origin.protocol))throw new Error("AUTH_TRUSTED_ORIGINS must contain explicit http or https origins, such as https://notes.example.com");if(!origins.includes(origin.origin))origins.push(origin.origin)}
  const policy=options.signIn??(async()=>passwordOnly)
  const auth=makeAuthenticationEngine(db,options,base.origin,origins,policy)
  /** Only the address and the browser name are kept with the session, as for password sign-in. No credentials are passed on. */
@@ -102,7 +108,7 @@ export function makeAuthenticationService(db:Database,bootstrapToken:string,opti
   const issued=await auth.api.issueSession({body:{userId,remember},headers,returnHeaders:true})
   return{cookies:issued.headers.getSetCookie(),token:issued.headers.get("set-auth-token")??""}
  }
- const signIn=makeSignInService({db,origin:base.origin,policy,issueSession,defaultOrganizationId:DEFAULT_ORGANIZATION_ID,
+ const signIn=makeSignInService({db,origin:base.origin,policy,issueSession,defaultOrganizationId:DEFAULT_ORGANIZATION_ID,ownerId:BOOTSTRAP_OWNER_ID,...(options.useGoogle?{useGoogle:options.useGoogle}:{}),
   // The state table holds a PKCE verifier for a few minutes; it is sealed with a key derived from the authentication secret.
   box:secretBoxFromKey(createHash("sha256").update("cereal.sign-in.state:"+options.secret).digest()),
   ...(options.google?.endpoints?{endpoints:options.google.endpoints}:{}),...(options.google?.fetch?{fetch:options.google.fetch}:{}),...(options.clock?{clock:options.clock}:{})})
@@ -134,6 +140,8 @@ export function makeAuthenticationService(db:Database,bootstrapToken:string,opti
    const path=new URL(request.url).pathname.slice("/api/auth".length)
    const accountRoute=path.startsWith("/mcp/")
    if(!accountRoute&&!allowed.get(path)?.includes(request.method))return Response.json({error:"not_found",message:"Authentication route not available"},{status:404,headers:{"Cache-Control":"no-store"}})
+   // The OAuth routes exist for AI apps only, and those need an HTTPS address (mcp-auth.ts).
+   if(!mcp.available&&(path.startsWith("/oauth2/")||path==="/jwks"||path==="/.well-known/oauth-authorization-server"))return Response.json({error:"not_found",message:MCP_NEEDS_HTTPS},{status:404,headers:{"Cache-Control":"no-store"}})
    // Protocol endpoints authenticate OAuth clients and must work cross-origin.
    // Browser account/consent mutations retain strict CSRF protection.
    const protocolPost=["/oauth2/token","/oauth2/register","/oauth2/introspect","/oauth2/revoke"].includes(path)
@@ -154,7 +162,14 @@ export function makeAuthenticationService(db:Database,bootstrapToken:string,opti
   },
   isTrustedOrigin(origin:string){return origins.includes(origin)},
   /** Whether the server has been claimed: the owner account has a password. Until then only the bootstrap token gets in. */
-  async ownerReady(){return!!await db.account.findFirst({where:{userId:BOOTSTRAP_OWNER_ID,providerId:"credential"},select:{id:true}})},
+  async ownerReady(){return!!await db.account.findFirst({where:{userId:BOOTSTRAP_OWNER_ID},select:{id:true}})},
+  /** Gives an account a password (replacing one it has): what an administrator does before the server goes back to email and password. */
+  setPassword:(userId:string,password:string)=>boundary(async()=>{
+   if(password.length<12||password.length>128)throw fail("invalid_request","Use a password of 12 to 128 characters")
+   const hashed=await hashPassword(password)
+   await db.$transaction(async tx=>{const existing=await tx.account.findFirst({where:{userId,providerId:"credential"}});if(existing)await tx.account.update({where:{id:existing.id},data:{password:hashed}});else await tx.account.create({data:{id:crypto.randomUUID(),accountId:userId,userId,providerId:"credential",password:hashed}})})
+   return{changed:true as const}
+  }),
   listUsers:(headers?:Headers)=>boundary(async()=>({users:(headers?(await auth.api.listUsers({headers,query:{limit:1000,sortBy:"createdAt",sortDirection:"asc"}})).users:await db.user.findMany({orderBy:{createdAt:"asc"},take:1000})).map(userDTO)})),
   createUser:(input:CreateUserInput,headers?:Headers)=>boundary(async()=>{
    try{const result=await auth.api.createUser({...(headers?{headers}:{}),body:{name:input.name.trim(),email:input.email.trim().toLowerCase(),password:input.password}});const user=await db.user.findUnique({where:{id:result.user.id}});if(!user)throw new Error("Account creation failed");await db.member.upsert({where:{organizationId_userId:{organizationId:DEFAULT_ORGANIZATION_ID,userId:user.id}},create:{id:crypto.randomUUID(),organizationId:DEFAULT_ORGANIZATION_ID,userId:user.id,role:"member"},update:{}});return userDTO(user)}catch(e){if(e instanceof AuthFailure)throw e;const status=(e as{statusCode?:number}).statusCode;if(status===400||status===422||status===409)throw fail("invalid_request","Account could not be created. Check the email and password requirements.");throw e}
@@ -170,7 +185,7 @@ export function makeAuthenticationService(db:Database,bootstrapToken:string,opti
    })}catch(error){if((error as{code?:string}).code==="P2002")throw fail("invalid_request","Email is already in use");throw error}
   }),
   updateUserRole:(id:string,role:"admin"|"user",headers?:Headers)=>boundary(()=>withAccountMutation(db,"instance-role:"+id,async()=>{const user=await db.user.findUnique({where:{id}});if(!user)throw fail("not_found","User not found");if(user.role==="owner")throw fail("forbidden","The instance owner role cannot be changed");if(headers){await auth.api.setRole({headers,body:{userId:id,role}});return userDTO(await db.user.findUniqueOrThrow({where:{id}}))}return userDTO(await db.user.update({where:{id},data:{role}}))})),
-  setupOwner:(input:CreateUserInput)=>boundary(async()=>{const password=await hashPassword(input.password);return db.$transaction(async tx=>{await tx.$queryRawUnsafe('SELECT "id" FROM "User" WHERE "id"=$1::uuid FOR UPDATE',BOOTSTRAP_OWNER_ID);if(await tx.account.findFirst({where:{userId:BOOTSTRAP_OWNER_ID,providerId:"credential"}}))throw fail("conflict","The owner account has already been initialized");if(await tx.user.findFirst({where:{email:input.email.trim().toLowerCase(),id:{not:BOOTSTRAP_OWNER_ID}}}))throw fail("conflict","Email is already in use");const user=await tx.user.update({where:{id:BOOTSTRAP_OWNER_ID},data:{name:input.name.trim(),email:input.email.trim().toLowerCase()}});await tx.account.create({data:{id:crypto.randomUUID(),accountId:BOOTSTRAP_OWNER_ID,userId:BOOTSTRAP_OWNER_ID,providerId:"credential",password}});return userDTO(user)})}),
+  setupOwner:(input:CreateUserInput)=>boundary(async()=>{const password=await hashPassword(input.password);return db.$transaction(async tx=>{await tx.$queryRawUnsafe('SELECT "id" FROM "User" WHERE "id"=$1::uuid FOR UPDATE',BOOTSTRAP_OWNER_ID);if(await tx.account.findFirst({where:{userId:BOOTSTRAP_OWNER_ID}}))throw fail("conflict","The owner account has already been initialized");if(await tx.user.findFirst({where:{email:input.email.trim().toLowerCase(),id:{not:BOOTSTRAP_OWNER_ID}}}))throw fail("conflict","Email is already in use");const user=await tx.user.update({where:{id:BOOTSTRAP_OWNER_ID},data:{name:input.name.trim(),email:input.email.trim().toLowerCase()}});await tx.account.create({data:{id:crypto.randomUUID(),accountId:BOOTSTRAP_OWNER_ID,userId:BOOTSTRAP_OWNER_ID,providerId:"credential",password}});return userDTO(user)})}),
  }
 }
 export type AuthenticationService=ReturnType<typeof makeAuthenticationService>

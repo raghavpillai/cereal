@@ -1,8 +1,7 @@
 import { createFileRoute, Navigate } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
-import { AdminClientError, createAdminClient } from '../lib/admin-client'
-import { fetchAuthMethods } from '../lib/auth-client'
 import { setupLanding } from '../lib/onboarding'
+import { readSession, rememberSetup } from '../lib/session-probe'
 import { RoutePending } from '../components/reader-state'
 
 /** The front door is the app itself: the notes list for someone who is signed in, the
@@ -15,20 +14,27 @@ export const Route = createFileRoute('/')({ ssr: false, component: FrontDoor })
 function FrontDoor() {
   const [to, setTo] = useState<'notes' | null>(null)
   useEffect(() => {
-    const controller = new AbortController(), client = createAdminClient(window.location.origin)
-    client.getSession(controller.signal).then(
+    const controller = new AbortController()
+    // A signed-out visitor is answered without the typed client; it is fetched only for someone who is signed in.
+    readSession(controller.signal).then(
       async session => {
+        if (controller.signal.aborted) return
+        if (!session) {
+          const { fetchAuthMethods } = await import('../lib/auth-client')
+          const unclaimed = await fetchAuthMethods(controller.signal).then(methods => methods.setupRequired, () => false)
+          if (controller.signal.aborted) return
+          if (unclaimed) rememberSetup(true)
+          window.location.replace(unclaimed ? '/admin' : '/login')
+          return
+        }
+        const { createAdminClient } = await import('../lib/admin-client')
+        const client = createAdminClient(window.location.origin)
         const setup = await setupLanding(session, () => client.getSettings(controller.signal))
         if (controller.signal.aborted) return
-        if (setup) window.location.replace(setup); else setTo('notes')
+        if (setup) { rememberSetup(true); window.location.replace(setup) } else setTo('notes')
       },
-      async error => {
-        if (controller.signal.aborted) return
-        // Only a clear "not signed in" goes to sign-in. Anything else is left to the notes page, which can say what went wrong and retry.
-        if (!(error instanceof AdminClientError && error.status === 401)) { setTo('notes'); return }
-        const unclaimed = await fetchAuthMethods(controller.signal).then(methods => methods.setupRequired, () => false)
-        if (!controller.signal.aborted) window.location.replace(unclaimed ? '/admin' : '/login')
-      },
+      // Anything but a clear "not signed in" is left to the notes page, which can say what went wrong and retry.
+      () => { if (!controller.signal.aborted) setTo('notes') },
     )
     return () => controller.abort()
   }, [])

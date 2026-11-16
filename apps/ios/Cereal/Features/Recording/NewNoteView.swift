@@ -247,6 +247,8 @@ struct RecordingPill: View {
     @Environment(\.motion) private var motion
 
     @State private var pressed = false
+    /// How far the menu's target reaches below the pill; see the menu.
+    static let menuOverhang: CGFloat = 12
 
     var body: some View {
         // This body reads only the recorder's state. The clock and the level
@@ -282,6 +284,12 @@ struct RecordingPill: View {
                     Button("Stop", systemImage: "stop.fill", role: .destructive, action: onStop)
                 } label: { Color.clear.contentShape(Capsule()) }
                 .menuOrder(.fixed)
+                // The menu's glyphs are neutral, as in the note's own menu; only Stop is red.
+                .tint(Theme.textSecondary)
+                // The menu opens over its target and ends 10 pt short of the target's lower
+                // edge, which left a sliver of the gold pill showing under the menu's corner.
+                // A target 12 pt taller brings the menu down over the whole pill.
+                .padding(.bottom, -RecordingPill.menuOverhang)
                 .accessibilityLabel("Recording controls")
                 .accessibilityValue(recorder.state == .paused ? "Paused" : "Recording")
                 .accessibilityHidden(!recorder.isCapturing)

@@ -108,6 +108,8 @@
 .admin-dialog-body > p { font-size: var(--text-base); line-height: 1.6; }
 .admin-dialog-body .admin-notice { margin: 0; }
 .admin-dialog-actions { display: flex; justify-content: flex-end; align-items: center; gap: var(--space-2); flex-wrap: wrap; padding: var(--space-4) var(--space-6); border-top: 1px solid var(--line); }
+/* The two answers to a dialog are one pair: the quiet one is as tall, and set as large, as the one beside it. */
+.admin-dialog-actions .admin-secondary-button { min-height: 2.5rem; padding: 0 1.125rem; font-size: var(--text-base); }
 .admin-dialog > p { padding: var(--space-5) var(--space-6) 0; font-size: var(--text-base); }
 .admin-dialog > .admin-notice { margin: var(--space-4) var(--space-6) 0; }
 .admin-dialog > .account-actions { justify-content: flex-end; padding: var(--space-5) var(--space-6); }

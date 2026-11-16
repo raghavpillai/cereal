@@ -314,6 +314,12 @@ pub fn set_dark(dark: bool) {
     DARK.with(|flag| flag.set(dark));
 }
 
+/// Whether the app is in its dark theme, for a view that is drawn outside
+/// the main one and has no settings of its own to ask.
+pub fn is_dark() -> bool {
+    DARK.with(|flag| flag.get())
+}
+
 /// The focus ring's colour: the focus gold at 60%, in its light and dark
 /// values.
 pub fn focus_ring() -> Hsla {
@@ -706,7 +712,13 @@ impl ToolTip {
 }
 
 impl Render for ToolTip {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        // A tooltip belongs to the pointer. Once the window is no longer the
+        // active one the pointer has gone elsewhere and no movement will
+        // arrive to take the tooltip down, so it goes now and stays gone.
+        if !window.is_window_active() {
+            self.hidden = true;
+        }
         if self.hidden || POPOVER_OPEN.with(|flag| flag.get()) {
             return div();
         }

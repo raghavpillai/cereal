@@ -1,3 +1,4 @@
+import {classifyOrigin} from "@meeting-notes/contracts/transport"
 import {mcp,requireMcpAuth} from "@better-auth/mcp"
 import {cimd} from "@better-auth/cimd"
 import {fetchClientMetadataResource} from "@better-auth/cimd/node"
@@ -33,7 +34,16 @@ const role=(value:string|undefined|null):PrincipalData["role"]=>value==="owner"?
 /** Protocol, PKCE, signatures, refresh rotation, CIMD and replay protection are
  * implemented by the official Better Auth plugins. The additional grant-id claim
  * enforces immediate disconnect and prevents an old JWT reviving on re-consent. */
-export function makeMcpAuthPlugins(db:Database,baseURL:string){
+/** AI apps sign in with OAuth, and both the MCP authorization rules and the provider plugin refuse a server that
+ * is not on HTTPS (or on this machine). A server on plain HTTP still starts and does everything else; its MCP
+ * addresses answer with this sentence. */
+export const MCP_NEEDS_HTTPS="Connecting AI apps needs an HTTPS address. This server is reached over plain HTTP."
+export const mcpAvailableAt=(baseURL:string)=>classifyOrigin(baseURL)==="secure"
+export function makeMcpAuthPlugins(db:Database,publicURL:string){
+ // The plugin cannot be built for a plain HTTP address at all. So that the account service keeps one shape, it is
+ // built for the address's HTTPS twin there, and `makeMcpAuthentication` (below) and the account routes refuse
+ // every MCP and OAuth address before the plugin is reached: nothing made for the twin is ever served.
+ const baseURL=mcpAvailableAt(publicURL)?publicURL:publicURL.replace(/^http:/,"https:")
  const {canonical,legacy}=mcpResources(baseURL),policy={name:"Cereal MCP",allowedScopes:MCP_OAUTH_SCOPES,accessTokenTtl:900,refreshTokenTtl:30*86400}
  return [jwt({disableSettingJwtHeader:true}),mcp({
   resource:canonical,loginPage:"/mcp/connect",consentPage:"/mcp/consent",scopes:MCP_OAUTH_SCOPES,
@@ -54,7 +64,8 @@ export function makeMcpAuthPlugins(db:Database,baseURL:string){
 }
 
 export function makeMcpAuthentication(db:Database,auth:AuthenticationEngine,baseURL:string){
- const {canonical,legacy}=mcpResources(baseURL),resource=canonical
+ const {canonical,legacy}=mcpResources(baseURL),resource=canonical,available=mcpAvailableAt(baseURL)
+ const needsHttps=(status:404|503)=>Response.json({error:status===404?"not_found":"unavailable",message:MCP_NEEDS_HTTPS},{status,headers:noStore})
  const metadataURL=(identifier:string)=>baseURL+METADATA_PATH+(identifier===legacy?LEGACY_MCP_PATH:MCP_PATH)
  const invalidGrant=(called:string)=>{const response=invalid();response.headers.set("WWW-Authenticate",`Bearer resource_metadata="${metadataURL(called)}", error="invalid_token", scope="${MCP_OAUTH_SCOPES.join(" ")}"`);return response}
  async function selectedWorkspace(userId:string,sessionOrganizationId?:string|null){
@@ -92,9 +103,12 @@ export function makeMcpAuthentication(db:Database,auth:AuthenticationEngine,base
  }
  return {
   resource,
+  /** False on plain HTTP off this machine: the MCP endpoint, its metadata and the OAuth routes all say why. */
+  available,
   /** Called only for public well-known discovery by the HTTP transport. The provider serves the document for
    * /api/mcp; the previous address keeps the same document under its own name. */
   async metadata(request:Request):Promise<Response>{
+   if(!available)return needsHttps(404)
    const url=new URL(request.url)
    if(url.pathname!==METADATA_PATH+LEGACY_MCP_PATH)return auth.handler(request)
    url.pathname=METADATA_PATH+MCP_PATH
@@ -104,6 +118,7 @@ export function makeMcpAuthentication(db:Database,auth:AuthenticationEngine,base
    return new Response(JSON.stringify({...await response.json() as Record<string,unknown>,resource:legacy}),{status:response.status,headers})
   },
   async protect(request:Request,handler:(request:Request,grant:McpGrant)=>Promise<Response>){
+   if(!available)return needsHttps(503)
    // `called` is the address this request came to; `audience` is the one its token is verified against.
    const called=new URL(request.url).pathname===LEGACY_MCP_PATH?legacy:canonical,claimed=claimedAudience(request.headers)
    const audience=claimed.includes(called)?called:claimed.includes(canonical)?canonical:claimed.includes(legacy)?legacy:called

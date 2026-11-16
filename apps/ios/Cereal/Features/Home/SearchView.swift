@@ -158,8 +158,10 @@ private struct SearchResults: View {
                                     NoteListRow(tile: hit.tile, title: hit.title, subtitle: hit.subtitle)
                                     if let excerpt = hit.excerpt {
                                         Text(hit.excerptParts.map(NoteSearch.marked) ?? (try? AttributedString(markdown: excerpt)) ?? AttributedString(excerpt))
-                                            .font(.system(size: 14)).foregroundStyle(Theme.textSecondary)
+                                            .readingFont(.rowSubtitle).foregroundStyle(Theme.textSecondary)
                                             .lineLimit(2).padding(.leading, 62).padding(.bottom, 8)
+                                            // It grows with the row above it, to the same limit.
+                                            .dynamicTypeSize(...DynamicTypeSize.accessibility1)
                                     }
                                 }
                             }

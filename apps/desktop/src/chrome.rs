@@ -1815,8 +1815,6 @@ impl Cereal {
             _ => {
                 let (title,description)=match &menu {
                     Menu::NewFolder=>("Create folder".to_string(),"Name".to_string()),
-                    Menu::Voice if crate::server::enabled()=>("A little less typing".into(),"Voice typing is not available yet. You can record a meeting, then stop recording to transcribe it and generate notes.".into()),
-                    Menu::Voice=>("A little less typing".into(),"Voice typing is not available yet. Meeting recording saves separate microphone and computer-audio files on this Mac.".into()),
                     Menu::RecordingHelp if crate::server::enabled()=>("Recording a meeting".into(),"Start captures your microphone and computer audio separately. Stop saves the recording and transcribes it without generating notes. Choose Generate notes when you are ready. Resume keeps the same transcript; after you stop again, Regenerate notes includes the new conversation.".into()),
                     Menu::RecordingHelp=>("Local audio recording".into(),"Start records your microphone and computer audio separately. Stop saves the audio on this Mac. Transcription and generated notes are available when you connect to your server.".into()),
                     Menu::Shortcuts=>("Keyboard shortcuts".into(),"Make yourself at home.".into()),
@@ -2798,13 +2796,15 @@ mod chrome_tests {
     fn settings_mode_has_only_real_pages_and_starts_on_preferences() {
         assert_eq!(SettingsTab::default(), SettingsTab::Preferences);
         let labels: Vec<_> = SettingsTab::ALL.iter().map(|tab| tab.label()).collect();
-        assert_eq!(labels, ["Preferences", "Profile", "Calendar", "About"]);
+        assert_eq!(
+            labels,
+            ["Preferences", "Profile", "Calendar", "Notifications", "About"]
+        );
         // Each page has its own glyph and none stands in for an unbuilt feature.
         let mut icons: Vec<_> = SettingsTab::ALL.iter().map(|tab| tab.icon()).collect();
         icons.dedup();
         assert_eq!(icons.len(), SettingsTab::ALL.len());
         for missing in [
-            "Notifications",
             "Billing",
             "Members",
             "Referrals",

@@ -50,9 +50,15 @@ export function NotesHome() {
     return () => observer.disconnect()
   }, [hasMore, loadingMore, moreError, loadMore, received])
 
+  // The field takes focus as it appears, in the same turn as the press that asked for it, so what is typed straight
+  // after lands in it. A field that is open because a search is still in it (coming back from a note) does not.
+  const asked = useRef(false)
   function openSearch() {
+    // Already open: take the keyboard there and select what it holds, now, not a frame later; a selection made
+    // after typing has begun would be replaced by the next key.
+    if (search.current) { search.current.focus(); search.current.select(); return }
+    asked.current = true
     setSearchOpen(true)
-    requestAnimationFrame(() => { search.current?.focus(); search.current?.select() })
   }
   function closeSearch() { setQuery(''); setSearchOpen(false) }
 
@@ -100,7 +106,7 @@ export function NotesHome() {
       {searchOpen
         ? <div className="app-find" role="search">
           <Icon name="search" size={13} />
-          <input ref={search} type="search" value={query} placeholder="Search" aria-label="Search notes" autoComplete="off" spellCheck={false} enterKeyHint="search" onChange={event => setQuery(event.target.value)} onKeyDown={searchKeys} />
+          <input ref={search} type="search" autoFocus={asked.current} value={query} placeholder="Search" aria-label="Search notes" autoComplete="off" spellCheck={false} enterKeyHint="search" onChange={event => setQuery(event.target.value)} onKeyDown={searchKeys} />
           <button type="button" className="app-tool is-small" aria-label="Close search" title="Close search · Esc" onClick={closeSearch}><Icon name="close" size={15} /></button>
         </div>
         : <button type="button" className="app-tool" aria-label="Search notes" title="Search notes · /" onClick={openSearch}><Icon name="search" size={15} /></button>}
@@ -174,7 +180,7 @@ function NoteRowsSkeleton({ more = false }: { more?: boolean }) {
  * page will have, so a cold load shows one skeleton and then the list. */
 export function NotesHomeSkeleton() {
   return <section className="notes-home" aria-busy="true"><div className="notes-column">
-    <HeaderActions><span className="site-avatar is-placeholder" aria-hidden="true" /></HeaderActions>
+    <HeaderActions><span className="header-pending" aria-hidden="true"><span className="site-link"><span>Download</span></span></span><span className="site-avatar is-placeholder" aria-hidden="true" /></HeaderActions>
     <header className="notes-head"><h1 className="app-heading">My notes</h1><span className="app-tool" aria-hidden="true"><Icon name="search" size={15} /></span></header>
     <div className="notes-list"><NoteRowsSkeleton /></div>
   </div></section>

@@ -112,6 +112,10 @@ struct ServerCaptureView: View {
                                 .glassMorph("keyboard", in: glass)
                         }
                     }
+                    // Without the keyboard the row is as tall as its tallest control (Ask and
+                    // Generate, 64 pt) whether or not one is showing. The pill dropped 8 pt when
+                    // a recording stopped and rose again when Generate arrived.
+                    .frame(minHeight: focus == nil ? 64 : nil)
                 }
             }.padding(.leading, rail.captureBarLeading).padding(.trailing, 20).padding(.bottom, 12)
                 .animation(settled ? motion.animation(.gooey, entering: focus != nil) : nil, value: focus)

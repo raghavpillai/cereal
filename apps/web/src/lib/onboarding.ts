@@ -7,14 +7,121 @@ import type { AdminSettingsDTO, AIModelDTO, AIProvider, AuthSessionDTO, Language
 export type StepId = 'claim' | 'name' | 'language' | 'speech' | 'models' | 'signIn' | 'storage' | 'apps'
 export const STEP_ORDER: readonly StepId[] = ['claim', 'name', 'language', 'speech', 'models', 'signIn', 'storage', 'apps']
 export const STEP_TITLES: Record<StepId, string> = {
-  claim: 'Claim this server', name: 'Name your space', language: 'Notes and chat', speech: 'Speech to text',
-  models: 'Models', signIn: 'Who can sign in', storage: 'Where files live', apps: 'Get the apps',
+  claim: 'Set up sign-in', name: 'Name your space', language: 'Notes and chat', speech: 'Speech to text',
+  models: 'Models', signIn: 'Who may join', storage: 'Where files live', apps: 'Get the apps',
 }
 /** Steps that offer "Skip for now". */
 export const OPTIONAL_STEPS: readonly StepId[] = ['signIn', 'storage']
 
 /** The steps this visit walks: with "Claim this server" first when it started on an unclaimed server. */
-export const stepsFor = (claiming: boolean): StepId[] => STEP_ORDER.filter(step => claiming || step !== 'claim')
+/** "Who may join" exists only on a server that signs in with Google: with email and password an administrator adds people. */
+export const stepsFor = (claiming: boolean, google = false): StepId[] => STEP_ORDER.filter(step => (claiming || step !== 'claim') && (google || step !== 'signIn'))
+
+/** The one way people sign in to a server: chosen in the first step, changed only from the admin panel. */
+export type SignInMethod = 'password' | 'google'
+/** The two addresses a Google OAuth client must list as authorized redirect URIs: sign-in first, then the calendar connection. */
+export const googleRedirectAddresses = (origin: string) => [`${serverAddress(origin)}/api/v1/auth/google/callback`, `${serverAddress(origin)}/api/integrations/google/callback`]
+const GOOGLE_CLIENT_ID = /^[A-Za-z0-9._-]{10,255}$/
+/** The first thing wrong with a Google client as typed, before anything is sent. */
+export function googleClientProblem(client: { clientId: string; clientSecret: string }): { field: 'clientId' | 'clientSecret'; message: string } | null {
+  const id = client.clientId.trim(), secret = client.clientSecret.trim()
+  if (!id) return { field: 'clientId', message: 'Paste the client ID of your Google OAuth client.' }
+  if (!GOOGLE_CLIENT_ID.test(id)) return { field: 'clientId', message: 'That is not a client ID. It ends in .apps.googleusercontent.com.' }
+  if (!secret) return { field: 'clientSecret', message: 'Paste the client secret that belongs to this client ID.' }
+  if (secret.length < 8 || secret.length > 512 || /\s/.test(secret)) return { field: 'clientSecret', message: 'That is not a client secret. Copy it again from Google Cloud.' }
+  return null
+}
+/** What to say when the proving Google sign-in failed, and which field to look at. Each reason gets its own sentence. */
+export function googleFailure(reason: string | null): { field: 'clientId' | 'clientSecret' | null; message: string } {
+  switch (reason) {
+    case 'invalid_client': return { field: 'clientSecret', message: 'Google did not accept the client secret. Copy the secret again from the same OAuth client as the client ID; nothing was saved.' }
+    case 'redirect_uri_mismatch': return { field: null, message: 'Google does not know this server’s address. Add both redirect addresses shown here to “Authorized redirect URIs” on the OAuth client, exactly as written, then try again.' }
+    case 'cancelled': return { field: null, message: 'The Google sign-in was cancelled, so nothing was saved. Try again when you are ready.' }
+    case 'unverified_email': return { field: null, message: 'That Google account’s email address is not verified. Sign in with a Google account whose address is verified.' }
+    case 'email_taken': return { field: null, message: 'Someone on this server already has an account with that Google address. Use a different Google account for the owner.' }
+    case 'google_account_in_use': return { field: null, message: 'That Google account belongs to someone else on this server. Sign in to Google as yourself to switch.' }
+    case 'already_claimed': return { field: null, message: 'This server was claimed a moment ago in another browser. Reload the page to sign in.' }
+    case 'expired': return { field: null, message: 'That took longer than ten minutes, so it was dropped. Nothing was saved; try again.' }
+    case 'blocked': return { field: null, message: 'The sign-in window was closed before Google finished. Nothing was saved; try again.' }
+    default: return { field: null, message: 'The Google sign-in did not finish. Nothing was saved. Check the client ID, the secret and the redirect addresses, then try again.' }
+  }
+}
+/** What Google shows on its own page when it will not even start, and what each means here. */
+export const GOOGLE_STUCK_HINT = 'If Google shows an error instead of its sign-in page: “redirect_uri_mismatch” means the two addresses above are not on the OAuth client yet, and “invalid_client” means the client ID is not one Google knows. Close that window, fix it, and try again.'
+
+export type GoogleVerification = { state: 'none' | 'pending' | 'done' | 'failed'; reason: string | null }
+/** How this browser's proving sign-in went. Sent with the HttpOnly cookie that sign-in set; nothing else identifies it. */
+export async function fetchGoogleVerification(signal?: AbortSignal, transport: typeof fetch = globalThis.fetch): Promise<GoogleVerification> {
+  const response = await transport('/api/v1/auth/google/verification', { signal, credentials: 'same-origin', cache: 'no-store', redirect: 'error', referrerPolicy: 'no-referrer' })
+  if (!response.ok) return { state: 'none', reason: null }
+  const body = await response.json().catch(() => null) as Partial<GoogleVerification> | null
+  return body && (body.state === 'pending' || body.state === 'done' || body.state === 'failed') ? { state: body.state, reason: typeof body.reason === 'string' ? body.reason : null } : { state: 'none', reason: null }
+}
+/** Where a proving sign-in may send the browser: an http(s) address only, never a script or an app. */
+export function googleDestination(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  try { const url = new URL(value); return (url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password ? url.href : null } catch { return null }
+}
+export interface GoogleStartFailure { field: 'code' | 'email' | 'clientId' | 'clientSecret' | null; message: string; waitSeconds: number }
+export type GoogleStart = { ok: true; url: string } | { ok: false; failure: GoogleStartFailure }
+/** Starts claiming the server with Google. The setup code is the bearer of this one request, as when claiming
+ * with a password; the answer is where to send the browser, and a cookie only the server can read. */
+export async function startGoogleClaim(code: string, client: { clientId: string; clientSecret: string }, signal?: AbortSignal, transport: typeof fetch = globalThis.fetch): Promise<GoogleStart> {
+  // Same-origin credentials, not "omit": the browser must keep the HttpOnly cookie the answer sets, which is what ties
+  // the sign-in that follows to this browser. The server reads only the bearer here; no cookie authorises a claim.
+  return startGoogle('/api/v1/admin/owner/setup/google', client, { Authorization: `Bearer ${code}` }, 'same-origin', signal, transport)
+}
+/** Starts switching a server to Google, from an administrator's session. */
+export async function startGoogleSwitch(client: { clientId: string; clientSecret: string }, signal?: AbortSignal, transport: typeof fetch = globalThis.fetch): Promise<GoogleStart> {
+  return startGoogle('/api/v1/admin/sign-in/google', client, {}, 'same-origin', signal, transport)
+}
+async function startGoogle(path: string, client: { clientId: string; clientSecret: string }, headers: Record<string, string>, credentials: RequestCredentials, signal: AbortSignal | undefined, transport: typeof fetch): Promise<GoogleStart> {
+  let response: Response
+  try {
+    // Never "include": only this origin's own cookies are ever sent or kept.
+    response = await transport(path, { method: 'POST', signal, credentials, cache: 'no-store', redirect: 'error', referrerPolicy: 'no-referrer', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: client.clientId.trim(), clientSecret: client.clientSecret.trim() }) })
+  } catch (error) {
+    if (signal?.aborted) throw error
+    return { ok: false, failure: { field: null, message: 'The server could not be reached. Check your connection and try again.', waitSeconds: 0 } }
+  }
+  if (response.ok) {
+    const url = googleDestination((await response.json().catch(() => null) as { authorizationUrl?: unknown } | null)?.authorizationUrl)
+    return url ? { ok: true, url } : { ok: false, failure: { field: null, message: 'The server could not start the Google sign-in. Try again in a moment.', waitSeconds: 0 } }
+  }
+  if (response.status === 400) {
+    const message = String((await response.json().catch(() => null) as { message?: unknown } | null)?.message ?? '')
+    return { ok: false, failure: /HTTPS/.test(message) ? { field: null, message: 'Google sign-in needs an HTTPS address. This server is reached over plain HTTP.', waitSeconds: 0 } : /secret/i.test(message) ? { field: 'clientSecret', message: 'That is not a client secret. Copy it again from Google Cloud.', waitSeconds: 0 } : { field: 'clientId', message: 'That is not a client ID. It ends in .apps.googleusercontent.com.', waitSeconds: 0 } }
+  }
+  return { ok: false, failure: claimFailure(response.status, response.headers.get('retry-after')) }
+}
+
+/** Runs the proving sign-in in its own small window, so what was typed stays on the page behind it, and waits for
+ * the server to say how it went. Call from a click: the window is opened before anything else happens. When the
+ * browser will not open a window the whole page goes to Google instead, and the page reads the outcome when it
+ * comes back. */
+export async function proveWithGoogle(start: (signal: AbortSignal) => Promise<GoogleStart>, signal: AbortSignal, environment: { open?: () => Window | null; status?: (signal: AbortSignal) => Promise<GoogleVerification>; wait?: (ms: number) => Promise<void>; leave?: (url: string) => void } = {}): Promise<{ ok: true } | { ok: false; failure: GoogleStartFailure }> {
+  const open = environment.open ?? (() => window.open('about:blank', 'cereal-google', 'popup,width=520,height=700'))
+  const status = environment.status ?? (inner => fetchGoogleVerification(inner)), wait = environment.wait ?? (ms => new Promise<void>(resolve => window.setTimeout(resolve, ms)))
+  const leave = environment.leave ?? (url => window.location.assign(url))
+  let popup: Window | null = null
+  try { popup = open() } catch { popup = null }
+  const close = () => { try { popup?.close() } catch { /* already gone */ } }
+  let started: GoogleStart
+  try { started = await start(signal) } catch (error) { close(); throw error }
+  if (!started.ok) { close(); return started }
+  if (!popup) { leave(started.url); await new Promise<never>(() => {}) }
+  try { popup!.location.replace(started.url) } catch { close(); leave(started.url); await new Promise<never>(() => {}) }
+  // Ten minutes is how long the server keeps the attempt.
+  for (let waited = 0; waited < 620_000; waited += 900) {
+    if (signal.aborted) { close(); throw new DOMException('Cancelled', 'AbortError') }
+    await wait(900)
+    const now = await status(signal).catch(() => ({ state: 'pending', reason: null }) as GoogleVerification)
+    if (now.state === 'done') { close(); return { ok: true } }
+    if (now.state === 'failed') { close(); return { ok: false, failure: { ...googleFailure(now.reason), waitSeconds: 0 } } }
+  }
+  close()
+  return { ok: false, failure: { ...googleFailure('expired'), waitSeconds: 0 } }
+}
 
 /** Where a reload lands: the first step the server does not report as finished, else the last screen. */
 export function resumeStep(steps: OnboardingStepsDTO): StepId {

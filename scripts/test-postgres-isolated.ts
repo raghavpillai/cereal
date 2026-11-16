@@ -25,11 +25,15 @@ try{
   // process. Keep real-login suites isolated without relaxing production limits.
   // The notes list benchmark builds a 500-note account and reads an 11 MB response. In the same
   // process as every other file it is killed for memory (exit 137) in a small Docker VM, so it runs alone.
-  const separate=["auth-postgres.test.ts","sign-in-postgres.test.ts","mcp-auth-postgres.test.ts","organizations-postgres.test.ts","note-summaries-postgres.test.ts","onboarding-postgres.test.ts"]
+  const separate=["auth-postgres.test.ts","sign-in-postgres.test.ts","mcp-auth-postgres.test.ts","organizations-postgres.test.ts","note-summaries-postgres.test.ts","onboarding-postgres.test.ts","plain-http-postgres.test.ts","google-claim-postgres.test.ts"]
   const tests=(await readdir(resolve(root,"apps/api/test"))).filter(name=>name.endsWith(".test.ts")&&!separate.includes(name)).map(name=>"apps/api/test/"+name)
   for(const files of [["apps/api/test/auth-postgres.test.ts"],["apps/api/test/sign-in-postgres.test.ts"],tests,["apps/api/test/note-summaries-postgres.test.ts"],["apps/api/test/mcp-auth-postgres.test.ts"],["apps/api/test/organizations-postgres.test.ts"],
    // On its own and last: it returns the bootstrap owner to "never claimed" and claims it again.
-   ["apps/api/test/onboarding-postgres.test.ts"]])
+   ["apps/api/test/onboarding-postgres.test.ts"],
+   // Real sign-ins over plain HTTP addresses, on their own for the same reason as the other sign-in files.
+   ["apps/api/test/plain-http-postgres.test.ts"],
+   // Claims the bootstrap owner with Google and with a password, and returns it to "never claimed" afterwards.
+   ["apps/api/test/google-claim-postgres.test.ts"]])
    await run(["docker","--context",context,"exec",testContainer,"bun","--no-env-file","test","--timeout","30000",...files])
  }finally{await run(["docker","--context",context,"rm","-f",testContainer])}
  console.log("Isolated PostgreSQL database tests passed")

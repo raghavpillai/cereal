@@ -9,6 +9,7 @@ import { makeProviderServices,ProviderFailure,type ProviderServices } from "./pr
 
 import {makeModelCatalog,CatalogFailure} from "./model-catalog"
 import {normalizeAllowedEmail,type SignInPolicy} from "./sign-in"
+import {classifyOrigin,googleNeedsHttps,GOOGLE_NEEDS_HTTPS} from "@meeting-notes/contracts/transport"
 import {normalizeS3Endpoint,normalizeS3Prefix,validBucketName,validS3Region,validAccessKeyId,validSecretAccessKey,S3SettingsError,type S3Config} from "./s3"
 import type {StorageConfiguration} from "./storage"
 import type {StorageSettingsDTO,UpdateStorageSettingsInput,OnboardingDTO,OnboardingStepInput} from "@meeting-notes/contracts"
@@ -39,6 +40,8 @@ export function makeAdministrationService(store:CalendarStore,box:SecretBox=secr
  const now=options.clock??(()=>new Date()),env=options.environment??process.env,fetchFeed=options.fetchFeed??fetchCalendarFeed
  const origin=new URL(options.baseURL??env.PUBLIC_BASE_URL??"http://localhost:"+(env.PORT??"3000")).origin
  const googleRedirectUris=[origin+"/api/v1/auth/google/callback",origin+"/api/integrations/google/callback"]
+ /** How the public address is reached, and whether Google will redirect to it (it will not over plain HTTP off this machine). */
+ const transport=classifyOrigin(origin),noGoogle=googleNeedsHttps(origin)
  const running=new Map<string,Promise<CalendarDTO|null>>();let disposed=false,busy=false
  const safe=(c:StoredCalendar):CalendarDTO=>{const{encryptedURL,...dto}=c;return dto}
  const boundary=<A>(task:()=>Promise<A>)=>Effect.tryPromise({try:task,catch:(error):ApiError=>error instanceof AdminFailure?error.payload:error instanceof CalendarLimitError?{error:"invalid_request",message:"A maximum of 20 calendars can be linked"}:{error:"unavailable",message:"Settings or calendar service is temporarily unavailable"}})
@@ -87,7 +90,8 @@ export function makeAdministrationService(store:CalendarStore,box:SecretBox=secr
    // ElevenLabs, or OpenAI when it is the provider chosen for speech-to-text.
    speech:configured("elevenlabs")||(s?.transcriptionModel?.provider==="openai"&&configured("openai")),
    models:!!recorded.models||!!(s?.chatModels&&s.generationModel&&s.transcriptionModel),
-   signIn:!!recorded.signIn,storage:!!recorded.storage,
+   // "Who may join" only exists for Google; with email and password an administrator adds people, so there is no step.
+   signIn:!!recorded.signIn||!googleOn(s),storage:!!recorded.storage,
   }}
  }
  /** The settings with the setup state: what the admin endpoints answer with. */
@@ -126,8 +130,13 @@ export function makeAdministrationService(store:CalendarStore,box:SecretBox=secr
  /** Google Calendar and Google sign-in share one client: the stored one, else the server environment. */
  async function googleCredentials(){const stored=storedGoogleClient(await store.getSettings());if(stored)return stored;return env.GOOGLE_CLIENT_ID&&env.GOOGLE_CLIENT_SECRET?{clientId:env.GOOGLE_CLIENT_ID,clientSecret:env.GOOGLE_CLIENT_SECRET}:null}
  // Both methods off can only be left behind by two administrators saving at once; password then stays on.
- const signInDTO=(s:Stored)=>({password:(s?.signInPassword??true)||!(s?.signInGoogle??false),google:s?.signInGoogle??false,allowedEmails:[...(s?.signInAllowedEmails??[])],googleClientId:s?.googleClientId??null,googleClientSecretSet:!!s?.googleClientSecret,googleRedirectUris})
- async function signInPolicy():Promise<SignInPolicy>{const s=await store.getSettings(),client=storedGoogleClient(s),dto=signInDTO(s);return{password:dto.password,google:dto.google&&!!client,allowedEmails:dto.allowedEmails,googleCredentials:client,instanceName:s?.instanceName??"Cereal"}}
+ // Where Google cannot be used at all (plain HTTP), password sign-in cannot be the method that is off either.
+ // A server has exactly one way to sign in. Google is it only when it was chosen, password was turned off with it,
+ // and Google can be used at this address; in every other case (a new server, an older one that had both on, plain
+ // HTTP) it is email and password.
+ const googleOn=(s:Stored)=>(s?.signInGoogle??false)&&s?.signInPassword===false&&!noGoogle
+ const signInDTO=(s:Stored)=>({password:!googleOn(s),google:googleOn(s),allowedEmails:[...(s?.signInAllowedEmails??[])],googleClientId:s?.googleClientId??null,googleClientSecretSet:!!s?.googleClientSecret,googleRedirectUris,googleNeedsHttps:noGoogle})
+ async function signInPolicy():Promise<SignInPolicy>{const s=await store.getSettings(),client=storedGoogleClient(s),dto=signInDTO(s);return{password:dto.password,google:dto.google&&!!client&&!noGoogle,allowedEmails:dto.allowedEmails,googleCredentials:client,instanceName:s?.instanceName??"Cereal"}}
  async function settings():Promise<AdminSettingsDTO>{
   const s=await store.getSettings(),legacyModel=s?.languageModel??fromEnv(s,"OPENROUTER_MODEL")??DEFAULT_LANGUAGE_MODEL,limits=liveLimits(s)
   return{instanceName:s?.instanceName??DEFAULT_INSTANCE_NAME,instanceLogo:s?.instanceLogo??null,languageModel:legacyModel,
@@ -184,8 +193,12 @@ export function makeAdministrationService(store:CalendarStore,box:SecretBox=secr
  /** Checks a sign-in change against what is stored and returns the columns to write. The secret is sealed here. */
  async function signInChange(input:NonNullable<UpdateAdminSettingsInput["signIn"]>){
   const current=signInDTO(await store.getSettings()),changes:{signInPassword?:boolean;signInGoogle?:boolean;signInAllowedEmails?:string[];googleClientId?:string|null;googleClientSecret?:string|null}={}
-  if(input.password!==undefined)changes.signInPassword=input.password
-  if(input.google!==undefined)changes.signInGoogle=input.google
+  // One method, never both and never neither: choosing one turns the other off.
+  if(input.password===true&&input.google===true)throw invalid("A server has one way to sign in: choose email and password, or Google")
+  if(input.password===false&&input.google===false)throw invalid("Keep one sign-in method turned on")
+  const wantsGoogle=input.google===true||input.password===false?true:input.google===false||input.password===true?false:undefined
+  if(wantsGoogle===true&&noGoogle)throw invalid(GOOGLE_NEEDS_HTTPS+". This server is reached over plain HTTP; put it behind HTTPS to use Google.")
+  if(wantsGoogle!==undefined){changes.signInGoogle=wantsGoogle;changes.signInPassword=!wantsGoogle}
   if(input.allowedEmails!==undefined){
    const entries:string[]=[]
    for(const raw of input.allowedEmails){const entry=normalizeAllowedEmail(raw);if(!entry)throw invalid("Allowed entries are a full email address or a domain such as @example.com");if(!entries.includes(entry))entries.push(entry)}
@@ -194,9 +207,8 @@ export function makeAdministrationService(store:CalendarStore,box:SecretBox=secr
   }
   if(input.googleClientId!==undefined){const id=input.googleClientId?.trim()||null;if(id&&!/^[A-Za-z0-9._-]{10,255}$/.test(id))throw invalid("Enter the Google client ID exactly as Google Cloud shows it");changes.googleClientId=id}
   if(input.googleClientSecret!==undefined){const secret=input.googleClientSecret?.trim()||null;if(secret&&(secret.length<8||secret.length>512||/\s/.test(secret)))throw invalid("Enter the Google client secret exactly as Google Cloud shows it");changes.googleClientSecret=secret?box.seal(secret):null}
-  const password=changes.signInPassword??current.password,google=changes.signInGoogle??current.google
+  const google=changes.signInGoogle??current.google
   const clientId=changes.googleClientId===undefined?current.googleClientId:changes.googleClientId,secretSet=changes.googleClientSecret===undefined?current.googleClientSecretSet:changes.googleClientSecret!==null
-  if(!password&&!google)throw invalid("Keep at least one sign-in method turned on")
   if(google&&!(clientId&&secretSet))throw invalid(current.google?"Turn off Google sign-in before removing its client ID or secret":"Add a Google client ID and client secret before turning on Google sign-in")
   return changes
  }
@@ -223,6 +235,17 @@ export function makeAdministrationService(store:CalendarStore,box:SecretBox=secr
  async function liveConfiguration(){const selected=(await settings()).liveTranscriptionModel;if(!selected)return null;return await providerKey(selected.provider)?{provider:selected.provider,model:selected.model,apiKey:()=>providerKey(selected.provider)}:null}
  return {
  configuration,liveConfiguration,googleCredentials,signInPolicy,
+ /** Makes Google, with a client Google has just accepted in a real sign-in, the one way to sign in. Returns how to
+  * put the settings back, for a caller whose next step fails. */
+ async useGoogle(client:{clientId:string;clientSecret:string}){
+  const before=await store.getSettings()
+  await store.saveSettings({googleClientId:client.clientId,googleClientSecret:box.seal(client.clientSecret),signInGoogle:true,signInPassword:false})
+  return async()=>{await store.saveSettings({googleClientId:before?.googleClientId??null,googleClientSecret:before?.googleClientSecret??null,signInGoogle:before?.signInGoogle??false,signInPassword:before?.signInPassword??true})}
+ },
+ /** Makes email and password the one way to sign in. The Google client stays stored, unused. */
+ async usePassword(){await store.saveSettings({signInPassword:true,signInGoogle:false})},
+ /** "secure", "private" or "public-http": how the public address is reached (contracts/transport.ts). */
+ transport,
  importEnvironment,
  /** How many recordings may be transcribed live at once, and how long a stopped one's provider sessions are kept. */
  liveLimits:async()=>liveLimits(await store.getSettings()),

@@ -69,6 +69,9 @@ pub struct Updates {
     /// Counts the checks and updates started, so the end of one that has
     /// been replaced is dropped.
     turn: u64,
+    /// Whether the last check found this to be the latest version; `None`
+    /// until one has finished.
+    latest: Option<bool>,
 }
 
 /// Megabytes with one decimal, the way a download is counted.
@@ -76,14 +79,55 @@ fn megabytes(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / 1_000_000.)
 }
 
+/// How much of `total` has arrived, in whole percent.
+fn percent(received: u64, total: u64) -> u64 {
+    if total == 0 {
+        0
+    } else {
+        received.min(total) * 100 / total
+    }
+}
+
 /// "4.2 MB of 9.8 MB (43%)". The total is the one the server advertised.
 pub fn progress_text(received: u64, total: u64) -> String {
     let received = received.min(total);
-    let percent = if total == 0 { 0 } else { received * 100 / total };
+    let percent = percent(received, total);
     format!("{} of {} ({percent}%)", megabytes(received), megabytes(total))
 }
 
 impl Updates {
+    /// A state of the update to look at, for the scripted tour: nothing is
+    /// checked, fetched or installed.
+    #[cfg(debug_assertions)]
+    pub fn review(&mut self, state: &str) {
+        let offer = Offer {
+            version: "9.9.9".into(),
+            path: String::new(),
+            size: 48_200_000,
+            sha256: String::new(),
+        };
+        self.put_away = false;
+        self.outcome = None;
+        self.received.store(20_700_000, Ordering::Release);
+        self.phase = match state {
+            "checking" => Phase::Checking,
+            "available" => Phase::Available(offer),
+            "downloading" => Phase::Downloading(offer),
+            "verifying" => Phase::Verifying(offer),
+            "ready" => Phase::Ready(Staged {
+                version: offer.version,
+                app: PathBuf::new(),
+                bundle: PathBuf::new(),
+                team: String::new(),
+            }),
+            "failed" => {
+                self.outcome = Some("The update could not be downloaded. Check your connection and try again.".into());
+                Phase::Idle
+            }
+            _ => Phase::Idle,
+        };
+    }
+
     fn notice(&self) -> Option<Notice> {
         let version = update::current_version();
         Some(match &self.phase {
@@ -145,19 +189,35 @@ impl Updates {
         matches!(self.phase, Phase::Available(_) | Phase::Ready(_))
     }
 
+    /// One line for the menu bar's menu: where this version stands.
+    pub(crate) fn status(&self) -> &'static str {
+        match (&self.phase, self.latest) {
+            (Phase::Checking, _) => "Checking for updates…",
+            (Phase::Available(_), _) => "Update available",
+            (Phase::Downloading(_) | Phase::Verifying(_), _) => "Downloading update…",
+            (Phase::Ready(_) | Phase::Restarting, _) => "Update ready to install",
+            (Phase::Idle, Some(true)) => "Latest version",
+            (Phase::Idle, Some(false)) => "Could not check for updates",
+            (Phase::Idle, None) => "Updates not checked yet",
+        }
+    }
+
     /// The sentence under "Version" in Settings, and the button beside it:
     /// its label, and whether it can be pressed now.
-    fn row(&self) -> (String, &'static str, bool) {
+    pub(crate) fn row(&self) -> (String, &'static str, bool) {
         let notice = self.notice();
         let sentence = match (&self.phase, &notice) {
             (Phase::Idle, _) | (_, None) => self
                 .outcome
                 .clone()
                 .unwrap_or_else(|| "Native GPUI build.".into()),
-            (Phase::Downloading(_), Some(notice)) => format!(
-                "{}: {}",
+            // One short line, whatever the width of the window: the row has
+            // the version and its button beside it. The megabytes are in the
+            // notice, which is up for as long as the download runs.
+            (Phase::Downloading(offer), Some(notice)) => format!(
+                "{} ({}%)",
                 notice.title,
-                notice.detail.clone().unwrap_or_default()
+                percent(self.received.load(Ordering::Acquire), offer.size)
             ),
             (_, Some(notice)) => notice.title.clone(),
         };
@@ -262,10 +322,11 @@ impl Cereal {
 
     /// A check or an update is over: say how it ended.
     fn end_update(&mut self, result: Result<(), Problem>, cx: &mut Context<Self>) {
-        let message = match result {
+        let message = match &result {
             Ok(()) => format!("Cereal is up to date ({})", update::current_version()),
             Err(problem) => problem.message(),
         };
+        self.updates.latest = Some(result.is_ok());
         self.updates.phase = Phase::Idle;
         self.updates.outcome = Some(message.clone());
         self.show_toast(&message, cx);
@@ -426,6 +487,8 @@ impl Cereal {
         crate::motion::pop(
             div()
                 .id("update-notice")
+                // Nothing behind the notice is under the pointer.
+                .occlude()
                 .absolute()
                 .bottom(px(16.))
                 .right(px(16.))
@@ -573,7 +636,7 @@ mod tests {
         assert_eq!(
             updates.row(),
             (
-                "Downloading version 0.2.0: 4.2 MB of 9.8 MB (43%)".into(),
+                "Downloading version 0.2.0 (43%)".into(),
                 "Downloading…",
                 false
             )

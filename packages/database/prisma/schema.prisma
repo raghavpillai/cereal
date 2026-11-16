@@ -316,6 +316,25 @@ model GoogleSignInState {
  expiresAt DateTime @db.Timestamptz(3)
  @@index([expiresAt])
 }
+/// A Google sign-in that proves a Google client before the server trusts it: claiming a new server with Google
+/// ("claim"), or an administrator switching the server to Google ("switch"). The setup code or the administrator's
+/// session was checked when the row was made; the browser that made it holds a random value in an HttpOnly cookie
+/// and only its hash is here. Single use: `outcome` is set once ("done" or the reason it failed), and the sealed
+/// client secret is cleared at the same moment. Rows expire after ten minutes.
+model GoogleVerification {
+ stateHash String @id @db.Char(64)
+ browserHash String @db.Char(64)
+ purpose String @db.VarChar(16)
+ userId String? @db.Uuid
+ clientId String @db.VarChar(255)
+ encryptedSecret String?
+ encryptedVerifier String
+ outcome String? @db.VarChar(32)
+ expiresAt DateTime @db.Timestamptz(3)
+ createdAt DateTime @default(now()) @db.Timestamptz(3)
+ @@index([browserHash])
+ @@index([expiresAt])
+}
 /// A signed-in browser handing its account to an app: single use, short lived, redeemed with the PKCE verifier.
 model AppSignInHandoff {
  codeHash String @id @db.Char(64)

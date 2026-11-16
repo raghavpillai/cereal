@@ -136,6 +136,9 @@
           "items": {
             "type": "string"
           }
+        },
+        "googleNeedsHttps": {
+          "type": "boolean"
         }
       },
       "required": [

@@ -84,10 +84,10 @@
 .onb-help { margin-top: 14px; max-width: 26.5rem; color: var(--ink-soft); font-size: var(--text-md); line-height: 1.55; text-wrap: pretty; }
 
 /* ── Fields ─────────────────────────────────────────────────────────────── */
-.onb-fields { display: grid; gap: 18px; min-width: 0; margin: 28px 0 0; padding: 0; border: 0; }
+.onb-fields { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; min-width: 0; margin: 28px 0 0; padding: 0; border: 0; }
 .onb-fields:disabled { opacity: 0.75; }
 .onb-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; }
-.onb-field { display: grid; gap: 6px; min-width: 0; align-content: start; }
+.onb-field { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; min-width: 0; align-content: start; }
 .onb-field > label, .onb-label { font: 500 var(--text-sm)/1.4 var(--font-ui); color: var(--ink); }
 .onb-label small, .onb-field > label small { margin-left: 6px; font-weight: 400; color: var(--ink-faint); }
 .onb-field-box { position: relative; display: block; }
@@ -130,7 +130,8 @@
 .onb-aside a { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
 .onb-aside a:hover { color: var(--brand-ink, var(--ink)); }
 .onb-copy { display: flex; align-items: center; gap: 8px; min-width: 0; height: 40px; padding: 0 5px 0 14px; border-radius: var(--radius-md); background: var(--wash); }
-.onb-copy code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 13px/1 var(--font-mono); color: var(--ink); }
+/* One line, cut with an ellipsis: the line box is tall enough for descenders (a line-height of 1 clips "g"). */
+.onb-copy code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 13px/1.6 var(--font-mono); color: var(--ink); }
 .onb-copy code span { color: var(--ink-faint); user-select: none; }
 .onb-copy-button { position: relative; display: grid; flex-shrink: 0; height: 30px; padding: 0 12px; border: 0; border-radius: 8px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow-sm), 0 0 0 1px var(--line); font: 500 var(--text-xs)/30px var(--font-ui); }
 .onb-copy-button:hover { background: var(--wash-solid); }
@@ -239,7 +240,7 @@
 .ls-bar { position: relative; display: flex; align-items: center; justify-content: center; flex-shrink: 0; height: 40px; border-bottom: 1px solid var(--line); }
 .ls-lights { position: absolute; left: 16px; display: flex; gap: 7px; }
 .ls-lights i { width: 10px; height: 10px; border-radius: 50%; background: var(--wash-strong); }
-.ls-title { max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 500 var(--text-sm)/1 var(--font-ui); color: var(--ink-soft); }
+.ls-title { max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 500 var(--text-sm)/1.5 var(--font-ui); color: var(--ink-soft); }
 .ls-body { position: relative; flex: 1; display: grid; min-height: 0; padding: 20px; overflow: hidden; }
 .ls-scene {
   grid-area: 1 / 1; position: relative; display: grid; min-width: 0; min-height: 0;
@@ -546,7 +547,8 @@
 
 /* ── Reduced motion: cross-fades only ───────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
-  .onb { --onb-shift: 0px; }
+  /* Going back as well as forward: the step fades and does not travel. */
+  .onb, .onb[data-direction='backward'] { --onb-shift: 0px; }
   .onb-dots-goo { filter: none !important; }
   .onb-dots .onb-blob, .onb-dot-done { transition: none !important; }
   .onb *, .onb *::before, .onb *::after { animation-iteration-count: 1 !important; }
@@ -561,3 +563,31 @@
   .onb-field[data-state='good'] .onb-field-ring, .onb-field[data-state='good'] .onb-field-ring::after, .onb-check path, .sc-note[data-on] .sc-heading, .sc-note[data-on] .sc-line b, .sc-speech[data-on] .sc-bubble b, .onb-done-mark::before, .onb-done-mark::after { animation: none !important; }
   .sc-speech[data-on] .sc-wave i { animation: none !important; transform: scaleY(calc(var(--h) * 0.8)); }
 }
+
+/* The plain-HTTP note on the claim step sits between the help and the fields. */
+.onb-transport { margin-top: 20px; }
+.onb-switch:disabled { opacity: 0.5; cursor: not-allowed; }
+.instance-transport { color: var(--ink-faint); }
+.instance-settings > .transport-warning { margin-bottom: 16px; }
+
+/* ── Step 1: one way to sign in ─────────────────────────────────────────── */
+.onb-choice[data-disabled] { opacity: 0.5; cursor: not-allowed; }
+.onb-choice[data-disabled]:hover { border-color: var(--line-strong); }
+.onb-method { display: grid; gap: 18px; animation: fade-in var(--dur-snappy) var(--ease-fade) backwards, rise var(--dur-settle) var(--spring-settle) backwards; }
+.onb-method .onb-where { margin-top: 0; }
+.onb-waiting { display: grid; justify-items: start; gap: 8px; margin-top: 18px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--brand-soft); color: var(--on-brand-soft); font-size: var(--text-sm); line-height: 1.5; animation: fade-in var(--dur-snappy) var(--ease-fade) backwards, rise var(--dur-snappy) var(--spring-snappy) backwards; }
+.onb-waiting > p:first-child { display: flex; align-items: flex-start; gap: 8px; }
+.onb-waiting .spinner { margin-top: 3px; border-color: color-mix(in srgb, currentColor 25%, transparent); border-top-color: currentColor; }
+.onb-waiting .onb-hint { color: inherit; opacity: 0.85; }
+.onb-waiting .quiet-button { margin-left: -0.625rem; color: inherit; }
+.onb-chips li.is-fixed { padding-right: 11px; gap: 7px; background: var(--wash); color: var(--ink-soft); }
+.onb-chips li small { font-size: var(--text-2xs); color: var(--ink-faint); }
+.sc-claim .sc-welcome { grid-area: auto; display: flex; align-items: center; gap: 8px; min-height: 32px; opacity: 1; transform: none; font: 500 13px/1.5 var(--font-ui); color: var(--ink-faint); transition: none; }
+.sc-claim[data-accepted] .sc-welcome { font: 400 24px/1.3 var(--font-display); letter-spacing: -0.01em; color: var(--ink); animation: fade-in var(--dur-snappy) var(--ease-fade) backwards, rise var(--dur-settle) var(--spring-settle) backwards; }
+.sc-claim[data-accepted] .sc-card { box-shadow: 0 0 0 2px var(--brand), var(--shadow-md); transition: box-shadow var(--dur-gooey) var(--ease-fade); }
+.sc-input[data-filled] { color: var(--ink); overflow: hidden; white-space: nowrap; }
+.sc-google { position: relative; }
+.sc-google-wait { width: 10px; height: 10px; border: 1.5px solid var(--line-strong); border-top-color: var(--ink-soft); border-radius: 50%; animation: spin 0.8s linear infinite; }
+/* The admin panel's Sign-in card: what opens under the method that is being switched to. */
+.sign-in-switch { display: grid; gap: var(--row-gap, 8px); margin-top: 4px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--wash); }
+.sign-in-switch-actions { display: flex; align-items: center; gap: 8px; }

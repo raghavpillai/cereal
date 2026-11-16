@@ -1,5 +1,8 @@
 import Foundation
 import os
+#if DEBUG
+import QuartzCore
+#endif
 
 /// Signpost intervals for a profiling session (Instruments > os_signpost, or
 /// the Points of Interest lane), named as in the performance audit. They cost
@@ -43,6 +46,9 @@ enum PerfProbe {
     private static func snapshot() -> [String: Int] { lock.withLock { counts } }
 
     private static func startPrinting() {
+        // A file or a pipe is block-buffered: without this the counts of a scripted run never arrive.
+        setvbuf(stdout, nil, _IOLBF, 0)
+        Task { @MainActor in FrameGapProbe.shared.start() }
         printer = Task.detached {
             var previous: [String: Int] = [:]
             while !Task.isCancelled {
@@ -61,3 +67,33 @@ enum PerfProbe {
     @inline(__always) static func hit(_ name: String, _ amount: Int = 1) {}
     #endif
 }
+
+#if DEBUG
+/// With `-perf-probe`: counts the frames the main thread delivered late. A display link
+/// fires once per refresh while the main run loop is free; a gap of more than 50 ms
+/// between two callbacks is a stall someone would see. `MainStall` is the number of
+/// stalls and `MainStallMs` their total length. A busy host stretches these too, so
+/// they are read beside the process's own CPU time, never alone.
+@MainActor
+final class FrameGapProbe: NSObject {
+    static let shared = FrameGapProbe()
+    private var link: CADisplayLink?
+    private var last: CFTimeInterval = 0
+
+    func start() {
+        guard link == nil else { return }
+        let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    @objc private func tick(_ link: CADisplayLink) {
+        let now = CACurrentMediaTime()
+        if last > 0, now - last > 0.05 {
+            PerfProbe.hit("MainStall")
+            PerfProbe.hit("MainStallMs", Int((now - last) * 1000))
+        }
+        last = now
+    }
+}
+#endif

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { createFileRoute } from '@tanstack/react-router'
 import type { AuthSessionDTO } from '@meeting-notes/contracts'
-import { AdminClientError, createAdminClient } from '../lib/admin-client'
+import { readSession, rememberSetup } from '../lib/session-probe'
 import { AppHandoffError, appCallbackURL, appSignInPath, appSignInRequest, authClient, fetchAuthMethods, googleStartURL, requestAppHandoff, safeReturnPath, signInErrorMessage, signInProblem, type AppSignInRequest, type AuthMethods } from '../lib/auth-client'
 import { setupLanding } from '../lib/onboarding'
 import { Loading, Notice } from '../components/admin/shared'
+import { TransportWarning } from '../components/kit/transport-notice'
 import appIcon from '../assets/app-icon.svg?url'
 import '../styles/login.css'
 
@@ -60,9 +61,11 @@ function SignInPage() {
     setStage({ kind: 'leaving' })
     let to = query.returnPath
     if (!to) {
+      const { createAdminClient } = await import('../lib/admin-client')
       const client = createAdminClient(window.location.origin)
       const known = session ?? await client.getSession().catch(() => null)
       to = known ? await setupLanding(known, () => client.getSettings()) : null
+      if (to) rememberSetup(true)
     }
     window.location.replace(to ?? '/notes')
   }, [query.returnPath])
@@ -74,13 +77,13 @@ function SignInPage() {
     try {
       const [methods, session] = await Promise.all([
         fetchAuthMethods(controller.signal),
-        createAdminClient(window.location.origin).getSession(controller.signal).catch(error => { if (error instanceof AdminClientError && error.status === 401) return null; throw error }),
+        readSession(controller.signal),
       ])
       if (controller.signal.aborted) return
       // Nobody can sign in to a server that has not been claimed: its sign-in page is the first step of setup.
       // …unless they asked for sign-in by name: a server set up before there was a claim step has accounts
       // whose owner never made a password, and those people must still be able to get in.
-      if (methods.setupRequired && !session && !new URLSearchParams(window.location.search).has('signin')) { setStage({ kind: 'leaving' }); window.location.replace('/admin'); return }
+      if (methods.setupRequired && !session && !new URLSearchParams(window.location.search).has('signin')) { setStage({ kind: 'leaving' }); rememberSetup(true); window.location.replace('/admin'); return }
       if (!session || (query.wantsApp && !app)) {
         // Nothing is in progress any more: a later visit with a session asks before handing it to an app.
         try { sessionStorage.removeItem(APP_SIGN_IN_FLAG) } catch { /* nothing to clear */ }
@@ -97,7 +100,7 @@ function SignInPage() {
 
   async function signedIn() {
     if (app) {
-      const session = await createAdminClient(window.location.origin).getSession().catch(() => null)
+      const session = await readSession().catch(() => null)
       await openApp(app, session)
     } else await leave()
   }
@@ -127,6 +130,7 @@ function SignInPage() {
   const { methods } = stage
   return <Shell eyebrow={app ? 'Cereal app' : 'Your meeting notes'} title={app ? 'Sign in to continue.' : 'Welcome back.'} lead={app ? `Sign in to ${methods.instanceName} to continue in the Cereal app.` : 'Sign in to read your notes.'}
     footnote="Accounts are provided by your instance administrator." download={!app}>
+    <TransportWarning transport={methods.transport} />
     {stage.signedOut && <Notice>You are signed out.</Notice>}
     {query.error && !problem && <Notice error>{query.error}</Notice>}
     {methods.google && <a className="sign-in-google" href={googleStartURL(app ? appSignInPath(app) : query.returnPath)} onClick={() => { if (app) try { sessionStorage.setItem(APP_SIGN_IN_FLAG, app.state) } catch { /* the return trip asks for confirmation instead */ } }}><GoogleMark />Continue with Google</a>}

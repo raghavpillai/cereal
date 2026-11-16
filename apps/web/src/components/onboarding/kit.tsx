@@ -1,6 +1,7 @@
 /** The small parts the setup flow is built from: the Cereal mark as a character, the gooey step dots,
  * fields, a switch, a line to copy, and the check that draws itself. */
 import { forwardRef, useEffect, useId, useImperativeHandle, useRef, useState, type InputHTMLAttributes, type ReactNode } from 'react'
+import { copyText } from '../../lib/clipboard'
 import markSource from '../../assets/mark.svg?raw'
 
 const MARK_PATH = /\sd="([^"]+)"/.exec(markSource)?.[1] ?? ''
@@ -122,10 +123,8 @@ export function CopyLine({ value, label, prefix }: { value: string; label: strin
   const timer = useRef<number | undefined>(undefined)
   useEffect(() => () => window.clearTimeout(timer.current), [])
   async function copy() {
-    try { await navigator.clipboard.writeText(value) } catch {
-      // No clipboard permission: select the text so one keystroke copies it.
-      return
-    }
+    // Works over plain HTTP too, where the clipboard API does not exist (lib/clipboard.ts).
+    try { await copyText(value) } catch { return }
     setCopied(true); window.clearTimeout(timer.current); timer.current = window.setTimeout(() => setCopied(false), 2000)
   }
   return <div className="onb-copy">
@@ -139,9 +138,9 @@ export function CopyLine({ value, label, prefix }: { value: string; label: strin
 }
 
 /** One of a few choices, as a card: a real radio button underneath, so arrows and Space work. */
-export function Choice({ name, value, checked, onChange, title, detail, icon }: { name: string; value: string; checked: boolean; onChange: () => void; title: string; detail?: string; icon?: ReactNode }) {
-  return <label className="onb-choice pressable" data-checked={checked ? '' : undefined}>
-    <input type="radio" className="sr-only" name={name} value={value} checked={checked} onChange={onChange} />
+export function Choice({ name, value, checked, onChange, title, detail, icon, disabled }: { name: string; value: string; checked: boolean; onChange: () => void; title: string; detail?: string; icon?: ReactNode; disabled?: boolean }) {
+  return <label className="onb-choice pressable" data-checked={checked ? '' : undefined} data-disabled={disabled ? '' : undefined}>
+    <input type="radio" className="sr-only" name={name} value={value} checked={checked} disabled={disabled} onChange={onChange} />
     {icon && <span className="onb-choice-icon" aria-hidden="true">{icon}</span>}
     <span className="onb-choice-text"><strong>{title}</strong>{detail && <small>{detail}</small>}</span>
     <span className="onb-choice-dot" aria-hidden="true" />

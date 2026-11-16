@@ -371,6 +371,35 @@ mod tests {
     }
 
     #[test]
+    fn a_session_on_a_plain_http_server_goes_to_that_origin_only() {
+        let private = credentials("http://10.30.1.77:3000");
+        let on_server = link(&format!("http://10.30.1.77:3000/s/{TOKEN}"));
+        assert_eq!(
+            bearer_for(&on_server, Some(&private)),
+            Some("session-token-for-the-signed-in-server")
+        );
+        // The same host over HTTPS, on another port, at the next address or
+        // worn as part of another name is a different server.
+        for elsewhere in [
+            format!("https://10.30.1.77:3000/s/{TOKEN}"),
+            format!("http://10.30.1.77/s/{TOKEN}"),
+            format!("http://10.30.1.77:3001/s/{TOKEN}"),
+            format!("http://10.30.1.78:3000/s/{TOKEN}"),
+            format!("http://10.30.1.77.evil.example:3000/s/{TOKEN}"),
+            format!("http://evil.example/s/{TOKEN}"),
+        ] {
+            let elsewhere = link(&elsewhere);
+            assert_eq!(bearer_for(&elsewhere, Some(&private)), None, "{elsewhere:?}");
+            assert_eq!(fetch(&elsewhere, Some(&private)), Err(SharedNoteError::SignInRequired));
+        }
+        // A session on an HTTPS server never follows a link down to HTTP.
+        let secure = credentials("https://notes.example.com");
+        let downgraded = link(&format!("http://notes.example.com/s/{TOKEN}"));
+        assert_eq!(bearer_for(&downgraded, Some(&secure)), None);
+        assert_eq!(fetch(&downgraded, Some(&secure)), Err(SharedNoteError::SignInRequired));
+    }
+
+    #[test]
     fn a_snapshot_is_read_leniently_and_never_trusted() {
         let note = read(&reply(
             200,
@@ -477,7 +506,8 @@ mod tests {
             r#"[
               {{"url":"https://notes.example.com/s/{TOKEN}","title":"Kept","openedAt":"2026-11-15T09:00:00Z"}},
               {{"url":"https://notes.example.com/s/{TOKEN}","title":"The same link again","openedAt":"2026-11-14T09:00:00Z"}},
-              {{"url":"http://evil.example/s/{TOKEN}","title":"Plain HTTP","openedAt":"2026-11-15T09:00:00Z"}},
+              {{"url":"http://user@evil.example/s/{TOKEN}","title":"Dressed up","openedAt":"2026-11-15T09:00:00Z"}},
+              {{"url":"ftp://evil.example/s/{TOKEN}","title":"Another scheme","openedAt":"2026-11-15T09:00:00Z"}},
               {{"url":"https://notes.example.com/notes/01136768-b41d-4ee8-ad19-e73976f18475","title":"Not a share","openedAt":"2026-11-15T09:00:00Z"}},
               {{"url":"cereal://auth?code=a&state=b","title":"Not a share","openedAt":"2026-11-15T09:00:00Z"}},
               {{"url":"javascript:alert(1)","title":"Not a link","openedAt":"2026-11-15T09:00:00Z"}}

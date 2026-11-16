@@ -42,6 +42,12 @@
 .note-shared-line { position: relative; top: -1px; color: var(--app-muted); font-size: 12px; line-height: 16px; white-space: nowrap; }
 .note-shared-foot { margin: 28px 0 0; color: var(--app-muted); font-size: 12px; line-height: 16px; }
 
+/* Text takes its direction from what it says: an Arabic or Hebrew title, line or bubble reads from the right
+   and starts at the right edge, with its punctuation on the correct side; everything else is unchanged. */
+.note-title, .note-own, .note-text h2, .note-line, .utterance-bubble { unicode-bidi: plaintext; text-align: start; }
+/* A list item stays beside its bullet or number, whichever way its words run. */
+.note-item .note-line { text-align: left; }
+
 /* Switching views settles in rather than swapping abruptly. */
 .note-content { width: 100%; min-width: 0; animation: fade-in var(--dur-snappy) var(--ease-fade) backwards; }
 .note-quiet { margin: 0 0 12px; color: var(--app-muted); font-size: 14px; line-height: 22px; }
@@ -120,7 +126,10 @@
 .transcript-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; }
 .transcript-body::-webkit-scrollbar { display: none; }
 .transcript-body:focus-visible { outline-offset: -2px; }
-.transcript-rows { display: flex; flex-direction: column; margin: 0; padding: 0 10px 0 12px; list-style: none; }
+.transcript-rows { display: flex; flex-direction: column; padding: 0 10px 0 12px; }
+/* A long meeting has thousands of bubbles, kept in runs of fifty. A run that is off screen is neither laid out nor
+   painted until it comes near, and keeps the height it last had, so the card opens and scrolls as it does for a short one. */
+.transcript-run { display: flex; flex-direction: column; flex-shrink: 0; margin: 0; padding: 0; list-style: none; content-visibility: auto; contain-intrinsic-size: auto 2200px; }
 .transcript-foot { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; height: 64px; padding: 0 10px 0 12px; }
 
 /* One bubble for each thing said. Others on the left, the reader's own microphone on the right;
@@ -152,6 +161,9 @@
 
 /* ── Share: the dark split pill and its card ───────────────────────────── */
 .share-split { position: relative; display: flex; gap: 1px; flex-shrink: 0; }
+/* The note's actions while the note is on its way: in their places, dimmed, and not controls yet. */
+.header-pending { display: contents; }
+.header-pending > * { opacity: 0.4; pointer-events: none; user-select: none; }
 /* The card hangs from the whole pill, not from its Share half. */
 .share-split .app-popover-root { position: static; }
 .share-button {
@@ -214,6 +226,10 @@
      which still leaves the heading marks their 16 px. The row under the title may wrap. */
   .note-doc { padding: 8px 20px 120px; }
   .note-meta { flex-wrap: wrap; height: auto; min-height: 28px; }
+  /* The details card hangs from the row, not from its chip: on a phone the chip can sit so far along the row that a card hung from it would leave the screen. */
+  .note-meta { position: relative; }
+  .note-meta .app-popover-root { position: static; }
+  .note-details-card { top: calc(100% + 4px); left: 4px; width: min(280px, calc(100% - 4px)); max-width: none; }
   .note-footer { left: 16px; right: 16px; }
   .note-footer::before { left: -16px; right: -16px; }
   .transcript-dock { left: 8px; right: 8px; bottom: 12px; }

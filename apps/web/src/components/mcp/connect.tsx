@@ -1,18 +1,24 @@
 import { Link } from '@tanstack/react-router'
+import { copyText } from '../../lib/clipboard'
+import { classifyOrigin } from '@meeting-notes/contracts/transport'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { SessionGate } from '../account/session-gate'
 import { Empty, Loading, Modal, Notice, useAdminTask, useResource } from '../admin/shared'
 import { createMCPClient, type MCPConnection } from '../../lib/mcp-client'
 import { Segmented } from '../kit/segmented'
 import { AccountMenu } from '../account/account-menu'
-import { AdminClientError } from '../../lib/admin-client'
+import { AdminClientError } from '../../lib/client-error'
 import { mcpConnectionURL, mcpScopeDescriptions, safeOAuthResume, signedOAuthQuery } from '../../lib/mcp-state'
 
 export function MCPConnect() {
   const [url, setURL] = useState<string | null>(null)
-  useEffect(() => { setURL(mcpConnectionURL(window.location.origin)) }, [])
+  // AI apps only sign in to servers on HTTPS (or on this machine): over plain HTTP the page says so instead of offering an address that cannot work.
+  const [needsHttps, setNeedsHttps] = useState(false)
+  useEffect(() => { setURL(mcpConnectionURL(window.location.origin)); setNeedsHttps(classifyOrigin(window.location.origin) !== 'secure') }, [])
   return <div className="admin-page mcp-page"><div className="admin-heading"><div><p className="eyebrow">Connections</p><h1>Your notes, where you work.</h1><p>Connect an AI app to your meeting notes.</p></div><Link to="/notes" className="admin-secondary-button">Your notes</Link></div>
-    <ConnectionInstructions url={url} />
+    {needsHttps
+      ? <section className="admin-card"><Empty title="Connecting AI apps needs an HTTPS address">AI apps only sign in to servers reached over HTTPS. This server is reached over plain HTTP, so apps cannot be connected until it has an HTTPS address.</Empty></section>
+      : <ConnectionInstructions url={url} />}
     <SessionGate>{(session, _client, expired, signOut) => <div key={session.user.id}><AccountMenu session={session} signOut={signOut} /><ResumeAuthorization expired={expired} /><ConnectedApps expired={expired} /><p className="admin-page-footnote">Signed in as {session.user.email}.</p></div>}</SessionGate>
   </div>
 }
@@ -45,7 +51,7 @@ export function ConnectionInstructions({ url }: { url: string | null }) {
   useEffect(() => { if (!copied) return; const timer = setTimeout(() => setCopied(false), 2500); return () => clearTimeout(timer) }, [copied])
   async function copy() {
     if (!url) return
-    try { await navigator.clipboard.writeText(url); setCopied(true); setCopyError(false) } catch { setCopyError(true) }
+    try { await copyText(url); setCopied(true); setCopyError(false) } catch { setCopyError(true) }
   }
   return <section className="admin-card"><h2>Connect an app</h2><p>Use this server address, then sign in and choose whether to allow access. Each person connects their own account.</p>
     <label className="mcp-url-label" htmlFor="mcp-server-url">Server address</label><div className="mcp-url"><input id="mcp-server-url" readOnly value={url ?? ''} placeholder="Loading server address…" spellCheck={false} /><button type="button" className="admin-secondary-button" disabled={!url} onClick={() => void copy()}>{copied ? 'Copied' : 'Copy address'}</button></div>

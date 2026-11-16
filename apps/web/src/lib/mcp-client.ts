@@ -1,6 +1,6 @@
 import { Schema } from 'effect'
 import {McpAuthorizationDTO,McpConnectionDTO,McpConnectionsDTO} from '@meeting-notes/contracts'
-import { AdminClientError } from './admin-client'
+import { AdminClientError } from './client-error'
 
 export const MCPAuthorization = McpAuthorizationDTO
 export type MCPAuthorization = typeof MCPAuthorization.Type

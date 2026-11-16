@@ -1,7 +1,8 @@
 import Foundation
 
 /// Where a Cereal server lives: scheme, host and port, with nothing after them.
-/// HTTPS, or HTTP on this device's own loopback addresses for development.
+/// HTTPS, or plain HTTP to this device or to an address on a private network
+/// (see `ServerAddress`); plain HTTP to anything else is not an origin.
 /// The host is kept in its ASCII form, so a look-alike name is shown as what it is.
 public struct ServerOrigin: Hashable, Sendable, CustomStringConvertible {
     public let scheme: String
@@ -36,7 +37,7 @@ public struct ServerOrigin: Hashable, Sendable, CustomStringConvertible {
             guard host.utf8.count <= 253, host.range(of: Self.namePattern, options: .regularExpression) != nil else { return nil }
         }
         if let port = components.port { guard (1...65_535).contains(port) else { return nil } }
-        guard scheme == "https" || ["localhost", "127.0.0.1", "::1"].contains(host) else { return nil }
+        guard ServerAddress.kind(scheme: scheme, host: host) != .publicHTTP else { return nil }
         self.scheme = scheme
         self.host = host
         self.port = components.port == (scheme == "https" ? 443 : 80) ? nil : components.port

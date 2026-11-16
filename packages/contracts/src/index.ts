@@ -300,6 +300,9 @@ export const SignInSettingsDTO = Schema.Struct({
   googleClientSecretSet: Schema.Boolean,
   /** The redirect URIs to register in Google Cloud: sign-in first, then the calendar connection. */
   googleRedirectUris: Schema.Array(Schema.String),
+  /** True when this server's address is plain HTTP off this machine: Google will not redirect to it, so Google
+   * sign-in cannot be turned on. Always sent by this server. */
+  googleNeedsHttps: Schema.optionalKey(Schema.Boolean),
 }).annotate({ identifier: "SignInSettingsDTO" })
 export type SignInSettingsDTO = typeof SignInSettingsDTO.Type
 export const UpdateSignInSettingsInput = Schema.Struct({
@@ -310,12 +313,33 @@ export const UpdateSignInSettingsInput = Schema.Struct({
   googleClientSecret: Schema.optionalKey(Schema.NullOr(GoogleClientSecret)),
 }).annotate({ identifier: "UpdateSignInSettingsInput" })
 export type UpdateSignInSettingsInput = typeof UpdateSignInSettingsInput.Type
+/** A Google client that has not been tried yet: sent to start the one Google sign-in that proves it. */
+export const GoogleVerificationInput = Schema.Struct({ clientId: GoogleClientId, clientSecret: GoogleClientSecret }).annotate({ identifier: "GoogleVerificationInput" })
+export type GoogleVerificationInput = typeof GoogleVerificationInput.Type
+/** Where to send the browser. The answer also sets an HttpOnly cookie that ties the sign-in to this browser. */
+export const GoogleVerificationStartDTO = Schema.Struct({ authorizationUrl: Schema.String }).annotate({ identifier: "GoogleVerificationStartDTO" })
+export type GoogleVerificationStartDTO = typeof GoogleVerificationStartDTO.Type
+/** How this browser's proving sign-in went. `reason` is set when it failed: "invalid_client" (Google refused the
+ * secret), "redirect_uri_mismatch", "cancelled", "unverified_email", "email_taken", "already_claimed",
+ * "google_account_in_use", "expired" or "failed". */
+export const GoogleVerificationStatusDTO = Schema.Struct({ state: Schema.Literals(["none", "pending", "done", "failed"]), reason: Schema.NullOr(Schema.String) }).annotate({ identifier: "GoogleVerificationStatusDTO" })
+export type GoogleVerificationStatusDTO = typeof GoogleVerificationStatusDTO.Type
+/** The password the signed-in administrator will use once the server signs in with email and password. */
+export const SwitchToPasswordInput = Schema.Struct({ password: Schema.String.check(Schema.isMinLength(12), Schema.isMaxLength(128)) }).annotate({ identifier: "SwitchToPasswordInput" })
+export type SwitchToPasswordInput = typeof SwitchToPasswordInput.Type
+/** How a server's public address is reached; the rules are in src/transport.ts. Named so generated code gets a type of its own. */
+export const ServerTransport = Schema.Literals(["secure", "private", "public-http"]).annotate({ identifier: "ServerTransport" })
+export type ServerTransport = typeof ServerTransport.Type
 /** What the sign-in page and the apps offer. Public: it says nothing about accounts. */
 export const AuthMethodsDTO = Schema.Struct({
   password: Schema.Boolean, google: Schema.Boolean, instanceName: Schema.String,
   /** True while nobody has claimed this server: no owner account with a password exists yet. The web and the apps
    * then show "Claim this server" in place of sign-in. Always sent by this server; optional so answers from older servers stay valid. */
   setupRequired: Schema.optionalKey(Schema.Boolean),
+  /** How this server's public address is reached (src/transport.ts): "secure" over HTTPS or on the machine itself,
+   * "private" over plain HTTP on a private network, "public-http" over plain HTTP anywhere else. The web and the
+   * apps warn on "public-http". Always sent by this server; optional so answers from older servers stay valid. */
+  transport: Schema.optionalKey(ServerTransport),
 }).annotate({ identifier: "AuthMethodsDTO" })
 export type AuthMethodsDTO = typeof AuthMethodsDTO.Type
 /** Browser-to-app sign-in. The app keeps a random verifier and sends base64url(SHA-256(verifier)) as the challenge. */
@@ -485,7 +509,12 @@ export const GoogleConnectionDTO = Schema.Struct({
   lastSyncedAt: Schema.NullOr(Timestamp), lastSyncError: Schema.NullOr(Schema.String), createdAt: Timestamp,
 }).annotate({ identifier: "GoogleConnectionDTO" })
 export type GoogleConnectionDTO = typeof GoogleConnectionDTO.Type
-export const GoogleStatusDTO = Schema.Struct({ configured: Schema.Boolean, redirectUri: Schema.NullOr(Schema.String), connections: Schema.Array(GoogleConnectionDTO) }).annotate({ identifier: "GoogleStatusDTO" })
+export const GoogleStatusDTO = Schema.Struct({
+  configured: Schema.Boolean, redirectUri: Schema.NullOr(Schema.String), connections: Schema.Array(GoogleConnectionDTO),
+  /** True when this server's address is plain HTTP off this machine: Google will not redirect to it, so a calendar
+   * cannot be connected until the server has an HTTPS address. Always sent by this server. */
+  needsHttps: Schema.optionalKey(Schema.Boolean),
+}).annotate({ identifier: "GoogleStatusDTO" })
 export type GoogleStatusDTO = typeof GoogleStatusDTO.Type
 export const GoogleConnectInput = Schema.Struct({ contacts: Schema.optionalKey(Schema.Boolean) }).annotate({ identifier: "GoogleConnectInput" })
 export const GoogleConnectDTO = Schema.Struct({ authorizationUrl: Schema.String }).annotate({ identifier: "GoogleConnectDTO" })
@@ -626,6 +655,7 @@ export const WireSchemas = {
   StorageSettingsDTO, UpdateStorageSettingsInput, StorageTestInput, StorageTestDTO,
   AppsSettingsDTO, UpdateAppsSettingsInput,
   OnboardingStepsDTO, OnboardingDTO, OnboardingStepInput,
+  GoogleVerificationInput, GoogleVerificationStartDTO, GoogleVerificationStatusDTO, SwitchToPasswordInput,
 } as const
 
 export interface NoteGenerationProvider {

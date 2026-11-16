@@ -97,6 +97,9 @@
           "items": {
             "$ref": "#/$defs/GoogleConnectionDTO"
           }
+        },
+        "needsHttps": {
+          "type": "boolean"
         }
       },
       "required": [

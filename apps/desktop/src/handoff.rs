@@ -461,6 +461,26 @@ mod tests {
                 "{state} {server:?}"
             );
         }
+        // A server on a private network, over plain HTTP: the answer may
+        // name that origin, and only that one.
+        let private = BrowserSignIn::with("http://10.30.1.77:3000".into(), "v".into(), "s".into());
+        assert_eq!(private.code(&answer("s", Some("http://10.30.1.77:3000"))), Ok("the-code"));
+        assert_eq!(private.code(&answer("s", None)), Ok("the-code"));
+        assert!(private.login_url().starts_with("http://10.30.1.77:3000/login?app=1&challenge="));
+        assert_eq!(private.exchange("c").0, "http://10.30.1.77:3000/api/v1/auth/app-handoff/exchange");
+        for server in [
+            "https://10.30.1.77:3000",
+            "http://10.30.1.77",
+            "http://10.30.1.77:3001",
+            "http://10.30.1.78:3000",
+            "http://localhost:3000",
+        ] {
+            assert_eq!(
+                private.code(&answer("s", Some(server))),
+                Err(HandoffError::Mismatch),
+                "{server}"
+            );
+        }
         // A server kept under a path is still named by its origin.
         let nested = BrowserSignIn::with("https://notes.example.com/base".into(), "v".into(), "s".into());
         assert_eq!(nested.code(&answer("s", Some("https://notes.example.com"))), Ok("the-code"));

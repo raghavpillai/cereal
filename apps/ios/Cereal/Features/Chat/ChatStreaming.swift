@@ -133,6 +133,9 @@ enum ChatTail {
     static let latestZone: CGFloat = ChatColumn.latestGap + 36 + ChatColumn.latestGap
     /// Height over which the conversation fades out above the composer's backdrop.
     static let fade: CGFloat = 18
+    /// Height of the fade under the chat title: the conversation's own top padding, so a
+    /// conversation resting at its start is not dimmed.
+    static let topFade: CGFloat = 8
 
     static func isNearEnd(visibleMaxY: CGFloat, bottomInset: CGFloat, contentHeight: CGFloat) -> Bool {
         visibleMaxY - bottomInset >= contentHeight - nearEnd
@@ -195,6 +198,16 @@ extension View {
     /// composer, with the rows at the top. See `followsChatTail`.
     func fillsChatRoom(_ room: CGFloat) -> some View {
         frame(minHeight: room, alignment: .topLeading)
+    }
+
+    /// At the top of the conversation: lines fade out under the title instead of
+    /// being cut through the middle of their letters.
+    func chatTopFade() -> some View {
+        overlay(alignment: .top) {
+            LinearGradient(colors: [Theme.bgTop, Theme.bgTop.opacity(0)], startPoint: .top, endPoint: .bottom)
+                .frame(height: ChatTail.topFade)
+                .allowsHitTesting(false)
+        }
     }
 
     /// Behind the composer: messages fade as they pass under its top edge and

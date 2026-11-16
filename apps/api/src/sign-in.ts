@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import type { Database } from "@meeting-notes/database"
 import type { SecretBox } from "./admin-secrets"
+import { googleNeedsHttps, GOOGLE_NEEDS_HTTPS } from "@meeting-notes/contracts/transport"
 
 /** What sign-in enforces right now. `google` is true only while Google is on and its OAuth client is stored. */
 export interface SignInPolicy {
@@ -90,6 +91,11 @@ export function makeSignInService(deps: {
   clock?: () => Date
   /** Google's endpoints. Only tests point these elsewhere. */
   endpoints?: GoogleEndpoints
+  /** The account a new server is claimed for. */
+  ownerId?: string
+  /** Makes Google, with this client, the server's one way to sign in. Called only after Google has accepted the
+   * client in a real sign-in. Returns a function that puts the settings back, for when what follows fails. */
+  useGoogle?: (client: { clientId: string; clientSecret: string }) => Promise<() => Promise<void>>
 }) {
   const { db, box, origin } = deps
   const now = deps.clock ?? (() => new Date()), transport = deps.fetch ?? globalThis.fetch, endpoints = deps.endpoints ?? googleEndpoints
@@ -146,7 +152,118 @@ export function makeSignInService(deps: {
     return null
   }
 
+  /* ── Proving a Google client ─────────────────────────────────────────────
+     Claiming a server with Google, and switching a server to Google, both start from a client ID and secret that
+     nobody has tried yet. They are tried with one real sign-in: Google only hands back an identity if the ID, the
+     secret and this server's redirect address are all right. Until that has happened nothing is saved. */
+  const verificationCookie = (secure ? "__Host-" : "") + "cereal_google_verification"
+  const verificationCookieLine = (value: string, maxAge: number) => `${verificationCookie}=${value}; Path=/; Max-Age=${maxAge}; HttpOnly; SameSite=Lax${secure ? "; Secure" : ""}`
+  const browserOf = (headers: Headers) => (headers.get("cookie") ?? "").split(";").map(part => part.trim()).find(part => part.startsWith(verificationCookie + "="))?.slice(verificationCookie.length + 1)
+  const googleUsable = !googleNeedsHttps(origin)
+  /** A small page for the window that went to Google: it closes itself; opened as a whole page, it goes back to the admin panel. */
+  const verificationPage = (ok: boolean) => new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>Cereal</title><style>html{color-scheme:light dark}body{margin:0;min-height:100vh;display:grid;place-items:center;font:16px/1.5 system-ui,sans-serif;background:Canvas;color:CanvasText}p{max-width:22rem;padding:1.5rem;text-align:center}</style></head><body><p>${ok ? "Google confirmed it. You can close this window." : "Google sign-in did not finish. You can close this window and look at the setup page."}</p><script>try{window.close()}catch(e){}setTimeout(function(){location.replace("/admin")},400)</script></body></html>`, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" } })
+
+  type VerificationRow = NonNullable<Awaited<ReturnType<Database["googleVerification"]["findUnique"]>>>
+  async function finishVerification(request: Request, url: URL, pending: VerificationRow): Promise<Response> {
+    const browser = browserOf(request.headers)
+    // Only the browser that started it may finish it; anyone else learns nothing and uses nothing up.
+    if (!browser || !token43.test(browser) || !sameText(pending.browserHash, sha(browser))) return verificationPage(false)
+    // Single use: the row is taken here, before anything is decided. A replayed callback finds it taken.
+    const taken = await db.googleVerification.updateMany({ where: { stateHash: pending.stateHash, outcome: null }, data: { outcome: "working" } })
+    if (taken.count !== 1) return verificationPage(pending.outcome === "done")
+    const finish = async (outcome: string, cookies: ReadonlyArray<string> = []) => {
+      await db.googleVerification.update({ where: { stateHash: pending.stateHash }, data: { outcome, encryptedSecret: null } }).catch(() => {})
+      const page = verificationPage(outcome === "done")
+      for (const value of cookies) page.headers.append("Set-Cookie", value)
+      return page
+    }
+    try {
+      if (pending.expiresAt.getTime() <= now().getTime()) return await finish("expired")
+      if (url.searchParams.has("error")) return await finish(url.searchParams.get("error") === "access_denied" ? "cancelled" : "failed")
+      const code = url.searchParams.get("code")
+      if (!code || code.length > 4096 || !pending.encryptedSecret || !googleUsable) return await finish("failed")
+      const client = { clientId: pending.clientId, clientSecret: box.open(pending.encryptedSecret) }
+      // The exchange is the proof. Google's own error names are read (never its text) so the person can be told what to fix.
+      const exchange = await transport(endpoints.token, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, redirect: "error", cache: "no-store", signal: AbortSignal.timeout(15_000),
+        body: new URLSearchParams({ code, client_id: client.clientId, client_secret: client.clientSecret, redirect_uri: redirectUri, grant_type: "authorization_code", code_verifier: box.open(pending.encryptedVerifier) }) })
+      const answer = (await exchange.text()).slice(0, 200_000)
+      let tokens: Record<string, unknown> = {}
+      try { const parsed: unknown = JSON.parse(answer); if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) tokens = parsed as Record<string, unknown> } catch { /* not JSON: treated as a failure below */ }
+      if (!exchange.ok) return await finish(tokens.error === "invalid_client" || tokens.error === "unauthorized_client" ? "invalid_client" : tokens.error === "redirect_uri_mismatch" ? "redirect_uri_mismatch" : "failed")
+      const accessToken = text(tokens.access_token, 10_000)
+      if (!accessToken) return await finish("failed")
+      const identity = await json(endpoints.userinfo, { headers: { Authorization: "Bearer " + accessToken } })
+      const subject = text(identity.sub, 255), email = text(identity.email, 254)?.toLowerCase() ?? null
+      if (!subject || !email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return await finish("failed")
+      if (identity.email_verified !== true) return await finish("unverified_email")
+      if (!deps.useGoogle) return await finish("failed")
+      const name = text(identity.name, 200) ?? email.split("@")[0]!
+
+      if (pending.purpose === "claim") {
+        const ownerId = deps.ownerId
+        if (!ownerId) return await finish("failed")
+        // Checked before anything is written, and again under a lock when it is.
+        if (await db.account.findFirst({ where: { userId: ownerId } })) return await finish("already_claimed")
+        if (await db.user.findFirst({ where: { email, id: { not: ownerId } } }) || await db.account.findFirst({ where: { providerId: "google", accountId: subject } })) return await finish("email_taken")
+        const undo = await deps.useGoogle(client)
+        let refused: string | null = null
+        try {
+          await db.$transaction(async tx => {
+            await tx.$queryRawUnsafe('SELECT "id" FROM "User" WHERE "id"=$1::uuid FOR UPDATE', ownerId)
+            if (await tx.account.findFirst({ where: { userId: ownerId } })) { refused = "already_claimed"; return }
+            if (await tx.user.findFirst({ where: { email, id: { not: ownerId } } })) { refused = "email_taken"; return }
+            await tx.user.update({ where: { id: ownerId }, data: { name, email, emailVerified: true } })
+            // No password is made for this account: it signs in with Google only.
+            await tx.account.create({ data: { id: crypto.randomUUID(), accountId: subject, providerId: "google", userId: ownerId } })
+          })
+        } catch { refused = "failed" }
+        if (refused) { await undo().catch(() => {}); return await finish(refused) }
+        const session = await deps.issueSession(ownerId, false, request.headers)
+        return await finish("done", session.cookies)
+      }
+
+      // Switching: the Google account is tied to the administrator who asked, so they can still get in afterwards.
+      const userId = pending.userId
+      const user = userId ? await db.user.findUnique({ where: { id: userId } }) : null
+      if (!user || (user.role !== "owner" && user.role !== "admin")) return await finish("failed")
+      const linked = await db.account.findFirst({ where: { providerId: "google", accountId: subject } })
+      if (linked && linked.userId !== user.id) return await finish("google_account_in_use")
+      const sameAddress = await db.user.findUnique({ where: { email } })
+      if (sameAddress && sameAddress.id !== user.id) return await finish("google_account_in_use")
+      const undo = await deps.useGoogle(client)
+      try { if (!linked) await db.account.create({ data: { id: crypto.randomUUID(), accountId: subject, providerId: "google", userId: user.id } }) }
+      catch { await undo().catch(() => {}); return await finish("failed") }
+      return await finish("done")
+    } catch { return await finish("failed") }
+  }
+
   return {
+    /** Starts the one Google sign-in that proves a client. The caller has already checked who is asking (the setup
+     * code, or an administrator's session). Answers with where to send the browser and the cookie that binds it. */
+    async beginVerification(input: { purpose: "claim" | "switch"; userId?: string; clientId: string; clientSecret: string }): Promise<{ authorizationUrl: string; cookie: string }> {
+      const clientId = input.clientId.trim(), clientSecret = input.clientSecret.trim()
+      if (!googleUsable) throw new SignInFailure("invalid_request", GOOGLE_NEEDS_HTTPS + ". This server is reached over plain HTTP.")
+      if (!/^[A-Za-z0-9._-]{10,255}$/.test(clientId)) throw new SignInFailure("invalid_request", "Enter the Google client ID exactly as Google Cloud shows it")
+      if (clientSecret.length < 8 || clientSecret.length > 512 || /\s/.test(clientSecret)) throw new SignInFailure("invalid_request", "Enter the Google client secret exactly as Google Cloud shows it")
+      if (input.purpose === "claim" && (!deps.ownerId || await db.account.findFirst({ where: { userId: deps.ownerId } }))) throw new SignInFailure("forbidden", "This server already has an owner")
+      await db.googleVerification.deleteMany({ where: { expiresAt: { lt: now() } } })
+      if (await db.googleVerification.count() >= 500) throw new SignInFailure("unavailable", "Too many sign-ins are waiting. Try again in a few minutes.")
+      const state = randomBytes(32).toString("base64url"), verifier = randomBytes(48).toString("base64url"), browser = randomBytes(32).toString("base64url")
+      await db.googleVerification.create({ data: { stateHash: sha(state), browserHash: sha(browser), purpose: input.purpose, userId: input.userId ?? null, clientId, encryptedSecret: box.seal(clientSecret), encryptedVerifier: box.seal(verifier), expiresAt: new Date(now().getTime() + STATE_MINUTES * 60_000) } })
+      const url = new URL(endpoints.authorization)
+      for (const [key, value] of Object.entries({ client_id: clientId, redirect_uri: redirectUri, response_type: "code", scope: "openid email profile", state, code_challenge: challengeOf(verifier), code_challenge_method: "S256", prompt: "select_account" })) url.searchParams.set(key, value)
+      return { authorizationUrl: url.href, cookie: verificationCookieLine(browser, STATE_MINUTES * 60) }
+    },
+    /** How this browser's last verification went. Says nothing to a browser that did not start one. */
+    async verificationStatus(headers: Headers): Promise<{ state: "none" | "pending" | "done" | "failed"; reason: string | null }> {
+      const browser = browserOf(headers)
+      if (!browser || !token43.test(browser)) return { state: "none", reason: null }
+      const row = await db.googleVerification.findFirst({ where: { browserHash: sha(browser) }, orderBy: { createdAt: "desc" } })
+      if (!row) return { state: "none", reason: null }
+      if (row.outcome === "done") return { state: "done", reason: null }
+      if (row.outcome && row.outcome !== "working") return { state: "failed", reason: row.outcome }
+      return row.expiresAt.getTime() <= now().getTime() ? { state: "failed", reason: "expired" } : { state: "pending", reason: null }
+    },
     async methods() { const policy = await deps.policy(); return { password: policy.password, google: policy.google, instanceName: policy.instanceName } },
 
     /** GET /api/v1/auth/google/start?return=<path>: remembers this browser and sends it to Google. */
@@ -172,6 +289,8 @@ export function makeSignInService(deps: {
       try {
         const url = new URL(request.url), state = url.searchParams.get("state"), code = url.searchParams.get("code")
         const browser = (request.headers.get("cookie") ?? "").split(";").map(part => part.trim()).find(part => part.startsWith(stateCookie + "="))?.slice(stateCookie.length + 1)
+        // A sign-in that is proving a client (claiming the server, or switching it to Google) is finished on its own terms.
+        if (state && token43.test(state)) { const proving = await db.googleVerification.findUnique({ where: { stateHash: sha(state) } }); if (proving) return finishVerification(request, url, proving) }
         if (!state || !token43.test(state) || !browser || !token43.test(browser)) return refused("failed")
         // Single use: the row is taken before anything else is decided.
         const attempt = await db.googleSignInState.delete({ where: { stateHash: sha(state) } }).catch(alreadyGone)

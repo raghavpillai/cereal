@@ -67,7 +67,7 @@ struct MeetingContextSheet: View {
                     } else if !busy {
                         Text("Choose a calendar event to see its time and attendees.").font(.footnote).foregroundStyle(Theme.textSecondary)
                     }
-                    if busy { ProgressView("Updating meeting…").font(.footnote).transition(motion.fade) }
+                    if busy { InlineProgress(text: "Updating meeting…").font(.footnote).transition(motion.fade) }
                     if let error { Text(error).font(.footnote).foregroundStyle(Theme.danger).transition(motion.rise) }
                 }.padding(24)
                     // The event, its links and its attendee list arrive and change with a settle.
@@ -136,7 +136,7 @@ struct MeetingEventPicker: View {
     var body: some View {
         NavigationStack {
             List {
-                if loading { ProgressView("Loading events…").listRowBackground(Theme.bgTop) }
+                if loading { InlineProgress(text: "Loading events…").listRowBackground(Theme.bgTop) }
                 if let error {
                     VStack(alignment: .leading, spacing: 8) { Text(error); Button("Retry") { Task { await load() } } }.font(.footnote)
                         .listRowBackground(Theme.bgTop)

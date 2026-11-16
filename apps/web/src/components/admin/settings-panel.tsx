@@ -16,7 +16,7 @@ export function ProviderLogo({provider}:{provider:AIProvider}){return <img class
 export const modelLogo=(provider:AIProvider,model:string):AIProvider=>provider==='openrouter'&&/^(openai|anthropic)\//.test(model)?model.split('/')[0] as AIProvider:provider
 export type CatalogState={data?:ModelCatalogDTO;busy?:boolean;error?:string}
 const providers=Object.keys(providerNames) as AIProvider[]
-export function SettingsPanel({settings,client,expired,busy,save,children}:{children?:ReactNode;settings:AdminSettingsDTO;client:AdminClient;expired:()=>void;busy:boolean;save:(patch:UpdateAdminSettingsInput)=>Promise<void>}){
+export function SettingsPanel({settings,client,expired,busy,save,replace,children}:{children?:ReactNode;settings:AdminSettingsDTO;client:AdminClient;expired:()=>void;busy:boolean;save:(patch:UpdateAdminSettingsInput)=>Promise<void>;/** The settings changed outside the form (the sign-in method was switched): show them. */replace:(settings:AdminSettingsDTO)=>void}){
  const formId=useId()
  const[draft,setDraft]=useState(()=>instanceDraft(settings)),[editing,setEditing]=useState<AIProvider|null>(null),[catalogs,setCatalogs]=useState<Partial<Record<AIProvider,CatalogState>>>({}),[logoError,setLogoError]=useState<string|null>(null)
  const requests=useRef(new Map<AIProvider,AbortController>()),logoVersion=useRef(0),logoInput=useRef<HTMLInputElement>(null)
@@ -77,7 +77,7 @@ export function SettingsPanel({settings,client,expired,busy,save,children}:{chil
    </div></div>
    <div className="model-section"><div className="model-section-heading"><h3>Meeting notes</h3></div><ModelPicker value={draft.generationModel} kind="language" catalogs={catalogs} available={available} load={loadCatalog} label="Meeting notes model" change={model=>update('generationModel',model as LanguageModelSelection)}/></div>
   </CardContent></Card>
-  {draft.signIn&&settings.signIn&&<SignInSettings draft={draft.signIn} saved={settings.signIn} change={next=>update('signIn',next)}/>}
+  {draft.signIn&&settings.signIn&&<SignInSettings draft={draft.signIn} saved={settings.signIn} change={next=>update('signIn',next)} client={client} switched={replace} expired={expired}/>}
   {draft.storage&&settings.storage&&<StorageSettings draft={draft.storage} saved={settings.storage} change={next=>update('storage',next)} test={async(input,signal)=>{try{return await client.testStorage(input,signal)}catch(error){if(error instanceof AdminClientError&&error.status===401)expired();throw error}}}/>}
   {draft.apps&&settings.apps&&<Card id="apps"><CardHeader><CardTitle>Apps</CardTitle></CardHeader><CardContent>
    <div className="model-section"><div className="model-section-heading"><h3>iPhone app</h3><span>{draft.apps.iosAppStoreId.trim()?'On the App Store':'Not published'}</span></div><div className="model-controls sign-in-block"><div className="storage-fields">

@@ -58,6 +58,9 @@ struct State {
 }
 static STATE: OnceLock<Mutex<State>> = OnceLock::new();
 fn path() -> Result<PathBuf, String> {
+    Ok(root()?.join("desktop-preferences.json"))
+}
+fn root() -> Result<PathBuf, String> {
     let root = crate::environment::var_os("CEREAL_DATA_DIR")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
@@ -66,11 +69,14 @@ fn path() -> Result<PathBuf, String> {
                 .map(|p| PathBuf::from(p).join("Library/Application Support/Cereal"))
         })
         .ok_or("Cannot locate device preferences")?;
-    Ok(root.join("desktop-preferences.json"))
+    Ok(root)
 }
 fn read(path: &Path) -> Result<Preferences, String> {
+    read_as(path)
+}
+fn read_as<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Result<T, String> {
     if !path.exists() {
-        return Ok(Preferences::default());
+        return Ok(T::default());
     }
     if fs::symlink_metadata(path)
         .map_err(|_| "Cannot read device preferences")?
@@ -125,11 +131,19 @@ pub fn icon_supported() -> bool {
 }
 
 fn write(path: &Path, preferences: &Preferences) -> Result<(), String> {
+    write_as(path, "desktop-preferences", preferences)
+}
+/// `stem` names the backup of an unreadable file and the temporary file.
+fn write_as<T: Serialize + serde::de::DeserializeOwned + Default>(
+    path: &Path,
+    stem: &str,
+    preferences: &T,
+) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or("Cannot locate device preference directory")?;
     fs::create_dir_all(parent).map_err(|_| "Cannot save device preferences")?;
-    if path.exists() && read(path).is_err() {
+    if path.exists() && read_as::<T>(path).is_err() {
         let metadata =
             fs::symlink_metadata(path).map_err(|_| "Cannot inspect existing preferences")?;
         if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 4096 {
@@ -137,12 +151,12 @@ fn write(path: &Path, preferences: &Preferences) -> Result<(), String> {
                 "Existing device preferences were preserved; choose a valid data directory".into(),
             );
         }
-        let backup = parent.join(format!("desktop-preferences.invalid-{}.json", nonce()));
+        let backup = parent.join(format!("{stem}.invalid-{}.json", nonce()));
         fs::copy(path, backup).map_err(|_| "Cannot preserve unreadable preferences")?;
     }
     let bytes = serde_json::to_vec_pretty(preferences)
         .map_err(|_| "Cannot serialize device preferences")?;
-    let temporary = parent.join(format!(".desktop-preferences-{}.tmp", nonce()));
+    let temporary = parent.join(format!(".{stem}-{}.tmp", nonce()));
     let result = (|| -> Result<(), String> {
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -169,6 +183,82 @@ fn nonce() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()
+}
+
+/// What this Mac shows of meetings: the menu bar item, reminders and the
+/// floating indicator. Kept in a file of its own, so an older Cereal reading
+/// `desktop-preferences.json` is not handed fields it does not know.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MeetingPreferences {
+    /// The next meeting and its countdown beside the mark in the menu bar,
+    /// and the events in its menu.
+    pub menu_bar_events: bool,
+    /// Whether "Coming up" and the menu include events with nobody else
+    /// invited and no call link.
+    pub events_without_participants: bool,
+    /// A notification one minute before a meeting starts.
+    pub scheduled_notifications: bool,
+    /// The capsule that floats at the screen's edge while recording.
+    pub live_indicator: bool,
+    /// Shared calendars left out of "Coming up" and the menu on this Mac.
+    pub hidden_calendars: Vec<String>,
+}
+impl Default for MeetingPreferences {
+    fn default() -> Self {
+        Self {
+            menu_bar_events: true,
+            events_without_participants: true,
+            scheduled_notifications: false,
+            live_indicator: true,
+            hidden_calendars: Vec::new(),
+        }
+    }
+}
+static MEETING: OnceLock<Mutex<MeetingPreferences>> = OnceLock::new();
+static MEETING_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+fn meeting_path() -> Result<PathBuf, String> {
+    Ok(root()?.join("meeting-preferences.json"))
+}
+fn meeting_state() -> &'static Mutex<MeetingPreferences> {
+    MEETING.get_or_init(|| {
+        // Tests start from the defaults, never from the user's own file.
+        if cfg!(test) {
+            return Mutex::new(MeetingPreferences::default());
+        }
+        Mutex::new(
+            meeting_path()
+                .and_then(|path| read_as(&path))
+                .unwrap_or_default(),
+        )
+    })
+}
+pub fn meeting() -> MeetingPreferences {
+    meeting_state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+/// Counts the changes made to the meeting preferences since launch, so
+/// what is drawn from them knows when to look again.
+pub fn meeting_revision() -> u64 {
+    MEETING_REVISION.load(std::sync::atomic::Ordering::Acquire)
+}
+/// Change the meeting preferences and save them. What is in memory changes
+/// only if the file was written.
+pub fn update_meeting(change: impl FnOnce(&mut MeetingPreferences)) -> Result<(), String> {
+    let mut state = meeting_state().lock().unwrap_or_else(|e| e.into_inner());
+    let mut next = state.clone();
+    change(&mut next);
+    if next == *state {
+        return Ok(());
+    }
+    // Tests never write the user's own preferences.
+    #[cfg(not(test))]
+    meeting_path().and_then(|path| write_as(&path, "meeting-preferences", &next))?;
+    *state = next;
+    MEETING_REVISION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    Ok(())
 }
 
 pub fn apply_saved_icon() -> Result<(), String> {
@@ -268,6 +358,27 @@ mod tests {
                 .starts_with("desktop-preferences.invalid-")
         }));
         assert_eq!(read(&path).unwrap().icon, AppIcon::Paper);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn meeting_preferences_default_to_showing_and_roundtrip_in_their_own_file() {
+        let dir = directory();
+        let path = dir.join("meeting-preferences.json");
+        let defaults: MeetingPreferences = read_as(&path).unwrap();
+        assert!(defaults.menu_bar_events && defaults.events_without_participants);
+        assert!(defaults.live_indicator && !defaults.scheduled_notifications);
+        let saved = MeetingPreferences {
+            menu_bar_events: false,
+            scheduled_notifications: true,
+            hidden_calendars: vec!["a".into()],
+            ..Default::default()
+        };
+        write_as(&path, "meeting-preferences", &saved).unwrap();
+        assert_eq!(read_as::<MeetingPreferences>(&path).unwrap(), saved);
+        // A file from a later version, with a setting this one does not
+        // know, still loads.
+        fs::write(&path, br#"{"menu_bar_events":false,"later":1}"#).unwrap();
+        assert!(!read_as::<MeetingPreferences>(&path).unwrap().menu_bar_events);
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]

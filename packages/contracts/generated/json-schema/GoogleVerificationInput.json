@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/GoogleVerificationInput",
+  "$defs": {
+    "GoogleVerificationInput": {
+      "type": "object",
+      "properties": {
+        "clientId": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 255
+        },
+        "clientSecret": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "clientId",
+        "clientSecret"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

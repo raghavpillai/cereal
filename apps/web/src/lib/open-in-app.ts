@@ -3,16 +3,14 @@
 
 const TOKEN = /^[A-Za-z0-9_-]{43}$/
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]'])
 
-/** Scheme, host and port with no trailing slash, or null when the apps would refuse it:
- * they accept https anywhere and plain http only on this machine. */
+/** Scheme, host and port with no trailing slash, exactly as the server is reached: https or plain http, on any
+ * host (a server on a private network has no certificate). Null for anything that is not a web address. */
 export function appOrigin(value: string): string | null {
   let url: URL
   try { url = new URL(value) } catch { return null }
   if (url.username || url.password) return null
-  if (url.protocol === 'https:' || (url.protocol === 'http:' && LOOPBACK.has(url.hostname))) return url.origin
-  return null
+  return url.protocol === 'https:' || url.protocol === 'http:' ? url.origin : null
 }
 
 /** `cereal://note?server=<origin>&id=<note id>` for a note in the reader's own account. */

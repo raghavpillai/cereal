@@ -1,6 +1,7 @@
 import Foundation
 
-/// An HTTPS instance URL, or HTTP on an explicit loopback host for local development.
+/// A server's address: HTTPS, or plain HTTP to this device or to an address
+/// on a private network (see `ServerAddress`). Plain HTTP to anything else is refused.
 /// Query parameters, fragments, embedded credentials, and traversal are rejected.
 public struct InstanceURL: Equatable, Sendable, CustomStringConvertible {
     public let url: URL
@@ -16,8 +17,8 @@ public struct InstanceURL: Equatable, Sendable, CustomStringConvertible {
               !(components.path.split(separator: "/").contains { $0 == "." || $0 == ".." }),
               !host.unicodeScalars.contains(where: CharacterSet.whitespacesAndNewlines.contains)
         else { throw APIClientError.invalidInstanceURL }
-        let loopback = ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host)
-        guard scheme == "https" || scheme == "http" && loopback else {
+        guard scheme == "https" || scheme == "http" else { throw APIClientError.insecureInstanceURL }
+        guard ServerAddress.kind(scheme: scheme, host: components.encodedHost ?? host) != .publicHTTP else {
             throw APIClientError.insecureInstanceURL
         }
         components.scheme = scheme
@@ -75,7 +76,7 @@ public enum APIClientError: Error, LocalizedError, Equatable, Sendable {
     public var errorDescription: String? {
         switch self {
         case .invalidInstanceURL: "Enter an instance URL without a query, fragment, or embedded credentials."
-        case .insecureInstanceURL: "Use HTTPS for your server. HTTP is supported only on localhost for development."
+        case .insecureInstanceURL: ServerAddress.needsHTTPS
         case .invalidToken: "Enter a valid instance access token."
         case .secureStorage: "The access token could not be read or saved securely on this device."
         case .invalidIdentifier: "This note identifier is invalid."

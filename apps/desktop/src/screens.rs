@@ -8,6 +8,11 @@ use gpui::{prelude::*, *};
 enum SettingToggle {
     DarkMode,
     ShowUpcoming,
+    MenuBarEvents,
+    EventsWithoutParticipants,
+    ScheduledNotifications,
+    LiveIndicator,
+    LoginItem,
 }
 
 /// The pages of the dedicated settings mode. Only settings this app really
@@ -18,14 +23,16 @@ pub enum SettingsTab {
     Preferences,
     Profile,
     Calendar,
+    Notifications,
     About,
 }
 
 impl SettingsTab {
-    pub const ALL: [SettingsTab; 4] = [
+    pub const ALL: [SettingsTab; 5] = [
         SettingsTab::Preferences,
         SettingsTab::Profile,
         SettingsTab::Calendar,
+        SettingsTab::Notifications,
         SettingsTab::About,
     ];
 
@@ -34,6 +41,7 @@ impl SettingsTab {
             SettingsTab::Preferences => "Preferences",
             SettingsTab::Profile => "Profile",
             SettingsTab::Calendar => "Calendar",
+            SettingsTab::Notifications => "Notifications",
             SettingsTab::About => "About",
         }
     }
@@ -43,6 +51,7 @@ impl SettingsTab {
             SettingsTab::Preferences => "sliders",
             SettingsTab::Profile => "person",
             SettingsTab::Calendar => "calendar",
+            SettingsTab::Notifications => "bell",
             SettingsTab::About => "help",
         }
     }
@@ -54,8 +63,8 @@ impl Cereal {
             Screen::Chat => self.render_chat_screen(window, cx),
             Screen::SearchResults => self.render_search_results(window, cx),
             Screen::Shared => self.render_shared_screen(window, cx),
-            Screen::Connect => self.render_connect_screen(cx),
-            Screen::Settings => self.render_settings_screen(cx),
+            Screen::Connect => self.render_connect_screen(window, cx),
+            Screen::Settings => self.render_settings_screen(window, cx),
             Screen::Trash => self.render_trash_screen(window, cx),
             _ => div().flex_1().into_any_element(),
         }
@@ -129,6 +138,9 @@ impl Cereal {
                                 .id(("search-result-preview", id))
                                 .pl(px(52.))
                                 .pr(px(8.))
+                                // The excerpt belongs to the row above it:
+                                // the next result starts a little lower.
+                                .pb(px(10.))
                                 .text_size(px(12.))
                                 .line_height(px(16.))
                                 .text_color(t.muted)
@@ -157,8 +169,9 @@ impl Cereal {
             .pr(px(10.))
             .child(
                 div()
-                    .w_full()
-                    .max_w(px(674.))
+                    // In pixels: see `page_column_width`.
+                    .w(px(self.page_column_width(window)))
+                    .flex_shrink_0()
                     .px(px(24.))
                     .pt(px(14.))
                     .pb(px(48.))
@@ -241,7 +254,7 @@ impl Cereal {
                         .on_click(cx.listener(|this, _, _, cx| this.open_pasted_link(cx))),
                 )
             });
-        let mut column = screen_column()
+        let mut column = screen_column(self.page_column_width(window))
             .child(page_title("Shared with me", t))
             .child(paste)
             .when_some(self.links.problem.clone(), |column, problem| {
@@ -331,13 +344,18 @@ impl Cereal {
         let t = self.theme();
         let empty = self.chat_messages.is_empty();
         let mut column = div()
-            .w_full()
-            .max_w(px(672.))
+            // A width in pixels, not "as wide as the page, up to 672": with
+            // only a maximum the column was first sized with nothing in it
+            // wrapped, and kept that height once its paragraphs had wrapped,
+            // so the last lines of a long answer (and what follows it) lay
+            // beyond the end of the scroll range and could not be reached.
+            .w(px(self.chat_column_width(window)))
             .px(px(24.))
             .pt(px(if empty { 112. } else { 24. }))
             .pb(px(28.))
             .flex()
-            .flex_col();
+            .flex_col()
+            .flex_shrink_0();
         if empty {
             let greeting = crate::account::session()
                 .map(|session| {
@@ -422,10 +440,8 @@ impl Cereal {
                 )
                 .child(self.render_chat_recipe_suggestions(cx));
         } else {
-            for (index, (question, answer)) in self.chat_messages.iter().enumerate() {
-                column = column.child(self.render_chat_turn(index, question, answer, false, cx));
-            }
-            if let Some(queue) = self.render_chat_queue(false, cx) {
+            column = column.child(self.render_chat_turns(0, false, window, cx));
+            if let Some(queue) = self.render_chat_queue(false, window, cx) {
                 column = column.child(queue);
             }
         }
@@ -474,7 +490,8 @@ impl Cereal {
                     .text_color(t.muted)
                     .child("AI can make mistakes. Check important details."),
             )
-            .when(self.chat_can_scroll_down(), |d| {
+            // The way down to the newest answer; an empty page has none.
+            .when(!empty && self.chat_can_scroll_down(), |d| {
                 d.child(self.render_chat_scroll_down(cx))
             })
             .into_any_element()
@@ -713,11 +730,11 @@ impl Cereal {
             .into_any_element()
     }
 
-    fn render_connect_screen(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_connect_screen(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme();
         screen_scroller("connect-screen")
             .child(
-                screen_column()
+                screen_column(self.page_column_width(window))
                     .child(page_title("Connect", t))
                     .child(
                         div()
@@ -853,14 +870,43 @@ impl Cereal {
             })
     }
 
-    fn render_settings_screen(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_settings_screen(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme();
         let connected = crate::server::enabled();
         let tab = self.settings_tab;
-        let mut column = screen_column().child(page_title(tab.label(), t));
+        let meetings = crate::desktop_preferences::meeting();
+        let mut column = screen_column(self.page_column_width(window)).child(page_title(tab.label(), t));
         match tab {
             SettingsTab::Preferences => {
+                // 1 enabled, 2 waiting for approval in System Settings.
+                let login = self.menu_bar.login_item;
                 column = column
+                    .child(section_label("General", t))
+                    .child(
+                        settings_card(t)
+                            .child(self.setting_toggle(
+                                "setting-live-indicator",
+                                "mic",
+                                "Live meeting indicator",
+                                "Floats at the edge of your screen while Cereal records in the background.",
+                                meetings.live_indicator,
+                                SettingToggle::LiveIndicator,
+                                cx,
+                            ))
+                            .child(self.setting_toggle(
+                                "setting-login-item",
+                                "power",
+                                "Open Cereal when you log in",
+                                match login {
+                                    2 => "Waiting for your approval in System Settings › General › Login Items.",
+                                    -1 => "Available in the installed Cereal app.",
+                                    _ => "Cereal starts when you log in to this Mac.",
+                                },
+                                matches!(login, 1 | 2),
+                                SettingToggle::LoginItem,
+                                cx,
+                            )),
+                    )
                     .child(section_label("Appearance", t))
                     .child(settings_card(t).child(self.setting_toggle(
                         "setting-dark-mode",
@@ -986,18 +1032,56 @@ impl Cereal {
             }
             SettingsTab::Calendar => {
                 column = column
-                    .child(section_label("Home", t))
-                    .child(settings_card(t).child(self.setting_toggle(
-                        "setting-upcoming",
-                        "calendar",
-                        "Show upcoming meetings",
-                        "Keep your calendar in view on Home.",
-                        self.workspace.settings.show_upcoming,
-                        SettingToggle::ShowUpcoming,
-                        cx,
-                    )))
+                    .child(section_label("Display", t))
+                    .child(
+                        settings_card(t)
+                            .child(self.setting_toggle(
+                                "setting-menu-bar-events",
+                                "menu-bar",
+                                "Show upcoming meetings in menu bar",
+                                "Your next meeting and the time until it starts, in the macOS menu bar.",
+                                meetings.menu_bar_events,
+                                SettingToggle::MenuBarEvents,
+                                cx,
+                            ))
+                            .child(self.setting_toggle(
+                                "setting-upcoming",
+                                "calendar",
+                                "Show upcoming meetings",
+                                "Keep your calendar in view on Home.",
+                                self.workspace.settings.show_upcoming,
+                                SettingToggle::ShowUpcoming,
+                                cx,
+                            ))
+                            .child(self.setting_toggle(
+                                "setting-events-without-participants",
+                                "person-outline",
+                                "Show events with no participants",
+                                "Coming up and the menu bar include events with nobody else invited and no call link.",
+                                meetings.events_without_participants,
+                                SettingToggle::EventsWithoutParticipants,
+                                cx,
+                            )),
+                    );
+                if let Some(calendars) = self.visible_calendars(cx) {
+                    column = column.child(calendars);
+                }
+                column = column
                     .child(section_label("Connections", t))
                     .child(settings_card(t).child(self.calendar_connections_row(cx)));
+            }
+            SettingsTab::Notifications => {
+                column = column
+                    .child(section_label("Meeting notifications", t))
+                    .child(settings_card(t).child(self.setting_toggle(
+                        "setting-scheduled-notifications",
+                        "bell",
+                        "Scheduled meetings",
+                        "Notify 1 minute before a meeting on your calendar starts. Click to open its note.",
+                        meetings.scheduled_notifications,
+                        SettingToggle::ScheduledNotifications,
+                        cx,
+                    )));
             }
             SettingsTab::About => {
                 column = column
@@ -1144,47 +1228,7 @@ impl Cereal {
         settings_row(symbol, label, description, t)
             .id(id)
             .cursor_pointer()
-            .child({
-                // The knob is a droplet: its leading edge runs ahead and the
-                // trailing edge catches up, while the track's tint follows.
-                let knob = self.stage.glide(id);
-                let level = self
-                    .stage
-                    .aim(
-                        (id, 0),
-                        if enabled { 1. } else { 0. },
-                        crate::motion::SNAPPY,
-                    )
-                    .clamp(0., 1.);
-                let slot = |on: bool| {
-                    div()
-                        .size(px(14.))
-                        .rounded_full()
-                        .when(on == enabled, |slot| slot.child(knob.probe(on)))
-                };
-                div()
-                    .relative()
-                    .flex_shrink_0()
-                    .mt(px(4.))
-                    .w(px(32.))
-                    .h(px(20.))
-                    .p(px(3.))
-                    .rounded_full()
-                    .bg(t.fill)
-                    .child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .rounded_full()
-                            .bg(t.accent.opacity(level)),
-                    )
-                    .child(knob.indicator(rgb(0xffffff).into(), 7.))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(slot(false))
-                    .child(slot(true))
-            })
+            .child(self.switch(id, enabled))
             .reach().on_click(cx.listener(move |this, _, _, cx| {
                 match setting {
                     SettingToggle::DarkMode => {
@@ -1194,9 +1238,259 @@ impl Cereal {
                         this.workspace.settings.show_upcoming =
                             !this.workspace.settings.show_upcoming
                     }
+                    SettingToggle::MenuBarEvents => this.set_menu_bar_events(!enabled, cx),
+                    SettingToggle::EventsWithoutParticipants => {
+                        this.set_meeting_preference(
+                            |preferences| preferences.events_without_participants = !enabled,
+                            cx,
+                        );
+                    }
+                    SettingToggle::LiveIndicator => {
+                        this.set_meeting_preference(
+                            |preferences| preferences.live_indicator = !enabled,
+                            cx,
+                        );
+                        crate::pill::refresh(cx);
+                    }
+                    SettingToggle::ScheduledNotifications => {
+                        this.set_scheduled_notifications(!enabled, cx)
+                    }
+                    SettingToggle::LoginItem => this.set_login_item(!enabled, cx),
                 }
                 this.persist(cx);
             }))
+    }
+
+    /// The switch at the end of a setting's row: a 32 by 20 track and a
+    /// 14 px knob.
+    fn switch(&self, id: &'static str, enabled: bool) -> Div {
+        let t = self.theme();
+        // The knob is a droplet: its leading edge runs ahead and the
+        // trailing edge catches up, while the track's tint follows.
+        let knob = self.stage.glide(id);
+        let level = self
+            .stage
+            .aim(
+                (id, 0),
+                if enabled { 1. } else { 0. },
+                crate::motion::SNAPPY,
+            )
+            .clamp(0., 1.);
+        let slot = |on: bool| {
+            div()
+                .size(px(14.))
+                .rounded_full()
+                .when(on == enabled, |slot| slot.child(knob.probe(on)))
+        };
+        div()
+            .relative()
+            .flex_shrink_0()
+            .mt(px(4.))
+            .w(px(32.))
+            .h(px(20.))
+            .p(px(3.))
+            .rounded_full()
+            .bg(t.fill)
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded_full()
+                    .bg(t.accent.opacity(level)),
+            )
+            .child(knob.indicator(rgb(0xffffff).into(), 7.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(slot(false))
+            .child(slot(true))
+    }
+
+    /// The same switch for a row that is one of many (a calendar): its knob
+    /// slides between the same two places without a droplet of its own.
+    fn row_switch(&self, key: u64, enabled: bool) -> Div {
+        let t = self.theme();
+        let level = self
+            .stage
+            .aim(
+                ("calendar-switch", key),
+                if enabled { 1. } else { 0. },
+                crate::motion::SNAPPY,
+            )
+            .clamp(0., 1.);
+        div()
+            .relative()
+            .flex_shrink_0()
+            .mt(px(4.))
+            .w(px(32.))
+            .h(px(20.))
+            .rounded_full()
+            .bg(t.fill)
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded_full()
+                    .bg(t.accent.opacity(level)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(3.))
+                    .left(px(3. + 12. * level))
+                    .size(px(14.))
+                    .rounded_full()
+                    .bg(rgb(0xffffff)),
+            )
+    }
+
+    fn set_meeting_preference(
+        &mut self,
+        change: impl FnOnce(&mut crate::desktop_preferences::MeetingPreferences),
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = crate::desktop_preferences::update_meeting(change) {
+            self.show_toast(&error, cx);
+        }
+        cx.notify();
+    }
+
+    /// "Visible calendars": every calendar this account's events come from,
+    /// each with a switch, and Reset. Absent until there is one.
+    fn visible_calendars(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let t = self.theme();
+        let hidden = crate::desktop_preferences::meeting().hidden_calendars;
+        // (id, name, where it is from, colour, shown)
+        let mut rows: Vec<(String, String, String, String, bool)> = self
+            .calendars
+            .sources
+            .iter()
+            .filter(|source| source.enabled)
+            .map(|source| {
+                (
+                    source.id.clone(),
+                    source.name.clone(),
+                    format!("Shared by your server · {}", source.source_host),
+                    source.color.clone(),
+                    !hidden.contains(&source.id),
+                )
+            })
+            .collect();
+        rows.extend(self.calendars.personal.iter().map(|calendar| {
+            (
+                calendar.id.clone(),
+                calendar.name.clone(),
+                if calendar.primary {
+                    "Your Google calendar".to_owned()
+                } else {
+                    "Google Calendar".to_owned()
+                },
+                calendar.color.clone(),
+                calendar.selected,
+            )
+        }));
+        if rows.is_empty() {
+            return None;
+        }
+        let changed = !hidden.is_empty()
+            || self
+                .calendars
+                .personal
+                .iter()
+                .any(|calendar| calendar.selected != calendar.primary);
+        let mut card = settings_card(t);
+        for (id, name, detail, color, shown) in rows {
+            let key = crate::lazy::key(&id);
+            let busy = self.calendars.choosing.is_some();
+            card = card.child(
+                div()
+                    .id(("visible-calendar", key))
+                    .relative()
+                    .min_h(px(64.))
+                    .px(px(16.))
+                    .py(px(12.))
+                    .flex()
+                    .items_center()
+                    .gap(px(14.))
+                    .cursor_pointer()
+                    .child(
+                        div()
+                            .size(px(32.))
+                            .flex_shrink_0()
+                            .rounded(px(8.))
+                            .bg(t.hover)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .size(px(10.))
+                                    .rounded(px(3.))
+                                    .bg(crate::calendar::calendar_color(&color)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .pt(px(2.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .line_height(px(18.))
+                                    .text_color(t.text)
+                                    .truncate()
+                                    .child(name),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .line_height(px(16.))
+                                    .text_color(t.muted)
+                                    .truncate()
+                                    .child(detail),
+                            ),
+                    )
+                    .child(self.row_switch(key, shown))
+                    .when(busy, |row| row.opacity(0.6))
+                    .reach()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_calendar_visible(id.clone(), !shown, cx)
+                    })),
+            );
+        }
+        Some(
+            div()
+                .w_full()
+                .child(
+                    div()
+                        .flex()
+                        .items_end()
+                        .justify_between()
+                        .child(section_label("Visible calendars", t))
+                        .when(changed, |heading| {
+                            heading.child(
+                                div()
+                                    .id("visible-calendars-reset")
+                                    .mb(px(6.))
+                                    .px(px(9.))
+                                    .text_size(px(13.))
+                                    .line_height(px(18.))
+                                    .text_color(t.accent)
+                                    .cursor_pointer()
+                                    .child("Reset")
+                                    .reach()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.reset_visible_calendars(cx)
+                                    })),
+                            )
+                        }),
+                )
+                .child(card),
+        )
     }
 
     fn render_trash_screen(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1224,7 +1518,7 @@ impl Cereal {
         screen_scroller("trash-screen")
             .track_scroll(&scroll)
             .child(
-                screen_column()
+                screen_column(self.page_column_width(window))
                     .child(page_title("Trash", t))
                     .child(
                         div()
@@ -1325,14 +1619,30 @@ fn screen_scroller(id: &'static str) -> Stateful<Div> {
         .items_center()
 }
 
-/// The 626 px content column shared with Home, so cards line up across pages.
-fn screen_column() -> Div {
+/// The 626 px content column shared with Home, so cards line up across
+/// pages, `width` wide (see `Cereal::page_column_width`).
+fn screen_column(width: f32) -> Div {
     div()
-        .w_full()
-        .max_w(px(674.))
+        .w(px(width))
+        .flex_shrink_0()
         .px(px(24.))
         .pt(px(9.))
         .pb(px(48.))
+}
+
+impl Cereal {
+    /// The width of a page's content column: the page beside the sidebar,
+    /// less the scroll bar's gutter, up to 674 px. It is given to the column
+    /// in pixels. A column that was only told "as wide as the page, up to
+    /// 674" was first sized with none of its text wrapped and kept that
+    /// height, so each line that then wrapped (a description in Settings, an
+    /// excerpt under a search result) took its height off the end of the
+    /// page: the bottom padding first, then the last rows, could not be
+    /// scrolled into view.
+    pub(crate) fn page_column_width(&self, window: &Window) -> f32 {
+        (f32::from(window.viewport_size().width) - 192. * self.sidebar_level - 10.)
+            .clamp(240., 674.)
+    }
 }
 
 /// A page's 24 px display title, inset to sit over the card text.

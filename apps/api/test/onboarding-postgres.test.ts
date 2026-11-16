@@ -49,7 +49,7 @@ describe.skipIf(!enabled)("first-run setup on PostgreSQL: claiming, recorded ste
     expect((await methods()).setupRequired).toBe(true)
     // The setup code works before anyone has an account; the owner step is still open.
     const fresh = await settings()
-    expect(fresh.onboarding).toEqual({ completedAt: null, steps: { owner: false, name: false, language: false, speech: false, models: false, signIn: false, storage: false } })
+    expect(fresh.onboarding).toEqual({ completedAt: null, steps: { owner: false, name: false, language: false, speech: false, models: false, signIn: true, storage: false } })
     const early = await request("/api/v1/admin/onboarding/complete", "POST")
     expect(early.status).toBe(409)
     expect((await early.json()).message).toBe("Finish the required setup steps first: owner, language, speech")
@@ -104,7 +104,7 @@ describe.skipIf(!enabled)("first-run setup on PostgreSQL: claiming, recorded ste
     expect((await settings(owner)).onboarding!.completedAt).toBe(completedAt)
     const restarted = await request("/api/v1/admin/onboarding/restart", "POST", undefined, owner)
     expect(restarted.status).toBe(200)
-    expect((await restarted.json() as AdminSettingsDTO).onboarding).toEqual({ completedAt: null, steps: { owner: true, name: true, language: true, speech: true, models: false, signIn: false, storage: false } })
+    expect((await restarted.json() as AdminSettingsDTO).onboarding).toEqual({ completedAt: null, steps: { owner: true, name: true, language: true, speech: true, models: false, signIn: true, storage: false } })
     const cleared = await db!.instanceSettings.findUniqueOrThrow({ where: { id: settingsId } })
     expect(cleared.onboardingCompletedAt).toBeNull()
     expect(cleared.onboardingSteps).toEqual({})

@@ -535,6 +535,9 @@ pub struct GoogleStatusDTO {
 
     pub connections: Vec<GoogleConnectionDTO>,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_https: Option<bool>,
+
     pub redirect_uri: Option<String>,
 }
 
@@ -783,6 +786,20 @@ pub struct AuthMethodsDTO {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub setup_required: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<ServerTransport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServerTransport {
+    Private,
+
+    #[serde(rename = "public-http")]
+    PublicHttp,
+
+    Secure,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -940,6 +957,9 @@ pub struct SignInSettingsDTO {
     pub google_client_id: Option<String>,
 
     pub google_client_secret_set: bool,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub google_needs_https: Option<bool>,
 
     pub google_redirect_uris: Vec<String>,
 
@@ -1784,6 +1804,45 @@ pub enum OnboardingStep {
     Speech,
 
     Storage,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleVerificationInput {
+    pub client_id: String,
+
+    pub client_secret: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleVerificationStartDTO {
+    pub authorization_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GoogleVerificationStatusDTO {
+    pub reason: Option<String>,
+
+    pub state: State,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum State {
+    Done,
+
+    Failed,
+
+    Pending,
+
+    #[serde(rename = "none")]
+    StateNone,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SwitchToPasswordInput {
+    pub password: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

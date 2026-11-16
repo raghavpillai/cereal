@@ -32,6 +32,9 @@
   background: var(--app-bg);
   view-transition-name: site-header;
 }
+/* First-run setup fills the window and has its own top bar. A tab known to be in setup (lib/session-probe.ts)
+   is marked before first paint, so this header is not shown for a moment and then taken away. */
+:root[data-setup] .site-header { display: none; }
 .site-mark {
   position: absolute; left: 16px; top: 8px;
   display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px;
@@ -40,6 +43,7 @@
 .site-mark .mark { width: 22px; height: 22px; }
 .site-nav, .site-actions { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .header-slot { display: contents; }
+.site-actions:not([data-ready]) { visibility: hidden; }
 /* The app's back pill: on a note it carries the chevron and leads back to the list. */
 .site-back {
   display: flex; align-items: center; justify-content: center; gap: 2px;
@@ -154,11 +158,27 @@
 @media (prefers-reduced-motion: reduce) {
   .theme-toggle .icon { transform: none !important; }
 }
+/* Under a finger. The controls are drawn at the desktop app's sizes, which suit a pointer; on a touch screen each
+   keeps its look and is pressed over a taller area that reaches into the empty room around it, the rows of a
+   menu stand 44 px apart, and the choices in the Share card are as tall. */
+@media (pointer: coarse) {
+  :is(.site-back, .site-link, .site-avatar, .app-tool, .app-pill, .share-button, .share-link-button, .share-revoke, .note-chip.is-button, .sign-in-download) { position: relative; }
+  :is(.site-mark, .site-back, .site-link, .site-avatar, .app-tool, .app-pill, .share-button, .share-link-button, .share-revoke, .note-chip.is-button, .sign-in-download)::after { content: ''; position: absolute; inset: -8px -3px; }
+  /* The outlined pills are measured from inside their 1 px edge. */
+  :is(.site-back, .app-pill, .note-chip.is-button)::after { inset: -9px -4px; }
+  .share-button::after { right: 0; }
+  .share-link-button::after { left: 0; }
+  .app-tool.is-small::after { inset: -12px; }
+  .share-revoke::after { inset: -11px -3px; }
+  .app-menu-row { height: 44px; }
+  .share-links li { min-height: 44px; }
+  .share-include label { min-height: 44px; }
+}
 @media (max-width: 600px) {
   .site-header { padding-left: 48px; }
   .site-mark { left: 10px; }
   .site-actions { gap: 6px; }
-  .site-actions > .site-link, .header-slot > .site-link { display: none; }
+  .site-actions > .site-link, .header-slot > .site-link, .header-pending > .site-link { display: none; }
   .site-link-row { display: flex; }
   .open-in-app { width: 28px; padding: 0; }
   .open-in-app-label { display: none; }

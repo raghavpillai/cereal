@@ -62,6 +62,7 @@ struct ServerHomeView: View {
                         VStack(alignment: .leading, spacing: 0) {
                             Text("More notes could not load. " + failure.localizedDescription).font(.footnote)
                             Button("Retry") { Task { await server.loadMore() } }
+                                .foregroundStyle(Theme.accent)
                                 .frame(minHeight: 44).contentShape(Rectangle())
                         }.foregroundStyle(Theme.textSecondary).transition(motion.fade)
                     }
@@ -262,6 +263,7 @@ struct ServerHomeView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     Text("Connect to your instance to read and edit its notes.")
                     Button("Connection settings") { router.showConnection = true }
+                        .foregroundStyle(Theme.accent)
                         .frame(minHeight: 44).contentShape(Rectangle())
                 }.foregroundStyle(Theme.textSecondary)
             }
@@ -272,6 +274,7 @@ struct ServerHomeView: View {
                 Text(error.localizedDescription)
                 if !server.list.rows.isEmpty { Text("Showing the last loaded notes.").font(.footnote).padding(.top, 10) }
                 Button("Retry") { Task { await server.refresh() } }
+                    .foregroundStyle(Theme.accent)
                     .frame(minHeight: 44).contentShape(Rectangle())
             }.foregroundStyle(Theme.textSecondary).padding(.bottom, 6)
         case .loaded:

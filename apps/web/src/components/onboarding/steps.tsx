@@ -2,21 +2,24 @@
  * checked and what Continue does; these only draw the inputs and report changes. */
 import { useRef, useState, type ReactNode } from 'react'
 import type { AdminSettingsDTO, AIProvider, LanguageModelSelection, LiveTranscriptionModelSelection, StorageTestDTO, TranscriptionModelSelection } from '@meeting-notes/contracts'
-import { addAllowedEmails, bucketReady, defaultLiveModel, googleClientReady, providerNames, type SignInDraft, type StorageDraft } from '../../lib/instance-settings'
+import { addAllowedEmails, bucketReady, defaultLiveModel, providerNames, type SignInDraft, type StorageDraft } from '../../lib/instance-settings'
 import { macDetails, type Downloads } from '../../lib/downloads'
-import { LANGUAGE_PROVIDERS, PROVIDER_HINTS, type LanguageProvider, type ModelsDraft } from '../../lib/onboarding'
+import { googleRedirectAddresses, LANGUAGE_PROVIDERS, PROVIDER_HINTS, type LanguageProvider, type ModelsDraft, type SignInMethod } from '../../lib/onboarding'
 import { ModelPicker, type CatalogState } from '../admin/settings-panel'
+import { GOOGLE_NEEDS_HTTPS } from '@meeting-notes/contracts/transport'
 import { Choice, CopyLine, DrawnCheck, Field, Switch, type FieldState } from './kit'
 
 export type KeyCheck = { state: 'idle' | 'checking' | 'connected' | 'failed'; /** How many models the provider listed for this key. */ count?: number; message?: string }
 const keyFieldState = (check: KeyCheck): FieldState => check.state === 'connected' ? 'good' : check.state === 'checking' ? 'checking' : check.state === 'failed' ? 'bad' : 'idle'
 const ProviderLogo = ({ provider }: { provider: AIProvider }) => <img src={`/providers/${provider}.svg`} width="20" height="20" alt="" />
 
-/* ── 1. Claim this server ────────────────────────────────────────────────── */
-export interface OwnerFields { code: string; name: string; email: string; password: string }
-export function ClaimFields({ value, change, problems, disabled }: {
-  value: OwnerFields; change: (next: Partial<OwnerFields>) => void
-  problems: Partial<Record<keyof OwnerFields, string>>; disabled: boolean
+/* ── 1. Set up sign-in ───────────────────────────────────────────────────── */
+export interface OwnerFields { code: string; method: SignInMethod; name: string; email: string; password: string; clientId: string; clientSecret: string }
+export type OwnerProblems = Partial<Record<'code' | 'name' | 'email' | 'password' | 'clientId' | 'clientSecret', string>>
+export function ClaimFields({ value, change, problems, disabled, googleNeedsHttps, origin }: {
+  value: OwnerFields; change: (next: Partial<OwnerFields>) => void; problems: OwnerProblems; disabled: boolean
+  /** Plain HTTP off this machine: Google will not redirect here, so that choice cannot be made. */
+  googleNeedsHttps: boolean; origin: string
 }) {
   return <><fieldset className="onb-fields" disabled={disabled}>
     {/* Not a password field: a password manager must not offer to keep the setup code. It is hidden as it is typed all the same. */}
@@ -26,13 +29,33 @@ export function ClaimFields({ value, change, problems, disabled }: {
       <p>To see the code, run this in Cereal’s folder on the server:</p>
       <CopyLine value="grep ADMIN_API_TOKEN .env" prefix="$ " label="Copy the command that shows the setup code" />
     </div>
-    <div className="onb-pair">
-      <Field label="Your name" name="name" autoComplete="name" maxLength={200} value={value.name} onChange={event => change({ name: event.target.value })} problem={problems.name} />
-      <Field label="Email" type="email" name="email" autoComplete="username" autoCapitalize="none" spellCheck={false} maxLength={254} value={value.email} onChange={event => change({ email: event.target.value })} problem={problems.email} />
+    <div className="onb-field">
+      <span className="onb-label" id="onb-method-label">How people sign in</span>
+      <div className="onb-choices" role="radiogroup" aria-labelledby="onb-method-label" aria-describedby={googleNeedsHttps ? 'onb-method-note' : undefined}>
+        <Choice name="sign-in-method" value="password" checked={value.method === 'password'} onChange={() => change({ method: 'password' })} title="Email and password" detail="You make an account for each person" />
+        <Choice name="sign-in-method" value="google" checked={value.method === 'google'} disabled={googleNeedsHttps} onChange={() => change({ method: 'google' })} title="Google" detail="People use their Google account" />
+      </div>
+      {googleNeedsHttps && <p className="onb-hint" id="onb-method-note">{GOOGLE_NEEDS_HTTPS}. This server is reached over plain HTTP.</p>}
     </div>
-    <Field label="Password" type="password" name="new-password" autoComplete="new-password" maxLength={128} value={value.password} onChange={event => change({ password: event.target.value })}
-      problem={problems.password} hint={value.password.length >= 12 ? 'Good. You will sign in with this email and password.' : 'At least 12 characters.'}
-      state={value.password.length >= 12 && !problems.password ? 'good' : 'idle'} />
+    {value.method === 'password' ? <div className="onb-method" key="password">
+      <div className="onb-pair">
+        <Field label="Your name" name="name" autoComplete="name" maxLength={200} value={value.name} onChange={event => change({ name: event.target.value })} problem={problems.name} />
+        <Field label="Email" type="email" name="email" autoComplete="username" autoCapitalize="none" spellCheck={false} maxLength={254} value={value.email} onChange={event => change({ email: event.target.value })} problem={problems.email} />
+      </div>
+      <Field label="Password" type="password" name="new-password" autoComplete="new-password" maxLength={128} value={value.password} onChange={event => change({ password: event.target.value })}
+        problem={problems.password} hint={value.password.length >= 12 ? 'Good. You will be the owner, and sign in with this email and password.' : 'At least 12 characters. You will be the owner.'}
+        state={value.password.length >= 12 && !problems.password ? 'good' : 'idle'} />
+    </div> : <div className="onb-method" key="google">
+      <div className="onb-where">
+        <p>In Google Cloud, make an OAuth client of type “Web application” and add both of these as authorized redirect URIs:</p>
+        {googleRedirectAddresses(origin).map((address, at) => <CopyLine key={address} value={address} label={`Copy the ${at === 0 ? 'sign-in' : 'calendar'} redirect address`} />)}
+      </div>
+      <div className="onb-pair">
+        <Field label="Client ID" name="google-client-id" autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={255} placeholder="…apps.googleusercontent.com" value={value.clientId} onChange={event => change({ clientId: event.target.value })} problem={problems.clientId} />
+        <Field label="Client secret" type="password" name="google-client-secret" autoComplete="off" maxLength={512} value={value.clientSecret} onChange={event => change({ clientSecret: event.target.value })} problem={problems.clientSecret} />
+      </div>
+      <p className="onb-hint">Continue signs you in with Google once. That proves the client works, and the Google account you use becomes the owner. Nobody gets a password.</p>
+    </div>}
   </fieldset>
     <p className="onb-aside">Already have an account on this server? <a href="/login?signin=1">Sign in</a></p></>
 }
@@ -120,43 +143,31 @@ export function ModelFields({ draft, change, catalogs, available, load, settings
   </div>
 }
 
-/* ── 6. Who can sign in ──────────────────────────────────────────────────── */
-export function SignInFields({ draft, change, saved }: { draft: SignInDraft; change: (next: SignInDraft) => void; saved: NonNullable<AdminSettingsDTO['signIn']> }) {
+/* ── 6. Who may join (a server that signs in with Google) ───────────────── */
+export function SignInFields({ draft, change, owner }: { draft: SignInDraft; change: (next: SignInDraft) => void; /** The owner's own address: always allowed, and shown so. */ owner: string }) {
   const [entry, setEntry] = useState(''), [entryProblem, setEntryProblem] = useState<string | null>(null)
-  const ready = googleClientReady(draft, saved.googleClientSecretSet)
   function add() {
     const result = addAllowedEmails(draft.allowedEmails, entry)
     setEntryProblem(result.problem)
     if (!result.problem) { change({ ...draft, allowedEmails: result.list }); setEntry('') }
   }
   return <div className="onb-fields">
-    <div className="onb-switches">
-      <Switch checked={draft.password} onChange={password => change({ ...draft, password })} label="Email and password" hint="Accounts you create for people" />
-      <Switch checked={draft.google} onChange={google => change({ ...draft, google })} label="Google" hint={draft.google && !ready ? 'Needs the client ID and secret below' : 'People sign in with their Google account'} />
-    </div>
-    <div className="onb-fold" data-open={draft.google ? '' : undefined}><div className="onb-fold-body" inert={!draft.google}>
-      <div className="onb-pair">
-        <Field label="Google client ID" name="google-client-id" autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={255} placeholder="…apps.googleusercontent.com" value={draft.googleClientId} onChange={event => change({ ...draft, googleClientId: event.target.value })} />
-        <Field label="Client secret" type="password" name="google-client-secret" autoComplete="off" maxLength={512} placeholder={saved.googleClientSecretSet ? 'Leave blank to keep it' : ''} value={draft.googleClientSecret} onChange={event => change({ ...draft, googleClientSecret: event.target.value })} />
+    <div className="onb-field">
+      <label htmlFor="onb-allowed">Email address or domain</label>
+      <div className="onb-add">
+        <input id="onb-allowed" className="input" type="text" inputMode="email" autoComplete="off" autoCapitalize="none" spellCheck={false} placeholder="someone@example.com or @example.com" value={entry}
+          aria-invalid={entryProblem ? true : undefined} aria-describedby={entryProblem ? 'onb-allowed-problem' : 'onb-allowed-hint'}
+          onChange={event => { setEntry(event.target.value); setEntryProblem(null) }} onKeyDown={event => { if (event.key === 'Enter' && entry.trim()) { event.preventDefault(); add() } }} />
+        <button type="button" className="button is-secondary pressable" onClick={add}>Add</button>
       </div>
-      <div className="onb-where">
-        <p>Add both of these as authorized redirect URIs on the OAuth client in Google Cloud:</p>
-        {saved.googleRedirectUris.map((uri, at) => <CopyLine key={uri} value={uri} label={`Copy the ${at === 0 ? 'sign-in' : 'calendar'} redirect address`} />)}
-      </div>
-      <div className="onb-field">
-        <label htmlFor="onb-allowed">Who may join with Google</label>
-        <div className="onb-add">
-          <input id="onb-allowed" className="input" type="text" inputMode="email" autoComplete="off" autoCapitalize="none" spellCheck={false} placeholder="someone@example.com or @example.com" value={entry}
-            aria-invalid={entryProblem ? true : undefined} aria-describedby={entryProblem ? 'onb-allowed-problem' : 'onb-allowed-hint'}
-            onChange={event => { setEntry(event.target.value); setEntryProblem(null) }} onKeyDown={event => { if (event.key === 'Enter' && entry.trim()) { event.preventDefault(); add() } }} />
-          <button type="button" className="button is-secondary pressable" onClick={add}>Add</button>
-        </div>
-        {draft.allowedEmails.length > 0 && <ul className="onb-chips" aria-label="Allowed emails and domains">{draft.allowedEmails.map(email => <li key={email}>
+      <ul className="onb-chips" aria-label="Who may join">
+        {owner && <li className="is-fixed"><span>{owner}</span><small>you</small></li>}
+        {draft.allowedEmails.map(email => <li key={email}>
           <span>{email}</span><button type="button" aria-label={`Remove ${email}`} onClick={() => change({ ...draft, allowedEmails: draft.allowedEmails.filter(other => other !== email) })}><svg viewBox="0 0 10 10" width="8" height="8" aria-hidden="true"><path d="M2 2l6 6M8 2 2 8" /></svg></button>
-        </li>)}</ul>}
-        {entryProblem ? <p className="onb-problem" id="onb-allowed-problem" role="alert">{entryProblem}</p> : <p className="onb-hint" id="onb-allowed-hint">Only these addresses and domains can create an account with Google. People who already have an account can always sign in.</p>}
-      </div>
-    </div></div>
+        </li>)}
+      </ul>
+      {entryProblem ? <p className="onb-problem" id="onb-allowed-problem" role="alert">{entryProblem}</p> : <p className="onb-hint" id="onb-allowed-hint">Anyone whose Google address is listed, or is at a listed domain, gets an account the first time they sign in. Leave it empty and only you can get in.</p>}
+    </div>
   </div>
 }
 

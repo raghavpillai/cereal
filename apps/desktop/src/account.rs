@@ -174,15 +174,17 @@ fn validate_url(raw: &str) -> Result<String, String> {
     let raw = raw.trim().trim_end_matches('/');
     let (scheme, rest) = raw.split_once("://").ok_or("Enter a valid server URL")?;
     let authority = rest.split('/').next().unwrap_or("");
-    let host = authority.split(':').next().unwrap_or("");
-    let loopback = host == "localhost" || host == "127.0.0.1" || authority.starts_with("[::1]:");
+    // Plain HTTP is accepted for a server on a private network; what that
+    // means for the address typed is said beside the field
+    // (`link::address_transport`). The session still goes only to the exact
+    // origin it was issued for.
     if authority.is_empty()
-        || !((scheme == "https") || (scheme == "http" && loopback))
+        || !(scheme == "https" || scheme == "http")
         || raw.chars().any(|c| c.is_control() || c.is_whitespace())
         || raw.contains(['@', '?', '#', '"', '\\'])
         || rest.split('/').any(|p| p == "." || p == "..")
     {
-        return Err("Use HTTPS, or HTTP on localhost for development".into());
+        return Err("Enter an address that starts with https:// or http://".into());
     }
     Ok(raw.to_owned())
 }
@@ -492,6 +494,55 @@ impl AccountView {
     /// Ask the server whose address is in the field how people sign in to
     /// it, once typing has paused. Each change starts a new question, and an
     /// answer to an earlier one, however late it arrives, is dropped.
+    /// A state of the form to look at, for the scripted tour: no server is
+    /// asked anything and nobody is signed in or out.
+    #[cfg(debug_assertions)]
+    pub fn review(&mut self, state: &str, cx: &mut Context<Self>) {
+        let (address, methods) = match state {
+            "google" => ("https://notes.example.com", (false, true)),
+            "both" | "waiting" => ("https://notes.example.com", (true, true)),
+            "http-private" => ("http://192.168.1.20:3000", (true, false)),
+            "http-public" => ("http://notes.example.com", (true, false)),
+            _ => ("https://notes.example.com", (true, false)),
+        };
+        self.url.update(cx, |input, cx| input.set_content(address, cx));
+        self.asked = Some(address.to_owned());
+        self.question = self.question.wrapping_add(1);
+        self.error = None;
+        self.busy = false;
+        self.waiting = None;
+        let offered = SignInMethods {
+            password: methods.0,
+            google: methods.1,
+            browser: methods.1,
+            instance_name: None,
+        };
+        self.discovery = match state {
+            "checking" => Discovery::Checking,
+            "unreachable" => Discovery::Failed(
+                "Could not reach that server. Check the address and that this Mac can reach it."
+                    .into(),
+            ),
+            _ => Discovery::Ready(offered),
+        };
+        match state {
+            "waiting" => {
+                self.turn = self.turn.wrapping_add(1);
+                self.waiting = BrowserSignIn::new(address.to_owned())
+                    .ok()
+                    .map(|attempt| (attempt, self.turn));
+            }
+            "wrong-password" => {
+                self.email
+                    .update(cx, |input, cx| input.set_content("sam@cereal.example", cx));
+                self.error = Some("That email or password is not right.".into());
+            }
+            "busy" => self.busy = true,
+            _ => {}
+        }
+        cx.notify();
+    }
+
     pub fn follow_address(&mut self, cx: &mut Context<Self>) {
         let address = self.url.read(cx).content().trim().to_owned();
         if self.asked.as_deref() == Some(address.as_str()) {
@@ -714,7 +765,8 @@ impl AccountView {
 }
 impl Render for AccountView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = Theme::new(true);
+        // The account page follows the app's theme, like the sign-in screen.
+        let t = Theme::new(crate::ui::is_dark());
         self.follow_address(cx);
         let field = |input: &Entity<TextInput>| {
             div()
@@ -754,6 +806,26 @@ impl Render for AccountView {
             );
         }
         form = form.child(field(&self.url));
+        // How what is typed there would travel (see the welcome's server
+        // step, which says the same).
+        let transport = crate::link::address_transport(&self.url.read(cx).content());
+        if let Some((transport, note)) =
+            transport.and_then(|transport| Some((transport, transport.note()?)))
+        {
+            form = form.child(if transport.warns() {
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(8.))
+                    .text_size(px(12.))
+                    .line_height(px(16.))
+                    .text_color(t.warning_ink)
+                    .child(icon("warning", 16., t.warning_ink))
+                    .child(div().flex_1().min_w_0().child(note))
+            } else {
+                small(note, t)
+            });
+        }
         let mut password_offered = true;
         match self.discovery.clone() {
             Discovery::Idle => {}
@@ -840,7 +912,8 @@ impl Render for AccountView {
             }
         }
         if let Some(error) = &self.error {
-            form = form.child(small(error.clone(), t));
+            // What went wrong reads as that, as under the "Paste link" field.
+            form = form.child(small(error.clone(), t).text_color(t.danger));
         }
         form = form.child(small(
             if password_offered {
@@ -1084,11 +1157,24 @@ mod tests {
     }
 
     #[test]
-    fn login_only_sends_credentials_to_https_or_explicit_loopback() {
+    fn a_server_address_is_https_or_http_and_nothing_dressed_up() {
         assert!(validate_url("https://notes.example/base").is_ok());
         assert!(validate_url("http://127.0.0.1:3000").is_ok());
+        // A server on a private network, over plain HTTP.
+        assert_eq!(validate_url("http://10.30.1.77:3000/").unwrap(), "http://10.30.1.77:3000");
+        assert!(validate_url("http://cereal.local:3000").is_ok());
+        assert!(validate_url("http://example.com").is_ok());
         for value in [
-            "http://example.com",
+            "ftp://10.30.1.77",
+            "//10.30.1.77:3000",
+            "10.30.1.77:3000",
+            "http://",
+            "http://secret@10.30.1.77",
+            "http://10.30.1.77/?token=x",
+            "http://10.30.1.77/#x",
+            "http://10.30.1.77/../api",
+            "http://10.30.1.77\\evil",
+            "http://10.30.1.77 :3000",
             "https://secret@host",
             "https://host/?token=x",
             "https://host/../api",

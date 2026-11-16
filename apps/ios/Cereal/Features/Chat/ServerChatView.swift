@@ -50,6 +50,8 @@ struct ServerChatView: View {
                     .foregroundStyle(Theme.chatText).lineLimit(1)
                     .padding(.top, RailMetrics.chatTitleInsets(compact: verticalSizeClass == .compact).top)
                     .padding(.bottom, RailMetrics.chatTitleInsets(compact: verticalSizeClass == .compact).bottom).padding(.leading, Theme.gutter)
+                    // A long title ends where the messages do, 16 pt from the edge.
+                    .padding(.trailing, ChatColumn.trailing)
                 if noteID == nil { Text("Across your private notes").font(.caption).foregroundStyle(Theme.textSecondary).padding(.leading, Theme.gutter).padding(.bottom, 8) }
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -104,6 +106,7 @@ struct ServerChatView: View {
                     // A reader at the end stays at the end, whatever made the conversation
                     // taller or its room smaller, and finishes with the whole answer in view.
                     .followsChatTail(followsTail, room: $room)
+                    .chatTopFade()
                     .onChange(of: messages.count) {
                         if followsTail && !messages.isEmpty { withAnimation(motion.snappy) { proxy.scrollTo("bottom", anchor: .chatEnd) } }
                     }

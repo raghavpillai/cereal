@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { copyText } from '../../lib/clipboard'
 import type { AuthSessionDTO, ShareDTO } from '@meeting-notes/contracts'
 import { stampLabel } from '../../lib/notes'
 import { ShareError, activeShares, createSharesClient, shareChoice, type SharesClient } from '../../lib/shares'
@@ -49,7 +50,7 @@ export function ShareControl({ noteId, session, has, expired, client: given }: {
     try {
       const { url } = await client.create(noteId, choice)
       let copied = false
-      try { await navigator.clipboard.writeText(url); copied = true } catch { /* shown for copying by hand */ }
+      try { await copyText(url); copied = true } catch { /* shown for copying by hand */ }
       if (!alive.current) return copied
       setMade({ url, copied })
       void reload()

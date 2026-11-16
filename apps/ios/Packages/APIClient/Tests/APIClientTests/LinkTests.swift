@@ -56,13 +56,24 @@ private func encoded(_ text: String) -> String {
         }
     }
 
-    @Test func plainHTTPIsOnlyForThisDevice() {
+    @Test func plainHTTPIsForThisDeviceAndPrivateNetworksOnly() {
         #expect(shared("http://127.0.0.1:3000/s/\(token)")?.origin.description == "http://127.0.0.1:3000")
         #expect(shared("http://localhost:3000/s/\(token)")?.origin.description == "http://localhost:3000")
         #expect(shared("http://[::1]:3000/s/\(token)")?.origin.description == "http://[::1]:3000")
         #expect(note("cereal://note?server=" + encoded("http://127.0.0.1:3000") + "&id=\(noteID)")?.origin.displayHost == "127.0.0.1:3000")
+        // A server on a private network, in each form a link takes.
+        #expect(shared("http://10.30.1.77:3000/s/\(token)")?.origin.description == "http://10.30.1.77:3000")
+        #expect(shared("cereal://shared?url=" + encoded("http://10.30.1.77:3000/s/\(token)"))?.origin.description == "http://10.30.1.77:3000")
+        #expect(note("http://192.168.1.10/notes/\(noteID)")?.origin.description == "http://192.168.1.10")
+        #expect(note("cereal://note?server=" + encoded("http://cereal.local:3000") + "&id=\(noteID)")?.origin.displayHost == "cereal.local:3000")
+        #expect(shared("http://nas/s/\(token)")?.origin.description == "http://nas")
+        #expect(shared("http://[fd12:3456::1]:3000/s/\(token)")?.origin.description == "http://[fd12:3456::1]:3000")
+        // Anything else over plain HTTP is not a link, however it is dressed.
         for refused in ["http://notes.example.com/s/\(token)", "http://127.0.0.1.example.com/s/\(token)",
-                        "http://localhost.example.com/s/\(token)", "http://192.168.1.10/s/\(token)", "http://127.0.0.2/s/\(token)"] {
+                        "http://localhost.example.com/s/\(token)", "http://10.30.1.77.example.com/s/\(token)",
+                        "http://cereal.local.example.com/s/\(token)", "http://8.8.8.8/s/\(token)", "http://172.32.0.1/s/\(token)",
+                        "http://167772161/s/\(token)", "http://0x0a.0.0.1/s/\(token)", "http://10.1/s/\(token)",
+                        "http://[2001:db8::1]/s/\(token)", "http://10.30.1.77@evil.example/s/\(token)"] {
             #expect(AppLink(text: refused) == nil, "\(refused)")
             #expect(AppLink(text: "cereal://shared?url=" + encoded(refused)) == nil, "\(refused)")
         }

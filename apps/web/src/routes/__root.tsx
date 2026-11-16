@@ -10,8 +10,9 @@ import quadrant from '../fonts/quadrant.ttf?url'
 import stylesheet from '../styles.css?url'
 
 /** Applies a remembered light/dark choice before first paint. Only the theme
- * name is stored; note content never enters browser storage. */
-const themeBootstrap = `try{var t=localStorage.getItem('cereal-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch(e){}`
+ * name is stored; note content never enters browser storage. A tab that is in first-run
+ * setup (lib/session-probe.ts) is marked too, so the header that setup hides is never painted first. */
+const themeBootstrap = `try{var t=localStorage.getItem('cereal-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch(e){}try{if(location.pathname==='/admin'&&sessionStorage.getItem('cereal-setup')==='1')document.documentElement.dataset.setup=''}catch(e){}`
 const PAPER = { light: '#f7f7f2', dark: '#292929' }
 
 export const Route = createRootRoute({
@@ -58,7 +59,9 @@ function Root() {
       <nav className="site-nav" aria-label="Site">
         <Link to="/notes" className="site-back" aria-current={onList ? 'page' : undefined}>{inside && <Icon name="chevron-left" size={10} />}<span>Notes</span></Link>
       </nav>
-      <div className="site-actions">
+      {/* Shown once the page is running: by then each page has put its own controls, or their placeholders, into the
+          slots, so the theme control appears where it will stay and is not seen sliding there. */}
+      <div className="site-actions" data-ready={mounted ? '' : undefined}>
         <span className="header-slot" ref={setAccount} />
         <ThemeToggle />
         <span className="header-slot is-page" ref={setPage} />
