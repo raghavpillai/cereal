@@ -66,6 +66,10 @@ pub struct SummaryState {
 
 /// How many finished summaries are kept.
 const SUMMARY_CACHE: usize = 64;
+/// Space above and below a rule in the notes. With the 8 pt blank line the
+/// source has on either side, the text ends 30 pt above the rule and starts
+/// again 30 pt below it, as the reference measures.
+const RULE_SPACE: f32 = 8.;
 
 pub struct EnhancedEdit {
     pub note_id: u64,
@@ -1084,7 +1088,7 @@ impl Cereal {
             let block = &blocks[index];
             match &block.parsed {
                 NoteLine::Blank => 8.,
-                NoteLine::Rule => 41.,
+                NoteLine::Rule => RULE_SPACE * 2. + 1.,
                 NoteLine::Heading(title) => {
                     counter.lines(title, full) as f32 * 24. + if block.row == 0 { 0. } else { 8. }
                 }
@@ -1119,7 +1123,7 @@ impl Cereal {
                     div()
                         .w_full()
                         .h(px(1.))
-                        .my(px(20.))
+                        .my(px(RULE_SPACE))
                         .bg(t.border)
                         .into_any_element(),
                 );

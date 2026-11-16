@@ -840,7 +840,7 @@ impl Cereal {
             self.show_toast(&format!("Sign in to {host} again to open this note"), cx);
         } else if trashed {
             // Where it can be restored from.
-            self.open_trash(cx);
+            self.open_trash_at(note, cx);
             self.show_toast("This note is in the Trash", cx);
         } else {
             self.open_note(note, cx);

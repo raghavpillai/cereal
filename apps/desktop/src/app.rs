@@ -132,6 +132,10 @@ pub struct Cereal {
     /// What a Trash row is asking ("Delete … forever?", or that the note
     /// was edited elsewhere).
     pub trash_ask: Option<crate::trash::Ask>,
+    /// The trashed note a link led to: its row is highlighted and scrolled
+    /// into view when the popover is next drawn.
+    pub trash_reveal: Option<u64>,
+    pub trash_scroll: ScrollHandle,
     /// Notes whose delete on their server has been sent and not answered.
     pub deleting_forever: std::collections::HashSet<u64>,
     pub menu_keyboard: crate::chrome::MenuKeyboard,
@@ -464,6 +468,8 @@ impl Cereal {
             menu_closed_by_press: None,
             press_seq: 0,
             trash_ask: None,
+            trash_reveal: None,
+            trash_scroll: ScrollHandle::new(),
             deleting_forever: Default::default(),
             menu_keyboard: Default::default(),
             palette: Default::default(),
@@ -965,6 +971,7 @@ impl Render for Cereal {
         }
         if self.menu != Some(Menu::Trash) {
             self.trash_ask = None;
+            self.trash_reveal = None;
         }
         match self.menu.clone() {
             Some(menu) if self.visible_menu.as_ref() != Some(&menu) || self.menu_exiting => {
@@ -996,6 +1003,7 @@ impl Render for Cereal {
             None if self.visible_menu.is_none() => self.menu_keyboard.reset(),
             _ => {}
         }
+        self.reveal_trash_row();
         // The menu stays mounted until its exit has finished, however often it
         // was interrupted on the way; no timer has to guess the duration.
         let menu_pose = self.stage.presence(("menu", 0), self.menu.is_some(), GOOEY);

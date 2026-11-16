@@ -1886,10 +1886,10 @@ impl Cereal {
                     .flex_shrink_0()
                     .px(px(if home { 3. } else { 4. }))
                     .when(home, |d| d.pb(px(3.)))
-                    .child(self.render_chat_composer_focused(
-                        self.ask.read(cx).focus_handle.is_focused(window),
-                        cx,
-                    )),
+                    // No focus ring in the panel, even while its field has
+                    // the keyboard: the panel is the frame, as in the
+                    // reference.
+                    .child(self.render_chat_composer_focused(false, cx)),
             )
             .when(scroll_down.visible, |d| {
                 d.child(crate::motion::pop(

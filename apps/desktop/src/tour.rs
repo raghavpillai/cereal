@@ -880,6 +880,13 @@ fn surface_steps() -> Vec<Step> {
         }),
         // From a page without the sidebar's footer: Home, with the popover.
         step("p-fix-trash-from-settings", 1200, |view, cx| view.open_trash(cx)),
+        // A link to a note that is in the Trash, followed from the note
+        // that is open: the Trash with its row, not the note.
+        step("p-fix-trash-link", 1200, |view, cx| {
+            view.menu = None;
+            view.open_note(1, cx);
+            view.open_linked_note(3, cx);
+        }),
         windowed("p-fix-palette-trash", 1200, |view, window, cx| {
             view.menu = None;
             view.open_search(window, cx);

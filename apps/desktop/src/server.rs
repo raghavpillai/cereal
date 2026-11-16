@@ -1918,7 +1918,8 @@ impl Cereal {
         };
         let (slot, url) = (account.slot, account.url.clone());
         if let Some(id) = cached_note(&self.workspace, slot, &server_id, &url) {
-            self.open_note(id, cx);
+            // A note in the Trash opens the Trash, not itself.
+            self.open_linked_note(id, cx);
             return;
         }
         let Ok(path_id) = crate::accounts::client::path_id(&server_id) else {
@@ -1962,7 +1963,7 @@ impl Cereal {
                         this.apply_server_note(remote, slot, &url);
                         this.persist(cx);
                         if let Some(id) = cached_note(&this.workspace, slot, &server_id, &url) {
-                            this.open_note(id, cx);
+                            this.open_linked_note(id, cx);
                         }
                     }
                     // Not a note of this account, or not a note any more.

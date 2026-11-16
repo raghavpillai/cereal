@@ -2174,7 +2174,7 @@ impl crate::app::Cereal {
             .rounded_full()
             .border_1()
             .border_color(if focused {
-                t.accent
+                crate::ui::ask_ring().0
             } else {
                 crate::motion::mix(
                     t.border,
@@ -2186,7 +2186,7 @@ impl crate::app::Cereal {
             .child(crate::motion::hover_probe(composer_hover))
             .shadow(if focused {
                 vec![BoxShadow {
-                    color: t.accent.opacity(0.13),
+                    color: crate::ui::ask_ring().1,
                     offset: point(px(0.), px(0.)),
                     blur_radius: px(0.),
                     spread_radius: px(3.),

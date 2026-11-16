@@ -208,7 +208,67 @@ pub fn erase_files(recordings: &Path, note: &Note) {
     }
 }
 
+/// Where following a link to a note leads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Linked {
+    /// The note itself.
+    Note,
+    /// The Trash, where the note can be restored from: a note in the Trash
+    /// is never shown as a live one. With its row in the popover, when the
+    /// popover lists it (see [`trash_rows`]).
+    Trash(Option<usize>),
+    /// No such note here.
+    Gone,
+}
+
+/// What a link to note `id` opens.
+pub fn linked(workspace: &crate::model::Workspace, id: u64) -> Linked {
+    match workspace.note(id) {
+        None => Linked::Gone,
+        Some(note) if note.trashed => {
+            Linked::Trash(trash_rows(workspace).iter().position(|row| row.id == id))
+        }
+        Some(_) => Linked::Note,
+    }
+}
+
 impl Cereal {
+    /// Follow a link to note `id`: the note, or the Trash with its row in
+    /// view when that is where the note is.
+    pub fn open_linked_note(&mut self, id: u64, cx: &mut Context<Self>) {
+        match linked(&self.workspace, id) {
+            Linked::Note => self.open_note(id, cx),
+            Linked::Trash(_) => {
+                self.open_trash_at(id, cx);
+                self.show_toast("This note is in the Trash", cx);
+            }
+            Linked::Gone => self.show_toast("This note is no longer available.", cx),
+        }
+    }
+
+    /// [`Cereal::open_trash`], with the row of note `id` highlighted and
+    /// scrolled into view.
+    pub fn open_trash_at(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.open_trash(cx);
+        self.trash_reveal = Some(id);
+    }
+
+    /// Once the popover's rows are this frame's: highlight the row a link
+    /// led to and bring it into view. Each row is one child of the list and
+    /// one keyboard entry, in the order of [`trash_rows`].
+    pub(crate) fn reveal_trash_row(&mut self) {
+        if self.menu != Some(Menu::Trash) {
+            return;
+        }
+        let Some(id) = self.trash_reveal.take() else {
+            return;
+        };
+        if let Linked::Trash(Some(row)) = linked(&self.workspace, id) {
+            self.menu_keyboard.selected = Some(row);
+            self.trash_scroll.scroll_to_item(row);
+        }
+    }
+
     /// The trash button: opens the popover, or closes it when it is open.
     /// A press outside the open popover has already closed it by the time
     /// the button's click arrives; [`Cereal::open_menu`] keeps it closed.
@@ -445,6 +505,7 @@ impl Cereal {
             );
         let mut list = div()
             .id("trash-list")
+            .track_scroll(&self.trash_scroll)
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
@@ -747,6 +808,31 @@ mod tests {
                 TrashRow { id: 3, title: "Gone from the server".into(), gone: true },
             ]
         );
+    }
+
+    #[test]
+    fn a_link_to_a_trashed_note_leads_to_its_row_in_the_trash_never_to_the_note() {
+        let mut workspace = Workspace::default();
+        workspace.notes = vec![
+            note(1, "Live", false),
+            note(2, "Trashed first", true),
+            note(3, "Live too", false),
+            note(4, "Trashed second", true),
+        ];
+        assert_eq!(linked(&workspace, 1), Linked::Note);
+        assert_eq!(linked(&workspace, 3), Linked::Note);
+        // The row is the note's place among the popover's rows, not among
+        // all notes.
+        assert_eq!(linked(&workspace, 2), Linked::Trash(Some(0)));
+        assert_eq!(linked(&workspace, 4), Linked::Trash(Some(1)));
+        assert_eq!(trash_rows(&workspace)[1].id, 4);
+        assert_eq!(linked(&workspace, 9), Linked::Gone);
+        // Restored, the same link opens the note again; trashed, it stops.
+        workspace.note_mut(4).unwrap().trashed = false;
+        assert_eq!(linked(&workspace, 4), Linked::Note);
+        workspace.note_mut(1).unwrap().trashed = true;
+        assert_eq!(linked(&workspace, 1), Linked::Trash(Some(0)));
+        assert_eq!(linked(&workspace, 2), Linked::Trash(Some(1)));
     }
 
     #[test]

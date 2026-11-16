@@ -362,6 +362,19 @@ pub fn focus_ring() -> Hsla {
     }
 }
 
+/// The focused Ask bar's edge and the halo round it, as the reference draws
+/// them: a pale olive line (its olive at half strength, #b7bf8f on the white
+/// bar) inside a hard-edged 3 pt halo of the same olive at 19% (#e4e8d4).
+/// The dark theme has the same pair in a lighter olive.
+pub fn ask_ring() -> (Hsla, Hsla) {
+    let olive: Hsla = if is_dark() {
+        rgb(0xb9c76a).into()
+    } else {
+        rgb(0x708020).into()
+    };
+    (olive.opacity(0.5), olive.opacity(0.19))
+}
+
 thread_local! {
     /// The focus handle of each reachable control, by its element ID, and
     /// handles made ahead of time for controls that are new this frame

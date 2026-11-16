@@ -647,6 +647,8 @@ struct LiveCaptureSessionTests {
         try await Task.sleep(for: .milliseconds(400)) // first layout
         let before = harness.live.counts
         PerfProbe.reset()
+        // Every change of the stream's state from here on, as the views see it.
+        let states = StatusChanges(transcript)
         let began = ContinuousClock.now
 
         let seconds = 598 // with the two above: ten minutes
@@ -674,7 +676,7 @@ struct LiveCaptureSessionTests {
         LIVE-SESSION-MEASUREMENT simulated=600s wall=\(wall) interims=\(interims) finals=\(finals) frames=\(after.frames - before.frames) \
         notePatches=\(patches) \
         noteReads=\(harness.instance.allRequests.filter { $0.method == "GET" && $0.path.hasSuffix("/notes/\(noteID)") && $0.at > began }.count) \
-        audioRequests=\(harness.instance.audioRequests) \
+        audioRequests=\(harness.instance.audioRequests) statusChanges=\(states.seen) \
         \(counts.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " "))
         """)
 
@@ -691,7 +693,12 @@ struct LiveCaptureSessionTests {
         // Per interim revision, one line body ran (the tail), plus the new and settled lines at each final:
         #expect(counts["LiveTranscriptLine.body"]! >= interims / 2)
         #expect(counts["LiveTranscriptLine.body"]! <= interims + 24 * (finals + 4))
-        #expect(counts["LiveStatusLine.body"]! <= 6)
+        // The stream stayed live throughout, so the status line had nothing new to say.
+        #expect(states.seen.isEmpty)
+        // Its body is not held to a fixed number: one of the two on screen is a row of the lazy list, and its body
+        // can run again when the list is rebuilt with no state of its own changed (0 times on a fast machine, 60
+        // in 336 rebuilds on a CI runner). What must hold is that it follows the list at most, never the revisions.
+        #expect(counts["LiveStatusLine.body"]! <= counts["LiveTranscriptList.body"]! + 6)
 
         // Writes. The capture file grows by one small append per input buffer and one header
         // refresh a second; the capture ledger does not move while recording.
@@ -753,5 +760,21 @@ struct LiveStatusTextTests {
         }
         #expect(LiveStatusText.isStreaming(.live) && LiveStatusText.isStreaming(.reconnecting) && LiveStatusText.isStreaming(.providerUnavailable))
         #expect(!LiveStatusText.isStreaming(.unavailable(.notRecording)) && !LiveStatusText.isStreaming(.off))
+    }
+}
+
+/// Records each change of a live transcript's status, through the same observation the views use.
+@MainActor private final class StatusChanges {
+    private(set) var seen: [LiveTranscriptStatus] = []
+    private let transcript: LiveTranscript
+    init(_ transcript: LiveTranscript) { self.transcript = transcript; watch() }
+    private func watch() {
+        withObservationTracking { _ = transcript.status } onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.seen.append(self.transcript.status)
+                self.watch()
+            }
+        }
     }
 }
