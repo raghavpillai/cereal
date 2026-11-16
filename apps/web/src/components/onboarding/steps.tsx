@@ -21,23 +21,27 @@ export function ClaimFields({ value, change, problems, disabled, googleNeedsHttp
   /** Plain HTTP off this machine: Google will not redirect here, so that choice cannot be made. */
   googleNeedsHttps: boolean; origin: string
 }) {
-  return <><fieldset className="onb-fields" disabled={disabled}>
+  // Each group of inputs is its own disabled fieldset while the step is busy; the lines to copy sit between
+  // them, outside, so the redirect addresses and the command can still be copied while Google is waiting.
+  return <><div className="onb-fields" data-disabled={disabled ? '' : undefined}>
+    <fieldset className="onb-group" disabled={disabled}>
     {/* Not a password field: a password manager must not offer to keep the setup code. It is hidden as it is typed all the same. */}
     <Field label="Setup code" type="text" className="is-secret" name="setup-code" autoComplete="off" autoCorrect="off" autoCapitalize="none" spellCheck={false} maxLength={600} data-1p-ignore data-lpignore="true"
       value={value.code} onChange={event => change({ code: event.target.value })} problem={problems.code} placeholder="Paste the code from your server" />
+    </fieldset>
     <div className="onb-where">
       <p>To see the code, run this in Cereal’s folder on the server:</p>
       <CopyLine value="grep ADMIN_API_TOKEN .env" prefix="$ " label="Copy the command that shows the setup code" />
     </div>
-    <div className="onb-field">
+    <fieldset className="onb-group" disabled={disabled}><div className="onb-field">
       <span className="onb-label" id="onb-method-label">How people sign in</span>
       <div className="onb-choices" role="radiogroup" aria-labelledby="onb-method-label" aria-describedby={googleNeedsHttps ? 'onb-method-note' : undefined}>
         <Choice name="sign-in-method" value="password" checked={value.method === 'password'} onChange={() => change({ method: 'password' })} title="Email and password" detail="You make an account for each person" />
         <Choice name="sign-in-method" value="google" checked={value.method === 'google'} disabled={googleNeedsHttps} onChange={() => change({ method: 'google' })} title="Google" detail="People use their Google account" />
       </div>
       {googleNeedsHttps && <p className="onb-hint" id="onb-method-note">{GOOGLE_NEEDS_HTTPS}. This server is reached over plain HTTP.</p>}
-    </div>
-    {value.method === 'password' ? <div className="onb-method" key="password">
+    </div></fieldset>
+    {value.method === 'password' ? <fieldset className="onb-method" key="password" disabled={disabled}>
       <div className="onb-pair">
         <Field label="Your name" name="name" autoComplete="name" maxLength={200} value={value.name} onChange={event => change({ name: event.target.value })} problem={problems.name} />
         <Field label="Email" type="email" name="email" autoComplete="username" autoCapitalize="none" spellCheck={false} maxLength={254} value={value.email} onChange={event => change({ email: event.target.value })} problem={problems.email} />
@@ -45,18 +49,18 @@ export function ClaimFields({ value, change, problems, disabled, googleNeedsHttp
       <Field label="Password" type="password" name="new-password" autoComplete="new-password" maxLength={128} value={value.password} onChange={event => change({ password: event.target.value })}
         problem={problems.password} hint={value.password.length >= 12 ? 'Good. You will be the owner, and sign in with this email and password.' : 'At least 12 characters. You will be the owner.'}
         state={value.password.length >= 12 && !problems.password ? 'good' : 'idle'} />
-    </div> : <div className="onb-method" key="google">
+    </fieldset> : <div className="onb-method" key="google">
       <div className="onb-where">
         <p>In Google Cloud, make an OAuth client of type “Web application” and add both of these as authorized redirect URIs:</p>
         {googleRedirectAddresses(origin).map((address, at) => <CopyLine key={address} value={address} label={`Copy the ${at === 0 ? 'sign-in' : 'calendar'} redirect address`} />)}
       </div>
-      <div className="onb-pair">
+      <fieldset className="onb-group" disabled={disabled}><div className="onb-pair">
         <Field label="Client ID" name="google-client-id" autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={255} placeholder="…apps.googleusercontent.com" value={value.clientId} onChange={event => change({ clientId: event.target.value })} problem={problems.clientId} />
         <Field label="Client secret" type="password" name="google-client-secret" autoComplete="off" maxLength={512} value={value.clientSecret} onChange={event => change({ clientSecret: event.target.value })} problem={problems.clientSecret} />
-      </div>
+      </div></fieldset>
       <p className="onb-hint">Continue signs you in with Google once. That proves the client works, and the Google account you use becomes the owner. Nobody gets a password.</p>
     </div>}
-  </fieldset>
+  </div>
     <p className="onb-aside">Already have an account on this server? <a href="/login?signin=1">Sign in</a></p></>
 }
 
