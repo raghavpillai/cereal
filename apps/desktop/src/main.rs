@@ -1,12 +1,15 @@
 mod account;
+mod accounts;
 mod app;
 mod audio;
 mod calendar;
 mod chat;
 mod chrome;
 mod desktop_preferences;
+mod device_settings;
 mod environment;
 mod fetch;
+mod folders;
 mod handoff;
 mod home;
 mod input;
@@ -41,6 +44,12 @@ mod update_view;
 mod validation;
 use gpui::*;
 fn main() {
+    // `CEREAL_KEYCHAIN_PROBE=1`: milestone P0's check of the Keychain on an
+    // installed, signed build (see `accounts::keychain::probe`). It opens
+    // no window and prints only what happened.
+    if environment::var("CEREAL_KEYCHAIN_PROBE").is_ok_and(|value| value == "1") {
+        std::process::exit(if accounts::keychain::probe() { 0 } else { 1 });
+    }
     let arguments: Vec<String> = std::env::args().collect();
     if let Some(result) = audio::probe_from_args(&arguments) {
         match result {

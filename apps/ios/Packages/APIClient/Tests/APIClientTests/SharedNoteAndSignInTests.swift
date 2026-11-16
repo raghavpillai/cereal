@@ -253,7 +253,7 @@ private func carriesSession(_ request: URLRequest) -> Bool {
         let name = "shared-note-model-" + UUID().uuidString
         let defaults = try #require(UserDefaults(suiteName: name))
         defaults.removePersistentDomain(forName: name)
-        return ServerNotesModel(settings: ConnectionSettingsStore(defaults: defaults, tokens: tokens)) { credentials in
+        return ServerNotesModel { credentials in
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = [WireProtocol.self]
             configuration.httpAdditionalHeaders = ["X-Test-Case": header]
@@ -499,7 +499,7 @@ private func summaryJSON(title: String, updatedAt: String) -> String {
             }
             return handler(request)
         }
-        let model = ServerNotesModel(settings: ConnectionSettingsStore(defaults: defaults, tokens: MemoryTokens())) { credentials in
+        let model = ServerNotesModel { credentials in
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = [WireProtocol.self]
             configuration.httpAdditionalHeaders = ["X-Test-Case": id]
@@ -604,7 +604,9 @@ private final class MemoryTokens: BearerTokenStore, @unchecked Sendable {
         let name = "browser-sign-in-" + UUID().uuidString
         let defaults = try #require(UserDefaults(suiteName: name))
         defer { defaults.removePersistentDomain(forName: name) }
-        let tokens = MemoryTokens()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MemoryAccountStore()
         let (configuration, id) = stubbed { request in
             let path = request.url?.path ?? ""
             if path.hasSuffix("/auth/app-handoff/exchange") { return .json(#"{"token":"browser-session-token"}"#) }
@@ -613,7 +615,7 @@ private final class MemoryTokens: BearerTokenStore, @unchecked Sendable {
             return Reply(status: 404)
         }
         let header = id
-        let model = ServerNotesModel(settings: ConnectionSettingsStore(defaults: defaults, tokens: tokens)) { credentials in
+        let accounts = AccountsModel(defaults: defaults, credentials: store, storage: AccountStorage(root: root)) { credentials in
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = [WireProtocol.self]
             configuration.httpAdditionalHeaders = ["X-Test-Case": header]
@@ -621,14 +623,18 @@ private final class MemoryTokens: BearerTokenStore, @unchecked Sendable {
         }
         let attempt = BrowserSignIn(instance: try InstanceURL("https://notes.example.com"), verifier: "verifier-verifier-verifier-verifier-verifier", state: "the-state")
         let callback = try #require(URL(string: "cereal://auth?code=one-time-code&state=the-state&server=https%3A%2F%2Fnotes.example.com"))
-        try await model.signIn(browser: attempt, callback: callback, configuration: configuration)
+        let account = try await accounts.signIn(browser: attempt, callback: callback, configuration: configuration)
 
+        let model = try #require(accounts.session(account)?.notes)
         guard case .loaded = model.state else { Issue.record("not signed in: \(model.state)"); return }
         #expect(model.instance?.description == "https://notes.example.com")
         #expect(model.session?.user.email == "owner@example.test")
-        // Saved where a password sign-in saves it: the token in the token store, the server in preferences.
-        #expect(try tokens.load() == "browser-session-token")
-        #expect(defaults.string(forKey: "meetingNotes.instanceURL") == "https://notes.example.com")
+        // Saved where a password sign-in saves it: the session in the account's own item, the account in preferences.
+        #expect(try store.load(account)?.credentials.bearerToken == "browser-session-token")
+        #expect(try store.load(account)?.credentials.instance.description == "https://notes.example.com")
+        let saved = String(decoding: try #require(defaults.data(forKey: AccountsModel.registryKey)), as: UTF8.self)
+        #expect(saved.contains("https:\\/\\/notes.example.com") || saved.contains("https://notes.example.com"))
+        #expect(!saved.contains("browser-session-token"))
         let requests = Wire.shared.requests(id)
         #expect(requests.first?.url?.path == "/api/v1/auth/app-handoff/exchange")
         #expect(requests.first?.value(forHTTPHeaderField: "Authorization") == nil)
@@ -640,15 +646,16 @@ private final class MemoryTokens: BearerTokenStore, @unchecked Sendable {
         let name = "browser-sign-in-" + UUID().uuidString
         let defaults = try #require(UserDefaults(suiteName: name))
         defer { defaults.removePersistentDomain(forName: name) }
-        let tokens = MemoryTokens()
+        let store = MemoryAccountStore()
         let (configuration, id) = stubbed { _ in .json(#"{"token":"should-never-be-asked-for"}"#) }
-        let model = ServerNotesModel(settings: ConnectionSettingsStore(defaults: defaults, tokens: tokens))
+        let accounts = AccountsModel(defaults: defaults, credentials: store,
+                                     storage: AccountStorage(root: FileManager.default.temporaryDirectory.appendingPathComponent(name)))
         let attempt = BrowserSignIn(instance: try InstanceURL("https://notes.example.com"), verifier: "verifier-verifier-verifier-verifier-verifier", state: "the-state")
         let forged = try #require(URL(string: "cereal://auth?code=stolen-code&state=another-state&server=https%3A%2F%2Fnotes.example.com"))
-        await #expect(throws: BrowserSignInError.mismatch) { try await model.signIn(browser: attempt, callback: forged, configuration: configuration) }
+        await #expect(throws: BrowserSignInError.mismatch) { try await accounts.signIn(browser: attempt, callback: forged, configuration: configuration) }
         #expect(Wire.shared.requests(id).isEmpty)
-        #expect(try tokens.load() == nil)
-        #expect(model.instance == nil)
-        guard case .disconnected = model.state else { Issue.record("state changed: \(model.state)"); return }
+        #expect(store.count == 0)
+        #expect(accounts.sessions.isEmpty)
+        #expect(defaults.object(forKey: AccountsModel.registryKey) == nil)
     }
 }

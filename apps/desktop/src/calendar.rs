@@ -27,11 +27,34 @@ pub struct CalendarSnapshot {
 /// both, from the settings under Settings › Calendar.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EventFilter {
-    /// Shared calendars hidden on this Mac.
+    /// Calendars hidden on this Mac, as `"<AccountId>/<calendarId>"`.
     pub hidden_calendars: Vec<String>,
+    /// The account these events were read through: a hidden calendar hides
+    /// only that account's.
+    pub account: Option<crate::accounts::AccountId>,
     /// "Show events with no participants" is off.
     pub meetings_only: bool,
     pub attendees: HashMap<String, u32>,
+}
+
+/// How a calendar hidden on this Mac is recorded: with its account, since
+/// two accounts on one server return the same id for a shared calendar.
+pub fn hidden_key(account: Option<&crate::accounts::AccountId>, calendar_id: &str) -> String {
+    match account {
+        Some(account) => format!("{}/{calendar_id}", account.as_str()),
+        None => calendar_id.to_owned(),
+    }
+}
+
+/// Entries from before accounts are bare calendar ids: they get the
+/// migrated account's id. Returns whether anything changed.
+pub fn migrate_hidden_calendars(hidden: &mut [String], account: &crate::accounts::AccountId) -> bool {
+    let mut changed = false;
+    for entry in hidden.iter_mut().filter(|entry| !entry.contains('/')) {
+        *entry = hidden_key(Some(account), entry);
+        changed = true;
+    }
+    changed
 }
 
 /// Whether an event is a meeting with someone: it has a call link, or other
@@ -58,7 +81,9 @@ impl EventFilter {
             .iter()
             .find(|source| source.id == event.calendar_id)
             .is_none_or(|source| source.enabled)
-            && !self.hidden_calendars.contains(&event.calendar_id)
+            && !self
+                .hidden_calendars
+                .contains(&hidden_key(self.account.as_ref(), &event.calendar_id))
             && (!self.meetings_only
                 || is_meeting(event, self.attendees.get(&event.id).copied()))
     }
@@ -66,6 +91,9 @@ impl EventFilter {
 
 #[derive(Default)]
 pub struct CalendarState {
+    /// The account these calendars and events were read through. Calendars
+    /// belong to the account they were read through.
+    pub account: Option<crate::accounts::AccountId>,
     pub sources: Vec<CalendarDTO>,
     pub events: Vec<CalendarEventDTO>,
     /// Today's events onward, whatever page Home is on: what the menu bar
@@ -114,6 +142,7 @@ impl CalendarState {
         let preferences = crate::desktop_preferences::meeting();
         EventFilter {
             hidden_calendars: preferences.hidden_calendars,
+            account: self.account.clone(),
             meetings_only: !preferences.events_without_participants,
             attendees: self.attendees.clone(),
         }
@@ -157,21 +186,16 @@ impl CalendarState {
 }
 
 /// The note this Mac already has for an event the server says has one.
+/// The note kept here for an event of the account in `slot`.
 pub fn local_note_for_event(
     workspace: &crate::model::Workspace,
     event: &CalendarEventDTO,
+    slot: u16,
     server: &str,
 ) -> Option<u64> {
     let note_id = event.note_id.as_deref()?;
-    workspace
-        .notes
-        .iter()
-        .find(|note| {
-            note.server_id.as_deref() == Some(note_id)
-                && note.server_url.as_deref() == Some(server)
-                && !note.trashed
-        })
-        .map(|note| note.id)
+    crate::server::cached_note(workspace, slot, note_id, server)
+        .filter(|id| workspace.note(*id).is_some_and(|note| !note.trashed))
 }
 
 pub fn is_active_timed_event(event: &CalendarEventDTO, now: DateTime<chrono::Utc>) -> bool {
@@ -263,10 +287,20 @@ pub(crate) fn calendar_color(text: &str) -> Hsla {
 }
 
 impl Cereal {
+    /// The account "Coming up" is read through: the default account, when
+    /// it is Ready. (One list per account, merged, comes with several
+    /// accounts.)
+    fn calendar_account(&self) -> Option<crate::accounts::Account> {
+        crate::accounts::default_account().filter(|account| account.shown() && account.is_ready())
+    }
+
     pub fn load_calendar_events(&mut self, cx: &mut Context<Self>) {
-        if !crate::server::enabled() || crate::account::identity().is_none() {
+        if !crate::server::enabled() {
             return;
         }
+        let Some(account) = self.calendar_account() else {
+            return;
+        };
         if let Some(cancel) = self.calendars.cancel.take() {
             cancel.store(true, Ordering::Release);
         }
@@ -274,7 +308,8 @@ impl Cereal {
         self.calendars.cancel = Some(cancel.clone());
         self.calendars.epoch = self.calendars.epoch.wrapping_add(1);
         let epoch = self.calendars.epoch;
-        let account_epoch = crate::account::epoch();
+        let account_epoch = account.epoch();
+        let account_id = account.id.clone();
         self.calendars.loading = true;
         self.calendars.error = None;
         let day = page_day(self.calendar_page);
@@ -285,8 +320,10 @@ impl Cereal {
             .earliest()
             .unwrap_or_else(Local::now);
         let (send, receive) = mpsc::channel();
+        let asked = account_id.clone();
         std::thread::spawn(move || {
             let _ = send.send(crate::server::load_calendar_events(
+                &asked,
                 &start.to_rfc3339(),
                 cancel,
             ));
@@ -306,12 +343,17 @@ impl Cereal {
                 }
             };
             let _ = this.update(cx, |this, cx| {
-                if epoch != this.calendars.epoch || account_epoch != crate::account::epoch() {
+                if epoch != this.calendars.epoch
+                    || crate::accounts::epoch_of(&account_id) != Some(account_epoch)
+                {
                     return;
                 }
                 this.calendars.loading = false;
                 match result {
-                    Ok(snapshot) => this.calendars.accept(snapshot, true, home_is_today),
+                    Ok(snapshot) => {
+                        this.calendars.account = Some(account_id.clone());
+                        this.calendars.accept(snapshot, true, home_is_today)
+                    }
                     Err(error) => this.calendars.error = Some(error),
                 }
                 cx.notify();
@@ -325,16 +367,20 @@ impl Cereal {
     /// page that is Home's own refresh; on another page it is a read of its
     /// own, and Home is left as it is.
     pub fn refresh_agenda(&mut self, cx: &mut Context<Self>) {
-        if !crate::server::enabled() || crate::account::identity().is_none() {
+        if !crate::server::enabled() {
             return;
         }
+        let Some(account) = self.calendar_account() else {
+            return;
+        };
         if self.calendar_page == 0 {
             self.load_calendar_events(cx);
             return;
         }
         self.calendars.agenda_epoch = self.calendars.agenda_epoch.wrapping_add(1);
         let epoch = self.calendars.agenda_epoch;
-        let account_epoch = crate::account::epoch();
+        let account_epoch = account.epoch();
+        let account_id = account.id.clone();
         let start = Local
             .from_local_datetime(
                 &crate::menubar::now()
@@ -345,8 +391,10 @@ impl Cereal {
             .earliest()
             .unwrap_or_else(Local::now);
         let (send, receive) = mpsc::channel();
+        let asked = account_id.clone();
         std::thread::spawn(move || {
             let _ = send.send(crate::server::load_calendar_events(
+                &asked,
                 &start.to_rfc3339(),
                 Arc::new(AtomicBool::new(false)),
             ));
@@ -364,11 +412,13 @@ impl Cereal {
                 }
             };
             let _ = this.update(cx, |this, cx| {
-                if epoch != this.calendars.agenda_epoch || account_epoch != crate::account::epoch()
+                if epoch != this.calendars.agenda_epoch
+                    || crate::accounts::epoch_of(&account_id) != Some(account_epoch)
                 {
                     return;
                 }
                 if let Ok(snapshot) = result {
+                    this.calendars.account = Some(account_id.clone());
                     this.calendars.accept(snapshot, false, true);
                     cx.notify();
                 }
@@ -382,10 +432,12 @@ impl Cereal {
     /// device.
     pub fn set_calendar_visible(&mut self, id: String, visible: bool, cx: &mut Context<Self>) {
         if !self.calendars.personal.iter().any(|calendar| calendar.id == id) {
+            // Hidden on this Mac, for the account it was read through.
+            let key = hidden_key(self.calendars.account.as_ref(), &id);
             let result = crate::desktop_preferences::update_meeting(|preferences| {
-                preferences.hidden_calendars.retain(|hidden| *hidden != id);
+                preferences.hidden_calendars.retain(|hidden| *hidden != key);
                 if !visible {
-                    preferences.hidden_calendars.push(id.clone());
+                    preferences.hidden_calendars.push(key.clone());
                 }
             });
             if let Err(error) = result {
@@ -400,9 +452,12 @@ impl Cereal {
     /// "Reset": every shared calendar shows again, and of the person's own
     /// only the primary ones are selected.
     pub fn reset_visible_calendars(&mut self, cx: &mut Context<Self>) {
-        if let Err(error) =
-            crate::desktop_preferences::update_meeting(|p| p.hidden_calendars.clear())
-        {
+        // Only this account's calendars: another account's stay as they are.
+        let prefix = hidden_key(self.calendars.account.as_ref(), "");
+        if let Err(error) = crate::desktop_preferences::update_meeting(|p| {
+            p.hidden_calendars
+                .retain(|hidden| !prefix.is_empty() && !hidden.starts_with(&prefix))
+        }) {
             self.show_toast(&error, cx);
         }
         let changes: Vec<(String, bool)> = self
@@ -422,14 +477,25 @@ impl Cereal {
         if self.calendars.choosing.is_some() {
             return;
         }
+        // A calendar's selection is changed on the server it was read from.
+        let Some(account) = self
+            .calendars
+            .account
+            .as_ref()
+            .and_then(crate::accounts::get)
+        else {
+            return;
+        };
         self.calendars.choosing = changes.first().map(|(id, _)| id.clone());
-        let account_epoch = crate::account::epoch();
+        let account_epoch = account.epoch();
+        let account_id = account.id.clone();
         let (send, receive) = mpsc::channel();
         let requested = changes.clone();
+        let asked = account_id.clone();
         std::thread::spawn(move || {
-            let result = requested
-                .iter()
-                .try_for_each(|(id, selected)| crate::server::select_personal_calendar(id, *selected));
+            let result = requested.iter().try_for_each(|(id, selected)| {
+                crate::server::select_personal_calendar(&asked, id, *selected)
+            });
             let _ = send.send(result);
         });
         cx.spawn(async move |this, cx| {
@@ -448,7 +514,7 @@ impl Cereal {
             };
             let _ = this.update(cx, |this, cx| {
                 this.calendars.choosing = None;
-                if account_epoch != crate::account::epoch() {
+                if crate::accounts::epoch_of(&account_id) != Some(account_epoch) {
                     return;
                 }
                 match result {
@@ -476,6 +542,22 @@ impl Cereal {
         if self.calendars.opening.is_some() {
             return;
         }
+        // An event is opened in the account it was read through. One whose
+        // account is not Ready is refused with that account named, never
+        // offered to another.
+        let Some(account) = self
+            .calendars
+            .account
+            .as_ref()
+            .and_then(crate::accounts::get)
+        else {
+            return;
+        };
+        if !account.is_ready() {
+            self.show_toast(&format!("{} can't be reached.", account.host()), cx);
+            return;
+        }
+        let (slot, server) = (account.slot, account.url.clone());
         let known = self
             .calendars
             .events
@@ -488,24 +570,26 @@ impl Cereal {
             .filter(|event| is_active_timed_event(event, chrono::Utc::now()));
         // An event whose note is already on this Mac opens it without
         // asking the server for anything.
-        if let Some(id) = known.as_ref().and_then(|event| {
-            let server = crate::server::origin()?;
-            local_note_for_event(&self.workspace, event, &server)
-        }) {
+        if let Some(id) = known
+            .as_ref()
+            .and_then(|event| local_note_for_event(&self.workspace, event, slot, &server))
+        {
             self.open_note(id, cx);
             if active_at_gesture.is_some() && !self.recording.is_active() {
                 self.start_recording_preview(id, cx);
             }
             return;
         }
-        let account_epoch = crate::account::epoch();
+        let account_epoch = account.epoch();
+        let account_id = account.id.clone();
         self.calendars.opening = Some(event_id.clone());
         let opened = event_id.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         self.calendars.open_cancel = Some(cancel.clone());
         let (send, receive) = mpsc::channel();
+        let asked = account_id.clone();
         std::thread::spawn(move || {
-            let _ = send.send(crate::server::note_for_calendar_event(&event_id, cancel));
+            let _ = send.send(crate::server::note_for_calendar_event(&asked, &event_id, cancel));
         });
         cx.spawn(async move |this, cx| {
             let result = loop {
@@ -522,11 +606,11 @@ impl Cereal {
                 }
             };
             let _ = this.update(cx, |this, cx| {
-                if account_epoch != crate::account::epoch() {
-                    return;
-                }
                 this.calendars.opening = None;
                 this.calendars.open_cancel = None;
+                if crate::accounts::epoch_of(&account_id) != Some(account_epoch) {
+                    return;
+                }
                 match result {
                     Ok((url, note)) => {
                         // The event has its note from now on: opening it
@@ -541,8 +625,15 @@ impl Cereal {
                         {
                             event.note_id = Some(server_id.clone());
                         }
-                        let id =
-                            crate::server::import_calendar_note(&mut this.workspace, note, url);
+                        let Some(id) = crate::server::import_calendar_note(
+                            &mut this.workspace,
+                            slot,
+                            note,
+                            url,
+                        ) else {
+                            this.show_toast("This note could not be kept on this Mac.", cx);
+                            return;
+                        };
                         this.persist(cx);
                         this.open_note(id, cx);
                         if active_at_gesture
@@ -909,7 +1000,10 @@ impl Cereal {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventFilter, event_on_day, event_time, safe_meeting_url};
+    use super::{
+        EventFilter, event_on_day, event_time, hidden_key, migrate_hidden_calendars,
+        safe_meeting_url,
+    };
     use chrono::{Duration, Local, NaiveDate, TimeZone};
     use meeting_notes_api_types::{CalendarDTO, CalendarEventDTO};
     use serde_json::json;
@@ -1134,11 +1228,38 @@ mod tests {
             ..Default::default()
         };
         assert!(shown(&hidden).is_empty());
+        // Hidden calendars are recorded with their account: the same
+        // calendar id of another account is not hidden.
+        let account = crate::accounts::AccountId::of(
+            "https://one.example",
+            "00000000-0000-4000-8000-000000000001",
+        );
+        let other = crate::accounts::AccountId::of(
+            "https://one.example",
+            "00000000-0000-4000-8000-000000000002",
+        );
+        let keyed = EventFilter {
+            hidden_calendars: vec![hidden_key(Some(&account), "work")],
+            account: Some(account.clone()),
+            ..Default::default()
+        };
+        assert!(shown(&keyed).is_empty());
+        let theirs = EventFilter {
+            account: Some(other),
+            ..keyed.clone()
+        };
+        assert_eq!(shown(&theirs), shown(&EventFilter::default()));
+        assert!(!shown(&theirs).is_empty());
+        // Entries from before accounts get the migrated account's id, once.
+        let mut saved = vec!["work".to_string(), hidden_key(Some(&account), "home")];
+        assert!(migrate_hidden_calendars(&mut saved, &account));
+        assert_eq!(saved, [hidden_key(Some(&account), "work"), hidden_key(Some(&account), "home")]);
+        assert!(!migrate_hidden_calendars(&mut saved, &account));
     }
 
     #[test]
     fn an_event_whose_note_is_already_here_opens_that_note() {
-        let mut workspace = crate::model::Workspace::default();
+        let mut workspace = crate::model::Workspace::with_slots(&[1, 2]);
         let remote: meeting_notes_api_types::NoteDTO = serde_json::from_value(json!({
             "id":"3a49a4af-c660-42e9-a36a-a806fbb41e0d","title":"Meeting","body":"","enhanced":"","date":"2026-11-26","duration":"","createdAt":"2026-11-26T10:00:00Z","updatedAt":"2026-11-26T10:00:00Z","recordingState":"idle","generationState":"idle","transcriptRevision":0,"generatedRevision":null,"transcriptSegments":[]
         })).unwrap();
@@ -1151,31 +1272,34 @@ mod tests {
         );
         let server = "https://one.example";
         // Never opened: there is nothing here to open yet.
-        assert_eq!(super::local_note_for_event(&workspace, &meeting, server), None);
+        assert_eq!(super::local_note_for_event(&workspace, &meeting, 1, server), None);
         // Opened once: the server's note arrives and the event remembers it.
         let first =
-            crate::server::import_calendar_note(&mut workspace, remote.clone(), server.into());
+            crate::server::import_calendar_note(&mut workspace, 1, remote.clone(), server.into())
+                .unwrap();
         meeting.note_id = Some(remote.id.clone());
         let count = workspace.notes.len();
         // Opened again, either way round: the same note, and no new one.
         assert_eq!(
-            super::local_note_for_event(&workspace, &meeting, server),
+            super::local_note_for_event(&workspace, &meeting, 1, server),
             Some(first)
         );
         assert_eq!(
-            crate::server::import_calendar_note(&mut workspace, remote, server.into()),
-            first
+            crate::server::import_calendar_note(&mut workspace, 1, remote, server.into()),
+            Some(first)
         );
         assert_eq!(workspace.notes.len(), count);
-        // The same event on another server is another note.
+        // The same event on another server is another note, and so is the
+        // same event id in another account on the same server.
         assert_eq!(
-            super::local_note_for_event(&workspace, &meeting, "https://other.example"),
+            super::local_note_for_event(&workspace, &meeting, 1, "https://other.example"),
             None
         );
+        assert_eq!(super::local_note_for_event(&workspace, &meeting, 2, server), None);
         // A note in the Trash is not opened in place; the server's answer
         // restores it (see `import_calendar_note`).
         workspace.note_mut(first).unwrap().trashed = true;
-        assert_eq!(super::local_note_for_event(&workspace, &meeting, server), None);
+        assert_eq!(super::local_note_for_event(&workspace, &meeting, 1, server), None);
     }
 
     #[test]

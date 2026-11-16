@@ -53,11 +53,12 @@ enum NoteSearch {
     /// this phone first, then the other party's initial, then a document.
     /// `title` is the newest title known for a result: a note renamed, or given
     /// a title by generating its notes, since the search ran is shown under that one.
-    static func server(_ hits: [ServerNoteSearchHit], onThisPhone: (String) -> Bool = { _ in false },
+    static func server(_ hits: [ServerNoteSearchHit], account: AccountID, onThisPhone: (NoteRef) -> Bool = { _ in false },
                        title: (ServerNoteRow) -> String = { $0.title }) -> [SearchHit] {
         hits.map { hit in
             let title = title(hit.row)
-            return SearchHit(route: .serverNote(hit.id), tile: onThisPhone(hit.id) ? .phone : ServerHomeGrouping.tile(for: hit.row),
+            let ref = NoteRef(account: account, id: hit.id)
+            return SearchHit(route: .serverNote(ref), tile: onThisPhone(ref) ? .phone : ServerHomeGrouping.tile(for: hit.row),
                       title: title.isEmpty ? "Untitled note" : title,
                       subtitle: (Date.serverTimestamp(hit.row.createdAt) ?? .distantPast).formatted(date: .omitted, time: .shortened),
                       excerpt: hit.excerpt.map { $0.map(\.text).joined() }, excerptParts: hit.excerpt)
@@ -78,12 +79,20 @@ enum NoteSearch {
 /// the keyboard; the only navigation control is Back.
 struct SearchView: View {
     @Environment(NoteStore.self) private var store
-    @Environment(ServerNotesModel.self) private var server
+    @Environment(AccountsModel.self) private var accounts
     @Environment(ServerRecordingController.self) private var recording
     @Environment(ConnectionMode.self) private var mode
     @Environment(Router.self) private var router
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
+    /// The account the search is sent to. A query is text that leaves the device,
+    /// so it goes only to an account in the search scope; until the scope can be
+    /// chosen and results of several accounts are interleaved, that is the first
+    /// Ready account in it. With one account it is that account.
+    private var searched: AccountSession? {
+        accounts.sessions.first { $0.isReady && (accounts.searchScope.isEmpty || accounts.searchScope.contains($0.id)) }
+    }
+    @State private var searchedKey: UUID?
     /// Server mode only: sends the query after a pause in typing and drops answers to older ones.
     @State private var search: ServerNoteSearch?
     @FocusState private var focused: Bool
@@ -91,8 +100,24 @@ struct SearchView: View {
     private var hits: [SearchHit] {
         mode.isDemo
             ? NoteSearch.local(store.activeNotes, query: query, currentUser: store.currentUser)
-            : NoteSearch.server(search?.hits ?? [], onThisPhone: { recording.activeNoteID == $0 || recording.hasPendingAudio(noteID: $0) },
-                                title: server.latestTitle(of:))
+            : searchedAccount.map { account, notes in
+                NoteSearch.server(search?.hits ?? [], account: account, onThisPhone: { recording.isActive($0) || recording.hasPendingAudio($0) },
+                                  title: notes.latestTitle(of:))
+            } ?? []
+    }
+
+    /// The account the results on screen came from, while it is still here.
+    private var searchedAccount: (AccountID, ServerNotesModel)? {
+        guard let session = accounts.sessions.first(where: { $0.key == searchedKey }), let id = session.notes.accountID else { return nil }
+        return (id, session.notes)
+    }
+
+    private func begin() {
+        guard !mode.isDemo, let session = searched, session.key != searchedKey else { return }
+        search?.cancel()
+        searchedKey = session.key
+        search = ServerNoteSearch(server: session.notes)
+        search?.update(query)
     }
 
     private var progress: SearchProgress {
@@ -118,7 +143,7 @@ struct SearchView: View {
             SearchBar(query: $query, focused: $focused)
         }
         .task {
-            if search == nil, !mode.isDemo { search = ServerNoteSearch(server: server) }
+            begin()
             search?.update(query)
             // The keyboard rises with the push instead of after it.
             try? await Task.sleep(for: .milliseconds(120))
@@ -126,7 +151,11 @@ struct SearchView: View {
         }
         .onChange(of: query) { _, text in search?.update(text) }
         // Another account's results are never shown under this one.
-        .onChange(of: server.accountIdentity) { query = ""; search?.update("") }
+        .onChange(of: accounts.signature) {
+            guard !mode.isDemo, searched?.key != searchedKey else { return }
+            query = ""; search?.update("")
+            if searched == nil { search = nil; searchedKey = nil } else { begin() }
+        }
     }
 }
 

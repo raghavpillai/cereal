@@ -86,6 +86,49 @@
               "type": "null"
             }
           ]
+        },
+        "meetingUid": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "occurrence": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attendeeCount": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "allOf": [
+                {
+                  "minimum": -9007199254740991,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "minimum": -2147483648,
+                  "maximum": 2147483647
+                }
+              ],
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [

@@ -12,6 +12,46 @@ import os
 /// and the same capture is also streamed to the server for live text. The live
 /// stream is an addition: when it is absent, late or broken, nothing here waits
 /// for it and the parts are delivered as they would be without it.
+/// What one account needs to get its recordings to its own server: its
+/// outbox, its capture ledger and the tasks that upload and watch. Nothing in
+/// one is ever read or sent through another account.
+@MainActor
+final class RecordingDelivery {
+    let account: AccountID
+    let server: ServerNotesModel
+    let outbox: AudioOutbox
+    var histories: [String: ServerCaptureHistory] = [:]
+    var uploadTask: Task<Void, Never>?
+    var uploads: Set<UUID> = []
+    var polls: [String: (id: UUID, task: Task<Void, Never>)] = [:]
+    var pollBudget: [String: Int] = [:]
+    var controlTask: Task<Void, Never>?
+    /// The session of the account that this delivery last queued its unsent audio for.
+    var generation: Int
+    /// True once the account has gone. Work begun before that ends without touching anything.
+    private(set) var closed = false
+
+    init(account: AccountID, server: ServerNotesModel, outbox: AudioOutbox) {
+        self.account = account; self.server = server; self.outbox = outbox
+        generation = server.sessionGeneration
+    }
+
+    func close() {
+        closed = true
+        uploadTask?.cancel(); uploadTask = nil
+        polls.values.forEach { $0.task.cancel() }
+        polls = [:]; pollBudget = [:]; uploads = []
+        controlTask?.cancel(); controlTask = nil
+    }
+
+    func saveHistories() throws {
+        let url = outbox.directory.appendingPathComponent("captures.json")
+        try JSONEncoder().encode(histories).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        PerfProbe.hit("Captures.Save")
+    }
+}
+
 @MainActor @Observable
 final class ServerRecordingController {
     /// Length of a delivery part cut from a continuous capture. Stored with each
@@ -19,8 +59,8 @@ final class ServerRecordingController {
     static let partSeconds = 30
 
     private(set) var recorder = Recorder(simulateCapture: false)
-    private(set) var activeNoteID: String?
-    private(set) var instanceIdentity: String?
+    /// The note being recorded, or just recorded, with the account it belongs to.
+    private(set) var active: NoteRef?
     private(set) var isBusy = false
     private(set) var isSyncing = false
     private(set) var status = ""
@@ -30,14 +70,8 @@ final class ServerRecordingController {
     /// recorded: stored text from the server, and with a live stream, the text
     /// still being spoken. Nil when no recording has been started here.
     private(set) var transcript: LiveTranscript?
-    @ObservationIgnored private var outbox: AudioOutbox?
-    @ObservationIgnored private var histories: [String: ServerCaptureHistory] = [:]
-    @ObservationIgnored private var server: ServerNotesModel?
-    @ObservationIgnored private var uploadTask: Task<Void, Never>?
-    @ObservationIgnored private var uploads: Set<UUID> = []
-    @ObservationIgnored private var polls: [String: (id: UUID, task: Task<Void, Never>)] = [:]
-    @ObservationIgnored private var pollBudget: [String: Int] = [:]
-    @ObservationIgnored private var controlTask: Task<Void, Never>?
+    /// One delivery per account, in place of the single outbox there used to be.
+    @ObservationIgnored private var deliveries: [AccountID: RecordingDelivery] = [:]
     @ObservationIgnored private var live: LiveCaptureSession?
     @ObservationIgnored private var liveEnding: Task<Void, Never>?
     @ObservationIgnored private var rotating = false
@@ -50,6 +84,8 @@ final class ServerRecordingController {
     @ObservationIgnored private let outboxRoot: URL?
     @ObservationIgnored private let makeBackend: (@MainActor () -> any CaptureBackend)?
     @ObservationIgnored private let makeLiveClient: LiveClientFactory
+    /// What the Live Activity may say about the account, when there is more than one to tell apart.
+    @ObservationIgnored var accountPresentation: (@MainActor (AccountID) -> (label: String, host: String)?)?
 
     typealias LiveClientFactory = @MainActor (ServerNotesModel, String, any LiveAudioSource, LiveTranscriptClient.Configuration) throws -> LiveTranscriptClient
 
@@ -65,111 +101,166 @@ final class ServerRecordingController {
     var isCapturing: Bool { recorder.isCapturing }
     /// The note whose recording the indicator on Home and on the note stands
     /// for, or nil when there is no recording to return to.
-    var indicatorNoteID: String? {
-        CaptureNavigation.showsIndicator(activeNoteID: activeNoteID, state: recorder.state) ? activeNoteID : nil
+    var indicator: NoteRef? {
+        CaptureNavigation.showsIndicator(activeNoteID: active?.id, state: recorder.state) ? active : nil
     }
-    /// Completed writes of the delivery journal, for measurement.
-    var outboxJournalWrites: Int { outbox?.journalWrites ?? 0 }
+    /// Completed writes of the delivery journals, for measurement.
+    var outboxJournalWrites: Int { deliveries.values.reduce(0) { $0 + $1.outbox.journalWrites } }
 
-    func hasPendingAudio(noteID: String) -> Bool {
+    func isActive(_ ref: NoteRef?) -> Bool { ref != nil && active == ref }
+    func isIndicator(_ ref: NoteRef?) -> Bool { ref != nil && indicator == ref }
+
+    func hasPendingAudio(_ ref: NoteRef?) -> Bool {
         _ = deliveryRevision
-        return outbox?.entries(noteID: noteID).contains { $0.state != .ready } ?? false
+        guard let ref, let delivery = deliveries[ref.account] else { return false }
+        return delivery.outbox.entries(noteID: ref.id).contains { $0.state != .ready }
     }
 
-    /// The growing transcript of `noteID`, when this installation is recording it or just did.
-    func transcript(for noteID: String) -> LiveTranscript? {
-        transcript?.noteID == noteID ? transcript : nil
+    /// True for a recording whose note its server says was deleted. Its audio is kept on this device.
+    func isDeletedOnServer(_ ref: NoteRef?) -> Bool {
+        _ = deliveryRevision
+        guard let ref, let delivery = deliveries[ref.account] else { return false }
+        return delivery.histories[ref.id]?.serverMissingSince != nil
     }
 
-    func attach(to server: ServerNotesModel) async {
-        guard instanceIdentity != server.accountIdentity else { return }
-        // Native Stop is synchronous and delivers its journal before changing connection ownership.
-        recorder.stopSegment()
-        rotationTask?.cancel(); rotationTask = nil
-        uploadTask?.cancel(); uploadTask = nil
-        polls.values.forEach { $0.task.cancel() }
-        polls = [:]; pollBudget = [:]; uploads = []
-        controlTask?.cancel(); controlTask = nil
-        live?.cancel(); live = nil; liveEnding = nil
-        transcript = nil
-        isSyncing = false
-        self.server = server
-        activeNoteID = nil
-        outbox = nil
-        histories = [:]
-        instanceIdentity = server.accountIdentity
-        error = nil
-        guard let instance = server.instance, let principalID = server.principalID, let scope = server.accountIdentity else { return }
-        do {
-            let queue = try AudioOutbox(instance: instance, principalID: principalID, root: outboxRoot)
-            outbox = queue
-            let ledger = queue.directory.appendingPathComponent("captures.json")
-            if FileManager.default.fileExists(atPath: ledger.path) {
-                histories = try JSONDecoder().decode([String: ServerCaptureHistory].self, from: Data(contentsOf: ledger))
+    /// The growing transcript of the note, when this installation is recording it or just did.
+    func transcript(for ref: NoteRef?) -> LiveTranscript? {
+        guard let ref, active == ref || transcriptOwner == ref else { return nil }
+        return transcript?.noteID == ref.id ? transcript : nil
+    }
+    @ObservationIgnored private var transcriptOwner: NoteRef?
+
+    /// Why `account` cannot be signed out or removed right now, or nil.
+    func removalBlock(for account: AccountID) -> String? {
+        active?.account == account && (recorder.isCapturing || isBusy) ? "Stop the recording first." : nil
+    }
+
+    /// The accounts whose capture ledger has `noteID`: where an old link that names no account leads.
+    func ledger(of account: AccountID) -> Set<String> {
+        Set(deliveries[account]?.histories.keys.map { $0.lowercased() } ?? [])
+    }
+
+    // MARK: Accounts
+
+    /// Brings the deliveries in line with the accounts: one for each account
+    /// whose identity is known, none for an account that has gone. An account
+    /// that has just become Ready again has its unsent audio queued again.
+    func sync(with accounts: [ServerNotesModel]) async {
+        var present: [AccountID: ServerNotesModel] = [:]
+        for notes in accounts { if let id = notes.accountID { present[id] = notes } }
+        for (id, delivery) in deliveries where present[id] !== delivery.server {
+            // A recording cannot outlive its account. Removal is refused while one runs; this is the backstop.
+            if active?.account == id {
+                recorder.stopSegment()
+                rotationTask?.cancel(); rotationTask = nil
+                live?.cancel(); live = nil; liveEnding = nil
+                transcript = nil; transcriptOwner = nil
+                active = nil
             }
-            try recoverCaptures()
-            deliveryRevision += 1
-            // Replay only this installation's recorded Stop intent. Do not stop arbitrary notes.
-            for (id, history) in histories where history.needsStop == true {
-                do {
-                    _ = try await server.recording(noteID: id, command: .stop)
-                    guard !Task.isCancelled, scope == instanceIdentity else { return }
-                    histories[id]?.needsStop = false
-                    try saveHistories()
-                } catch {
-                    guard !Task.isCancelled, scope == instanceIdentity else { return }
-                    self.error = "A saved Stop is waiting for a connection. \(error.localizedDescription)"
+            delivery.close()
+            deliveries[id] = nil
+            refreshSyncing()
+        }
+        for notes in accounts {
+            // An account has an outbox once its server has said who it is: the directory is named by both.
+            guard let id = notes.accountID, let instance = notes.instance, let principalID = notes.principalID else { continue }
+            if let delivery = deliveries[id] {
+                guard notes.status == .ready, delivery.generation != notes.sessionGeneration else { continue }
+                delivery.generation = notes.sessionGeneration
+                await resume(delivery)
+                continue
+            }
+            do {
+                let queue = try AudioOutbox(instance: instance, principalID: principalID, root: outboxRoot)
+                let delivery = RecordingDelivery(account: id, server: notes, outbox: queue)
+                let ledger = queue.directory.appendingPathComponent("captures.json")
+                if FileManager.default.fileExists(atPath: ledger.path) {
+                    delivery.histories = try JSONDecoder().decode([String: ServerCaptureHistory].self, from: Data(contentsOf: ledger))
                 }
-            }
-            for id in Set(queue.entries.filter { $0.state != .ready }.map(\.noteID)) {
-                guard !Task.isCancelled, scope == instanceIdentity else { return }
-                await deliver(noteID: id, retryFailures: false)
-            }
-        } catch { self.error = "Saved recording delivery could not be recovered. Original audio is preserved. \(error.localizedDescription)" }
+                deliveries[id] = delivery
+                try recoverCaptures(delivery)
+                deliveryRevision += 1
+                if notes.status == .ready { await resume(delivery) }
+            } catch { self.error = "Saved recording delivery could not be recovered. Original audio is preserved. \(error.localizedDescription)" }
+        }
     }
 
-    func start(note: NoteDTO) async {
-        guard !isBusy, !recorder.isCapturing, let server, let outbox,
-              instanceIdentity == server.accountIdentity, let uuid = UUID(uuidString: note.id) else { return }
+    /// The accounts that have a delivery here, for tests.
+    var deliveringAccounts: [AccountID] { Array(deliveries.keys) }
+
+    /// Sends what an account still holds here: a Stop it recorded and could not
+    /// send, and every part its server does not have. Never another account's.
+    private func resume(_ delivery: RecordingDelivery) async {
+        // Replay only this installation's recorded Stop intent. Do not stop arbitrary notes.
+        for (id, history) in delivery.histories where history.needsStop == true && !isRecording(NoteRef(account: delivery.account, id: id)) {
+            guard history.serverMissingSince == nil else { continue }
+            do {
+                _ = try await delivery.server.recording(noteID: id, command: .stop)
+                guard !Task.isCancelled, !delivery.closed else { return }
+                delivery.histories[id]?.needsStop = false
+                try delivery.saveHistories()
+            } catch {
+                guard !Task.isCancelled, !delivery.closed else { return }
+                if await confirmDeleted(id, delivery) { continue }
+                self.error = "A saved Stop is waiting for a connection. \(error.localizedDescription)"
+            }
+        }
+        for id in Set(delivery.outbox.entries.filter { $0.state != .ready }.map(\.noteID)) {
+            guard !Task.isCancelled, !delivery.closed else { return }
+            if delivery.histories[id]?.serverMissingSince != nil {
+                // Asked once per launch or sign-in: a note that is listed again gets its audio after all.
+                guard await isBack(id, delivery) else { continue }
+            }
+            await deliver(NoteRef(account: delivery.account, id: id), retryFailures: false)
+        }
+    }
+
+    func start(note: NoteDTO, in account: AccountID?) async {
+        guard !isBusy, !recorder.isCapturing, let account, let delivery = deliveries[account], !delivery.closed,
+              let uuid = UUID(uuidString: note.id) else { return }
+        let server = delivery.server, outbox = delivery.outbox
+        let ref = NoteRef(account: account, id: note.id)
         isBusy = true
         error = nil
-        activeNoteID = note.id
+        active = ref
         captureStorageFailed = false
-        let scope = instanceIdentity
         defer { isBusy = false }
         // Only audio from the device's input needs the microphone permission.
         let needsMicrophone = (makeBackend ?? CaptureEnginePolicy.makeBackend)().usesMicrophone
         let permitted = await MicPermission.isGranted
         let allowed = permitted || !needsMicrophone ? true : await MicPermission.request()
-        guard !Task.isCancelled, scope == instanceIdentity, instanceIdentity == server.accountIdentity else { return }
+        guard !Task.isCancelled, !delivery.closed else { return }
         guard allowed else {
             error = "Allow microphone access in Settings before starting a recording."
             return
         }
         do {
             // A previous Stop must reach the server before Resume, but transcription need not finish.
-            await controlTask?.value
+            await delivery.controlTask?.value
             try Task.checkCancellation()
             let freshNote = try await server.note(id: note.id)
-            guard scope == instanceIdentity else { throw CancellationError() }
+            guard !delivery.closed else { throw CancellationError() }
             let remoteChunks = try await server.audioChunks(noteID: note.id)
-            guard scope == instanceIdentity else { throw CancellationError() }
-            if histories[note.id] == nil {
-                histories[note.id] = ServerCaptureHistory(baseOffsetMs: Self.durationMs(freshNote),
+            guard !delivery.closed else { throw CancellationError() }
+            if delivery.histories[note.id] == nil {
+                delivery.histories[note.id] = ServerCaptureHistory(baseOffsetMs: Self.durationMs(freshNote),
                     nextSequence: (remoteChunks.filter { $0.channel == .mic }.map(\.sequence).max() ?? -1) + 1, segments: [])
-                try saveHistories()
+                try delivery.saveHistories()
             }
-            try stageHistory(noteID: note.id) // Repair any prior local queue write before a new capture starts.
-            histories[note.id]!.prepareForResume(remoteChunks: remoteChunks,
+            try stageHistory(ref, delivery) // Repair any prior local queue write before a new capture starts.
+            delivery.histories[note.id]!.prepareForResume(remoteChunks: remoteChunks,
                 remoteDurationMs: Self.durationMs(freshNote), localEndMs: outbox.endMs(noteID: note.id))
-            try saveHistories()
-            let history = histories[note.id]!
+            delivery.histories[note.id]!.serverMissingSince = nil
+            try delivery.saveHistories()
+            let history = delivery.histories[note.id]!
             _ = try await server.recording(noteID: note.id, command: freshNote.recordingState == .idle ? .start : .resume)
-            guard scope == instanceIdentity, instanceIdentity == server.accountIdentity else { throw CancellationError() }
+            guard !delivery.closed else { throw CancellationError() }
             let root = outbox.directory.appendingPathComponent("recordings", isDirectory: true)
             live?.cancel(); live = nil
             recorder = Recorder(simulateCapture: false, recordingRoot: root, backend: makeBackend)
-            activeNoteID = note.id
+            let shown = accountPresentation?(account)
+            recorder.activityAccount = RecordingActivityAccount(id: account.raw, label: shown?.label, host: shown?.host)
+            active = ref
             var elapsedSegments = history.segments
             let baselineMs = max(0, (history.nextStartMs ?? history.baseOffsetMs) - Int(history.segments.reduce(0) { $0 + $1.duration } * 1000))
             if baselineMs > 0 {
@@ -177,23 +268,24 @@ final class ServerRecordingController {
                     duration: Double(baselineMs) / 1000, fileName: "remote-duration"), at: 0)
             }
             recorder.prepare(existing: elapsedSegments)
-            recorder.onSegmentFinished = { [weak self] segment, file in self?.finished(segment, file: file, noteID: note.id) }
+            recorder.onSegmentFinished = { [weak self] segment, file in self?.finished(segment, file: file, ref: ref) }
             recorder.partSeconds = Self.capturePartSeconds
-            recorder.onPartBoundary = { [weak self] frames in self?.stageOpenCapture(noteID: note.id, frames: frames) }
+            recorder.onPartBoundary = { [weak self] frames in self?.stageOpenCapture(ref, frames: frames) }
             recorder.onPauseChanged = { [weak self] paused in self?.pauseChanged(paused) }
             let stored = LiveTranscript(noteID: note.id)
             stored.merge(note: freshNote)
             transcript = stored
+            transcriptOwner = ref
             recorder.startSegment(noteID: uuid, title: freshNote.title)
-            followTitle(of: note.id)
+            followTitle(of: ref)
             if case .failed(let message) = recorder.state {
-                scheduleDelivery(noteID: note.id, stopServer: true)
+                scheduleDelivery(ref, stopServer: true)
                 error = message
             } else {
                 status = "Recording on device · Transcript updates after each audio chunk"
                 // The one place the two capture paths part ways.
-                if recorder.capturesContinuously { beginContinuousCapture(noteID: note.id, transcript: stored) }
-                else { scheduleRotation(noteID: note.id, uuid: uuid, title: note.title) }
+                if recorder.capturesContinuously { beginContinuousCapture(ref, transcript: stored) }
+                else { scheduleRotation(ref, uuid: uuid, title: note.title) }
             }
         } catch is CancellationError { }
         catch { self.error = error.localizedDescription }
@@ -202,10 +294,10 @@ final class ServerRecordingController {
     /// Keeps the recording's Live Activity named after its note: a title typed
     /// during the meeting, or one the server gave the note, reaches the Lock
     /// Screen without anyone asking for it. Ends with the recording.
-    private func followTitle(of noteID: String) {
-        guard activeNoteID == noteID, let server else { return }
-        let title = withObservationTracking { server.title(ofNote: noteID) } onChange: { [weak self] in
-            Task { @MainActor in self?.followTitle(of: noteID) }
+    private func followTitle(of ref: NoteRef) {
+        guard active == ref, let server = deliveries[ref.account]?.server else { return }
+        let title = withObservationTracking { server.title(ofNote: ref.id) } onChange: { [weak self] in
+            Task { @MainActor in self?.followTitle(of: ref) }
         }
         if let title { recorder.setActivityTitle(title) }
     }
@@ -214,79 +306,116 @@ final class ServerRecordingController {
         rotationTask?.cancel(); rotationTask = nil
         let finished = recorder.stopSegment()
         // Zero-frame starts still need a server Stop, without creating an upload or transcript.
-        if finished == nil, let id = activeNoteID {
+        if finished == nil, let ref = active {
             // A stream still open here belongs to a capture that holds nothing, so its length is 0.
             // After an interruption the stream already ended at the capture's length and this is a no-op.
             endLive(atSample: 0)
-            scheduleDelivery(noteID: id, stopServer: true)
+            scheduleDelivery(ref, stopServer: true)
         }
     }
 
-    func retry(noteID: String) {
-        guard !isSyncing else { return }
+    func retry(_ ref: NoteRef?) {
+        guard !isSyncing, let ref, let delivery = deliveries[ref.account] else { return }
         error = nil
-        scheduleDelivery(noteID: noteID, stopServer: activeNoteID != noteID || !recorder.isCapturing, retryFailures: true)
+        // Asking again is the person's own check of a note the server said was gone.
+        delivery.histories[ref.id]?.serverMissingSince = nil
+        scheduleDelivery(ref, stopServer: active != ref || !recorder.isCapturing, retryFailures: true)
     }
 
-    func forgetDeletedNote(_ noteID: String) throws {
-        guard !(activeNoteID == noteID && recorder.isCapturing), let outbox else { return }
-        uploadTask?.cancel(); uploadTask = nil
-        polls.removeValue(forKey: noteID)?.task.cancel()
+    func forgetDeletedNote(_ ref: NoteRef?) throws {
+        guard let ref, !(active == ref && recorder.isCapturing), let delivery = deliveries[ref.account] else { return }
+        let noteID = ref.id
+        delivery.uploadTask?.cancel(); delivery.uploadTask = nil
+        delivery.polls.removeValue(forKey: noteID)?.task.cancel()
         refreshSyncing()
-        try outbox.discard(noteID: noteID)
-        histories.removeValue(forKey: noteID)
-        try saveHistories()
+        try delivery.outbox.discard(noteID: noteID)
+        delivery.histories.removeValue(forKey: noteID)
+        try delivery.saveHistories()
         if let uuid = UUID(uuidString: noteID) {
-            let folder = outbox.directory.appendingPathComponent("recordings/\(uuid.uuidString)", isDirectory: true)
+            let folder = delivery.outbox.directory.appendingPathComponent("recordings/\(uuid.uuidString)", isDirectory: true)
             if FileManager.default.fileExists(atPath: folder.path) { try FileManager.default.removeItem(at: folder) }
         }
-        if activeNoteID == noteID { activeNoteID = nil }
-        if transcript?.noteID == noteID { transcript = nil }
+        if active == ref { active = nil }
+        if transcriptOwner == ref { transcript = nil; transcriptOwner = nil }
         deliveryRevision += 1
     }
+
+    // MARK: Notes deleted on the server
+
+    /// A recording's note is gone only when the server says so about the note
+    /// itself: `GET /notes/{id}` answering 404. Nothing else (a failed upload, a
+    /// short list, a server that does not answer) marks it. The audio stays on
+    /// this device, marked, and is not sent again by itself.
+    private func confirmDeleted(_ noteID: String, _ delivery: RecordingDelivery) async -> Bool {
+        do {
+            _ = try await delivery.server.noteSnapshot(id: noteID)
+            return false
+        } catch let failure as APIClientError where failure == .notFound {
+            guard !delivery.closed else { return false }
+            if delivery.histories[noteID] == nil {
+                delivery.histories[noteID] = ServerCaptureHistory(baseOffsetMs: 0, nextSequence: delivery.outbox.nextSequence(noteID: noteID), segments: [])
+            }
+            delivery.histories[noteID]!.serverMissingSince = .now
+            delivery.histories[noteID]!.needsStop = false
+            try? delivery.saveHistories()
+            deliveryRevision += 1
+            return true
+        } catch { return false }
+    }
+
+    /// A marked note that its server lists again loses the mark.
+    private func isBack(_ noteID: String, _ delivery: RecordingDelivery) async -> Bool {
+        guard (try? await delivery.server.noteSnapshot(id: noteID)) != nil, !delivery.closed else { return false }
+        delivery.histories[noteID]?.serverMissingSince = nil
+        try? delivery.saveHistories()
+        deliveryRevision += 1
+        return true
+    }
+
+    static let deletedOnServer = "Deleted on the server · Its audio is kept on this iPhone"
 
     // MARK: Delivery
 
     /// True while the note is being recorded here. Delivery then works quietly:
     /// the recording surface has its own status and must not flicker.
-    private func isRecording(_ noteID: String) -> Bool { activeNoteID == noteID && recorder.isCapturing }
+    private func isRecording(_ ref: NoteRef) -> Bool { active == ref && recorder.isCapturing }
 
     /// The one status line is about the note on screen. While a note is being
     /// recorded it says how that recording is transcribed, and the delivery of
     /// another note's saved audio does not write over it.
-    private func showsDeliveryStatus(_ noteID: String) -> Bool {
-        !isRecording(noteID) && !(recorder.isCapturing && activeNoteID != noteID)
+    private func showsDeliveryStatus(_ ref: NoteRef) -> Bool {
+        !isRecording(ref) && !(recorder.isCapturing && active != ref)
     }
 
     private func refreshSyncing() {
-        let value = !uploads.isEmpty || !polls.isEmpty
+        let value = deliveries.values.contains { !$0.uploads.isEmpty || !$0.polls.isEmpty }
         if isSyncing != value { isSyncing = value }
     }
 
     /// Uploads every staged part the server does not have yet, in order. It
     /// never waits for transcription: the next part can follow at once.
-    private func deliver(noteID: String, retryFailures: Bool) async {
-        guard let server, let outbox, instanceIdentity == server.accountIdentity else { return }
+    private func deliver(_ ref: NoteRef, retryFailures: Bool) async {
+        guard let delivery = deliveries[ref.account], !delivery.closed else { return }
+        let server = delivery.server, outbox = delivery.outbox, noteID = ref.id
         let token = UUID()
-        uploads.insert(token)
+        delivery.uploads.insert(token)
         refreshSyncing()
-        let scope = instanceIdentity
-        defer { uploads.remove(token); refreshSyncing() }
+        defer { delivery.uploads.remove(token); refreshSyncing() }
         do {
-            try stageHistory(noteID: noteID)
+            try stageHistory(ref, delivery)
             let waiting = outbox.entries(noteID: noteID).filter { $0.state != .ready }
             guard !waiting.isEmpty else { return }
             var chunks = try await server.audioChunks(noteID: noteID)
             for entry in waiting {
                 try Task.checkCancellation()
-                guard scope == instanceIdentity else { throw CancellationError() }
+                guard !delivery.closed else { throw CancellationError() }
                 let known = chunks.first { $0.id == entry.id }
                 let receipt: AudioChunkDTO
                 if let known {
                     receipt = known.state == .failed && retryFailures
                         ? try await server.retryAudio(noteID: noteID, chunkID: entry.id) : known
                 } else {
-                    if showsDeliveryStatus(noteID) { status = "Uploading saved audio…" }
+                    if showsDeliveryStatus(ref) { status = "Uploading saved audio…" }
                     receipt = try await server.upload(entry, from: outbox)
                 }
                 let state = Self.deliveryState(receipt)
@@ -294,13 +423,18 @@ final class ServerRecordingController {
                 chunks.removeAll { $0.id == receipt.id }; chunks.append(receipt)
                 deliveryRevision += 1
             }
-            follow(noteID: noteID)
+            follow(ref)
         } catch is CancellationError { }
         catch {
+            // The note itself is asked for before its recording is called deleted.
+            if (error as? APIClientError) == .notFound, !isRecording(ref), await confirmDeleted(noteID, delivery) {
+                if showsDeliveryStatus(ref) { status = Self.deletedOnServer }
+                return
+            }
             // While recording, the next part boundary tries again; the capture itself is unaffected.
-            if !isRecording(noteID) {
+            if !isRecording(ref) {
                 self.error = error.localizedDescription
-                if showsDeliveryStatus(noteID) { status = "Audio kept on this device · Retry delivery when connected" }
+                if showsDeliveryStatus(ref) { status = "Audio kept on this device · Retry delivery when connected" }
             } else {
                 log.notice("Part upload will be retried: \(error.localizedDescription, privacy: .public)")
             }
@@ -308,30 +442,31 @@ final class ServerRecordingController {
     }
 
     /// Starts, or extends, the one task that watches the server transcribe this note's parts.
-    private func follow(noteID: String) {
-        pollBudget[noteID] = 120
-        guard polls[noteID] == nil else { return }
+    private func follow(_ ref: NoteRef) {
+        guard let delivery = deliveries[ref.account] else { return }
+        let noteID = ref.id
+        delivery.pollBudget[noteID] = 120
+        guard delivery.polls[noteID] == nil else { return }
         let id = UUID()
-        let scope = instanceIdentity
-        polls[noteID] = (id, Task { [weak self] in
-            await self?.poll(noteID: noteID, scope: scope)
-            guard let self, polls[noteID]?.id == id else { return }
-            polls[noteID] = nil
+        delivery.polls[noteID] = (id, Task { [weak self] in
+            await self?.poll(ref, delivery)
+            guard let self, delivery.polls[noteID]?.id == id else { return }
+            delivery.polls[noteID] = nil
             refreshSyncing()
         })
         refreshSyncing()
     }
 
-    private func poll(noteID: String, scope: String?) async {
-        guard let server, let outbox else { return }
+    private func poll(_ ref: NoteRef, _ delivery: RecordingDelivery) async {
+        let server = delivery.server, outbox = delivery.outbox, noteID = ref.id
         do {
-            if showsDeliveryStatus(noteID) { status = "Transcribing and identifying speakers…" }
-            while (pollBudget[noteID] ?? 0) > 0 {
-                pollBudget[noteID]! -= 1
+            if showsDeliveryStatus(ref) { status = "Transcribing and identifying speakers…" }
+            while (delivery.pollBudget[noteID] ?? 0) > 0 {
+                delivery.pollBudget[noteID]! -= 1
                 try Task.checkCancellation()
-                guard scope == instanceIdentity else { throw CancellationError() }
+                guard !delivery.closed else { throw CancellationError() }
                 let chunks = try await server.audioChunks(noteID: noteID)
-                guard scope == instanceIdentity else { throw CancellationError() }
+                guard !delivery.closed else { throw CancellationError() }
                 var changed = false
                 let local = Dictionary(uniqueKeysWithValues: outbox.entries(noteID: noteID).map { ($0.id, $0.state) })
                 for receipt in chunks {
@@ -346,83 +481,84 @@ final class ServerRecordingController {
                 // While a live stream is carrying this recording, its finals are the stored text and
                 // it asks for a note read itself when the server's revision moves without it. Reading
                 // the note here as well would only repeat that, once per part.
-                let streamed = isRecording(noteID) && (transcript(for: noteID).map { LiveStatusText.isStreaming($0.status) } ?? false)
+                let streamed = isRecording(ref) && (transcript(for: ref).map { LiveStatusText.isStreaming($0.status) } ?? false)
                 if (changed || failed || !working) && !streamed {
                     // getNote returns the server source of truth; update the list through refresh after completion.
                     // While the note is being recorded this is a private read: the transcript
                     // model keeps the result, and nothing that shows the list has to redraw.
-                    document = isRecording(noteID) ? try await server.noteSnapshot(id: noteID) : try await server.note(id: noteID)
-                    guard scope == instanceIdentity else { throw CancellationError() }
-                    if let document { transcript(for: noteID)?.merge(note: document) }
+                    document = isRecording(ref) ? try await server.noteSnapshot(id: noteID) : try await server.note(id: noteID)
+                    guard !delivery.closed else { throw CancellationError() }
+                    if let document { transcript(for: ref)?.merge(note: document) }
                 }
                 if failed {
                     error = "Some audio could not be transcribed. Saved chunks can be retried without recording again."
-                    if showsDeliveryStatus(noteID) { status = "Audio kept · Transcription needs retry" }
+                    if showsDeliveryStatus(ref) { status = "Audio kept · Transcription needs retry" }
                     return
                 }
                 if !working {
-                    if !isRecording(noteID) {
-                        if showsDeliveryStatus(noteID) { status = document?.transcriptSegments.isEmpty == true ? "Audio saved · No speech detected" : "Transcript updated" }
+                    if !isRecording(ref) {
+                        if showsDeliveryStatus(ref) { status = document?.transcriptSegments.isEmpty == true ? "Audio saved · No speech detected" : "Transcript updated" }
                         await server.refresh()
                     }
                     return
                 }
                 try await Task.sleep(for: .seconds(2))
             }
-            if showsDeliveryStatus(noteID) { status = "Audio saved on server · Transcription is still processing" }
+            if showsDeliveryStatus(ref) { status = "Audio saved on server · Transcription is still processing" }
         } catch is CancellationError { }
         catch {
-            if !isRecording(noteID) {
+            if !isRecording(ref) {
                 self.error = error.localizedDescription
-                if showsDeliveryStatus(noteID) { status = "Audio kept on this device · Retry delivery when connected" }
+                if showsDeliveryStatus(ref) { status = "Audio kept on this device · Retry delivery when connected" }
             }
         }
     }
 
-    private func finished(_ segment: CaptureSegment, file: URL, noteID: String) {
+    private func finished(_ segment: CaptureSegment, file: URL, ref: NoteRef) {
         // Every way a capture ends comes through here (Stop, an interruption, a failed route), after
         // its file is closed. `capturedFrames` is then the length of the capture, which is what
         // `mark: end` must carry, however much of it the stream has sent.
         endLive(atSample: recorder.capturedFrames)
-        guard histories[noteID] != nil else { error = APIClientError.localStorage.localizedDescription; return }
-        histories[noteID]!.append(segment)
-        if rotating, let gap = CaptureContinuity.gaps(in: histories[noteID]!.segments).last, gap.afterIndex == segment.index - 1 {
+        guard let delivery = deliveries[ref.account], delivery.histories[ref.id] != nil else { error = APIClientError.localStorage.localizedDescription; return }
+        delivery.histories[ref.id]!.append(segment)
+        if rotating, let gap = CaptureContinuity.gaps(in: delivery.histories[ref.id]!.segments).last, gap.afterIndex == segment.index - 1 {
             log.notice("Audio between segments \(gap.afterIndex, privacy: .public) and \(segment.index, privacy: .public) was not captured: \(Int(gap.seconds * 1000), privacy: .public) ms")
         }
         do {
-            try saveHistories()
-            try stageHistory(noteID: noteID)
+            try delivery.saveHistories()
+            try stageHistory(ref, delivery)
             CaptureRecovery.acknowledge(CaptureRecovery.journalURL(for: file))
             deliveryRevision += 1
         } catch { self.error = error.localizedDescription; captureStorageFailed = true }
-        scheduleDelivery(noteID: noteID, stopServer: !rotating)
+        scheduleDelivery(ref, stopServer: !rotating)
     }
 
-    private func scheduleDelivery(noteID: String, stopServer: Bool, retryFailures: Bool = false) {
-        let scope = instanceIdentity
+    private func scheduleDelivery(_ ref: NoteRef, stopServer: Bool, retryFailures: Bool = false) {
+        guard let delivery = deliveries[ref.account] else { return }
+        let noteID = ref.id
         if stopServer {
-            let previousControl = controlTask
+            let previousControl = delivery.controlTask
             let ending = liveEnding
-            controlTask = Task { [weak self] in
+            delivery.controlTask = Task { [weak self] in
                 await previousControl?.value
                 // The live stream hands over its last words before the note stops recording.
                 await ending?.value
-                guard let self, !Task.isCancelled, scope == instanceIdentity, let server else { return }
+                guard let self, !Task.isCancelled, !delivery.closed else { return }
                 do {
-                    _ = try await server.recording(noteID: noteID, command: .stop)
-                    guard scope == instanceIdentity else { return }
-                    histories[noteID]?.needsStop = false
-                    try saveHistories()
+                    _ = try await delivery.server.recording(noteID: noteID, command: .stop)
+                    guard !delivery.closed else { return }
+                    delivery.histories[noteID]?.needsStop = false
+                    try delivery.saveHistories()
                 } catch { self.error = error.localizedDescription }
             }
         }
-        // Uploads are one ordered chain. Watching transcription is a separate task, so a
-        // slow transcription never holds back the next part.
-        let previous = uploadTask
-        uploadTask = Task { [weak self] in
+        // Uploads are one ordered chain per account. Watching transcription is a separate
+        // task, so a slow transcription never holds back the next part.
+        let previous = delivery.uploadTask
+        delivery.uploadTask = Task { [weak self] in
             await previous?.value
-            guard let self, !Task.isCancelled, scope == instanceIdentity, server != nil else { return }
-            await deliver(noteID: noteID, retryFailures: retryFailures)
+            guard let self, !Task.isCancelled, !delivery.closed else { return }
+            await deliver(ref, retryFailures: retryFailures)
         }
     }
 
@@ -430,8 +566,9 @@ final class ServerRecordingController {
     /// A recorder segment is copied in two-minute parts, as it always was. A
     /// continuous capture is cut on its own part length; parts cut while it was
     /// recording are recognised and only the rest is added.
-    private func stageHistory(noteID: String) throws {
-        guard let outbox, var history = histories[noteID], let uuid = UUID(uuidString: noteID) else { return }
+    private func stageHistory(_ ref: NoteRef, _ delivery: RecordingDelivery) throws {
+        let outbox = delivery.outbox, noteID = ref.id
+        guard var history = delivery.histories[noteID], let uuid = UUID(uuidString: noteID) else { return }
         let folder = outbox.directory.appendingPathComponent("recordings/\(uuid.uuidString)", isDirectory: true)
         var offset = history.baseOffsetMs
         var changed = false
@@ -444,7 +581,7 @@ final class ServerRecordingController {
                 if let frames = ContinuousCapture.frames(inFile: file) {
                     staged = try Signpost.interval("Outbox.Stage") {
                         try outbox.stageParts(noteID: noteID, capture: file, availableFrames: frames,
-                            partFrames: partSeconds(of: segment.fileName, noteID: noteID) * ContinuousCapture.sampleRate,
+                            partFrames: partSeconds(of: segment.fileName, ref: ref) * ContinuousCapture.sampleRate,
                             isFinal: true, startMs: capturedOffset, sequence: sequence)
                     }
                 } else if !outbox.containsSource(noteID: noteID, fileName: segment.fileName) { throw APIClientError.invalidAudio }
@@ -457,33 +594,24 @@ final class ServerRecordingController {
             offset = capturedOffset + Int(segment.duration * 1000)
         }
         guard changed else { return }
-        histories[noteID] = history
-        try saveHistories()
+        delivery.histories[noteID] = history
+        try delivery.saveHistories()
     }
 
-    private func recoverCaptures() throws {
-        guard let outbox else { return }
-        let root = outbox.directory.appendingPathComponent("recordings", isDirectory: true)
+    private func recoverCaptures(_ delivery: RecordingDelivery) throws {
+        let root = delivery.outbox.directory.appendingPathComponent("recordings", isDirectory: true)
         for capture in CaptureRecovery.scan(roots: [root]) {
             let id = capture.noteID.uuidString.lowercased()
-            guard histories[id] != nil else { continue }
+            guard delivery.histories[id] != nil else { continue }
             guard let segment = capture.segment else {
                 error = "An interrupted recording could not be read completely. Its original audio and recovery journal are still on this device."
                 continue
             }
-            histories[id]!.append(segment)
-            try saveHistories()
-            try stageHistory(noteID: id)
+            delivery.histories[id]!.append(segment)
+            try delivery.saveHistories()
+            try stageHistory(NoteRef(account: delivery.account, id: id), delivery)
             CaptureRecovery.acknowledge(capture.journalFile)
         }
-    }
-
-    private func saveHistories() throws {
-        guard let outbox else { throw APIClientError.localStorage }
-        let url = outbox.directory.appendingPathComponent("captures.json")
-        try JSONEncoder().encode(histories).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        PerfProbe.hit("Captures.Save")
     }
 
     // MARK: Continuous capture (engine path)
@@ -500,51 +628,53 @@ final class ServerRecordingController {
     /// The part length a continuous capture was begun with. If the ledger lost it
     /// (a kill between starting the capture and saving the ledger), it is read
     /// back from the parts already cut, so later parts keep the same boundaries.
-    private func partSeconds(of fileName: String, noteID: String) -> Int {
-        if let stored = histories[noteID]?.partSeconds?[fileName], stored > 0 { return stored }
-        let cut = outbox?.entries(noteID: noteID).filter { $0.sourceFileName == fileName }.map(\.durationMs).max() ?? 0
+    private func partSeconds(of fileName: String, ref: NoteRef) -> Int {
+        let delivery = deliveries[ref.account]
+        if let stored = delivery?.histories[ref.id]?.partSeconds?[fileName], stored > 0 { return stored }
+        let cut = delivery?.outbox.entries(noteID: ref.id).filter { $0.sourceFileName == fileName }.map(\.durationMs).max() ?? 0
         return cut >= 1000 && cut % 1000 == 0 ? cut / 1000 : Self.capturePartSeconds
     }
 
     /// Records where the capture sits on the note timeline before any part of
     /// it is cut, then starts the live stream from the same file.
-    private func beginContinuousCapture(noteID: String, transcript: LiveTranscript) {
-        guard let file = recorder.currentFileURL, histories[noteID] != nil else { return }
-        let baseMs = histories[noteID]!.begin(fileName: file.lastPathComponent, partSeconds: Self.capturePartSeconds)
-        do { try saveHistories() } catch { self.error = error.localizedDescription }
-        startLive(noteID: noteID, file: file, baseMs: baseMs, transcript: transcript)
+    private func beginContinuousCapture(_ ref: NoteRef, transcript: LiveTranscript) {
+        guard let file = recorder.currentFileURL, let delivery = deliveries[ref.account], delivery.histories[ref.id] != nil else { return }
+        let baseMs = delivery.histories[ref.id]!.begin(fileName: file.lastPathComponent, partSeconds: Self.capturePartSeconds)
+        do { try delivery.saveHistories() } catch { self.error = error.localizedDescription }
+        startLive(ref, delivery, file: file, baseMs: baseMs, transcript: transcript)
     }
 
     /// The capture grew past a part boundary: cut the part and send it.
-    private func stageOpenCapture(noteID: String, frames: Int64) {
-        guard isRecording(noteID), let outbox, let history = histories[noteID], let file = recorder.currentFileURL,
+    private func stageOpenCapture(_ ref: NoteRef, frames: Int64) {
+        let noteID = ref.id
+        guard isRecording(ref), let delivery = deliveries[ref.account], let history = delivery.histories[noteID], let file = recorder.currentFileURL,
               let baseMs = history.segmentOffsets?[file.lastPathComponent] else { return }
         do {
             let staged = try Signpost.interval("Outbox.Stage") {
-                try outbox.stageParts(noteID: noteID, capture: file, availableFrames: Int(frames),
-                    partFrames: partSeconds(of: file.lastPathComponent, noteID: noteID) * ContinuousCapture.sampleRate,
-                    isFinal: false, startMs: baseMs, sequence: max(history.nextSequence, outbox.nextSequence(noteID: noteID)))
+                try delivery.outbox.stageParts(noteID: noteID, capture: file, availableFrames: Int(frames),
+                    partFrames: partSeconds(of: file.lastPathComponent, ref: ref) * ContinuousCapture.sampleRate,
+                    isFinal: false, startMs: baseMs, sequence: max(history.nextSequence, delivery.outbox.nextSequence(noteID: noteID)))
             }
             guard !staged.isEmpty else { return }
             deliveryRevision += 1
-            scheduleDelivery(noteID: noteID, stopServer: false)
+            scheduleDelivery(ref, stopServer: false)
         } catch {
             // The capture file is intact and is cut again at the next boundary and at Stop.
             self.error = error.localizedDescription
         }
     }
 
-    private func startLive(noteID: String, file: URL, baseMs: Int, transcript: LiveTranscript) {
-        guard let server, let source = try? CaptureFileReader(url: file) else { return }
+    private func startLive(_ ref: NoteRef, _ delivery: RecordingDelivery, file: URL, baseMs: Int, transcript: LiveTranscript) {
+        let server = delivery.server, noteID = ref.id
+        guard let source = try? CaptureFileReader(url: file) else { return }
         let configuration = LiveTranscriptClient.Configuration(captureID: "\(noteID)/\(file.lastPathComponent)", baseMs: baseMs)
         guard let client = try? makeLiveClient(server, noteID, source, configuration) else { return }
-        let scope = instanceIdentity
-        let session = LiveCaptureSession(client: client, transcript: transcript) { [weak self] in
-            guard let self, scope == instanceIdentity, let server = self.server else { return nil }
+        let session = LiveCaptureSession(client: client, transcript: transcript) {
+            guard !delivery.closed else { return nil }
             return try? await server.noteSnapshot(id: noteID)
         }
         session.onStatus = { [weak self] value in
-            guard let self, isRecording(noteID) else { return }
+            guard let self, isRecording(ref) else { return }
             // One line under the note says how the transcript is being made.
             switch value {
             case .live: status = "Recording on device · Live transcript"
@@ -569,12 +699,12 @@ final class ServerRecordingController {
 
     // MARK: Recorder path (legacy, behind CaptureEnginePolicy)
 
-    private func scheduleRotation(noteID: String, uuid: UUID, title: String) {
+    private func scheduleRotation(_ ref: NoteRef, uuid: UUID, title: String) {
         rotationTask?.cancel()
         rotationTask = Task { [weak self] in
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(120)) } catch { return }
-                guard let self, activeNoteID == noteID, recorder.state == .recording else { return }
+                guard let self, active == ref, recorder.state == .recording else { return }
                 // Measurement only: the order of operations below is unchanged.
                 let interval = Signpost.ui.beginInterval("Capture.Rotate")
                 let began = ProcessInfo.processInfo.systemUptime
@@ -584,7 +714,7 @@ final class ServerRecordingController {
                 guard !captureStorageFailed else {
                     Signpost.ui.endInterval("Capture.Rotate", interval)
                     recorder.stopSegment() // End the retained indicator when rotation cannot continue.
-                    scheduleDelivery(noteID: noteID, stopServer: true)
+                    scheduleDelivery(ref, stopServer: true)
                     return
                 }
                 // The next part of the same recording: its Live Activity keeps the title it has.
@@ -593,7 +723,7 @@ final class ServerRecordingController {
                 noteRotationPause(ProcessInfo.processInfo.systemUptime - began)
                 if case .failed(let message) = recorder.state {
                     error = message
-                    scheduleDelivery(noteID: noteID, stopServer: true)
+                    scheduleDelivery(ref, stopServer: true)
                     return
                 }
             }
@@ -632,6 +762,9 @@ struct ServerCaptureHistory: Codable {
     var segmentOffsets: [String: Int]?
     var nextStartMs: Int?
     var needsStop: Bool?
+    /// Set when the server answered 404 for the note itself. The audio is kept;
+    /// it is cleared when the note is listed again or recorded to again.
+    var serverMissingSince: Date?
     /// Part length, in seconds, of each continuous capture, fixed when it begins.
     var partSeconds: [String: Int]?
 

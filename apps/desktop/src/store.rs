@@ -169,12 +169,17 @@ pub fn commit(
     }
 }
 
-/// Chat history that has been serialised and is waiting for a write.
-type PendingHistory = Option<(PathBuf, Vec<u8>, u64)>;
-static CHAT_HISTORY: Mutex<PendingHistory> = Mutex::new(None);
-static CHAT_HISTORY_SAVED: AtomicU64 = AtomicU64::new(0);
+/// Chat history that has been serialised and is waiting for a write: one
+/// file per account (and one for local mode), newest content only.
+#[derive(Default)]
+struct PendingHistory {
+    queued: HashMap<PathBuf, (Vec<u8>, u64)>,
+    /// What was last queued for each file.
+    saved: HashMap<PathBuf, u64>,
+}
+static CHAT_HISTORY: Mutex<Option<PendingHistory>> = Mutex::new(None);
 
-fn fingerprint(data: &[u8]) -> u64 {
+pub fn fingerprint(data: &[u8]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     data.hash(&mut hasher);
@@ -182,18 +187,31 @@ fn fingerprint(data: &[u8]) -> u64 {
 }
 
 /// Queue encoded chat history for writing unless it is byte-for-byte what was
-/// last queued. Returns whether anything was queued.
+/// last queued for that file. Returns whether anything was queued.
 pub fn queue_chat_history(path: PathBuf, data: Vec<u8>) -> bool {
     let print = fingerprint(&data);
-    if CHAT_HISTORY_SAVED.swap(print, Ordering::SeqCst) == print {
+    let mut guard = CHAT_HISTORY.lock().unwrap_or_else(|poison| poison.into_inner());
+    let pending = guard.get_or_insert_with(PendingHistory::default);
+    if pending.saved.insert(path.clone(), print) == Some(print) {
         return false;
     }
-    *CHAT_HISTORY.lock().unwrap() = Some((path, data, next_generation()));
+    pending.queued.insert(path, (data, next_generation()));
     true
 }
 
-fn take_chat_history() -> PendingHistory {
-    CHAT_HISTORY.lock().unwrap().take()
+fn take_chat_history() -> Vec<(PathBuf, Vec<u8>, u64)> {
+    CHAT_HISTORY
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .as_mut()
+        .map(|pending| {
+            pending
+                .queued
+                .drain()
+                .map(|(path, (data, generation))| (path, data, generation))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl Cereal {
@@ -227,7 +245,7 @@ impl Cereal {
     /// an explicit Save, sleep. Returns false if the workspace write failed.
     pub fn flush_all_blocking(&mut self, cx: &mut Context<Self>) -> bool {
         let saved = !self.autosave.flush() || self.write_workspace(true, cx);
-        if let Some((path, data, generation)) = take_chat_history() {
+        for (path, data, generation) in take_chat_history() {
             let ticket = begin();
             if let Err(error) = commit(&path, generation, ticket, |_| {
                 crate::chat::write_history(&path, &data)
@@ -239,49 +257,89 @@ impl Cereal {
         saved
     }
 
-    /// Serialise the workspace and write it, on this thread when `blocking`.
-    /// A failure is shown exactly as a failed save always was.
+    /// Serialise what changed and write it, on this thread when `blocking`.
+    /// In local mode that is the one workspace file. In server mode it is
+    /// each account's file whose notes changed, and the device files that
+    /// changed. A failure is shown exactly as a failed save always was.
     fn write_workspace(&mut self, blocking: bool, cx: &mut Context<Self>) -> bool {
-        let job = crate::model::workspace_file().and_then(|path| {
-            self.workspace
-                .encode()
-                .map(|data| (path, data, next_generation()))
-        });
-        let (path, data, generation) = match job {
-            Ok(job) => job,
+        let jobs = if self.workspace.by_account() {
+            self.workspace.pending_writes()
+        } else if crate::server::enabled() {
+            // Server mode with no device files (no home directory): there
+            // is nowhere to write.
+            Ok(Vec::new())
+        } else {
+            crate::model::workspace_file().and_then(|path| {
+                self.workspace.encode().map(|data| {
+                    vec![crate::model::PendingWrite {
+                        path,
+                        data,
+                        workspace: true,
+                    }]
+                })
+            })
+        };
+        let jobs: Vec<_> = match jobs {
+            Ok(jobs) => jobs
+                .into_iter()
+                .map(|job| (job, next_generation(), begin()))
+                .collect(),
             Err(error) => {
                 self.show_toast(&format!("Could not save: {error}"), cx);
                 return false;
             }
         };
-        let ticket = begin();
-        if blocking {
-            let result = commit(&path, generation, ticket, |first| {
-                crate::model::write_workspace(&path, &data, first)
-            });
-            if let Err(error) = &result {
-                self.show_toast(&format!("Could not save: {error}"), cx);
-            }
-            return result.is_ok();
-        }
-        // Hand the job to the background executor before returning. If it were
-        // only queued behind this thread's next turn, a blocking flush right
-        // after (`wait_idle` on the UI thread) would wait for a write that
-        // could never start.
-        let write = cx.background_executor().spawn(async move {
-            commit(&path, generation, ticket, |first| {
-                crate::model::write_workspace(&path, &data, first)
+        fn run(job: &crate::model::PendingWrite, generation: u64, ticket: Ticket) -> Result<bool, String> {
+            commit(&job.path, generation, ticket, |first| {
+                if job.workspace {
+                    crate::model::write_workspace(&job.path, &job.data, first)
+                } else {
+                    crate::shared::write_private(&job.path, &job.data)
+                }
             })
+        }
+        if blocking {
+            let mut saved = true;
+            for (job, generation, ticket) in jobs {
+                if let Err(error) = run(&job, generation, ticket) {
+                    self.workspace.forget_written(&job.path);
+                    self.autosave.retry();
+                    self.show_toast(&format!("Could not save: {error}"), cx);
+                    saved = false;
+                }
+            }
+            return saved;
+        }
+        if jobs.is_empty() {
+            return true;
+        }
+        // Hand the jobs to the background executor before returning. If they
+        // were only queued behind this thread's next turn, a blocking flush
+        // right after (`wait_idle` on the UI thread) would wait for a write
+        // that could never start.
+        let write = cx.background_executor().spawn(async move {
+            let mut failed = Vec::new();
+            for (job, generation, ticket) in jobs {
+                if let Err(error) = run(&job, generation, ticket) {
+                    failed.push((job.path, error));
+                }
+            }
+            failed
         });
         cx.spawn(async move |this, cx| {
-            if let Err(error) = write.await {
-                let _ = this.update(cx, |this, cx| {
-                    // Nothing reached the disk: keep the workspace dirty so
-                    // the next edit or flush tries again.
-                    this.autosave.retry();
-                    this.show_toast(&format!("Could not save: {error}"), cx);
-                });
+            let failed = write.await;
+            if failed.is_empty() {
+                return;
             }
+            let _ = this.update(cx, |this, cx| {
+                // Nothing reached the disk: keep the workspace dirty so
+                // the next edit or flush tries again.
+                for (path, _) in &failed {
+                    this.workspace.forget_written(path);
+                }
+                this.autosave.retry();
+                this.show_toast(&format!("Could not save: {}", failed[0].1), cx);
+            });
         })
         .detach();
         true
@@ -290,22 +348,21 @@ impl Cereal {
     /// Start the background write for chat history queued by
     /// `save_chat_history`. Called from render, which always follows it.
     pub fn drain_chat_history(&mut self, cx: &mut Context<Self>) {
-        let Some((path, data, generation)) = take_chat_history() else {
-            return;
-        };
-        let ticket = begin();
-        // As for the workspace: started now, awaited later.
-        let write = cx.background_executor().spawn(async move {
-            commit(&path, generation, ticket, |_| {
-                crate::chat::write_history(&path, &data)
+        for (path, data, generation) in take_chat_history() {
+            let ticket = begin();
+            // As for the workspace: started now, awaited later.
+            let write = cx.background_executor().spawn(async move {
+                commit(&path, generation, ticket, |_| {
+                    crate::chat::write_history(&path, &data)
+                })
+            });
+            cx.spawn(async move |this, cx| {
+                if let Err(error) = write.await {
+                    let _ = this.update(cx, |this, cx| this.show_toast(&error, cx));
+                }
             })
-        });
-        cx.spawn(async move |this, cx| {
-            if let Err(error) = write.await {
-                let _ = this.update(cx, |this, cx| this.show_toast(&error, cx));
-            }
-        })
-        .detach();
+            .detach();
+        }
     }
 }
 
@@ -677,7 +734,10 @@ mod tests {
         changed.push(b'!');
         assert!(queue_chat_history(path.clone(), changed.clone()));
         // Only the newest content is kept for the writer.
-        let queued = take_chat_history().unwrap();
+        let queued = take_chat_history()
+            .into_iter()
+            .find(|(queued, _, _)| *queued == path)
+            .unwrap();
         assert_eq!((queued.0, queued.1), (path, changed));
     }
 }

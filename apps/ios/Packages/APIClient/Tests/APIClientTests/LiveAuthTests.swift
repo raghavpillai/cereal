@@ -17,13 +17,16 @@ import Contracts
         let domain = "Cereal-native-live-auth-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: domain))
         defer { defaults.removePersistentDomain(forName: domain) }
-        let settings = ConnectionSettingsStore(defaults: defaults, tokens: AuthProbeTokens())
-        let model = ServerNotesModel(settings: settings)
-        await model.signIn(instance: base, email: aEmail, password: aPassword)
+        let store = MemoryAccountStore()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(domain)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let accounts = AccountsModel(defaults: defaults, credentials: store, storage: AccountStorage(root: root), allowsMultiple: true)
+        let aAccount = try await accounts.signIn(instance: base, email: aEmail, password: aPassword)
+        var model = try #require(accounts.session(aAccount)?.notes)
         let firstIdentity = try #require(model.accountIdentity)
         #expect(model.principalID == env["NATIVE_AUTH_A_ID"])
         #expect(model.session?.user.role == .user)
-        let aCredentials = try #require(try settings.load())
+        let aCredentials = try #require(try store.load(aAccount)).credentials
         let aNote = try await model.create(title: "Native auth QA A", body: "Fictional private canary A")
         let ownAPI = MeetingNotesAPI(credentials: aCredentials)
         let events = try await ownAPI.calendarEvents(from: .now.addingTimeInterval(-86400), to: .now.addingTimeInterval(60 * 86400))
@@ -39,13 +42,15 @@ import Contracts
         #expect(retry.meeting?.participants.filter { $0.id == manualID }.count == 1)
         #expect(retry.meeting?.participants.first(where: { $0.id == manualID })?.nameSource == .manual)
         #expect(try await model.note(id: aNote.id).recordingState == .idle)
-        await model.signIn(instance: base, email: bEmail, password: bPassword)
+        let bAccount = try await accounts.signIn(instance: base, email: bEmail, password: bPassword)
+        #expect(accounts.sessions.map(\.id) == [aAccount, bAccount])
+        model = try #require(accounts.session(bAccount)?.notes)
         #expect(model.accountIdentity != firstIdentity)
         #expect(model.principalID == env["NATIVE_AUTH_B_ID"])
         #expect(!model.state.notes.contains { $0.id == aNote.id })
         await #expect(throws: APIClientError.notFound) { try await model.note(id: aNote.id) }
         await #expect(throws: APIClientError.notFound) { try await model.noteContext(id: aNote.id) }
-        let bCredentials = try #require(try settings.load())
+        let bCredentials = try #require(try store.load(bAccount)).credentials
         let bNote = try await model.create(title: "Native auth QA B", body: "Fictional private canary B")
         let aAPI = MeetingNotesAPI(credentials: aCredentials)
         await #expect(throws: APIClientError.notFound) { try await aAPI.note(id: bNote.id) }
@@ -63,17 +68,14 @@ import Contracts
         _ = try await aAPI.deleteNote(id: defaultNote.id)
         _ = try await aAPI.deleteNote(id: aNote.id)
         _ = try await bAPI.deleteNote(id: bNote.id)
-        try await model.signOut()
+        try await accounts.signOut(bAccount)
         #expect(model.accountIdentity == nil && model.state.notes.isEmpty)
+        // The session is ended on its server in the background.
+        for _ in 0..<50 {
+            if case .refused = await bAPI.verifySession() { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
         await #expect(throws: APIClientError.unauthorized) { try await bAPI.session() }
         try await aAPI.signOut()
     }
-}
-
-private final class AuthProbeTokens: BearerTokenStore, @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: String?
-    func load() throws -> String? { lock.lock(); defer { lock.unlock() }; return value }
-    func save(_ token: String) throws { lock.lock(); defer { lock.unlock() }; value = token }
-    func clear() throws { lock.lock(); defer { lock.unlock() }; value = nil }
 }

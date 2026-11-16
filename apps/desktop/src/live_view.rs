@@ -693,12 +693,15 @@ impl Cereal {
         };
         let capture_id = pending.capture_id.clone();
         let uploaded = note.clone();
-        let account = crate::account::epoch();
+        // The stream belongs to the note's account: it stops when that
+        // account's epoch moves (its session ended or was replaced, or it
+        // was signed out of). The capture itself is local and carries on.
+        let account = crate::accounts::note_epoch(id);
         let session = Session::start(
             id,
             Source::Monitor(pending.monitor.clone()),
             move || crate::server::live_target(&note, &capture_id),
-            move || crate::account::epoch() == account,
+            move || crate::accounts::note_epoch(id) == account,
         );
         self.live.streams += 1;
         self.live.session = Some(Stream {
@@ -1675,8 +1678,10 @@ mod tests {
         // Two-second parts, so a test meeting of fourteen seconds has seven.
         crate::server::testing::set_part_seconds(&server.url, &root, &note, &capture_id, 2);
         let target = Target {
-            url: crate::server::testing::live_url(&server.url, fake::NOTE),
-            token: "fictional-part-upload-owner-token-0000".into(),
+            endpoint: crate::accounts::client::LiveEndpoint::for_test(
+                crate::server::testing::live_url(&server.url, fake::NOTE),
+                "fictional-part-upload-owner-token-0000",
+            ),
             capture_id: capture_id.clone(),
             base_ms: 0,
         };

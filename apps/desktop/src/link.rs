@@ -214,11 +214,6 @@ impl SharedNoteLink {
         format!("{}/s/{}", self.origin.url(), self.token)
     }
 
-    /// Where the snapshot is read from.
-    pub fn api_url(&self) -> String {
-        format!("{}/api/v1/shared/{}", self.origin.url(), self.token)
-    }
-
     /// The link a web page hands to the app.
     #[cfg(test)]
     pub fn app_url(&self) -> String {
@@ -605,7 +600,6 @@ mod tests {
         let web = format!("https://notes.example.com/s/{TOKEN}");
         let link = shared(&web).expect("web link");
         assert_eq!(link.web_url(), web);
-        assert_eq!(link.api_url(), format!("https://notes.example.com/api/v1/shared/{TOKEN}"));
         assert_eq!(link.origin.display_host(), "notes.example.com");
         assert_eq!(shared(&link.app_url()), Some(link.clone()));
         assert_eq!(shared(&app_shared(&web)), Some(link.clone()));

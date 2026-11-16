@@ -16,6 +16,12 @@
           "enum": [
             "v1"
           ]
+        },
+        "features": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [

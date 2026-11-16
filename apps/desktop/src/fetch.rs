@@ -25,13 +25,15 @@ pub enum Failure {
     TooLarge,
 }
 
-/// What is sent: the address, an optional bearer session and an optional
-/// JSON body. Kept apart from the sending so it can be checked in tests.
+/// What is sent: the address and an optional JSON body, and never a
+/// session. A request that carries one is made by the account's own client
+/// (`accounts::AccountClient::fetch`), which builds the address from that
+/// account's base, so a caller here cannot pair a session with a URL.
+/// Kept apart from the sending so it can be checked in tests.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Request<'a> {
     pub method: &'a str,
     pub url: &'a str,
-    pub bearer: Option<&'a str>,
     pub body: Option<&'a Value>,
 }
 
@@ -53,12 +55,6 @@ impl Request<'_> {
             quote(self.url),
             quote(self.method)
         );
-        if let Some(bearer) = self.bearer {
-            config.push_str(&format!(
-                "header = {}\n",
-                quote(&format!("Authorization: Bearer {bearer}"))
-            ));
-        }
         if let Some(body) = self.body {
             config.push_str("header = \"Content-Type: application/json\"\n");
             config.push_str(&format!("data-binary = {}\n", quote(&body.to_string())));
@@ -68,67 +64,62 @@ impl Request<'_> {
 
     /// Send it, accepting at most `limit` bytes of answer.
     pub fn send(&self, limit: usize) -> Result<Reply, Failure> {
-        let mut child = Command::new("/usr/bin/curl")
-            .args([
-                "--disable",
-                "--config",
-                "-",
-                "--silent",
-                "--connect-timeout",
-                "10",
-                "--max-time",
-                "25",
-                "--max-redirs",
-                "0",
-                "--proto",
-                "=https,http",
-                "--max-filesize",
-                &limit.to_string(),
-                "--write-out",
-                "\n%{http_code}",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| Failure::Transport)?;
-        let sent = child
-            .stdin
-            .take()
-            .ok_or(Failure::Transport)
-            .and_then(|mut input| {
-                input
-                    .write_all(self.config().as_bytes())
-                    .map_err(|_| Failure::Transport)
-            });
-        let Some(output) = child.stdout.take().filter(|_| sent.is_ok()) else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(Failure::Transport);
-        };
-        // The answer, a line break and three digits of status. Anything past
-        // that is more than was asked for, however the server sent it.
-        let room = limit + 4;
-        let mut bytes = Vec::new();
-        let read = output.take(room as u64 + 1).read_to_end(&mut bytes);
-        if read.is_err() || bytes.len() > room {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(if read.is_err() {
-                Failure::Transport
-            } else {
-                Failure::TooLarge
-            });
-        }
-        let status = child.wait().map_err(|_| Failure::Transport)?;
-        match status.code() {
-            Some(0) => {}
-            Some(63) => return Err(Failure::TooLarge),
-            Some(28) => return Err(Failure::TimedOut),
-            _ => return Err(Failure::Unreachable),
-        }
-        split_reply(bytes).ok_or(Failure::Transport)
+        exchange(&self.config(), limit)
     }
+}
+
+/// One curl exchange for a request written as a curl config: no redirect is
+/// followed, nothing but HTTP(S) is spoken, and nothing in the address is
+/// expanded. The config travels over stdin, never argv or a file.
+pub(crate) fn exchange(config: &str, limit: usize) -> Result<Reply, Failure> {
+    let mut child = Command::new("/usr/bin/curl")
+        .args(["--disable", "--config", "-", "--silent"])
+        .args(["--connect-timeout", "10", "--max-time", "25"])
+        .args(crate::accounts::client::SAFE_TRANSPORT)
+        .arg("--max-filesize")
+        .arg(limit.to_string())
+        .args(["--write-out", "\n%{http_code}"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| Failure::Transport)?;
+    let sent = child
+        .stdin
+        .take()
+        .ok_or(Failure::Transport)
+        .and_then(|mut input| {
+            input
+                .write_all(config.as_bytes())
+                .map_err(|_| Failure::Transport)
+        });
+    let Some(output) = child.stdout.take().filter(|_| sent.is_ok()) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(Failure::Transport);
+    };
+    // The answer, a line break and three digits of status. Anything past
+    // that is more than was asked for, however the server sent it.
+    let room = limit + 4;
+    let mut bytes = Vec::new();
+    let read = output.take(room as u64 + 1).read_to_end(&mut bytes);
+    if read.is_err() || bytes.len() > room {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(if read.is_err() {
+            Failure::Transport
+        } else {
+            Failure::TooLarge
+        });
+    }
+    let status = child.wait().map_err(|_| Failure::Transport)?;
+    match status.code() {
+        Some(0) => {}
+        Some(63) => return Err(Failure::TooLarge),
+        Some(28) => return Err(Failure::TimedOut),
+        _ => return Err(Failure::Unreachable),
+    }
+    split_reply(bytes).ok_or(Failure::Transport)
 }
 
 /// Download `url` into the file at `path`, replacing it, with no credentials
@@ -171,6 +162,7 @@ pub fn download(
             "0",
             "--proto",
             "=https,http",
+            "--globoff",
             "--max-filesize",
             &limit.to_string(),
             "--write-out",
@@ -251,11 +243,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_request_sends_a_session_only_when_it_is_given_one() {
+    fn a_request_made_here_never_carries_a_session() {
         let anonymous = Request {
             method: "GET",
             url: "https://notes.example.com/api/v1/auth/methods",
-            bearer: None,
             body: None,
         }
         .config();
@@ -266,21 +257,12 @@ mod tests {
         let exchange = Request {
             method: "POST",
             url: "https://notes.example.com/api/v1/auth/app-handoff/exchange",
-            bearer: None,
             body: Some(&body),
         }
         .config();
         assert!(!exchange.to_lowercase().contains("authorization"));
         assert!(exchange.contains("request = \"POST\""));
         assert!(exchange.contains(r#"data-binary = "{\"code\":\"c\",\"verifier\":\"v\"}""#));
-        let signed = Request {
-            method: "GET",
-            url: "https://notes.example.com/api/v1/shared/token",
-            bearer: Some("session-token"),
-            body: None,
-        }
-        .config();
-        assert!(signed.contains("header = \"Authorization: Bearer session-token\""));
     }
 
     #[test]
@@ -288,7 +270,6 @@ mod tests {
         let config = Request {
             method: "GET",
             url: "https://notes.example.com/\"\nheader = \"X-Injected: 1",
-            bearer: Some("a\"\nurl = \"https://evil.example"),
             body: None,
         }
         .config();
@@ -301,9 +282,9 @@ mod tests {
                 "{line}"
             );
         }
-        assert_eq!(config.lines().count(), 4);
-        assert_eq!(config.matches("url = ").count(), 2);
-        assert!(config.contains("\\nurl = \\\"https://evil.example"));
+        assert_eq!(config.lines().count(), 3);
+        assert_eq!(config.matches("url = ").count(), 1);
+        assert!(config.contains("\\nheader = \\\"X-Injected: 1"));
     }
 
     #[test]

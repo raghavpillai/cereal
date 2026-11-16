@@ -1,5 +1,6 @@
 import { Context, Effect } from "effect"
-import type { AudioChunkDTO, TranscriptSegmentDTO, CreateNoteInput, NoteDTO, ShareDTO, SharedNoteDTO, UpdateNoteInput } from "@meeting-notes/contracts"
+import type { AudioChunkDTO, TranscriptSegmentDTO, CreateNoteInput, ImportNoteInput, MeetingContextDTO, NoteDTO, ShareDTO, SharedNoteDTO, UpdateNoteInput } from "@meeting-notes/contracts"
+import {clampCreatedAt,importedSegmentId,matchesStamp,type DeletePreconditions} from "./note-import"
 import {selectMeetings,selectTranscriptPassages,type MeetingSearchInput,type TranscriptSearchInput,type TranscriptSearchHit} from "./meeting-search"
 import type {NoteSearchPageDTO,NoteSummariesPageDTO} from "@meeting-notes/contracts"
 import type {NoteListInput,NoteSearchInput} from "./note-summaries"
@@ -23,6 +24,12 @@ export interface StoredAudioChunk extends AudioChunkDTO {
   /** How a ready part was accounted for (live coverage ledger); absent on rows written before it existed. */
   readonly resolution?: ChunkResolution | null
 }
+/** One import request: the note as sent, the SHA-256 of that request, and the one clock reading the note's
+ * `importedAt` and `updatedAt` are both written from. */
+export interface ImportNoteCommand { readonly input: ImportNoteInput; readonly digest: string; readonly now: Date }
+/** "replayed": the id exists, is the caller's, was made by this very request and has not changed since.
+ * "conflict": the id exists and any of that is not so; the caller is told nothing more. */
+export type ImportNoteResult = { readonly outcome: "created" | "replayed"; readonly note: NoteDTO } | { readonly outcome: "conflict" }
 export interface NotesRepositoryService {
   /** Request-facing adapters must be scoped to a stable account ID. */
   readonly forUser: (userId: string, organizationId?: string) => NotesRepositoryService
@@ -52,6 +59,15 @@ export interface NotesRepositoryService {
   readonly createNote: (input: CreateNoteInput) => Effect.Effect<NoteDTO, RepositoryError>
   readonly updateNote: (id: string, input: UpdateNoteInput) => Effect.Effect<NoteDTO | null, RepositoryError>
   readonly deleteNote: (id: string) => Effect.Effect<boolean, RepositoryError>
+  /** A whole note with its transcript and saved meeting context, in one write: all of it or none. The
+   * context is stored as given under a fresh event id and bound to no calendar event. */
+  readonly importNote: (command: ImportNoteCommand) => Effect.Effect<ImportNoteResult, RepositoryError>
+  /** Deletes only if the note is still what the caller read, decided with the note locked: "conflict" when
+   * it is recording, a part is not ready, or a given stamp or part count differs. */
+  readonly deleteNoteIf: (id: string, preconditions: DeletePreconditions) => Effect.Effect<"deleted" | "missing" | "conflict", RepositoryError>
+  /** Memory adapter only: the meeting context an import saved with its note, handed over once to the memory
+   * context store (the Prisma adapter writes that row itself, inside the import). `undefined`: nothing waits. */
+  readonly takeImportedContext?: (noteId: string) => MeetingContextDTO | null | undefined
   readonly listShares: (noteId: string) => Effect.Effect<ReadonlyArray<ShareDTO>, RepositoryError>
   readonly createShare: (share: StoredShare) => Effect.Effect<StoredShare, RepositoryError>
   readonly findShare: (tokenHash: string) => Effect.Effect<StoredShare | null, RepositoryError>
@@ -73,6 +89,7 @@ export function scopeRepository(repository: NotesRepositoryService, userId: stri
   listNoteSummaries?:NonNullable<NotesRepositoryService["listNoteSummaries"]>
   searchNoteSummaries?:NonNullable<NotesRepositoryService["searchNoteSummaries"]>
   createNote: NotesRepositoryService["createNote"]
+  importNote: NotesRepositoryService["importNote"]
 }, organizationId?: string): NotesRepositoryService {
   const note = <A>(id: string, operation: () => Effect.Effect<A, RepositoryError>, absent: A) =>
     Effect.flatMap(access.ownsNote(id), allowed => allowed ? operation() : Effect.succeed(absent))
@@ -87,6 +104,9 @@ export function scopeRepository(repository: NotesRepositoryService, userId: stri
     getNote: id => note(id, () => repository.getNote(id), null),
     updateNote: (id, input) => note(id, () => repository.updateNote(id, input), null),
     deleteNote: id => note(id, () => repository.deleteNote(id), false),
+    importNote: access.importNote,
+    deleteNoteIf: (id, preconditions) => note(id, () => repository.deleteNoteIf(id, preconditions), "missing" as const),
+    ...(repository.takeImportedContext ? { takeImportedContext: repository.takeImportedContext } : {}),
     recording: (id, command) => note(id, () => repository.recording(id, command), null),
     listAudioChunks: id => note(id, () => repository.listAudioChunks(id), []),
     putAudioChunk: chunk => note(chunk.noteId, () => repository.putAudioChunk(chunk), null),
@@ -130,6 +150,28 @@ export function makeMemoryRepository(seed: ReadonlyArray<NoteDTO> = [], clock: (
   const shares = new Map<string, StoredShare>()
   const chunks = new Map<string, StoredAudioChunk>()
   const generationRuns = new Map<string,string>()
+  // What an import wrote, to recognise the same request again; and its meeting context until the context store takes it.
+  const imports = new Map<string,{digest:string;importedAt:string;transcriptRevision:number;generatedRevision:number|null}>()
+  const importedContexts = new Map<string,MeetingContextDTO|null>()
+  const importFor = (ownerId: string, { input, digest, now }: ImportNoteCommand): ImportNoteResult => {
+    const id = input.id.toLowerCase(), existing = notes.get(id), made = imports.get(id)
+    if (existing) return owners.get(id) === ownerId && made?.digest === digest && existing.updatedAt === made.importedAt && existing.transcriptRevision === made.transcriptRevision && existing.generatedRevision === made.generatedRevision
+      ? { outcome: "replayed", note: structuredClone(existing) } : { outcome: "conflict" }
+    const at = now.toISOString(), transcriptRevision = input.transcriptSegments.length ? 1 : 0, generatedRevision = input.generated ? transcriptRevision : null
+    // The same rule as PostgreSQL's primary key: a derived segment id that some note already holds is a conflict.
+    const derived = new Set(input.transcriptSegments.map(segment => importedSegmentId(id, segment.id)))
+    for (const other of notes.values()) if (other.transcriptSegments.some(segment => derived.has(segment.id))) return { outcome: "conflict" }
+    const note: NoteDTO = {
+      id, title: input.title, body: input.body, enhanced: input.enhanced, date: input.date, duration: input.duration,
+      createdAt: clampCreatedAt(input.createdAt, now).toISOString(), updatedAt: at, importedAt: at,
+      transcriptSegments: input.transcriptSegments.map(segment => ({ ...segment, id: importedSegmentId(id, segment.id) })).sort((a, b) => a.startMs - b.startMs),
+      recordingState: input.recordingState, generationState: input.generated ? "ready" : "idle", transcriptRevision, generatedRevision,
+    }
+    notes.set(id, note); owners.set(id, ownerId)
+    imports.set(id, { digest, importedAt: at, transcriptRevision, generatedRevision })
+    importedContexts.set(id, input.meeting ? { ...structuredClone(input.meeting), eventId: crypto.randomUUID() } : null)
+    return { outcome: "created", note: structuredClone(note) }
+  }
   const clone = <T>(value: T): T => structuredClone(value)
   const liveState = makeMemoryLiveRepository({ notes, chunks, clock })
   const repository: NotesRepositoryService = {
@@ -139,7 +181,17 @@ export function makeMemoryRepository(seed: ReadonlyArray<NoteDTO> = [], clock: (
       ownsShare: id => Effect.sync(() => [...shares.values()].some(s => s.metadata.id === id && owners.get(s.metadata.noteId) === userId)),
       listNotes: () => Effect.map(repository.listNotes(), rows => rows.filter(n => owners.get(n.id) === userId)),
       createNote: input => Effect.map(repository.createNote(input), created => { owners.set(created.id, userId); return created }),
+      importNote: command => Effect.sync(() => importFor(userId, command)),
     }),
+    importNote: command => Effect.sync(() => importFor(BOOTSTRAP_OWNER_ID, command)),
+    takeImportedContext: noteId => { const context = importedContexts.get(noteId); importedContexts.delete(noteId); return context },
+    deleteNoteIf: (id, preconditions) => Effect.flatMap(Effect.sync(() => {
+      const note = notes.get(id); if (!note) return "missing" as const
+      const parts = [...chunks.values()].filter(chunk => chunk.noteId === id)
+      return note.recordingState === "recording" || parts.some(chunk => chunk.state !== "ready")
+        || preconditions.stamp && !matchesStamp(preconditions.stamp, { updatedAt: Date.parse(note.updatedAt), transcriptRevision: note.transcriptRevision, generatedRevision: note.generatedRevision })
+        || preconditions.chunks !== undefined && preconditions.chunks !== parts.length ? "conflict" as const : "deleted" as const
+    }), decision => decision === "deleted" ? Effect.map(repository.deleteNote(id), () => decision) : Effect.succeed(decision)),
     recording: (id, command) => Effect.sync(() => {
       const n = notes.get(id)
       if (!n || (command === "start" && n.recordingState === "stopped") || (command === "resume" && n.recordingState === "idle")) return null
@@ -215,6 +267,7 @@ export function makeMemoryRepository(seed: ReadonlyArray<NoteDTO> = [], clock: (
       for (const [chunkId, chunk] of chunks) if (chunk.noteId === id) chunks.delete(chunkId)
       for (const [hash, share] of shares) if (share.metadata.noteId === id) shares.delete(hash)
       liveState.forget(id)
+      imports.delete(id); importedContexts.delete(id)
       return notes.delete(id)
     }),
     listShares: (noteId) => Effect.sync(() => clone([...shares.values()].filter((share) => share.metadata.noteId === noteId).map((share) => share.metadata))),

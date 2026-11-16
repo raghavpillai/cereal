@@ -83,6 +83,8 @@ final class Recorder {
 
     /// The title of the note this recorder records, for its Live Activity.
     @ObservationIgnored private var activityTitle = ""
+    /// The account of the note this recorder records. Nil for the local demo.
+    @ObservationIgnored var activityAccount: RecordingActivityAccount?
 
     /// The note being recorded has a new title. Its Live Activity follows.
     func setActivityTitle(_ title: String) {
@@ -153,7 +155,7 @@ final class Recorder {
             // Simulated timing is never advertised as genuine system recording.
             // A later part of the same recording does not bring the title again.
             if !title.isEmpty { activityTitle = title }
-            if advertisesCapture { activity.start(noteID: noteID, title: activityTitle, elapsed: elapsed) }
+            if advertisesCapture { activity.start(noteID: noteID, title: activityTitle, elapsed: elapsed, account: activityAccount) }
             startMetering()
         } catch {
             let continuous = backend is any ContinuousCaptureBackend
@@ -193,7 +195,7 @@ final class Recorder {
             }
             clock.resume(at: ProcessInfo.processInfo.systemUptime)
             state = .recording
-            if advertisesCapture, let noteID = activityNoteID { activity.start(noteID: noteID, title: activityTitle, elapsed: elapsed) }
+            if advertisesCapture, let noteID = activityNoteID { activity.start(noteID: noteID, title: activityTitle, elapsed: elapsed, account: activityAccount) }
             startMetering()
             onPauseChanged?(false)
         } catch {
@@ -305,7 +307,7 @@ final class Recorder {
             if advertisesCapture, state == .recording, let noteID = activityNoteID {
                 // Initial Activity.request can fail if server setup finishes after
                 // backgrounding. Retrying the indicator never restarts audio.
-                activity.start(noteID: noteID, title: activityTitle, elapsed: elapsed)
+                activity.start(noteID: noteID, title: activityTitle, elapsed: elapsed, account: activityAccount)
             }
         }
         observe(UIApplication.willTerminateNotification) { [weak self] _ in self?.stopSegment() }

@@ -27,6 +27,20 @@ final class StubInstance: @unchecked Sendable {
     private var recordingState = "idle"
     /// Chunks with these sequences stay "processing" until released.
     var heldSequences: Set<Int> = []
+    /// Sessions the server no longer accepts: every request with one is refused in the API's own words.
+    var refusedTokens: Set<String> = []
+    /// When set, what an upload, the list of chunks, or the note itself is answered with instead.
+    var uploadStatus: Int?
+    var chunksStatus: Int?
+    var noteStatus: Int?
+    func set(refused: Set<String>? = nil, upload: Int?? = nil, chunks: Int?? = nil, note: Int?? = nil) {
+        lock.withLock {
+            if let refused { refusedTokens = refused }
+            if let upload { uploadStatus = upload }
+            if let chunks { chunksStatus = chunks }
+            if let note { noteStatus = note }
+        }
+    }
 
     var allRequests: [Request] { lock.withLock { requests } }
     var allUploads: [Upload] { lock.withLock { uploads } }
@@ -56,6 +70,13 @@ final class StubInstance: @unchecked Sendable {
         let method = request.httpMethod ?? "GET"
         requests.append(Request(method: method, path: path, at: .now))
         func json(_ value: Any) -> (Int, Data) { (200, try! JSONSerialization.data(withJSONObject: value)) }
+        func refusal(_ status: Int) -> (Int, Data) { (status, Data(#"{"error":"\#(status == 401 ? "unauthorized" : "not_found")","message":"Stub"}"#.utf8)) }
+        let token = request.value(forHTTPHeaderField: "Authorization").map { String($0.dropFirst("Bearer ".count)) } ?? ""
+        if refusedTokens.contains(token) { return refusal(401) }
+        if path.hasSuffix("/api/auth/sign-out") { return json([String: Any]()) }
+        if let noteStatus, path.hasSuffix("/notes/\(noteID)") || path.hasSuffix("/notes/\(noteID)/recording") { return refusal(noteStatus) }
+        if let chunksStatus, path.hasSuffix("/audio/chunks") { return refusal(chunksStatus) }
+        if let uploadStatus, method == "PUT", path.contains("/audio/chunks/") { return refusal(uploadStatus) }
         if path.hasSuffix("/api/v1/session") {
             return json(["user": ["id": Self.principal, "name": "Test Owner", "email": "owner@example.test", "role": "owner", "createdAt": "2026-11-12T00:00:00Z"], "expiresAt": NSNull()])
         }
@@ -278,19 +299,20 @@ struct LiveSessionHarness {
     let server: ServerNotesModel
     let controller: ServerRecordingController
 
-    init(framesPerUtterance: Int = 20) async throws {
+    /// `controller`: a recorder that already exists, to give it a second account on another server.
+    init(framesPerUtterance: Int = 20, host: String = "example.test", controller existing: ServerRecordingController? = nil) async throws {
         live = ScriptedLiveServer(instance: instance, framesPerUtterance: framesPerUtterance)
         let key = StubInstanceProtocol.register(instance)
         let suite = "live-session-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
-        server = ServerNotesModel(settings: ConnectionSettingsStore(defaults: defaults, tokens: MemoryTokens()), makeAPI: { credentials in
+        server = ServerNotesModel(makeAPI: { credentials in
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = [StubInstanceProtocol.self]
             configuration.httpAdditionalHeaders = ["X-Stub-Instance": key]
             return MeetingNotesAPI(credentials: credentials, configuration: configuration)
         })
         let input = input, live = live
-        controller = ServerRecordingController(outboxRoot: root.appendingPathComponent("outbox"),
+        controller = existing ?? ServerRecordingController(outboxRoot: root.appendingPathComponent("outbox"),
             makeBackend: { EngineCaptureBackend(input: input) },
             makeLiveClient: { _, _, source, configuration in
                 // The session is replayed faster than real time, so the stream must not be held to real-time pacing.
@@ -300,9 +322,9 @@ struct LiveSessionHarness {
                 fast.endGrace = .milliseconds(500)
                 return LiveTranscriptClient(connector: live, source: source, configuration: fast)
             })
-        await server.connect(instance: "https://example.test", token: "unit-test-token")
+        await server.connect(instance: "https://\(host)", token: "unit-test-token")
         try #require(server.instance != nil)
-        await controller.attach(to: server)
+        if existing == nil { await controller.attach(to: server) }
     }
 
     func note() async throws -> NoteDTO { try await server.note(id: instance.noteID) }
@@ -451,6 +473,8 @@ struct LiveCaptureSessionTests {
             RailMetricsReader { NavigationStack { ServerCaptureView(noteID: noteID) } }
             TranscriptHost(noteID: noteID).frame(height: 320)
         }
+        // The screen is one account's, as it is wherever the app shows it.
+        .environment(\.account, harness.server.accountID)
         .environment(harness.server).environment(harness.controller).environment(router))
         window.isHidden = false
         defer { window.isHidden = true }
@@ -543,7 +567,7 @@ private struct TranscriptHost: View {
     @Environment(ServerRecordingController.self) private var recording
     var body: some View {
         let _ = PerfProbe.hit("Test.TranscriptHost.body")
-        if let live = recording.transcript(for: noteID) { LiveTranscriptList(live: live) } else { Color.clear }
+        if let live = recording.transcript(for: recording.ref(noteID)) { LiveTranscriptList(live: live) } else { Color.clear }
     }
 }
 

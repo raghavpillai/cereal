@@ -1,6 +1,7 @@
 import ActivityKit
 import Foundation
 import Testing
+import APIClient
 @testable import Cereal
 
 @MainActor private final class ActivityTestClock {
@@ -35,8 +36,10 @@ import Testing
     var requestedStaleDates: [Date] = []
     var requests = 0
     var activities: [any RecordingActivitySession] { sessions }
-    func request(noteID: UUID, state: RecordingActivityAttributes.ContentState, staleDate: Date, presentation: RecordingActivityAttributes.Presentation?) throws -> any RecordingActivitySession {
+    var requestedAccounts: [String?] = []
+    func request(noteID: UUID, accountID: String?, state: RecordingActivityAttributes.ContentState, staleDate: Date, presentation: RecordingActivityAttributes.Presentation?) throws -> any RecordingActivitySession {
         requests += 1
+        requestedAccounts.append(accountID)
         if failsRequest { throw CocoaError(.featureUnsupported) }
         let session = ActivityTestSession(noteID: noteID, state: state)
         session.isPreview = presentation == .preview
@@ -287,23 +290,105 @@ import Testing
             _ = try JSONEncoder().encode(state)
         }
     }
-    @Test func activeServerDeepLinkRequiresSameNonemptyAccountAndExistingNoteIdentity() throws {
-        let id = UUID(), url = RecordingActivityAttributes(noteID: id).recordingURL
-        #expect(RecordingActivityLinkPolicy.activeServerNoteID(url: url, activeNoteID: id.uuidString.lowercased(), recordingIdentity: "server|A", accountIdentity: "server|A") == id)
-        #expect(RecordingActivityLinkPolicy.activeServerNoteID(url: url, activeNoteID: id.uuidString, recordingIdentity: "server|A", accountIdentity: "server|B") == nil)
-        #expect(RecordingActivityLinkPolicy.activeServerNoteID(url: url, activeNoteID: id.uuidString, recordingIdentity: nil, accountIdentity: nil) == nil)
-        #expect(RecordingActivityLinkPolicy.activeServerNoteID(url: url, activeNoteID: id.uuidString, recordingIdentity: "", accountIdentity: "") == nil)
-        #expect(RecordingActivityLinkPolicy.activeServerNoteID(url: url, activeNoteID: UUID().uuidString, recordingIdentity: "server|A", accountIdentity: "server|A") == nil)
-        #expect(RecordingActivityLinkPolicy.activeServerNoteID(url: url, activeNoteID: id.uuidString, recordingIdentity: "other-server|A", accountIdentity: "server|A") == nil)
+    // MARK: Link policy vectors
+
+    private static let accountA = AccountID(address: "https://a.example.test", userID: "00000000-0000-4000-8000-00000000000a")
+    private static let accountB = AccountID(address: "https://b.example.test", userID: "00000000-0000-4000-8000-00000000000b")
+
+    @Test func theRecordingLinkCarriesItsAccountAndNothingElse() throws {
+        let id = UUID()
+        // From before accounts, and for the local demo: the note alone.
+        let old = RecordingActivityAttributes(noteID: id).recordingURL
+        #expect(old.absoluteString == "cereal://recording/\(id.uuidString)")
+        #expect(RecordingActivityLinkPolicy.link(old) == .init(noteID: id, account: nil))
+        // With an account: exactly one parameter, `a`, of 64 hex characters.
+        let new = RecordingActivityAttributes(noteID: id, accountID: Self.accountA.raw).recordingURL
+        #expect(new.absoluteString == "cereal://recording/\(id.uuidString)?a=\(Self.accountA.raw)")
+        #expect(RecordingActivityLinkPolicy.link(new) == .init(noteID: id, account: Self.accountA))
+        // Something that is not an account id never reaches the link.
+        for bad in ["", "sam@example.test", "../../x", String(repeating: "A", count: 64), String(repeating: "a", count: 63)] {
+            #expect(RecordingActivityAttributes(noteID: id, accountID: bad).recordingURL == old, "\(bad)")
+        }
+        // An activity started before accounts existed still decodes, and one started now encodes its account.
+        let legacy = try JSONDecoder().decode(RecordingActivityAttributes.self, from: Data(#"{"noteID":"\#(id.uuidString)"}"#.utf8))
+        #expect(legacy.accountID == nil && legacy.recordingURL == old)
+        let state = try JSONDecoder().decode(RecordingActivityAttributes.ContentState.self,
+            from: Data(#"{"phase":"recording","elapsed":3,"timerAnchor":0,"updatedAt":0}"#.utf8))
+        #expect(state.accountLabel == nil && state.accountHost == nil && state.title == nil)
+        let round = try JSONDecoder().decode(RecordingActivityAttributes.self, from: JSONEncoder().encode(RecordingActivityAttributes(noteID: id, accountID: Self.accountA.raw)))
+        #expect(round.accountID == Self.accountA.raw)
     }
 
-    @Test func activeServerDeepLinkRejectsUntrustedRouteOrEmbeddedSecrets() throws {
-        let id = UUID()
-        // The last one is well formed but uses the scheme of builds before the production identity.
-        for raw in ["https://recording/\(id)", "cereal://other/\(id)", "cereal://recording/extra/\(id)", "cereal://recording/\(id)?token=synthetic", "cereal://user@recording/\(id)", "cereal://recording/\(id)#other", "minutes://recording/\(id)"] {
-            let url = try #require(URL(string: raw))
-            #expect(RecordingActivityLinkPolicy.activeServerNoteID(url: url, activeNoteID: id.uuidString, recordingIdentity: "server|A", accountIdentity: "server|A") == nil)
+    @Test func aRecordingLinkOpensTheRunningRecordingOrTheNoteInItsOwnAccount() throws {
+        let id = UUID(), note = id.uuidString.lowercased()
+        let a = Self.accountA, b = Self.accountB
+        let active = NoteRef(account: a, id: note)
+        func target(_ text: String, active: NoteRef? = nil, accounts: [AccountID] = [a, b], ledger: [AccountID: Set<String>] = [:]) throws -> RecordingActivityLinkPolicy.Target {
+            let url = try #require(URL(string: text))
+            let link = try #require(RecordingActivityLinkPolicy.link(url))
+            return RecordingActivityLinkPolicy.target(link, active: active, accounts: accounts, ledger: { ledger[$0] ?? [] })
         }
+        let bare = "cereal://recording/\(id.uuidString)"
+        // The recording in progress: its note, when the link names its account or none.
+        #expect(try target(bare, active: active) == .note(active))
+        #expect(try target(bare + "?a=\(a.raw)", active: active) == .note(active))
+        // The stored id may be in either case.
+        #expect(try target(bare, active: NoteRef(account: a, id: id.uuidString)) == .note(NoteRef(account: a, id: id.uuidString)))
+        // The same note id in another account is another note: it opens there, not in the recording's account.
+        #expect(try target(bare + "?a=\(b.raw)", active: active) == .note(NoteRef(account: b, id: note)))
+        // No recording, or a recording of another note: the note in the account the link names, if it is here.
+        #expect(try target(bare + "?a=\(b.raw)") == .note(NoteRef(account: b, id: note)))
+        #expect(try target(bare + "?a=\(b.raw)", active: NoteRef(account: a, id: UUID().uuidString.lowercased())) == .note(NoteRef(account: b, id: note)))
+        // An account that is no longer here: Home. A link never leads into another account.
+        #expect(try target(bare + "?a=\(b.raw)", accounts: [a]) == .home)
+        #expect(try target(bare + "?a=\(b.raw)", active: active, accounts: [a]) == .home)
+        // A link from before accounts is looked up in each account's capture ledger, in the person's order.
+        #expect(try target(bare, ledger: [b: [note]]) == .note(NoteRef(account: b, id: note)))
+        #expect(try target(bare, ledger: [a: [note], b: [note]]) == .note(NoteRef(account: a, id: note)))
+        #expect(try target(bare, ledger: [b: [UUID().uuidString.lowercased()]]) == .home)
+        #expect(try target(bare, accounts: []) == .home)
+    }
+
+    @Test func aRecordingLinkWithAnythingElseInItIsRefused() throws {
+        let id = UUID(), a = Self.accountA.raw
+        // The last one is well formed but uses the scheme of builds before the production identity.
+        for raw in ["https://recording/\(id)", "cereal://other/\(id)", "cereal://recording/extra/\(id)", "cereal://recording/\(id)?token=synthetic",
+                    "cereal://user@recording/\(id)", "cereal://recording/\(id)#other", "minutes://recording/\(id)", "cereal://recording/not-a-note",
+                    "cereal://recording/\(id)?a=", "cereal://recording/\(id)?a=\(a.dropLast())", "cereal://recording/\(id)?a=\(a.uppercased())",
+                    "cereal://recording/\(id)?a=\(a)&a=\(a)", "cereal://recording/\(id)?a=\(a)&token=synthetic", "cereal://recording/\(id)?b=\(a)",
+                    "cereal://recording/\(id)?a=\(a)#x", "cereal://recording:80/\(id)?a=\(a)", "cereal://recording/\(id)?a=%61\(a.dropFirst())",
+                    "cereal://recording/\(id)?"] {
+            let url = try #require(URL(string: raw))
+            #expect(RecordingActivityLinkPolicy.link(url) == nil, "\(raw)")
+        }
+    }
+
+    @Test func theActivityNamesTheAccountOnlyWhenThereAreSeveral() async throws {
+        let backend = ActivityTestBackend(), clock = ActivityTestClock()
+        let controller = RecordingLiveActivityController(backend: backend, now: { clock.date }, uptime: { clock.uptime })
+        let note = UUID()
+        // One account: the link carries it, and nothing is shown about it.
+        controller.start(noteID: note, title: "Planning", elapsed: 0, account: RecordingActivityAccount(id: Self.accountA.raw))
+        #expect(backend.requestedAccounts == [Self.accountA.raw])
+        #expect(backend.sessions.last?.state.accountLabel == nil && backend.sessions.last?.state.accountHost == nil)
+        // A new part of the same recording does not know the account and must not blank it.
+        controller.start(noteID: note, title: "", elapsed: 30)
+        controller.pause(elapsed: 31)
+        await controller.finishPendingUpdates()
+        #expect(backend.requests == 1)
+        controller.end(elapsed: 31)
+        await controller.finishPendingUpdates()
+        // Several accounts: the label and the host travel with the state. Never an email or a token.
+        controller.start(noteID: UUID(), title: "Planning", elapsed: 0,
+                         account: RecordingActivityAccount(id: Self.accountB.raw, label: "Personal", host: "cereal.example.test"))
+        let state = try #require(backend.sessions.last?.state)
+        #expect(state.accountLabel == "Personal" && state.accountHost == "cereal.example.test")
+        let encoded = String(decoding: try JSONEncoder().encode(state), as: UTF8.self)
+        #expect(!encoded.contains("@") && !encoded.lowercased().contains("token"))
+        // The local demo has no account.
+        controller.end()
+        controller.start(noteID: UUID(), title: "", elapsed: 0)
+        #expect(backend.requestedAccounts.last == .some(nil))
     }
 
     @Test func previewOnlyCleanupLeavesActualCaptureActivityUntouched() async throws {

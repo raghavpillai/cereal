@@ -20,7 +20,9 @@ export interface StoredSettings { instanceLogo:string|null;chatModels:ReadonlyAr
 /** `bucket` and `accessKeyId` are empty strings when not entered yet. */
 export interface StoredS3Settings {endpoint:string|null;region:string;bucket:string;prefix:string;forcePathStyle:boolean;accessKeyId:string}
 export type StoredCalendar = { -readonly [K in keyof CalendarDTO]: CalendarDTO[K] } & { encryptedURL:string }
-export interface StoredCalendarEvent { id:string;calendarId:string;sourceKey:string;meetingKey:string;title:string;startAt:string;endAt:string;allDay:boolean;startDate:string;endDate:string;timeZone:string|null;location:string|null;meetingUrl:string|null }
+export interface StoredCalendarEvent { id:string;calendarId:string;sourceKey:string;meetingKey:string;title:string;startAt:string;endAt:string;allDay:boolean;startDate:string;endDate:string;timeZone:string|null;location:string|null;meetingUrl:string|null
+ /** The iCalendar UID, the occurrence ("single", "date:…", "instant:…") and the number of other invitees. Absent or null on an event stored before they existed. */
+ meetingUid?:string|null;occurrence?:string|null;attendeeCount?:number|null }
 export interface JoinedCalendarEvent extends StoredCalendarEvent {calendarName:string;color:string;noteId:string|null}
 export class CalendarLimitError extends Error {}
 export interface CalendarStore {

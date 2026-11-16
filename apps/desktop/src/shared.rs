@@ -3,8 +3,8 @@
 //! account on its own server, so the session goes to that server and to no
 //! other; for a note anywhere else nothing is fetched at all.
 use crate::{
-    account::Credentials,
-    fetch::{Failure, Reply, Request},
+    accounts::{Account, AccountClient},
+    fetch::{Failure, Reply},
     link::{AppLink, SharedNoteLink},
 };
 use chrono::{DateTime, NaiveDate, Utc};
@@ -93,33 +93,29 @@ impl SharedNoteError {
     }
 }
 
-/// The session to send with a shared note's request: the one for the server
-/// the link is on, and only that one. `None` means nothing may be asked.
-pub fn bearer_for<'a>(link: &SharedNoteLink, credentials: Option<&'a Credentials>) -> Option<&'a str> {
-    credentials
-        .filter(|credentials| !credentials.token.is_empty() && link.origin.is_server(&credentials.url))
-        .map(|credentials| credentials.token.as_str())
+/// The account a shared note is read with: the first, in account order, on
+/// the server the link is on (and with no path in its address), whose
+/// session may be used. `None` means nothing may be asked of anyone.
+pub fn reader_for<'a>(link: &SharedNoteLink, accounts: &'a [Account]) -> Option<&'a Account> {
+    accounts
+        .iter()
+        .find(|account| link.origin.is_server(&account.url) && account.shown() && account.is_ready())
 }
 
-/// Read a shared snapshot with the session of the server it is on. Without
-/// such a session no request is made.
-pub fn fetch(link: &SharedNoteLink, credentials: Option<&Credentials>) -> Result<SharedNote, SharedNoteError> {
-    let Some(bearer) = bearer_for(link, credentials) else {
+/// Read a shared snapshot with the client of an account on the server it
+/// is on. The client builds the address from its own base, so the session
+/// cannot go anywhere else; without such a client no request is made.
+pub fn fetch(link: &SharedNoteLink, client: Option<&AccountClient>) -> Result<SharedNote, SharedNoteError> {
+    let Some(client) = client.filter(|client| link.origin.is_server(&client.url)) else {
         return Err(SharedNoteError::SignInRequired);
     };
-    let url = link.api_url();
-    let reply = Request {
-        method: "GET",
-        url: &url,
-        bearer: Some(bearer),
-        body: None,
-    }
-    .send(MAXIMUM_BYTES)
-    .map_err(|failure| match failure {
-        Failure::TooLarge => SharedNoteError::TooLarge,
-        Failure::TimedOut => SharedNoteError::TimedOut,
-        Failure::Unreachable | Failure::Transport => SharedNoteError::Unreachable,
-    })?;
+    let reply = client
+        .fetch(&format!("/api/v1/shared/{}", link.token), MAXIMUM_BYTES)
+        .map_err(|failure| match failure {
+            Failure::TooLarge => SharedNoteError::TooLarge,
+            Failure::TimedOut => SharedNoteError::TimedOut,
+            Failure::Unreachable | Failure::Transport => SharedNoteError::Unreachable,
+        })?;
     read(&reply)
 }
 
@@ -318,11 +314,19 @@ mod tests {
         }
     }
 
-    fn credentials(url: &str) -> Credentials {
-        Credentials {
-            url: url.into(),
-            token: "session-token-for-the-signed-in-server".into(),
-        }
+    const SESSION: &str = "session-token-for-the-signed-in-server";
+
+    /// A verified, Ready account at `url`.
+    fn account(url: &str) -> Account {
+        let mut account = Account::new(
+            crate::accounts::AccountId::of(url, "00000000-0000-4000-8000-000000000001"),
+            1,
+            url.into(),
+        );
+        account.user_id = Some("00000000-0000-4000-8000-000000000001".into());
+        account.state = crate::accounts::AccountState::Ready;
+        account.verified_this_launch = true;
+        account
     }
 
     fn reply(status: u16, body: &str) -> Reply {
@@ -334,50 +338,67 @@ mod tests {
 
     #[test]
     fn the_session_goes_to_the_server_the_app_is_signed_in_to_and_no_other() {
-        let on_server = link(&format!("http://127.0.0.1:3000/s/{TOKEN}"));
-        let signed_in = credentials("http://127.0.0.1:3000");
+        use crate::accounts::client::testing::{Fake, json};
+        // A server that would hand anything to anyone who asked.
+        let server = Fake::start(|_| json(200, "{}"));
+        let on_server = link(&format!("{}/s/{TOKEN}", server.url));
+        let signed_in = [account(&server.url)];
         assert_eq!(
-            bearer_for(&on_server, Some(&signed_in)),
-            Some("session-token-for-the-signed-in-server")
+            reader_for(&on_server, &signed_in).map(|account| account.url.as_str()),
+            Some(server.url.as_str())
         );
+        let client = AccountClient::for_test(&server.url, SESSION, None);
+        let port = server.url.rsplit(':').next().unwrap().to_owned();
         for elsewhere in [
-            format!("http://localhost:3000/s/{TOKEN}"),
-            format!("http://127.0.0.1:3001/s/{TOKEN}"),
-            format!("https://127.0.0.1:3000/s/{TOKEN}"),
+            format!("http://localhost:{port}/s/{TOKEN}"),
+            format!("http://127.0.0.1:1/s/{TOKEN}"),
+            format!("https://127.0.0.1:{port}/s/{TOKEN}"),
             format!("https://notes.example.com/s/{TOKEN}"),
             format!("https://127.0.0.1.evil.example/s/{TOKEN}"),
         ] {
             let elsewhere = link(&elsewhere);
-            assert_eq!(bearer_for(&elsewhere, Some(&signed_in)), None, "{elsewhere:?}");
-            // And so nothing is asked of that server: no request is made.
+            assert!(reader_for(&elsewhere, &signed_in).is_none(), "{elsewhere:?}");
+            // And so nothing is asked of that server: no request is made,
+            // even if a client for another server is handed over.
             assert_eq!(
-                fetch(&elsewhere, Some(&signed_in)),
+                fetch(&elsewhere, Some(&client)),
                 Err(SharedNoteError::SignInRequired)
             );
         }
         // Signed out, or in local mode.
-        assert_eq!(bearer_for(&on_server, None), None);
+        assert!(reader_for(&on_server, &[]).is_none());
         assert_eq!(fetch(&on_server, None), Err(SharedNoteError::SignInRequired));
-        let empty = Credentials {
-            url: "http://127.0.0.1:3000".into(),
-            token: String::new(),
-        };
-        assert_eq!(bearer_for(&on_server, Some(&empty)), None);
+        // An account whose session has ended, or was never verified.
+        let mut ended = account(&server.url);
+        ended.state = crate::accounts::AccountState::NeedsSignIn;
+        assert!(reader_for(&on_server, &[ended]).is_none());
+        let mut unverified = account(&server.url);
+        unverified.verified_this_launch = false;
+        assert!(reader_for(&on_server, &[unverified]).is_none());
         // A server kept under a path is not the origin a link names.
+        let under_path = format!("{}/base", server.url);
+        assert!(reader_for(&on_server, &[account(&under_path)]).is_none());
         assert_eq!(
-            bearer_for(&on_server, Some(&credentials("http://127.0.0.1:3000/base"))),
-            None
+            fetch(&on_server, Some(&AccountClient::for_test(&under_path, SESSION, None))),
+            Err(SharedNoteError::SignInRequired)
         );
+        // Nothing above reached the server.
+        assert!(server.requests().is_empty());
+        // The one request that is allowed goes to the link's own server,
+        // to the shared-note path, with that account's session.
+        let _ = fetch(&on_server, Some(&client));
+        let seen = server.requests();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].path, format!("/api/v1/shared/{TOKEN}"));
+        assert_eq!(seen[0].bearer().as_deref(), Some(SESSION));
     }
 
     #[test]
     fn a_session_on_a_plain_http_server_goes_to_that_origin_only() {
-        let private = credentials("http://10.30.1.77:3000");
+        let private = [account("http://10.30.1.77:3000")];
         let on_server = link(&format!("http://10.30.1.77:3000/s/{TOKEN}"));
-        assert_eq!(
-            bearer_for(&on_server, Some(&private)),
-            Some("session-token-for-the-signed-in-server")
-        );
+        assert!(reader_for(&on_server, &private).is_some());
+        let client = AccountClient::for_test("http://10.30.1.77:3000", SESSION, None);
         // The same host over HTTPS, on another port, at the next address or
         // worn as part of another name is a different server.
         for elsewhere in [
@@ -389,14 +410,20 @@ mod tests {
             format!("http://evil.example/s/{TOKEN}"),
         ] {
             let elsewhere = link(&elsewhere);
-            assert_eq!(bearer_for(&elsewhere, Some(&private)), None, "{elsewhere:?}");
-            assert_eq!(fetch(&elsewhere, Some(&private)), Err(SharedNoteError::SignInRequired));
+            assert!(reader_for(&elsewhere, &private).is_none(), "{elsewhere:?}");
+            assert_eq!(fetch(&elsewhere, Some(&client)), Err(SharedNoteError::SignInRequired));
         }
         // A session on an HTTPS server never follows a link down to HTTP.
-        let secure = credentials("https://notes.example.com");
+        let secure = [account("https://notes.example.com")];
         let downgraded = link(&format!("http://notes.example.com/s/{TOKEN}"));
-        assert_eq!(bearer_for(&downgraded, Some(&secure)), None);
-        assert_eq!(fetch(&downgraded, Some(&secure)), Err(SharedNoteError::SignInRequired));
+        assert!(reader_for(&downgraded, &secure).is_none());
+        assert_eq!(
+            fetch(
+                &downgraded,
+                Some(&AccountClient::for_test("https://notes.example.com", SESSION, None))
+            ),
+            Err(SharedNoteError::SignInRequired)
+        );
     }
 
     #[test]

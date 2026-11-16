@@ -121,7 +121,8 @@ pub fn home_rows(notes: &[&Note]) -> Vec<HomeRow> {
                 note.title.clone().into()
             },
             time: note.time.clone().into(),
-            date: note.timeline_date(),
+            // The day a row is listed under is never later than tomorrow.
+            date: note.sort_day(),
         })
         .collect()
 }

@@ -277,7 +277,7 @@ impl Cereal {
             cx.notify();
             return;
         }
-        let server = crate::account::server_origin().filter(|_| crate::server::enabled());
+        let server = crate::accounts::update_server().filter(|_| crate::server::enabled());
         let Some(server) = server else {
             self.end_update(Err(Problem::NotConnected), cx);
             return;
@@ -343,7 +343,7 @@ impl Cereal {
     }
 
     fn download_update(&mut self, offer: Offer, cx: &mut Context<Self>) {
-        let Some(server) = crate::account::server_origin().filter(|_| crate::server::enabled())
+        let Some(server) = crate::accounts::update_server().filter(|_| crate::server::enabled())
         else {
             self.end_update(Err(Problem::NotConnected), cx);
             return;

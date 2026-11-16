@@ -201,8 +201,13 @@ pub struct MeetingPreferences {
     pub scheduled_notifications: bool,
     /// The capsule that floats at the screen's edge while recording.
     pub live_indicator: bool,
-    /// Shared calendars left out of "Coming up" and the menu on this Mac.
+    /// Calendars left out of "Coming up" and the menu on this Mac, as
+    /// `"<AccountId>/<calendarId>"`. (Entries from before accounts are bare
+    /// calendar ids; they get the migrated account's id.)
     pub hidden_calendars: Vec<String>,
+    /// The scheme of the reminder identifiers registered with macOS (see
+    /// `menubar::REMINDER_SCHEME`). 0 before reminders carried their account.
+    pub reminder_scheme: u32,
 }
 impl Default for MeetingPreferences {
     fn default() -> Self {
@@ -212,9 +217,20 @@ impl Default for MeetingPreferences {
             scheduled_notifications: false,
             live_indicator: true,
             hidden_calendars: Vec::new(),
+            reminder_scheme: 0,
         }
     }
 }
+/// What this Mac keeps about an account that is erased: the calendars of it
+/// hidden here. (Meeting choices and dismissed pairs come with several
+/// accounts.)
+pub fn forget_account(preferences: &mut MeetingPreferences, account: &crate::accounts::AccountId) {
+    let prefix = format!("{}/", account.as_str());
+    preferences
+        .hidden_calendars
+        .retain(|hidden| !hidden.starts_with(&prefix));
+}
+
 static MEETING: OnceLock<Mutex<MeetingPreferences>> = OnceLock::new();
 static MEETING_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 fn meeting_path() -> Result<PathBuf, String> {

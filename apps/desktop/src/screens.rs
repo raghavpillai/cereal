@@ -39,7 +39,8 @@ impl SettingsTab {
     pub fn label(self) -> &'static str {
         match self {
             SettingsTab::Preferences => "Preferences",
-            SettingsTab::Profile => "Profile",
+            // An account is one user on one server; this page is about them.
+            SettingsTab::Profile => "Accounts",
             SettingsTab::Calendar => "Calendar",
             SettingsTab::Notifications => "Notifications",
             SettingsTab::About => "About",
@@ -357,7 +358,7 @@ impl Cereal {
             .flex_col()
             .flex_shrink_0();
         if empty {
-            let greeting = crate::account::session()
+            let greeting = crate::accounts::default_session()
                 .map(|session| {
                     session
                         .user
@@ -759,7 +760,7 @@ impl Cereal {
         let t = self.theme();
         let glide = self.stage.glide("sidebar");
         let connected = crate::server::enabled();
-        let session = crate::account::session().filter(|_| connected);
+        let session = crate::accounts::default_session().filter(|_| connected);
         let name = self.workspace_name();
         let detail = match &session {
             Some(session) => session.user.email.clone(),
@@ -864,7 +865,7 @@ impl Cereal {
                             .child(row_feedback(t, 8.))
                             .child(icon("share", 16., t.danger))
                             .child("Sign out")
-                            .reach().on_click(cx.listener(|this, _, _, cx| this.sign_out_account(cx))),
+                            .reach().on_click(cx.listener(|this, _, _, cx| this.ask_sign_out_default(cx))),
                     ),
                 )
             })
@@ -958,7 +959,7 @@ impl Cereal {
                     );
             }
             SettingsTab::Profile => {
-                let session = crate::account::session().filter(|_| connected);
+                let session = crate::accounts::default_session().filter(|_| connected);
                 let (title, detail) = match &session {
                     Some(session) => (
                         session.user.name.clone(),
@@ -1027,8 +1028,34 @@ impl Cereal {
                                     }),
                                 ),
                             ),
+                        )
+                        // Erasing is its own, explicit action; signing out
+                        // keeps everything on this Mac.
+                        .when_some(
+                            crate::accounts::default_account().filter(|_| connected),
+                            |card, account| {
+                                card.child(
+                                    settings_row(
+                                        "trash",
+                                        "Remove account and erase its data",
+                                        format!(
+                                            "Signs out of {} and deletes what is saved for it on this Mac. The notes on the server are not affected.",
+                                            account.host()
+                                        ),
+                                        t,
+                                    )
+                                    .child(
+                                        pill("settings-remove-account", "Remove…", "", t).on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.ask_erase_account(account.id.clone(), cx)
+                                            }),
+                                        ),
+                                    ),
+                                )
+                            },
                         ),
                 );
+                column = self.saved_data_sections(column, cx);
             }
             SettingsTab::Calendar => {
                 column = column
@@ -1232,11 +1259,13 @@ impl Cereal {
             .reach().on_click(cx.listener(move |this, _, _, cx| {
                 match setting {
                     SettingToggle::DarkMode => {
-                        this.workspace.settings.dark_mode = !this.workspace.settings.dark_mode
+                        this.workspace.settings.dark_mode = !this.workspace.settings.dark_mode;
+                        this.workspace.settings_changed();
                     }
                     SettingToggle::ShowUpcoming => {
                         this.workspace.settings.show_upcoming =
-                            !this.workspace.settings.show_upcoming
+                            !this.workspace.settings.show_upcoming;
+                        this.workspace.settings_changed();
                     }
                     SettingToggle::MenuBarEvents => this.set_menu_bar_events(!enabled, cx),
                     SettingToggle::EventsWithoutParticipants => {
@@ -1495,25 +1524,33 @@ impl Cereal {
 
     fn render_trash_screen(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme();
-        // Only what a Trash row shows is copied: its id, title and date.
+        // Only what a Trash row shows is copied: its id, title, date and
+        // whether its server said it is gone.
         let notes: Vec<_> = self
             .workspace
             .notes
             .iter()
-            .filter(|note| note.trashed)
-            .map(|note| (note.id, note.title.clone(), note.date.clone()))
+            .filter(|note| note.trashed && !self.workspace.is_hidden(note))
+            .map(|note| {
+                (
+                    note.id,
+                    note.title.clone(),
+                    note.date.clone(),
+                    note.server_missing_since.is_some(),
+                )
+            })
             .collect();
         crate::motion::stats::copied(
             notes
                 .iter()
-                .map(|(_, title, date)| title.len() + date.len())
+                .map(|(_, title, date, _)| title.len() + date.len())
                 .sum(),
         );
         let empty = notes.is_empty();
         let scroll = crate::lazy::scroll("trash");
         let keys: Vec<u64> = notes
             .iter()
-            .map(|(id, title, _)| crate::lazy::key(("trashed", id, title)))
+            .map(|(id, title, _, gone)| crate::lazy::key(("trashed", id, title, gone)))
             .collect();
         screen_scroller("trash-screen")
             .track_scroll(&scroll)
@@ -1556,7 +1593,13 @@ impl Cereal {
                             &scroll,
                             window,
                             |index| {
-                                let (id, title, date) = notes[index].clone();
+                                let (id, title, date, gone) = notes[index].clone();
+                                // A note its own server no longer has says so.
+                                let date = if gone {
+                                    format!("{date} · {DELETED_ON_SERVER}")
+                                } else {
+                                    date
+                                };
                                 div()
                                     .p(px(14.))
                                     .flex()
@@ -1589,12 +1632,7 @@ impl Cereal {
                                     .child(
                                         pill(("restore-note", id), "Restore", "arrow-left", t)
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                if let Some(note) = this.workspace.note_mut(id) {
-                                                    note.trashed = false;
-                                                }
-                                                if this.persist(cx) {
-                                                    this.show_toast("Note restored", cx);
-                                                }
+                                                this.restore_from_trash(id, cx)
                                             })),
                                     )
                                     .into_any_element()
@@ -1603,6 +1641,574 @@ impl Cereal {
                     }),
             )
             .into_any_element()
+    }
+}
+
+/// What a note in Trash says when its own server no longer has it.
+pub const DELETED_ON_SERVER: &str = "Deleted on the server";
+
+/// A sheet about an account. What it says is decided here, in one place,
+/// from what is really on this Mac.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AccountSheet {
+    /// Sign out: the session ends; everything on this Mac stays.
+    SignOut {
+        account: crate::accounts::AccountId,
+        host: String,
+        counts: crate::accounts::saved::Counts,
+    },
+    /// Remove an account and erase its data from this Mac.
+    Erase {
+        account: crate::accounts::AccountId,
+        host: String,
+        counts: crate::accounts::saved::Counts,
+    },
+    /// Erase data that no signed-in account owns: a signed-out account's
+    /// (`host` from its own file) or older saved data (`host` is `None`).
+    EraseSaved {
+        id: crate::accounts::AccountId,
+        host: Option<String>,
+        counts: crate::accounts::saved::Counts,
+        bytes: u64,
+    },
+    /// Sign in to an account that was signed out of. Its address was read
+    /// from a plain file on this Mac, so it is shown in full beside the
+    /// hosts already signed in to, and compared with them.
+    SignIn {
+        url: String,
+        hosts: crate::accounts::skeleton::HostSheet,
+    },
+    /// Restore a note its server deleted: it is created there again.
+    Restore { note: u64, host: String },
+}
+
+/// How a sheet's button looks and what it means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SheetAction {
+    Cancel,
+    /// Leads to the erase sheet instead of signing out.
+    EraseInstead,
+    SignOut,
+    Erase,
+    Continue,
+    Restore,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SheetText {
+    pub title: String,
+    pub body: String,
+    /// In the order they are drawn. The default (what Return does) is
+    /// `default`.
+    pub buttons: Vec<(String, SheetAction)>,
+    pub default: SheetAction,
+    /// A sentence drawn in the warning style above the buttons.
+    pub warning: Option<String>,
+}
+
+impl AccountSheet {
+    pub fn text(&self) -> SheetText {
+        let cancel = ("Cancel".to_owned(), SheetAction::Cancel);
+        match self {
+            Self::SignOut { host, counts, .. } => SheetText {
+                title: format!("Sign out of {host}?"),
+                body: format!(
+                    "{} stay on this Mac, and are here again when you sign back in.",
+                    counts.stays()
+                ),
+                buttons: vec![
+                    cancel,
+                    ("Remove and erase instead…".into(), SheetAction::EraseInstead),
+                    ("Sign out".into(), SheetAction::SignOut),
+                ],
+                default: SheetAction::SignOut,
+                warning: None,
+            },
+            Self::Erase { host, counts, .. } => SheetText {
+                title: format!("Remove {host} and erase its data from this Mac?"),
+                body: format!(
+                    "{}. The notes on {host} are not affected.",
+                    counts.goes()
+                ),
+                buttons: vec![cancel, (counts.erase_label(), SheetAction::Erase)],
+                default: SheetAction::Cancel,
+                warning: never_uploaded(counts),
+            },
+            Self::EraseSaved {
+                host,
+                counts,
+                bytes,
+                ..
+            } => SheetText {
+                title: match host {
+                    Some(host) => format!("Erase what is saved on this Mac for {host}?"),
+                    None => "Erase this older saved data?".into(),
+                },
+                body: format!(
+                    "{} ({}). {}",
+                    counts.goes(),
+                    crate::accounts::saved::size_label(*bytes),
+                    match host {
+                        Some(host) => format!("The notes on {host} are not affected."),
+                        None => "Notes on a server are not affected.".into(),
+                    }
+                ),
+                buttons: vec![cancel, (counts.erase_label(), SheetAction::Erase)],
+                default: SheetAction::Cancel,
+                warning: never_uploaded(counts),
+            },
+            Self::SignIn { hosts, .. } => {
+                let mut body = format!(
+                    "This address was saved on this Mac. Check that it is the server you mean: {}",
+                    hosts.host
+                );
+                if !hosts.existing.is_empty() {
+                    body.push_str(&format!(
+                        "\n\nYou are signed in to: {}",
+                        hosts.existing.join(", ")
+                    ));
+                }
+                SheetText {
+                    title: format!("Sign in to {}?", hosts.host),
+                    body,
+                    buttons: vec![cancel, ("Continue".into(), SheetAction::Continue)],
+                    // A look-alike of a server already in use: Cancel is
+                    // what Return does.
+                    default: if hosts.default_is_cancel() {
+                        SheetAction::Cancel
+                    } else {
+                        SheetAction::Continue
+                    },
+                    warning: hosts.resembles.as_ref().map(|other| {
+                        format!("{} looks like {other}, but it is a different server.", hosts.host)
+                    }),
+                }
+            }
+            Self::Restore { host, .. } => SheetText {
+                title: "Restore this note?".into(),
+                body: format!(
+                    "It was deleted on {host}. Restoring creates it there again; its recording on the server is gone."
+                ),
+                buttons: vec![cancel, ("Restore".into(), SheetAction::Restore)],
+                default: SheetAction::Restore,
+                warning: None,
+            },
+        }
+    }
+}
+
+fn never_uploaded(counts: &crate::accounts::saved::Counts) -> Option<String> {
+    match counts.never_uploaded {
+        0 => None,
+        1 => Some("1 recording was never uploaded: it exists only on this Mac.".into()),
+        n => Some(format!("{n} recordings were never uploaded: they exist only on this Mac.")),
+    }
+}
+
+impl Cereal {
+    /// What an account's notes hold on this Mac, for the sheets.
+    fn account_counts(&self, account: &crate::accounts::Account) -> crate::accounts::saved::Counts {
+        let chats = self
+            .chat_archives
+            .iter()
+            .filter(|chat| chat.account.as_ref() == Some(&account.id))
+            .count();
+        crate::accounts::saved::Counts::of_notes(self.workspace.notes_of(account.slot), chats)
+    }
+
+    fn open_account_sheet(&mut self, sheet: AccountSheet, cx: &mut Context<Self>) {
+        self.account_sheet = Some(sheet);
+        self.menu = Some(Menu::Account);
+        cx.notify();
+    }
+
+    /// "Sign out", wherever it was chosen: the sheet that says what stays.
+    pub fn ask_sign_out_default(&mut self, cx: &mut Context<Self>) {
+        let Some(account) = crate::accounts::default_account() else {
+            return;
+        };
+        self.ask_sign_out(account.id, cx);
+    }
+
+    pub fn ask_sign_out(&mut self, id: crate::accounts::AccountId, cx: &mut Context<Self>) {
+        let Some(account) = crate::accounts::get(&id) else {
+            return;
+        };
+        if let Some(blocked) = self.account_blocked(&account) {
+            self.show_toast(blocked.message(), cx);
+            return;
+        }
+        let counts = self.account_counts(&account);
+        self.open_account_sheet(
+            AccountSheet::SignOut {
+                host: account.host(),
+                account: id,
+                counts,
+            },
+            cx,
+        );
+    }
+
+    pub fn ask_erase_account(&mut self, id: crate::accounts::AccountId, cx: &mut Context<Self>) {
+        let Some(account) = crate::accounts::get(&id) else {
+            return;
+        };
+        if let Some(blocked) = self.account_blocked(&account) {
+            self.show_toast(blocked.message(), cx);
+            return;
+        }
+        let counts = self.account_counts(&account);
+        self.open_account_sheet(
+            AccountSheet::Erase {
+                host: account.host(),
+                account: id,
+                counts,
+            },
+            cx,
+        );
+    }
+
+    /// Restore a note from Trash. One its server deleted asks first: it
+    /// becomes a note of this Mac that is created there again.
+    pub fn restore_from_trash(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(note) = self.workspace.note(id) else {
+            return;
+        };
+        if note.server_missing_since.is_some() {
+            let host = note
+                .server_url
+                .as_deref()
+                .map(crate::accounts::host_of)
+                .unwrap_or_else(|| "the server".into());
+            self.open_account_sheet(AccountSheet::Restore { note: id, host }, cx);
+            return;
+        }
+        if let Some(note) = self.workspace.note_mut(id) {
+            note.trashed = false;
+        }
+        if self.persist(cx) {
+            self.show_toast("Note restored", cx);
+        }
+    }
+
+    /// The restore of a "Deleted on the server" note was confirmed: its
+    /// server id, address, mark and sidecar go, so the next save creates it
+    /// on the server again.
+    pub(crate) fn restore_deleted_note(&mut self, id: u64, cx: &mut Context<Self>) {
+        let recordings = crate::accounts::handle::slot_of(id)
+            .and_then(|slot| self.workspace.slots.get(&slot))
+            .map(|slot| slot.recordings.clone());
+        let Some(note) = self.workspace.note_mut(id) else {
+            return;
+        };
+        if let Some(url) = crate::server::detach_from_server(note)
+            && let Some(recordings) = recordings
+        {
+            let _ = std::fs::remove_file(crate::server::association_file(&recordings, &url, id));
+        }
+        self.persist(cx);
+        self.show_toast("Note restored", cx);
+        self.server_action(id, crate::server::Action::Save, cx);
+    }
+
+    /// Run what a sheet's button means.
+    fn account_sheet_chosen(&mut self, action: SheetAction, window: &mut Window, cx: &mut Context<Self>) {
+        let sheet = self.account_sheet.take();
+        self.menu = None;
+        self.focus.focus(window);
+        match (sheet, action) {
+            (Some(AccountSheet::SignOut { account, .. }), SheetAction::SignOut) => {
+                self.sign_out_account(account, cx)
+            }
+            (Some(AccountSheet::SignOut { account, .. }), SheetAction::EraseInstead) => {
+                self.ask_erase_account(account, cx)
+            }
+            (Some(AccountSheet::Erase { account, .. }), SheetAction::Erase) => {
+                self.erase_account(account, cx)
+            }
+            (Some(AccountSheet::EraseSaved { id, .. }), SheetAction::Erase) => {
+                self.erase_saved_data(id, cx)
+            }
+            (Some(AccountSheet::SignIn { url, .. }), SheetAction::Continue) => {
+                self.account
+                    .update(cx, |form, cx| form.sign_in_to(url, cx));
+                self.navigate(Screen::Account, cx);
+                // Local mode has no gate to the form: go there directly.
+                self.screen = Screen::Account;
+            }
+            (Some(AccountSheet::Restore { note, .. }), SheetAction::Restore) => {
+                self.restore_deleted_note(note, cx)
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    /// The buttons of an account sheet, in the dialog's own button row.
+    pub(crate) fn account_sheet_actions(&self, sheet: &SheetText, cx: &mut Context<Self>) -> Div {
+        let t = self.theme();
+        let mut row = div()
+            .mt(px(8.))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_end()
+            .gap(px(8.));
+        // The default is the filled button. A sheet that erases draws Erase
+        // filled in the danger colour, and Return does not erase.
+        let erases = sheet.buttons.iter().any(|(_, action)| *action == SheetAction::Erase);
+        for (index, (label, action)) in sheet.buttons.iter().enumerate() {
+            let action = *action;
+            let filled = if erases {
+                action == SheetAction::Erase
+            } else {
+                action == sheet.default
+            };
+            let button = if filled {
+                // The dialog's filled button, as "Create" in "Create folder".
+                div()
+                    .id(("account-sheet-action", index))
+                    .h(px(28.))
+                    .px(px(14.))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .text_size(px(13.))
+                    .bg(if erases { t.danger } else { t.text })
+                    .text_color(t.bg)
+                    .cursor_pointer()
+                    .child(label.clone())
+            } else {
+                pill(("account-sheet-action", index), label.clone(), "", t).h(px(28.))
+            };
+            row = row.child(
+                crate::motion::dims(
+                    button,
+                    crate::motion::reveal_key(("account-sheet-action", index)),
+                    0.14,
+                )
+                .reach()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.account_sheet_chosen(action, window, cx)
+                })),
+            );
+        }
+        let Some(warning) = &sheet.warning else {
+            return row;
+        };
+        // As under the address field when an address would travel in the
+        // clear (`account.rs`).
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(8.))
+                    .text_size(px(12.))
+                    .line_height(px(16.))
+                    .text_color(t.warning_ink)
+                    .child(icon("warning", 16., t.warning_ink))
+                    .child(div().flex_1().min_w_0().child(warning.clone())),
+            )
+            .child(row)
+    }
+
+    /// Read what is on this Mac of accounts that are not signed in, off the
+    /// UI thread (sizes are measured by walking the directories).
+    pub fn refresh_saved_data(&mut self, cx: &mut Context<Self>) {
+        if self.saved_data_loading || crate::audio::preview_mode() {
+            return;
+        }
+        let Some(paths) = crate::accounts::Paths::of_environment() else {
+            return;
+        };
+        let live: Vec<_> = crate::accounts::all()
+            .into_iter()
+            .map(|account| account.id)
+            .collect();
+        self.saved_data_loading = true;
+        cx.spawn(async move |this, cx| {
+            let listing = cx
+                .background_executor()
+                .spawn(async move { crate::accounts::saved::listing(&paths, &live) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.saved_data_loading = false;
+                this.saved_data = Some(listing);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn ask_erase_saved(&mut self, id: crate::accounts::AccountId, cx: &mut Context<Self>) {
+        let Some(saved) = self.saved_data.as_ref().and_then(|listing| {
+            listing
+                .signed_out
+                .iter()
+                .chain(&listing.older)
+                .find(|saved| saved.id == id)
+        }) else {
+            return;
+        };
+        let sheet = AccountSheet::EraseSaved {
+            host: saved.host(),
+            counts: saved.counts,
+            bytes: saved.bytes,
+            id,
+        };
+        self.open_account_sheet(sheet, cx);
+    }
+
+    fn erase_saved_data(&mut self, id: crate::accounts::AccountId, cx: &mut Context<Self>) {
+        let Some(paths) = crate::accounts::Paths::of_environment() else {
+            return;
+        };
+        let live: Vec<_> = crate::accounts::all()
+            .into_iter()
+            .map(|account| account.id)
+            .collect();
+        if crate::accounts::saved::erase(&paths, &id, &live) {
+            let _ = crate::desktop_preferences::update_meeting(|preferences| {
+                crate::desktop_preferences::forget_account(preferences, &id)
+            });
+            self.show_toast("Erased from this Mac", cx);
+        } else {
+            self.show_toast("That data could not be erased", cx);
+        }
+        self.saved_data = None;
+        self.refresh_saved_data(cx);
+    }
+
+    /// For `CEREAL_DEBUG_VIEW`: open one of the sheets about saved data.
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_saved_sheet(
+        &mut self,
+        view: &str,
+        listing: &crate::accounts::saved::Listing,
+        cx: &mut Context<Self>,
+    ) {
+        match view {
+            "erase-saved" => {
+                if let Some(saved) = listing.older.first().or(listing.signed_out.first()) {
+                    self.ask_erase_saved(saved.id.clone(), cx);
+                }
+            }
+            _ => {
+                let wanted = if view == "sign-in-warning" { 1 } else { 0 };
+                if let Some(file) = listing
+                    .signed_out
+                    .iter()
+                    .filter_map(|saved| saved.described.as_ref())
+                    .nth(wanted)
+                    .or(listing.signed_out.first().and_then(|saved| saved.described.as_ref()))
+                {
+                    self.ask_sign_in_saved(file.url.clone(), cx);
+                }
+            }
+        }
+    }
+
+    /// "Sign in" on a signed-out account's row. The address comes from a
+    /// plain file, so it is shown and compared before anything is asked of
+    /// it; nothing is sent from here.
+    fn ask_sign_in_saved(&mut self, url: String, cx: &mut Context<Self>) {
+        let existing: Vec<String> = crate::accounts::all()
+            .iter()
+            .map(|account| account.host())
+            .collect();
+        let hosts = crate::accounts::skeleton::host_sheet(&crate::accounts::host_of(&url), &existing);
+        self.open_account_sheet(AccountSheet::SignIn { url, hosts }, cx);
+    }
+
+    /// "Signed out, with data on this Mac" and "Older saved data", under
+    /// the account card. Each is absent when there is nothing to list.
+    fn saved_data_sections(&self, mut column: Div, cx: &mut Context<Self>) -> Div {
+        let t = self.theme();
+        let Some(listing) = &self.saved_data else {
+            return column;
+        };
+        // Getting a second account is switched off for now: with someone
+        // signed in, a signed-out account can be erased but not signed in to.
+        let can_sign_in = crate::accounts::all().is_empty() || crate::accounts::multiple();
+        if !listing.signed_out.is_empty() {
+            let mut card = settings_card(t);
+            for (index, saved) in listing.signed_out.iter().enumerate() {
+                let Some(file) = &saved.described else {
+                    continue;
+                };
+                let (id, url) = (saved.id.clone(), file.url.clone());
+                let mut detail = file.email.clone();
+                if !detail.is_empty() {
+                    detail.push_str(" · ");
+                }
+                detail.push_str(&format!(
+                    "{}, {}",
+                    saved.counts.stays(),
+                    crate::accounts::saved::size_label(saved.bytes)
+                ));
+                card = card.child(
+                    settings_row("globe", crate::accounts::host_of(&file.url), detail, t)
+                        .when(can_sign_in, |row| {
+                            row.child(
+                                pill(("saved-sign-in", index), "Sign in", "", t)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.ask_sign_in_saved(url.clone(), cx)
+                                    })),
+                            )
+                        })
+                        .child(
+                            pill(("saved-erase", index), "Erase…", "", t)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.ask_erase_saved(id.clone(), cx)
+                                })),
+                        ),
+                );
+            }
+            column = column
+                .child(section_label("Signed out, with data on this Mac", t))
+                .child(card);
+        }
+        if !listing.older.is_empty() {
+            let mut card = settings_card(t);
+            for (index, saved) in listing.older.iter().enumerate() {
+                let id = saved.id.clone();
+                let changed = saved
+                    .changed
+                    .and_then(|seconds| chrono::DateTime::from_timestamp(seconds as i64, 0))
+                    .map(|time| {
+                        time.with_timezone(&chrono::Local)
+                            .format("%-d %b %Y")
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| "an unknown date".into());
+                card = card.child(
+                    settings_row(
+                        "folder",
+                        "Saved by an earlier version of Cereal",
+                        format!(
+                            "{} · {} · last changed {changed}",
+                            saved.counts.stays(),
+                            crate::accounts::saved::size_label(saved.bytes)
+                        ),
+                        t,
+                    )
+                    .child(
+                        pill(("older-erase", index), "Erase…", "", t)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.ask_erase_saved(id.clone(), cx)
+                            })),
+                    ),
+                );
+            }
+            column = column
+                .child(section_label("Older saved data", t))
+                .child(card);
+        }
+        column
     }
 }
 
@@ -1770,4 +2376,98 @@ pub(crate) fn empty_illustration(symbol: &str, t: Theme) -> Div {
                 .justify_center()
                 .child(icon(symbol, 31., t.accent)),
         )
+}
+
+#[cfg(test)]
+mod account_sheet_tests {
+    use super::*;
+    // `gpui::*` re-exports its own `test` attribute; these are plain unit tests.
+    use std::prelude::v1::test;
+    use crate::accounts::{AccountId, migration::AccountFile, saved};
+
+    #[test]
+    fn o3_the_sign_out_sheet_says_what_stays_and_offers_erasing_instead() {
+        let counts = saved::Counts { notes: 214, recordings: 41, ..Default::default() };
+        let sheet = AccountSheet::SignOut {
+            account: AccountId::of("https://notes.acme.com", "00000000-0000-4000-8000-000000000001"),
+            host: "notes.acme.com".into(),
+            counts,
+        }
+        .text();
+        assert_eq!(sheet.title, "Sign out of notes.acme.com?");
+        assert_eq!(
+            sheet.body,
+            "214 notes and 41 recordings stay on this Mac, and are here again when you sign back in."
+        );
+        let labels: Vec<_> = sheet.buttons.iter().map(|(label, _)| label.as_str()).collect();
+        assert_eq!(labels, ["Cancel", "Remove and erase instead…", "Sign out"]);
+        assert_eq!(sheet.default, SheetAction::SignOut);
+        // The erase sheet counts what goes, says what is not affected, and
+        // names recordings that exist nowhere else on its button.
+        let erase = AccountSheet::Erase {
+            account: AccountId::of("https://notes.acme.com", "00000000-0000-4000-8000-000000000001"),
+            host: "notes.acme.com".into(),
+            counts: saved::Counts { notes: 214, folders: 3, favorites: 12, chats: 9, recordings: 41, never_uploaded: 3 },
+        }
+        .text();
+        assert_eq!(
+            erase.body,
+            "214 notes saved here · 3 folders use them · 12 favourites · 9 chats · 41 recordings, 3 of which were never uploaded. The notes on notes.acme.com are not affected."
+        );
+        assert_eq!(erase.buttons[1].0, "Erase, including 3 recordings that exist nowhere else");
+        assert_eq!(erase.default, SheetAction::Cancel, "erasing is never what Return does");
+        assert_eq!(
+            erase.warning.as_deref(),
+            Some("3 recordings were never uploaded: they exist only on this Mac.")
+        );
+    }
+
+    #[test]
+    fn o1_signed_out_data_is_listed_and_signing_in_to_it_shows_the_host_first() {
+        let root = std::env::temp_dir().join(format!("cereal-o1-{}", uuid::Uuid::new_v4()));
+        let paths = crate::accounts::Paths::at(&root);
+        let user = "00000000-0000-4000-8000-000000000001";
+        // A signed-out account that describes itself, one planted with a
+        // look-alike of a host in use, one from before accounts, and the
+        // account that is signed in.
+        let honest = AccountId::of("https://old.example.com", user);
+        let planted = AccountId::of("https://notes.\u{0430}cme.com", user);
+        let older = AccountId::of("https://Notes.Acme.com", user);
+        let live = AccountId::of("https://notes.acme.com", user);
+        for (id, url) in [(&honest, "https://old.example.com"), (&planted, "https://notes.\u{0430}cme.com")] {
+            AccountFile { id: id.as_str().into(), url: url.into(), user_id: user.into(), email: "r@old.example".into(), label: String::new() }
+                .write(&paths.account(id))
+                .unwrap();
+            std::fs::write(paths.workspace(id), br#"{"notes":[{"id":1,"title":"Kept"}]}"#).unwrap();
+        }
+        std::fs::create_dir_all(paths.recordings(&older).join("note-1")).unwrap();
+        std::fs::write(paths.workspace(&older), br#"{"notes":[{"id":1},{"id":2}]}"#).unwrap();
+        std::fs::create_dir_all(paths.account(&live)).unwrap();
+        std::fs::write(paths.workspace(&live), b"{}").unwrap();
+        let listing = saved::listing(&paths, &[live.clone()]);
+        let signed_out: Vec<_> = listing.signed_out.iter().map(|saved| saved.id.clone()).collect();
+        assert_eq!(signed_out.len(), 2);
+        assert!(signed_out.contains(&honest) && signed_out.contains(&planted));
+        assert_eq!(listing.older.len(), 1, "a directory without account.json is older saved data");
+        assert_eq!(listing.older[0].id, older);
+        assert_eq!(listing.older[0].counts.notes, 2);
+        assert!(listing.older[0].bytes > 0 && listing.older[0].changed.is_some());
+        // [Sign in] on the honest one: the host in full, beside the hosts in use.
+        let hosts = |url: &str| crate::accounts::skeleton::host_sheet(&crate::accounts::host_of(url), &["notes.acme.com".to_string()]);
+        let plain = AccountSheet::SignIn { url: "https://old.example.com".into(), hosts: hosts("https://old.example.com") }.text();
+        assert!(plain.body.contains("old.example.com") && plain.body.contains("notes.acme.com"));
+        assert_eq!(plain.default, SheetAction::Continue);
+        assert!(plain.warning.is_none());
+        // On the planted look-alike: a warning, and Cancel is the default.
+        let warned = AccountSheet::SignIn { url: "https://notes.\u{0430}cme.com".into(), hosts: hosts("https://notes.\u{0430}cme.com") }.text();
+        assert_eq!(warned.default, SheetAction::Cancel);
+        assert!(warned.warning.unwrap().contains("looks like notes.acme.com, but it is a different server"));
+        // Erasing is refused for the signed-in account's directory and done
+        // for the others.
+        assert!(!saved::erase(&paths, &live, &[live.clone()]));
+        assert!(paths.account(&live).exists());
+        assert!(saved::erase(&paths, &older, &[live.clone()]));
+        assert!(!paths.account(&older).exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

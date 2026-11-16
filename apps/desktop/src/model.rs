@@ -20,11 +20,81 @@ pub struct Workspace {
     /// from them can be cached between renders. Not persisted.
     #[serde(skip)]
     revision: u64,
+    /// Server mode: one entry per account whose file has been read (or
+    /// refused) in this launch, by slot. Empty in local mode, where the
+    /// workspace is one file and ids are the file's own.
+    #[serde(skip)]
+    pub slots: std::collections::BTreeMap<u16, Slot>,
+    /// Slots whose rows are filtered out of the lists (an account that needs
+    /// a sign-in). A view filter only: the notes stay loaded and are written
+    /// as usual.
+    #[serde(skip)]
+    pub hidden: std::collections::HashSet<u16>,
+    /// Server mode: the device-level files beside the accounts' directories
+    /// (`settings.json`, `folders.json`).
+    #[serde(skip)]
+    pub device: Option<crate::folders::Device>,
+}
+
+/// One file a save has to write.
+pub struct PendingWrite {
+    pub path: PathBuf,
+    pub data: Vec<u8>,
+    /// An account's `workspace.json` (written with the checks that file
+    /// gets); otherwise a small device file.
+    pub workspace: bool,
+}
+
+/// What is known in memory about one account's `workspace.json`.
+#[derive(Debug, Clone)]
+pub struct Slot {
+    pub account: crate::accounts::AccountId,
+    /// The account's `workspace.json`.
+    pub path: PathBuf,
+    /// The account's `recordings` directory.
+    pub recordings: PathBuf,
+    /// The file id the next new note of this account takes. Persisted as
+    /// `nextId`; never reused, even after a note leaves the file.
+    pub next_id: u64,
+    pub state: SlotState,
+    /// What was last read from or handed to the writer for this file, so a
+    /// slot whose notes did not change is not written again.
+    pub written: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SlotState {
+    Loaded,
+    /// The file holds an id that cannot be a note's (0, 2^40 - 1 or more, or
+    /// one used twice). It was not loaded and is never written: it is left
+    /// exactly as it is, and the account says so.
+    Unreadable(String),
+    /// The account was signed out of or removed. Its notes are gone from
+    /// memory and the encoder refuses to write it.
+    Dead,
+}
+
+/// What an account's `workspace.json` holds. Ids in it are always file ids.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct AccountFile {
+    notes: Vec<Note>,
+    folders: Vec<Folder>,
+    settings: Option<Settings>,
+    #[serde(rename = "nextId")]
+    next_id: u64,
+}
+
+fn note_file_id<S: serde::Serializer>(id: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+    // In an account's file, always the file id: a handle never reaches a
+    // file. Local mode's ids are written as they are.
+    serializer.serialize_u64(crate::accounts::handle::on_disk(*id))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Note {
+    #[serde(serialize_with = "note_file_id")]
     pub id: u64,
     pub title: String,
     pub body: String,
@@ -68,9 +138,48 @@ pub struct Note {
     pub folder_id: Option<u64>,
     pub favorite: bool,
     pub trashed: bool,
+    /// When the note's own server answered that it no longer has the note
+    /// (a 404 for the note itself, after a complete listing without it). It
+    /// is then in Trash as "Deleted on the server"; nothing of it is erased.
+    #[serde(default, rename = "serverMissingSince", skip_serializing_if = "Option::is_none")]
+    pub server_missing_since: Option<String>,
+    /// The title or the text was changed here and no save of it has been
+    /// answered yet. Such a note is queued again when its account is Ready.
+    #[serde(default, rename = "unsentEdits", skip_serializing_if = "std::ops::Not::not")]
+    pub unsent_edits: bool,
+    /// A capture was recorded here and its upload has not been confirmed.
+    #[serde(default, rename = "unsentCapture", skip_serializing_if = "std::ops::Not::not")]
+    pub unsent_capture: bool,
 }
 
 impl Note {
+    /// Something of this note exists only on this Mac: an edit or a capture
+    /// the server has not confirmed.
+    pub fn has_unsent_work(&self) -> bool {
+        self.unsent_edits || self.unsent_capture || self.enhanced_dirty
+    }
+
+    /// The day this note sorts and is grouped under: its timeline day, but
+    /// never later than tomorrow by this Mac's clock, so a server cannot pin
+    /// its notes to the top with a date far in the future. An honest note
+    /// is never dated after tomorrow.
+    pub fn sort_day(&self) -> String {
+        self.sort_day_on(Local::now().date_naive())
+    }
+
+    pub fn sort_day_on(&self, today: chrono::NaiveDate) -> String {
+        let day = self.timeline_date();
+        let tomorrow = today
+            .succ_opt()
+            .unwrap_or(today)
+            .format("%Y-%m-%d")
+            .to_string();
+        match chrono::NaiveDate::parse_from_str(&day, "%Y-%m-%d") {
+            Ok(_) if day > tomorrow => tomorrow,
+            _ => day,
+        }
+    }
+
     /// Bytes a full clone of this note duplicates (its text and segments).
     pub fn bulk(&self) -> usize {
         self.title.len()
@@ -119,6 +228,9 @@ impl Note {
             folder_id: self.folder_id,
             favorite: self.favorite,
             trashed: self.trashed,
+            server_missing_since: self.server_missing_since.clone(),
+            unsent_edits: self.unsent_edits,
+            unsent_capture: self.unsent_capture,
         }
     }
 
@@ -255,15 +367,359 @@ impl Workspace {
         // Never read the file while a write that was already handed over is
         // still on its way to disk.
         crate::store::wait_idle();
-        workspace_path()
+        if crate::server::enabled() {
+            // Each account's notes join when its session has been verified
+            // in this launch (`load_account`).
+            return match crate::accounts::Paths::of_environment() {
+                Some(paths) => Self::for_accounts(&paths),
+                None => Self::default(),
+            };
+        }
+        local_workspace_path()
             .and_then(|path| Self::load_from(&path))
-            .unwrap_or_else(|_| {
-                if crate::server::enabled() {
-                    Self::default()
-                } else {
-                    Self::demo()
+            .unwrap_or_else(|_| Self::demo())
+    }
+
+    /// The workspace of server mode before any account's notes have joined
+    /// it: the device-level settings and folders, and no notes.
+    pub fn for_accounts(paths: &crate::accounts::Paths) -> Self {
+        let device = crate::folders::Device::load(paths);
+        Self {
+            settings: device.settings.clone().unwrap_or_default(),
+            folders: device.folders.clone(),
+            device: Some(device),
+            ..Self::default()
+        }
+    }
+
+    /// Server mode: ids in memory are handles, and every account has its
+    /// own file.
+    pub fn by_account(&self) -> bool {
+        self.device.is_some()
+    }
+
+    /// Read one account's notes into the workspace, each id becoming a
+    /// handle in the account's slot. Returns how many notes joined.
+    ///
+    /// If any id in the file is 0, above the highest a file may hold, or
+    /// used twice, the file is **not loaded and not written**: it is left
+    /// exactly as it is and the reason is returned. Nothing is renumbered.
+    pub fn load_account(
+        &mut self,
+        slot: u16,
+        account: &crate::accounts::AccountId,
+        paths: &crate::accounts::Paths,
+    ) -> Result<usize, String> {
+        use crate::accounts::handle;
+        if let Some(existing) = self.slots.get(&slot) {
+            return match &existing.state {
+                SlotState::Loaded => Ok(0),
+                SlotState::Unreadable(reason) => Err(reason.clone()),
+                SlotState::Dead => Err("That account was removed".into()),
+            };
+        }
+        if handle::handle(slot, 1).is_none() {
+            return Err("That account has no place in memory".into());
+        }
+        crate::store::wait_idle();
+        let path = paths.workspace(account);
+        let recordings = paths.recordings(account);
+        let mut entry = Slot {
+            account: account.clone(),
+            path: path.clone(),
+            recordings: recordings.clone(),
+            next_id: 1,
+            state: SlotState::Loaded,
+            written: None,
+        };
+        let refuse = |this: &mut Self, mut entry: Slot, reason: String| {
+            entry.state = SlotState::Unreadable(reason.clone());
+            this.slots.insert(slot, entry);
+            Err(reason)
+        };
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return refuse(self, entry, format!("Cannot read workspace: {error}")),
+        };
+        let mut file = match &bytes {
+            Some(bytes) => match serde_json::from_slice::<AccountFile>(bytes) {
+                Ok(file) => file,
+                // Malformed JSON keeps today's rule: the first save copies
+                // it aside before replacing it (`write_workspace`).
+                Err(_) => AccountFile::default(),
+            },
+            None => AccountFile::default(),
+        };
+        let mut seen = std::collections::HashSet::new();
+        if let Some(bad) = file
+            .notes
+            .iter()
+            .find(|note| !(1..=handle::MAX_FILE_ID).contains(&note.id) || !seen.insert(note.id))
+        {
+            let reason = format!(
+                "a note in it has the id {}, which no note of this file can have",
+                bad.id
+            );
+            return refuse(self, entry, reason);
+        }
+        // Never an id that was ever used: the stored high-water mark, the
+        // notes in the file, and the names an older build may have left on
+        // disk after rewriting the file without the mark.
+        entry.next_id = file
+            .next_id
+            .max(file.notes.iter().map(|note| note.id + 1).max().unwrap_or(1))
+            .max(highest_id_on_disk(&recordings) + 1)
+            .max(1);
+        // Device-level settings are seeded from the first account read.
+        if let Some(device) = &mut self.device {
+            if device.settings.is_none() {
+                let seeded = file.settings.clone().unwrap_or_default();
+                device.settings = Some(seeded.clone());
+                // A `--dark` launch has already chosen; keep what is shown.
+                let dark = self.settings.dark_mode;
+                self.settings = seeded;
+                self.settings.dark_mode |= dark;
+            }
+            // Folders become device-level (once per account, durably).
+            let map = device.seed(account, &file.folders, &mut self.folders);
+            for note in &mut file.notes {
+                if let Some(folder) = note.folder_id {
+                    note.folder_id = map.get(&folder).copied();
                 }
-            })
+            }
+        }
+        // Native finalization can complete during app shutdown after GPUI's
+        // last workspace save. The owner reference already exists; reconcile
+        // metadata. On disk a manifest names its note by file id.
+        for note in &mut file.notes {
+            for saved in &mut note.audio_captures {
+                if let Ok(data) = fs::read(&saved.manifest_path)
+                    && let Ok(manifest) =
+                        serde_json::from_slice::<crate::audio::CaptureManifest>(&data)
+                    && manifest.note_id == note.id
+                    && manifest.capture_id == saved.capture_id
+                {
+                    *saved = manifest;
+                }
+            }
+        }
+        let count = file.notes.len();
+        for mut note in file.notes {
+            // A capture's manifest keeps naming its note by file id, in
+            // memory as on disk.
+            note.id = handle::handle(slot, note.id).expect("checked above");
+            self.notes.push(note);
+        }
+        self.revision = self.revision.wrapping_add(1);
+        self.slots.insert(slot, entry);
+        // What is on disk is what would be written now: nothing to write
+        // until something changes. (A file from an older build differs, and
+        // is brought up to date by the first save.)
+        if let (Some(bytes), Ok(encoded)) = (bytes, self.encode_slot(slot)) {
+            let same = bytes == encoded;
+            if let Some(entry) = self.slots.get_mut(&slot) {
+                entry.written = same.then(|| crate::store::fingerprint(&encoded));
+            }
+        }
+        // Step 5 of the folder seeding: the account is recorded as seeded
+        // only after its file holds device folder ids.
+        if self
+            .device
+            .as_ref()
+            .is_some_and(|device| device.needs_commit(account))
+        {
+            let saved = match self.encode_slot(slot) {
+                Ok(encoded) if self.slots.get(&slot).is_some_and(|entry| entry.written.is_none()) => {
+                    let print = crate::store::fingerprint(&encoded);
+                    write_workspace(&path, &encoded, true).map(|()| {
+                        if let Some(entry) = self.slots.get_mut(&slot) {
+                            entry.written = Some(print);
+                        }
+                    })
+                }
+                Ok(_) => Ok(()),
+                Err(error) => Err(error),
+            };
+            if saved.is_ok()
+                && let Some(device) = &mut self.device
+            {
+                device.commit(account, &self.folders);
+            }
+        }
+        Ok(count)
+    }
+
+    /// One account's file as it is written: its notes with their file ids,
+    /// the device folders its notes use (so an older build reads a
+    /// consistent file), a copy of the settings, and the id high-water mark.
+    pub fn encode_slot(&self, slot: u16) -> Result<Vec<u8>, String> {
+        struct Notes<'a>(&'a [Note], u16);
+        impl Serialize for Notes<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.collect_seq(self.0.iter().filter(|note| {
+                    crate::accounts::handle::slot_of(note.id) == Some(self.1)
+                }))
+            }
+        }
+        #[derive(Serialize)]
+        struct File<'a> {
+            notes: Notes<'a>,
+            folders: Vec<&'a Folder>,
+            settings: &'a Settings,
+            #[serde(rename = "nextId")]
+            next_id: u64,
+        }
+        let entry = self.slots.get(&slot).ok_or("That account's notes are not loaded")?;
+        if entry.state != SlotState::Loaded {
+            return Err("That account's notes are not written".into());
+        }
+        let used: std::collections::HashSet<u64> = self
+            .notes
+            .iter()
+            .filter(|note| crate::accounts::handle::slot_of(note.id) == Some(slot))
+            .filter_map(|note| note.folder_id)
+            .collect();
+        crate::accounts::handle::encoding_account_file(|| serde_json::to_vec_pretty(&File {
+            notes: Notes(&self.notes, slot),
+            folders: self
+                .folders
+                .iter()
+                .filter(|folder| used.contains(&folder.id))
+                .collect(),
+            settings: &self.settings,
+            next_id: entry.next_id,
+        }))
+        .map_err(|error| format!("Cannot serialize workspace: {error}"))
+    }
+
+    /// A new note of the account in `slot`. Its id is the account's next
+    /// file id, which is never one that was used before. `None` when the
+    /// account's notes are not loaded or it has run out of ids.
+    pub fn create_note_in(&mut self, slot: u16) -> Option<u64> {
+        let entry = self.slots.get_mut(&slot)?;
+        if entry.state != SlotState::Loaded {
+            return None;
+        }
+        let id = crate::accounts::handle::handle(slot, entry.next_id)?;
+        entry.next_id += 1;
+        self.revision = self.revision.wrapping_add(1);
+        let now = Local::now();
+        self.notes.insert(
+            0,
+            Note {
+                id,
+                title: "Untitled note".into(),
+                date: now.format("%Y-%m-%d").to_string(),
+                time: now.format("%-I:%M %p").to_string(),
+                duration: "0 min".into(),
+                ..Note::default()
+            },
+        );
+        Some(id)
+    }
+
+    /// An account was signed out of or removed: its notes leave memory and
+    /// its slot is dead, so nothing writes its file again.
+    pub fn drop_slot(&mut self, slot: u16) {
+        self.revision = self.revision.wrapping_add(1);
+        self.notes
+            .retain(|note| crate::accounts::handle::slot_of(note.id) != Some(slot));
+        if let Some(entry) = self.slots.get_mut(&slot) {
+            entry.state = SlotState::Dead;
+        }
+        self.hidden.remove(&slot);
+    }
+
+    /// Show or hide an account's rows in the lists. A view filter.
+    pub fn set_hidden(&mut self, slot: u16, hidden: bool) {
+        let changed = if hidden {
+            self.hidden.insert(slot)
+        } else {
+            self.hidden.remove(&slot)
+        };
+        if changed {
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
+    /// The person changed a setting: in server mode the settings are this
+    /// Mac's from now on, whether or not an account ever seeded them.
+    pub fn settings_changed(&mut self) {
+        if let Some(device) = &mut self.device {
+            device.settings_touched(&self.settings);
+        }
+    }
+
+    /// Whether a note's row is filtered out of the lists.
+    pub fn is_hidden(&self, note: &Note) -> bool {
+        !self.hidden.is_empty()
+            && crate::accounts::handle::slot_of(note.id).is_some_and(|slot| self.hidden.contains(&slot))
+    }
+
+    /// The notes of one account, as they are in memory.
+    pub fn notes_of(&self, slot: u16) -> impl Iterator<Item = &Note> {
+        self.notes
+            .iter()
+            .filter(move |note| crate::accounts::handle::slot_of(note.id) == Some(slot))
+    }
+
+    /// What has to reach the disk in server mode: each loaded, live slot
+    /// whose notes changed, and the device files that changed. A slot that
+    /// is not loaded, or was marked dead by sign-out or removal, is never
+    /// written. Hidden slots are loaded and are written normally.
+    pub fn pending_writes(&mut self) -> Result<Vec<PendingWrite>, String> {
+        let mut jobs = Vec::new();
+        let slots: Vec<u16> = self
+            .slots
+            .iter()
+            .filter(|(_, entry)| entry.state == SlotState::Loaded)
+            .map(|(slot, _)| *slot)
+            .collect();
+        for slot in slots {
+            let data = self.encode_slot(slot)?;
+            let print = crate::store::fingerprint(&data);
+            let entry = self.slots.get_mut(&slot).expect("listed above");
+            if entry.written != Some(print) {
+                entry.written = Some(print);
+                jobs.push(PendingWrite {
+                    path: entry.path.clone(),
+                    data,
+                    workspace: true,
+                });
+            }
+        }
+        if let Some(device) = &mut self.device {
+            for (path, data) in device.pending(&self.folders, &self.settings) {
+                jobs.push(PendingWrite {
+                    path,
+                    data,
+                    workspace: false,
+                });
+            }
+        }
+        Ok(jobs)
+    }
+
+    /// A write failed: its content is still only in memory, so the next
+    /// save must hand it over again.
+    pub fn forget_written(&mut self, path: &Path) {
+        for entry in self.slots.values_mut() {
+            if entry.path == path {
+                entry.written = None;
+            }
+        }
+        if let Some(device) = &mut self.device {
+            device.forget(path);
+        }
+    }
+
+    /// Why an account's notes are not shown, when its file was refused.
+    pub fn unreadable(&self, slot: u16) -> Option<&str> {
+        match &self.slots.get(&slot)?.state {
+            SlotState::Unreadable(reason) => Some(reason),
+            _ => None,
+        }
     }
 
     /// The workspace as it is written to disk.
@@ -387,6 +843,7 @@ impl Workspace {
                             folder_id,
                             favorite,
                             trashed: false,
+                            ..Note::default()
                         }
                     },
                 )
@@ -406,7 +863,7 @@ impl Workspace {
                 },
             ],
             settings: Settings::default(),
-            revision: 0,
+            ..Self::default()
         }
     }
 
@@ -450,6 +907,11 @@ impl Workspace {
 
     pub fn add_folder(&mut self, name: String) -> u64 {
         self.revision = self.revision.wrapping_add(1);
+        // In server mode a folder is a folder of this Mac, in its own id
+        // space; it can hold notes of any account.
+        if let Some(device) = &mut self.device {
+            return device.add(&mut self.folders, &name);
+        }
         let id = self.next_id();
         let name = name.trim();
         self.folders.push(Folder {
@@ -477,6 +939,7 @@ impl Workspace {
             .iter()
             .filter(|note| {
                 !note.trashed
+                    && !self.is_hidden(note)
                     && folder_id.is_none_or(|folder| note.folder_id == Some(folder))
                     && (!favorites_only || note.favorite)
                     && (query.is_empty()
@@ -485,9 +948,10 @@ impl Workspace {
                             .any(|text| text.to_lowercase().contains(&query)))
             })
             .collect();
+        let today = Local::now().date_naive();
         notes.sort_by(|a, b| {
-            b.timeline_date()
-                .cmp(&a.timeline_date())
+            b.sort_day_on(today)
+                .cmp(&a.sort_day_on(today))
                 .then_with(|| b.server_created_at.cmp(&a.server_created_at))
                 .then_with(|| b.id.cmp(&a.id))
         });
@@ -534,15 +998,68 @@ impl Workspace {
         Ok(workspace)
     }
 
+    /// A server-mode workspace whose accounts in `slots` are loaded and
+    /// empty, with no files behind them.
+    #[cfg(test)]
+    pub(crate) fn with_slots(slots: &[u16]) -> Self {
+        let mut workspace = Self::default();
+        for slot in slots {
+            let account = crate::accounts::AccountId::of(
+                "https://test.example",
+                &uuid::Uuid::from_u128(u128::from(*slot)).hyphenated().to_string(),
+            );
+            let root = std::env::temp_dir().join(format!("cereal-no-such-{}", account.as_str()));
+            workspace.slots.insert(
+                *slot,
+                Slot {
+                    account,
+                    path: root.join("workspace.json"),
+                    recordings: root.join("recordings"),
+                    next_id: 1,
+                    state: SlotState::Loaded,
+                    written: None,
+                },
+            );
+        }
+        workspace
+    }
+
     #[cfg(test)]
     fn save_to(&self, path: &Path) -> Result<(), String> {
         write_workspace(path, &self.encode()?, true)
     }
 }
 
-/// Where the current account's workspace lives.
+/// Where local mode's workspace lives ("this Mac only").
 pub fn workspace_file() -> Result<PathBuf, String> {
-    workspace_path()
+    local_workspace_path()
+}
+
+/// The highest note id any name under an account's `recordings` directory
+/// carries: `note-<n>` capture directories and `server-associations/*/<n>.txt`
+/// sidecars. An id that has a name on disk was used, and is never given to
+/// another note, even if an older build rewrote the file without `nextId`.
+fn highest_id_on_disk(recordings: &Path) -> u64 {
+    let names = |directory: &Path| -> Vec<String> {
+        fs::read_dir(directory)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect()
+    };
+    let captures = names(recordings)
+        .into_iter()
+        .filter_map(|name| name.strip_prefix("note-")?.parse::<u64>().ok());
+    let sidecars = names(&recordings.join("server-associations"))
+        .into_iter()
+        .flat_map(|namespace| names(&recordings.join("server-associations").join(namespace)))
+        .filter_map(|name| name.strip_suffix(".txt")?.parse::<u64>().ok());
+    captures
+        .chain(sidecars)
+        .filter(|id| *id <= crate::accounts::handle::MAX_FILE_ID)
+        .max()
+        .unwrap_or(0)
 }
 
 /// Atomically replace the workspace file with `data`: write a private
@@ -592,13 +1109,14 @@ pub fn write_workspace(path: &Path, data: &[u8], unknown_previous: bool) -> Resu
     result
 }
 
+#[cfg(test)]
 pub fn account_cache_path(root: &Path, identity: &str) -> PathBuf {
     let namespace = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, identity.as_bytes());
     root.join("servers")
         .join(namespace.to_string())
         .join("workspace.json")
 }
-fn workspace_path() -> Result<PathBuf, String> {
+fn local_workspace_path() -> Result<PathBuf, String> {
     let root = if let Some(directory) =
         crate::environment::var_os("CEREAL_DATA_DIR").filter(|v| !v.is_empty())
     {
@@ -607,19 +1125,36 @@ fn workspace_path() -> Result<PathBuf, String> {
         let home = std::env::var_os("HOME").ok_or("Cannot determine home directory")?;
         PathBuf::from(home).join("Library/Application Support/Cereal")
     };
-    if crate::server::enabled() {
-        let identity = crate::account::identity()
-            .ok_or("Sign in before accessing private cached notes or audio")?;
-        return Ok(account_cache_path(&root, &identity));
-    }
     Ok(root.join("workspace.json"))
 }
 
-pub fn audio_directory() -> Result<PathBuf, String> {
-    Ok(workspace_path()?
-        .parent()
-        .ok_or("Workspace has no parent")?
-        .join("recordings"))
+/// Where captures are kept: an account's `recordings` directory for a note
+/// of an account, local mode's own otherwise. Paths take the account; there
+/// is no "current" one.
+pub fn audio_directory(account: Option<&crate::accounts::AccountId>) -> Result<PathBuf, String> {
+    match account {
+        Some(account) => crate::accounts::Paths::of_environment()
+            .map(|paths| paths.recordings(account))
+            .ok_or_else(|| "Cannot determine home directory".to_string()),
+        None if crate::server::enabled() => {
+            Err("Sign in before accessing private cached notes or audio".into())
+        }
+        None => Ok(local_workspace_path()?
+            .parent()
+            .ok_or("Workspace has no parent")?
+            .join("recordings")),
+    }
+}
+
+/// The capture directory of a note in memory: its account's, by its handle.
+pub fn audio_directory_of(note_id: u64) -> Result<PathBuf, String> {
+    if !crate::server::enabled() {
+        return audio_directory(None);
+    }
+    let account = crate::accounts::of_note(note_id)
+        .filter(|account| account.user_id.is_some())
+        .ok_or("This note does not belong to an account on this Mac")?;
+    audio_directory(Some(&account.id))
 }
 
 fn write_new(path: &Path, data: &[u8]) -> std::io::Result<()> {
@@ -983,5 +1518,477 @@ mod tests {
         let loaded: Note = serde_json::from_value(stored).unwrap();
         assert_eq!(loaded.enhanced, "Saved outline");
         assert!(loaded.needs_regeneration());
+    }
+}
+
+/// The account side of the workspace: handles, per-account files, the id
+/// high-water mark, device folders, and what is and is not written.
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+    // `gpui::*` re-exports its own `test` attribute; these are plain unit tests.
+    use std::prelude::v1::test;
+    use crate::accounts::{AccountId, Paths, handle};
+
+    fn root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("cereal-slots-{name}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn account(n: u128) -> AccountId {
+        AccountId::of("https://notes.acme.example", &uuid::Uuid::from_u128(n).hyphenated().to_string())
+    }
+
+    fn write(paths: &Paths, id: &AccountId, json: serde_json::Value) {
+        fs::create_dir_all(paths.account(id)).unwrap();
+        fs::write(paths.workspace(id), serde_json::to_vec_pretty(&json).unwrap()).unwrap();
+    }
+
+    fn notes(ids: std::ops::RangeInclusive<u64>, prefix: &str) -> serde_json::Value {
+        serde_json::Value::Array(
+            ids.map(|id| serde_json::json!({"id": id, "title": format!("{prefix} {id}"), "body": "Text"}))
+                .collect(),
+        )
+    }
+
+    /// Write what a save hands over, as the writer would.
+    fn save(workspace: &mut Workspace) -> Vec<PathBuf> {
+        let jobs = workspace.pending_writes().unwrap();
+        for job in &jobs {
+            if job.workspace {
+                write_workspace(&job.path, &job.data, true).unwrap();
+            } else {
+                crate::shared::write_private(&job.path, &job.data).unwrap();
+            }
+        }
+        jobs.into_iter().filter(|job| job.workspace).map(|job| job.path).collect()
+    }
+
+    #[test]
+    fn h1_two_files_with_the_same_ids_load_as_distinct_handles_and_are_not_rewritten() {
+        let root = root("h1");
+        let paths = Paths::at(&root);
+        let (a, b) = (account(1), account(2));
+        write(&paths, &a, serde_json::json!({"notes": notes(1..=5, "A")}));
+        write(&paths, &b, serde_json::json!({"notes": notes(1..=5, "B")}));
+        let mut workspace = Workspace::for_accounts(&paths);
+        assert_eq!(workspace.load_account(1, &a, &paths), Ok(5));
+        assert_eq!(workspace.load_account(2, &b, &paths), Ok(5));
+        let ids: std::collections::HashSet<u64> = workspace.notes.iter().map(|note| note.id).collect();
+        assert_eq!(ids.len(), 10, "ten distinct handles");
+        for note in &workspace.notes {
+            let (slot, file) = handle::split(note.id).unwrap();
+            assert!((1..=5).contains(&file));
+            assert!(note.title.starts_with(if slot == 1 { "A" } else { "B" }));
+        }
+        // Loading brought the older files up to date (`nextId`, device
+        // folder ids: step 4 of the folder seeding), so the first save has
+        // nothing left to write…
+        assert!(save(&mut workspace).is_empty());
+        let on_disk: Vec<Vec<u8>> = [&a, &b].iter().map(|id| fs::read(paths.workspace(id)).unwrap()).collect();
+        let written: serde_json::Value = serde_json::from_slice(&on_disk[0]).unwrap();
+        assert_eq!(written["notes"][0]["id"], 1, "on disk, always the file id");
+        assert_eq!(written["nextId"], 6);
+        // …and from then on an unchanged workspace writes nothing, and what
+        // it would write is byte for byte what is there.
+        let mut again = Workspace::for_accounts(&paths);
+        again.load_account(1, &a, &paths).unwrap();
+        again.load_account(2, &b, &paths).unwrap();
+        assert!(save(&mut again).is_empty());
+        assert_eq!(again.encode_slot(1).unwrap(), on_disk[0]);
+        assert_eq!(again.encode_slot(2).unwrap(), on_disk[1]);
+        // One edit writes only its own account's file.
+        let first_b = again.notes_of(2).next().unwrap().id;
+        again.note_mut(first_b).unwrap().body = "Edited".into();
+        assert_eq!(save(&mut again), [paths.workspace(&b)]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn h4_next_id_survives_an_older_build_rewriting_the_file() {
+        let root = root("h4");
+        let paths = Paths::at(&root);
+        let a = account(1);
+        // Names an older build may have left after rewriting the file
+        // without `nextId`: a capture directory and an upload sidecar.
+        fs::create_dir_all(paths.recordings(&a).join("note-7").join("capture-1")).unwrap();
+        let sidecars = paths.recordings(&a).join("server-associations").join(uuid::Uuid::new_v4().to_string());
+        fs::create_dir_all(&sidecars).unwrap();
+        fs::write(sidecars.join("9.txt"), "3a49a4af-c660-42e9-a36a-a806fbb41e0d").unwrap();
+        // The older build rewrote the file: no `nextId` any more.
+        write(&paths, &a, serde_json::json!({"notes": notes(1..=2, "A")}));
+        let mut workspace = Workspace::for_accounts(&paths);
+        workspace.load_account(1, &a, &paths).unwrap();
+        let id = workspace.create_note_in(1).unwrap();
+        assert_eq!(handle::split(id), Some((1, 10)), "never 3, 7 or 9 again");
+        assert_eq!(handle::split(workspace.create_note_in(1).unwrap()), Some((1, 11)));
+        save(&mut workspace);
+        let written: serde_json::Value = serde_json::from_slice(&fs::read(paths.workspace(&a)).unwrap()).unwrap();
+        assert_eq!(written["nextId"], 12);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn h5_a_file_holding_an_id_no_note_can_have_is_not_loaded_and_not_rewritten() {
+        for bad in [
+            serde_json::json!([{"id": 1u64 << 40, "title": "A handle written by mistake"}]),
+            serde_json::json!([{"id": (1u64 << 40) - 1, "title": "The reserved last id"}]),
+            serde_json::json!([{"id": 0, "title": "Zero"}]),
+            serde_json::json!([{"id": 2, "title": "Twice"}, {"id": 2, "title": "Twice"}]),
+        ] {
+            let root = root("h5");
+            let paths = Paths::at(&root);
+            let (a, b) = (account(1), account(2));
+            write(&paths, &a, serde_json::json!({"notes": bad}));
+            write(&paths, &b, serde_json::json!({"notes": notes(1..=1, "B")}));
+            let before = fs::read(paths.workspace(&a)).unwrap();
+            let mut workspace = Workspace::for_accounts(&paths);
+            let refused = workspace.load_account(1, &a, &paths).unwrap_err();
+            assert!(refused.contains("no note of this file can have"), "{refused}");
+            assert_eq!(workspace.unreadable(1), Some(refused.as_str()), "the account says so");
+            assert_eq!(workspace.create_note_in(1), None);
+            assert_eq!(workspace.notes_of(1).count(), 0);
+            // Asked again, the answer is the same.
+            assert!(workspace.load_account(1, &a, &paths).is_err());
+            // Another account is unaffected; the refused file is never written.
+            workspace.load_account(2, &b, &paths).unwrap();
+            let b_note = workspace.notes_of(2).next().unwrap().id;
+            workspace.note_mut(b_note).unwrap().body = "Edited".into();
+            let written = save(&mut workspace);
+            assert!(!written.contains(&paths.workspace(&a)));
+            assert_eq!(fs::read(paths.workspace(&a)).unwrap(), before, "left exactly as it is");
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn h3_an_id_that_left_the_file_is_never_given_to_another_note() {
+        let root = root("h3");
+        let paths = Paths::at(&root);
+        let a = account(1);
+        write(&paths, &a, serde_json::json!({"notes": notes(1..=3, "A")}));
+        let mut workspace = Workspace::for_accounts(&paths);
+        workspace.load_account(1, &a, &paths).unwrap();
+        // The highest note leaves the file (pruned, or moved).
+        let highest = handle::handle(1, 3).unwrap();
+        workspace.notes.retain(|note| note.id != highest);
+        workspace.revision = workspace.revision.wrapping_add(1);
+        save(&mut workspace);
+        // Next launch: a new note gets a new id. (That its first save is a
+        // `POST /notes` and adopts no old sidecar: `server::tests::h3_…`.)
+        let mut workspace = Workspace::for_accounts(&paths);
+        workspace.load_account(1, &a, &paths).unwrap();
+        let id = workspace.create_note_in(1).unwrap();
+        assert_eq!(handle::split(id), Some((1, 4)));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn h9_a_capture_recorded_on_slot_two_has_file_ids_on_disk_and_reconciles_at_load() {
+        let root = root("h9");
+        let paths = Paths::at(&root);
+        let (a, b) = (account(1), account(2));
+        write(&paths, &a, serde_json::json!({"notes": notes(1..=1, "A")}));
+        let note = handle::handle(2, 4).unwrap();
+        // Where a capture of that note goes: named by its file id.
+        let directory = crate::audio::capture_directory(&paths.recordings(&b), note).join("capture-1");
+        assert!(directory.ends_with("recordings/note-4/capture-1"));
+        fs::create_dir_all(&directory).unwrap();
+        let manifest = |finished: Option<&str>| {
+            serde_json::json!({
+                "version": 1, "capture_id": "capture-1", "note_id": 4,
+                "directory": directory, "manifest_path": directory.join("manifest.json"),
+                "started_at": "2026-11-15T10:00:00Z", "finished_at": finished,
+                "stats": {"mic": {}, "system": {}}, "error": null
+            })
+        };
+        // The window saved the note while recording; the capture finished
+        // after the last save (the app was quitting).
+        write(&paths, &b, serde_json::json!({"notes": [{"id": 4, "title": "Recorded", "audioCaptures": [manifest(None)]}]}));
+        fs::write(directory.join("manifest.json"), serde_json::to_vec(&manifest(Some("2026-11-15T10:30:00Z"))).unwrap()).unwrap();
+        let mut workspace = Workspace::for_accounts(&paths);
+        workspace.load_account(1, &a, &paths).unwrap();
+        workspace.load_account(2, &b, &paths).unwrap();
+        let loaded = workspace.note(note).unwrap();
+        assert_eq!(loaded.audio_captures.len(), 1);
+        assert!(loaded.audio_captures[0].completed(), "reconciled from its manifest");
+        assert_eq!(loaded.audio_captures[0].note_id, 4, "a manifest names its note by file id");
+        save(&mut workspace);
+        let written: serde_json::Value = serde_json::from_slice(&fs::read(paths.workspace(&b)).unwrap()).unwrap();
+        assert_eq!(written["notes"][0]["id"], 4);
+        assert_eq!(written["notes"][0]["audioCaptures"][0]["note_id"], 4);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn h8_the_reserved_ids_are_never_notes() {
+        let mut workspace = Workspace::with_slots(&[1]);
+        let id = workspace.create_note_in(1).unwrap();
+        for reserved in [handle::SHARED_NOTE_ID, handle::NO_NOTE] {
+            assert!(workspace.note(reserved).is_none());
+            assert_eq!(handle::slot_of(reserved), None);
+            assert_ne!(id, reserved);
+        }
+        // The shared-note page's id is not a handle, so no account's file
+        // can hold it and nothing looks it up as a note.
+        assert!(handle::split(handle::SHARED_NOTE_ID).is_none());
+    }
+
+    #[test]
+    fn local_mode_files_keep_their_ids_as_they_are() {
+        // An id of local mode that happens to look like a handle is written
+        // as it is: only an account's file is encoded with file ids.
+        let odd = (3u64 << 40) | 5;
+        let workspace = Workspace {
+            notes: vec![Note { id: odd, ..Default::default() }],
+            ..Default::default()
+        };
+        let written: serde_json::Value = serde_json::from_slice(&workspace.encode().unwrap()).unwrap();
+        assert_eq!(written["notes"][0]["id"], odd);
+    }
+
+    #[test]
+    fn s2_a_hidden_account_keeps_every_note_and_capture_and_is_written_as_usual() {
+        let root = root("s2");
+        let paths = Paths::at(&root);
+        let (a, b) = (account(1), account(2));
+        write(&paths, &a, serde_json::json!({"notes": [
+            {"id": 1, "title": "Kept while signed out"},
+            {"id": 2, "title": "Unsent", "unsentEdits": true}
+        ]}));
+        write(&paths, &b, serde_json::json!({"notes": notes(1..=2, "B")}));
+        let mut workspace = Workspace::for_accounts(&paths);
+        workspace.load_account(1, &a, &paths).unwrap();
+        workspace.load_account(2, &b, &paths).unwrap();
+        save(&mut workspace);
+        // Account 1's session ended: a view filter.
+        workspace.set_hidden(1, true);
+        let shown: Vec<_> = workspace.visible_notes(None, false, "").iter().map(|note| note.id).collect();
+        assert!(!shown.is_empty() && shown.iter().all(|id| handle::slot_of(*id) == Some(2)));
+        assert_eq!(workspace.notes_of(1).count(), 2, "still in memory");
+        // An edit in the other account writes only that account.
+        let b_note = workspace.notes_of(2).next().unwrap().id;
+        workspace.note_mut(b_note).unwrap().body = "Edited".into();
+        assert_eq!(save(&mut workspace), [paths.workspace(&b)]);
+        // The hidden account's open note can still change, and is written.
+        let a_note = handle::handle(1, 1).unwrap();
+        workspace.note_mut(a_note).unwrap().body = "Typed while the session had ended".into();
+        assert_eq!(save(&mut workspace), [paths.workspace(&a)]);
+        // Relaunch and sign in: everything is there.
+        let mut again = Workspace::for_accounts(&paths);
+        again.load_account(1, &a, &paths).unwrap();
+        again.load_account(2, &b, &paths).unwrap();
+        assert_eq!(again.notes_of(1).count(), 2);
+        assert_eq!(again.note(a_note).unwrap().body, "Typed while the session had ended");
+        assert!(again.note(handle::handle(1, 2).unwrap()).unwrap().unsent_edits);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn s5_a_signed_out_account_is_never_written_back() {
+        let root = root("s5");
+        let paths = Paths::at(&root);
+        let (a, b) = (account(1), account(2));
+        write(&paths, &a, serde_json::json!({"notes": notes(1..=3, "A")}));
+        write(&paths, &b, serde_json::json!({"notes": notes(1..=1, "B")}));
+        let mut workspace = Workspace::for_accounts(&paths);
+        workspace.load_account(1, &a, &paths).unwrap();
+        workspace.load_account(2, &b, &paths).unwrap();
+        save(&mut workspace);
+        let before = fs::read(paths.workspace(&a)).unwrap();
+        // A note of account 1 changed, then account 1 was signed out of
+        // before the save: its slot is dead.
+        let a_note = handle::handle(1, 1).unwrap();
+        workspace.note_mut(a_note).unwrap().body = "Never written".into();
+        workspace.drop_slot(1);
+        assert_eq!(workspace.notes_of(1).count(), 0);
+        assert_eq!(workspace.create_note_in(1), None, "the encoder refuses a dead slot");
+        assert!(workspace.encode_slot(1).is_err());
+        let b_note = workspace.notes_of(2).next().unwrap().id;
+        workspace.note_mut(b_note).unwrap().body = "Edited elsewhere".into();
+        assert_eq!(save(&mut workspace), [paths.workspace(&b)]);
+        assert_eq!(fs::read(paths.workspace(&a)).unwrap(), before);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn v3_a_note_dated_in_the_future_sorts_as_if_dated_tomorrow() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 16).unwrap();
+        let note = |id, date: &str, created: Option<&str>| Note {
+            id,
+            date: date.into(),
+            server_created_at: created.map(str::to_owned),
+            ..Default::default()
+        };
+        // A server dates its notes in year 9999 and in 2030.
+        let far = note(1, "9999-12-31", Some("9999-12-31T00:00:00Z"));
+        let later = note(2, "2030-01-01", None);
+        assert_eq!(far.sort_day_on(today), "2026-11-17");
+        assert_eq!(later.sort_day_on(today), "2026-11-17");
+        // An honest note keeps its day.
+        let honest = note(3, "2026-11-16", Some("2026-11-16T09:00:00Z"));
+        assert_eq!(honest.sort_day_on(today), honest.timeline_date());
+        assert_eq!(note(4, "2026-11-17", None).sort_day_on(today), "2026-11-17");
+        assert_eq!(note(5, "not a date", None).sort_day_on(today), "not a date");
+        // In the list nothing sorts later than tomorrow, so a future-dated
+        // note cannot sit above everything for ever: it is in tomorrow's
+        // group, and a note made tomorrow sorts beside it.
+        let workspace = Workspace {
+            notes: vec![far, honest, later],
+            ..Default::default()
+        };
+        let tomorrow = (Local::now().date_naive() + chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
+        let days: Vec<String> = workspace.visible_notes(None, false, "").iter().map(|note| note.sort_day()).collect();
+        assert!(days.iter().all(|day| *day <= tomorrow), "{days:?}");
+    }
+
+    #[test]
+    fn v7_with_one_account_the_list_is_the_one_the_build_before_showed() {
+        // The same file read the way the build before read it, and as the
+        // one account's file now: the same notes, in the same order, under
+        // the same days, in the same folders.
+        let root = root("v7");
+        let paths = Paths::at(&root);
+        let a = account(1);
+        let mut file = Workspace::demo();
+        for note in &mut file.notes {
+            note.server_id = Some(uuid::Uuid::new_v4().to_string());
+            note.server_url = Some("https://notes.acme.example".into());
+        }
+        file.save_to(&paths.workspace(&a)).unwrap();
+        let before = Workspace::load_from(&paths.workspace(&a)).unwrap();
+        let mut now = Workspace::for_accounts(&paths);
+        now.load_account(1, &a, &paths).unwrap();
+        let rows = |workspace: &Workspace, folder| -> Vec<(u64, String, String, Option<u64>, bool)> {
+            workspace
+                .visible_notes(folder, false, "")
+                .iter()
+                .map(|note| (handle::file_id(note.id), note.title.clone(), note.sort_day(), note.folder_id, note.favorite))
+                .collect()
+        };
+        assert_eq!(rows(&now, None), rows(&before, None));
+        for folder in &before.folders {
+            assert_eq!(rows(&now, Some(folder.id)), rows(&before, Some(folder.id)), "{}", folder.name);
+        }
+        assert_eq!(
+            now.folders.iter().map(|f| (f.id, f.name.clone())).collect::<Vec<_>>(),
+            before.folders.iter().map(|f| (f.id, f.name.clone())).collect::<Vec<_>>()
+        );
+        assert_eq!(now.settings.show_upcoming, before.settings.show_upcoming);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn h7_two_accounts_with_a_folder_of_the_same_name_share_one_device_folder() {
+        let root = root("h7");
+        let paths = Paths::at(&root);
+        let (a, b) = (account(1), account(2));
+        write(&paths, &a, serde_json::json!({
+            "notes": [{"id": 1, "title": "A1", "folder_id": 4}],
+            "folders": [{"id": 4, "name": "Clients"}]
+        }));
+        write(&paths, &b, serde_json::json!({
+            "notes": [{"id": 1, "title": "B1", "folder_id": 9}, {"id": 2, "title": "B2"}],
+            "folders": [{"id": 9, "name": " clients "}, {"id": 4, "name": "Other"}]
+        }));
+        let mut workspace = Workspace::for_accounts(&paths);
+        workspace.load_account(1, &a, &paths).unwrap();
+        workspace.load_account(2, &b, &paths).unwrap();
+        let clients: Vec<_> = workspace.folders.iter().filter(|f| f.name.trim().eq_ignore_ascii_case("clients")).collect();
+        assert_eq!(clients.len(), 1, "one folder");
+        let clients = clients[0].id;
+        assert_eq!(clients, 4, "the first account keeps its ids");
+        // B's "Other" had A's id 4: it became a folder of its own.
+        let other = workspace.folders.iter().find(|f| f.name == "Other").unwrap().id;
+        assert_ne!(other, clients);
+        // A note of either account can be filed in it…
+        let b2 = handle::handle(2, 2).unwrap();
+        workspace.note_mut(b2).unwrap().folder_id = Some(clients);
+        save(&mut workspace);
+        // …and stays filed after a restart.
+        let mut again = Workspace::for_accounts(&paths);
+        again.load_account(1, &a, &paths).unwrap();
+        again.load_account(2, &b, &paths).unwrap();
+        let filed: Vec<String> = again.visible_notes(Some(clients), false, "").iter().map(|n| n.title.clone()).collect();
+        assert_eq!(filed.len(), 3, "{filed:?}");
+        assert_eq!(again.folders.len(), 2);
+        // Each account's file keeps the device folders its notes use, so an
+        // older build reads a consistent file.
+        let b_file: serde_json::Value = serde_json::from_slice(&fs::read(paths.workspace(&b)).unwrap()).unwrap();
+        assert_eq!(b_file["folders"].as_array().unwrap().len(), 1);
+        assert_eq!(b_file["folders"][0]["id"], clients);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn f1_folder_seeding_survives_a_crash_after_each_step_and_an_older_build() {
+        let a_file = serde_json::json!({
+            "notes": [{"id": 1, "title": "A1", "folder_id": 4}, {"id": 2, "title": "Dangling", "folder_id": 77}],
+            "folders": [{"id": 4, "name": "Clients"}]
+        });
+        let b_file = serde_json::json!({
+            "notes": [{"id": 1, "title": "B1", "folder_id": 5}, {"id": 2, "title": "B2", "folder_id": 6}],
+            "folders": [{"id": 5, "name": "clients"}, {"id": 6, "name": "Hiring"}]
+        });
+        let check = |paths: &Paths, a: &AccountId, b: &AccountId| {
+            let mut workspace = Workspace::for_accounts(paths);
+            workspace.load_account(1, a, paths).unwrap();
+            workspace.load_account(2, b, paths).unwrap();
+            let names: Vec<String> = workspace.folders.iter().map(|f| f.name.to_lowercase()).collect();
+            assert_eq!(names.iter().filter(|n| *n == "clients").count(), 1, "{names:?}");
+            assert_eq!(names.iter().filter(|n| *n == "hiring").count(), 1, "{names:?}");
+            let clients = workspace.folders.iter().find(|f| f.name == "Clients").unwrap().id;
+            let filed: Vec<String> = workspace.visible_notes(Some(clients), false, "").iter().map(|n| n.title.clone()).collect();
+            assert_eq!(filed.len(), 2, "no lost membership: {filed:?}");
+            let hiring = workspace.folders.iter().find(|f| f.name == "Hiring").unwrap().id;
+            assert_eq!(workspace.visible_notes(Some(hiring), false, "").len(), 1);
+            // A folder id that names no device folder is in no folder.
+            let dangling = workspace.notes.iter().find(|n| n.title == "Dangling").unwrap();
+            assert_eq!(dangling.folder_id, None);
+            workspace
+        };
+        // 0 = no crash; then a crash after steps 3, 4 and 5 of A's seeding,
+        // and a run again.
+        for crash in [0, 3, 4, 5] {
+            let root = root("f1");
+            let paths = Paths::at(&root);
+            let (a, b) = (account(1), account(2));
+            write(&paths, &a, a_file.clone());
+            write(&paths, &b, b_file.clone());
+            if crash == 3 {
+                let mut device = crate::folders::Device::load(&paths);
+                let mut folders = Vec::new();
+                let theirs: Vec<Folder> = serde_json::from_value(a_file["folders"].clone()).unwrap();
+                device.seed(&a, &theirs, &mut folders);
+            } else if crash >= 4 {
+                // Steps 3 to 5 for A alone.
+                let mut workspace = Workspace::for_accounts(&paths);
+                workspace.load_account(1, &a, &paths).unwrap();
+                if crash == 4 {
+                    // The commit (step 5) did not reach the disk.
+                    let mut file: serde_json::Value =
+                        serde_json::from_slice(&fs::read(paths.folders()).unwrap()).unwrap();
+                    file["seeded"] = serde_json::json!([]);
+                    fs::write(paths.folders(), serde_json::to_vec(&file).unwrap()).unwrap();
+                }
+            }
+            drop(check(&paths, &a, &b));
+            // Run again: the same, nothing duplicated.
+            let mut workspace = check(&paths, &a, &b);
+            save(&mut workspace);
+            // An older build rewrites B's file (no `nextId`, and a folder it
+            // made with an id of its choosing): no second seeding of what
+            // was there, and the new folder is kept.
+            let mut file: serde_json::Value = serde_json::from_slice(&fs::read(paths.workspace(&b)).unwrap()).unwrap();
+            file.as_object_mut().unwrap().remove("nextId");
+            file["folders"].as_array_mut().unwrap().push(serde_json::json!({"id": 1, "name": "Made by the old build"}));
+            fs::write(paths.workspace(&b), serde_json::to_vec(&file).unwrap()).unwrap();
+            let workspace = check(&paths, &a, &b);
+            assert_eq!(workspace.folders.iter().filter(|f| f.name == "Made by the old build").count(), 1);
+            let seeded: serde_json::Value = serde_json::from_slice(&fs::read(paths.folders()).unwrap()).unwrap();
+            assert_eq!(seeded["seeded"].as_array().unwrap().len(), 2, "crash {crash}");
+            let _ = fs::remove_dir_all(root);
+        }
     }
 }

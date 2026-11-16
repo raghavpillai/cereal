@@ -10,47 +10,54 @@ import Contracts
 
 /// Where the screens around a recording lead, and what never ends one.
 struct CaptureNavigationRuleTests {
-    private let note = "3a49a4af-c660-42e9-a36a-a806fbb41e0d"
-    private let other = "99ad1171-3771-4ae6-81a1-44f617b663db"
+    private static let account = AccountID(address: "https://example.test", userID: "00000000-0000-4000-8000-000000000001")
+    private let note = NoteRef(account: account, id: "3a49a4af-c660-42e9-a36a-a806fbb41e0d")
+    private let other = NoteRef(account: account, id: "99ad1171-3771-4ae6-81a1-44f617b663db")
+    /// The same note id on another server is another note.
+    private let twin = NoteRef(account: AccountID(address: "https://other.example.test", userID: "00000000-0000-4000-8000-000000000001"), id: "3a49a4af-c660-42e9-a36a-a806fbb41e0d")
+    private var chat: Route { .serverChat(note.account, noteID: note.id) }
 
     @Test func askingFromTheRecordingScreenOpensTheNotesChatWithTheNoteBehindIt() {
         // From Home: Back from the chat lands on the note being recorded, where the indicator is.
-        #expect(CaptureNavigation.pathForChat(from: [], noteID: note) == [.serverNote(note), .serverChat(note)])
+        #expect(CaptureNavigation.pathForChat(from: [], note: note) == [.serverNote(note), chat])
         // From the note itself: nothing is pushed twice.
-        #expect(CaptureNavigation.pathForChat(from: [.serverNote(note)], noteID: note) == [.serverNote(note), .serverChat(note)])
+        #expect(CaptureNavigation.pathForChat(from: [.serverNote(note)], note: note) == [.serverNote(note), chat])
         // Already in that chat (asked, went back to the recording, asked again).
-        #expect(CaptureNavigation.pathForChat(from: [.serverNote(note), .serverChat(note)], noteID: note) == [.serverNote(note), .serverChat(note)])
+        #expect(CaptureNavigation.pathForChat(from: [.serverNote(note), chat], note: note) == [.serverNote(note), chat])
         // From somewhere else the user was browsing: their place is kept underneath.
-        #expect(CaptureNavigation.pathForChat(from: [.search, .serverNote(other)], noteID: note) == [.search, .serverNote(other), .serverNote(note), .serverChat(note)])
+        #expect(CaptureNavigation.pathForChat(from: [.search, .serverNote(other)], note: note) == [.search, .serverNote(other), .serverNote(note), chat])
     }
 
     @Test func closingTheRecordingScreenReturnsToWhereTheUserWasWhileRecordingAndToTheNoteOnceStopped() {
         // Still recording: closing changes nothing but the screen on top.
-        #expect(CaptureNavigation.pathAfterClosing(from: [], noteID: note, recording: true) == [])
-        #expect(CaptureNavigation.pathAfterClosing(from: [.search], noteID: note, recording: true) == [.search])
-        #expect(CaptureNavigation.pathAfterClosing(from: [.serverNote(note)], noteID: note, recording: true) == [.serverNote(note)])
+        #expect(CaptureNavigation.pathAfterClosing(from: [], note: note, recording: true) == [])
+        #expect(CaptureNavigation.pathAfterClosing(from: [.search], note: note, recording: true) == [.search])
+        #expect(CaptureNavigation.pathAfterClosing(from: [.serverNote(note)], note: note, recording: true) == [.serverNote(note)])
         // Stopped: the note is where its notes are generated. It is never stacked on itself.
-        #expect(CaptureNavigation.pathAfterClosing(from: [], noteID: note, recording: false) == [.serverNote(note)])
-        #expect(CaptureNavigation.pathAfterClosing(from: [.serverNote(note)], noteID: note, recording: false) == [.serverNote(note)])
+        #expect(CaptureNavigation.pathAfterClosing(from: [], note: note, recording: false) == [.serverNote(note)])
+        #expect(CaptureNavigation.pathAfterClosing(from: [.serverNote(note)], note: note, recording: false) == [.serverNote(note)])
     }
 
     @Test func theNotePageReadsItsNoteAgainWhenTheRecordingScreenOverItCloses() {
         // Notes generated on the recording screen: the page behind it must not keep offering "Generate notes".
-        #expect(CaptureNavigation.noteReloads(noteID: "a", captureWas: "a", captureIs: nil))
+        #expect(CaptureNavigation.noteReloads(note: note, captureWas: note, captureIs: nil))
         // Another note's recording screen closing, or this one opening, is not a reason to read again.
-        #expect(!CaptureNavigation.noteReloads(noteID: "a", captureWas: "b", captureIs: nil))
-        #expect(!CaptureNavigation.noteReloads(noteID: "a", captureWas: nil, captureIs: "a"))
-        #expect(!CaptureNavigation.noteReloads(noteID: "a", captureWas: "a", captureIs: "a"))
+        #expect(!CaptureNavigation.noteReloads(note: note, captureWas: other, captureIs: nil))
+        #expect(!CaptureNavigation.noteReloads(note: note, captureWas: nil, captureIs: note))
+        #expect(!CaptureNavigation.noteReloads(note: note, captureWas: note, captureIs: note))
+        // Nor is the recording screen of a note with the same id in another account.
+        #expect(!CaptureNavigation.noteReloads(note: note, captureWas: twin, captureIs: nil))
+        #expect(!CaptureNavigation.noteReloads(note: nil, captureWas: nil, captureIs: nil))
     }
 
     @Test func theIndicatorStaysWhileThereIsARecordingToReturnTo() {
-        #expect(CaptureNavigation.showsIndicator(activeNoteID: note, state: .recording))
-        #expect(CaptureNavigation.showsIndicator(activeNoteID: note, state: .paused))
+        #expect(CaptureNavigation.showsIndicator(activeNoteID: note.id, state: .recording))
+        #expect(CaptureNavigation.showsIndicator(activeNoteID: note.id, state: .paused))
         // Ended by a call or a lost input: the way back to the screen that explains it and resumes.
-        #expect(CaptureNavigation.showsIndicator(activeNoteID: note, state: .failed("Recording was interrupted.")))
+        #expect(CaptureNavigation.showsIndicator(activeNoteID: note.id, state: .failed("Recording was interrupted.")))
         // The user stopped it, or nothing was ever started.
-        #expect(!CaptureNavigation.showsIndicator(activeNoteID: note, state: .stopped))
-        #expect(!CaptureNavigation.showsIndicator(activeNoteID: note, state: .idle))
+        #expect(!CaptureNavigation.showsIndicator(activeNoteID: note.id, state: .stopped))
+        #expect(!CaptureNavigation.showsIndicator(activeNoteID: note.id, state: .idle))
         #expect(!CaptureNavigation.showsIndicator(activeNoteID: nil, state: .recording))
     }
 
@@ -73,22 +80,23 @@ struct CaptureNavigationRuleTests {
     }
 
     @Test func theRecordingScreenGrowsOutOfItsControlOnlyWhereThatControlIs() {
-        #expect(CaptureNavigation.zoomsFromSource(path: [], noteID: note))
-        #expect(CaptureNavigation.zoomsFromSource(path: [.serverNote(note)], noteID: note))
-        #expect(!CaptureNavigation.zoomsFromSource(path: [.serverNote(other)], noteID: note))
-        #expect(!CaptureNavigation.zoomsFromSource(path: [.serverNote(note), .serverChat(note)], noteID: note))
+        #expect(CaptureNavigation.zoomsFromSource(path: [], note: note))
+        #expect(CaptureNavigation.zoomsFromSource(path: [.serverNote(note)], note: note))
+        #expect(!CaptureNavigation.zoomsFromSource(path: [.serverNote(other)], note: note))
+        #expect(!CaptureNavigation.zoomsFromSource(path: [.serverNote(note), chat], note: note))
+        #expect(!CaptureNavigation.zoomsFromSource(path: [.serverNote(twin)], note: note))
     }
 }
 
 /// The recording screen can be shown and taken away; the recording is not its property.
 private struct CaptureHost: View {
-    let noteID: String
+    let note: NoteRef
     @Bindable var router: Router
     var body: some View {
         ZStack {
             Color.clear
             if router.serverCapture != nil {
-                RailMetricsReader { NavigationStack { ServerCaptureView(noteID: noteID) } }
+                RailMetricsReader { NavigationStack { ServerCaptureView(noteID: note.id).environment(\.account, note.account) } }
             }
         }
     }
@@ -101,10 +109,10 @@ private struct IndicatorHost: View {
     var body: some View {
         let _ = PerfProbe.hit("Test.IndicatorHost.body")
         VStack {
-            Text(recording.indicatorNoteID == nil ? "No recording" : "Recording")
-            if let id = recording.indicatorNoteID {
+            Text(recording.indicator == nil ? "No recording" : "Recording")
+            if let ref = recording.indicator {
                 RecordingPill(recorder: recording.recorder, onStop: {}, onStart: {},
-                              onOpen: { router.serverCapture = ServerCaptureTarget(id: id) })
+                              onOpen: { router.serverCapture = ServerCaptureTarget(ref) })
             }
         }
     }
@@ -128,14 +136,15 @@ struct RecordingNavigationTests {
         defer { try? FileManager.default.removeItem(at: harness.root) }
         let router = Router()
         let noteID = harness.instance.noteID
+        let note = NoteRef(account: try #require(harness.server.accountID), id: noteID)
         // Opening the screen starts the recording, as + on Home does.
-        router.serverCapture = ServerCaptureTarget(id: noteID)
-        let window = try window(CaptureHost(noteID: noteID, router: router)
+        router.serverCapture = ServerCaptureTarget(note)
+        let window = try window(CaptureHost(note: note, router: router)
             .environment(harness.server).environment(harness.controller).environment(router))
         defer { window.isHidden = true }
         try await waitFor("recording", timeout: .seconds(10)) { harness.controller.recorder.state == .recording }
         var time = harness.input.feed(format: InjectedAudio.builtIn, from: 0, seconds: 1)
-        #expect(harness.controller.indicatorNoteID == noteID)
+        #expect(harness.controller.indicator?.id == noteID)
         let transcript = try #require(harness.controller.transcript)
         try await waitFor("live text") { !transcript.utterances.isEmpty }
 
@@ -143,7 +152,7 @@ struct RecordingNavigationTests {
         router.serverCapture = nil
         try await Task.sleep(for: .milliseconds(400))
         #expect(harness.controller.recorder.state == .recording)
-        #expect(harness.controller.indicatorNoteID == noteID)
+        #expect(harness.controller.indicator?.id == noteID)
         #expect(harness.instance.count("POST", suffix: "/recording") == 1) // only the Start
 
         // It is still a recording in every sense: audio is captured, parts are cut and
@@ -161,7 +170,7 @@ struct RecordingNavigationTests {
 
         // Returning does not restart anything: same capture, same clock.
         let file = harness.controller.recorder.currentFileURL
-        router.serverCapture = ServerCaptureTarget(id: noteID)
+        router.serverCapture = ServerCaptureTarget(note)
         try await Task.sleep(for: .milliseconds(500))
         #expect(harness.controller.recorder.state == .recording)
         #expect(harness.controller.recorder.currentFileURL == file)
@@ -173,7 +182,7 @@ struct RecordingNavigationTests {
         // Stop is the one thing that ends it.
         harness.controller.stop()
         #expect(harness.controller.recorder.state == .stopped)
-        #expect(harness.controller.indicatorNoteID == nil)
+        #expect(harness.controller.indicator?.id == nil)
         try await waitFor("Stop on the server") { harness.instance.count("POST", suffix: "/recording") == 2 }
         #expect(harness.controller.recorder.capturedFrames == 5 * 16_000)
     }
@@ -181,25 +190,25 @@ struct RecordingNavigationTests {
     @Test func pauseAndAnInterruptionKeepTheIndicatorAndTheWayBack() async throws {
         let harness = try await LiveSessionHarness()
         defer { try? FileManager.default.removeItem(at: harness.root) }
-        #expect(harness.controller.indicatorNoteID == nil)
+        #expect(harness.controller.indicator?.id == nil)
         await harness.controller.start(note: try await harness.note())
         harness.input.feed(format: InjectedAudio.builtIn, from: 0, seconds: 1)
-        #expect(harness.controller.indicatorNoteID == harness.instance.noteID)
+        #expect(harness.controller.indicator?.id == harness.instance.noteID)
         harness.controller.recorder.pause()
-        #expect(harness.controller.indicatorNoteID == harness.instance.noteID)
+        #expect(harness.controller.indicator?.id == harness.instance.noteID)
         harness.controller.recorder.resumeFromPause()
         // A phone call ends the capture while the user is on another screen.
         NotificationCenter.default.post(name: AVAudioSession.interruptionNotification, object: nil,
             userInfo: [AVAudioSessionInterruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue])
         #expect(!harness.controller.isCapturing)
         // The indicator is still there, so the interruption is not silent and one tap returns.
-        #expect(harness.controller.indicatorNoteID == harness.instance.noteID)
+        #expect(harness.controller.indicator?.id == harness.instance.noteID)
         try await waitFor("Stop on the server") { harness.instance.count("POST", suffix: "/recording") == 2 }
         // Returning to the recording screen is the tap that resumes it.
         await harness.controller.start(note: try await harness.note())
         #expect(harness.controller.recorder.state == .recording)
         harness.controller.stop()
-        #expect(harness.controller.indicatorNoteID == nil)
+        #expect(harness.controller.indicator?.id == nil)
     }
 
     @Test func theIndicatorOnAnotherScreenFollowsTheClockInItsLeavesOnly() async throws {

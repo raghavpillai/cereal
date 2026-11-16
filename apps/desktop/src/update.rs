@@ -281,7 +281,6 @@ pub fn check(server: &str) -> Result<Check, Problem> {
     let reply = Request {
         method: "GET",
         url: &address,
-        bearer: None,
         body: None,
     }
     .send(MANIFEST_LIMIT)

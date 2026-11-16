@@ -2019,7 +2019,7 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
                     .await;
                 let ready = handle
                     .update(cx, |view, _, _| {
-                        crate::account::identity().is_some()
+                        crate::accounts::any_shown()
                             && view.server_pending == 0
                             && !view.workspace.notes.is_empty()
                     })
@@ -2397,12 +2397,12 @@ pub fn live_probe(handle: WindowHandle<Cereal>, seconds: u64, cx: &mut App) {
         }
         // Signing in with the configured token takes a request or two.
         for _ in 0..40 {
-            if crate::account::identity().is_some() {
+            if crate::accounts::any_shown() {
                 break;
             }
             cx.background_executor().timer(tick).await;
         }
-        if crate::account::identity().is_none() {
+        if !crate::accounts::any_shown() {
             return quit(cx, "refused: the server did not accept the configured token");
         }
         // What the probe is asked to do besides recording:
@@ -2426,7 +2426,9 @@ pub fn live_probe(handle: WindowHandle<Cereal>, seconds: u64, cx: &mut App) {
                 // The steps of `new_note`, with the title in place before
                 // the server first hears of the note.
                 Some(title) => {
-                    let id = view.workspace.create_note();
+                    let Some(id) = view.create_note_without_event() else {
+                        return None;
+                    };
                     view.workspace.note_mut(id).unwrap().title = title.clone();
                     view.open_note(id, cx);
                     view.active_tab = NoteTab::Notes;
@@ -3292,7 +3294,7 @@ pub fn welcome(handle: WindowHandle<Cereal>, name: String, cx: &mut App) {
                         .update(cx, |view, _, _| {
                             format!(
                                 "session at {}: {} notes read, server status {:?}, calendars loaded {} ({} sources, error {:?})",
-                                crate::account::configured_url(),
+                                crate::accounts::configured_url(),
                                 view.workspace.notes.iter().filter(|note| note.server_id.is_some()).count(),
                                 view.server_status,
                                 view.calendars.loaded,

@@ -1199,6 +1199,9 @@ pub struct UpdateCalendarInput {
 pub struct CalendarEventDTO {
     pub all_day: bool,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attendee_count: Option<i64>,
+
     pub calendar_id: String,
 
     pub calendar_name: String,
@@ -1213,9 +1216,15 @@ pub struct CalendarEventDTO {
 
     pub location: Option<String>,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meeting_uid: Option<String>,
+
     pub meeting_url: Option<String>,
 
     pub note_id: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub occurrence: Option<String>,
 
     pub start_at: String,
 
@@ -1462,32 +1471,23 @@ pub struct EvidenceQuoteDTO {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NoteDTO {
-    pub body: String,
+pub struct CreateNoteInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
 
-    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
 
-    pub date: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<String>,
 
-    pub duration: String,
-
-    pub enhanced: String,
-
-    pub generated_revision: Option<i64>,
-
-    pub generation_state: GenerationState,
-
-    pub id: String,
-
-    pub recording_state: RecordingState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enhanced: Option<String>,
 
     pub title: String,
 
-    pub transcript_revision: i64,
-
-    pub transcript_segments: Vec<TranscriptSegmentDTO>,
-
-    pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcript_segments: Option<Vec<TranscriptSegmentDTO>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1512,27 +1512,6 @@ pub struct TranscriptSegmentDTO {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CreateNoteInput {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub body: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub date: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub enhanced: Option<String>,
-
-    pub title: String,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcript_segments: Option<Vec<TranscriptSegmentDTO>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct UpdateNoteInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
@@ -1551,6 +1530,88 @@ pub struct UpdateNoteInput {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transcript_segments: Option<Vec<TranscriptSegmentDTO>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportNoteInput {
+    pub body: String,
+
+    pub created_at: String,
+
+    pub date: String,
+
+    pub duration: String,
+
+    pub enhanced: String,
+
+    pub generated: bool,
+
+    pub id: String,
+
+    pub meeting: Option<MeetingContextDTO>,
+
+    pub recording_state: ImportedRecordingState,
+
+    pub title: String,
+
+    pub transcript_segments: Vec<TranscriptSegmentDTO>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportedRecordingState {
+    Idle,
+
+    Stopped,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedNoteDTO {
+    pub note: NoteDTO,
+
+    pub segment_ids: Vec<ImportedSegmentIdDTO>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteDTO {
+    pub body: String,
+
+    pub created_at: String,
+
+    pub date: String,
+
+    pub duration: String,
+
+    pub enhanced: String,
+
+    pub generated_revision: Option<i64>,
+
+    pub generation_state: GenerationState,
+
+    pub id: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub imported_at: Option<String>,
+
+    pub recording_state: RecordingState,
+
+    pub title: String,
+
+    pub transcript_revision: i64,
+
+    pub transcript_segments: Vec<TranscriptSegmentDTO>,
+
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportedSegmentIdDTO {
+    pub from: String,
+
+    pub to: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1642,6 +1703,9 @@ pub struct ShareDTO {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HealthDTO {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub features: Option<Vec<String>>,
+
     pub status: HealthDtoStatus,
 
     pub version: Version,

@@ -144,7 +144,7 @@ struct SidebarDrawer: View {
 private struct SidebarPanel: View {
     @Environment(NoteStore.self) private var store
     @Environment(Router.self) private var router
-    @Environment(ServerNotesModel.self) private var server
+    @Environment(AccountsModel.self) private var accounts
     @Environment(ConnectionMode.self) private var connectionMode
     @AccessibilityFocusState private var focusedOnOpen: Bool
     private var model: SidebarModel { SidebarModel.shared }
@@ -178,9 +178,15 @@ private struct SidebarPanel: View {
                         row(note.displayTitle, symbol: "doc.text", selected: selected(.note(note.id))) { router.path = [.note(note.id)] }
                     }
                 } else {
-                    ForEach(server.list.rows) { note in
-                        row(note.title.isEmpty ? "Untitled note" : note.title, symbol: "doc.text", selected: selected(.serverNote(note.id))) {
-                            router.path = [.serverNote(note.id)]
+                    // Each account's notes, in the person's order. An account that must sign in again is left out.
+                    ForEach(accounts.sessions.filter { $0.status != .needsSignIn }, id: \.key) { session in
+                        if let account = session.notes.accountID {
+                            ForEach(session.notes.list.rows) { note in
+                                let ref = NoteRef(account: account, id: note.id)
+                                row(note.title.isEmpty ? "Untitled note" : note.title, symbol: "doc.text", selected: selected(.serverNote(ref))) {
+                                    router.path = [.serverNote(ref)]
+                                }
+                            }
                         }
                     }
                 }

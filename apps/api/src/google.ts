@@ -7,6 +7,7 @@ import type { SecretBox } from './admin-secrets'
 import type { GoogleCalendar, GoogleConnection, GoogleEvent, GoogleStore } from './google-store'
 import {MeetingBindingConflict} from './meeting-context-errors'
 import type { GoogleIntegration } from './google-integration'
+import { wellFormedOccurrence } from './calendar-feed'
 
 const CALENDAR_LIST = 'https://www.googleapis.com/auth/calendar.calendarlist.readonly'
 const CALENDAR_EVENTS = 'https://www.googleapis.com/auth/calendar.events.readonly'
@@ -72,7 +73,11 @@ export function normalizeGoogleEvent(raw: unknown, calendar: GoogleCalendar): Go
   const recurring=!!(text(e.recurringEventId,1024)||originalDate||originalTime)
   const occurrence = !recurring ? "single" : allDay ? `date:${originalDate ?? startDate}` : `instant:${originalTime && Number.isFinite(Date.parse(originalTime)) ? new Date(originalTime).toISOString() : context.startAt}`
   const meetingKey = sha(`google-meeting:${text(e.iCalUID, 2048) ?? `remote:${calendar.remoteId}:${id}`}:${occurrence}`)
-  return { id: eventId, remoteId: id, meetingKey, calendarId: calendar.id, title: context.title, startAt: context.startAt, endAt: context.endAt, allDay, startDate, endDate, timeZone: context.timeZone, location: context.location, meetingUrl, context }
+  // The identity sent to the apps: the iCalendar UID as Google gives it (never the `remote:` fallback, which
+  // means nothing on another server, and never a shortened one) with the occurrence in the same three forms as
+  // calendar-feed.ts.
+  const rawUid = typeof e.iCalUID === 'string' ? e.iCalUID.trim() : '', uid = rawUid && rawUid.length <= 2048 ? rawUid : null
+  return { id: eventId, remoteId: id, meetingKey, meetingUid: uid, occurrence: wellFormedOccurrence(occurrence), calendarId: calendar.id, title: context.title, startAt: context.startAt, endAt: context.endAt, allDay, startDate, endDate, timeZone: context.timeZone, location: context.location, meetingUrl, context }
 }
 
 /** All Google grants, calendars, events and contact enrichments are account-scoped.

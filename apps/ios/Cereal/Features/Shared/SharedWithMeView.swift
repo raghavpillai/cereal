@@ -8,7 +8,7 @@ import APIClient
 struct SharedWithMeView: View {
     @Environment(SharedNoteHistory.self) private var history
     @Environment(Router.self) private var router
-    @Environment(ServerNotesModel.self) private var server
+    @Environment(AccountsModel.self) private var accounts
     @Environment(ConnectionMode.self) private var mode
     @Environment(\.dismiss) private var dismiss
     @Environment(\.motion) private var motion
@@ -25,7 +25,7 @@ struct SharedWithMeView: View {
                         ScreenPrompt(symbol: "link", title: "Nothing shared with you yet", detail: "Shared notes you open are kept here.")
                     }
                 } else {
-                    SharedVisitList(visits: history.visits, open: { router.open(.shared($0.link), server: server, mode: mode) },
+                    SharedVisitList(visits: history.visits, open: { router.open(.shared($0.link), accounts: accounts, mode: mode) },
                                     remove: { visit in withAnimation(motion.exit(.settle)) { history.remove(visit.id) } })
                         .transition(motion.fade)
                 }
@@ -66,7 +66,7 @@ struct SharedWithMeView: View {
             return
         }
         text = ""; problem = nil; focused = false
-        router.open(link, server: server, mode: mode)
+        router.open(link, accounts: accounts, mode: mode)
     }
 }
 

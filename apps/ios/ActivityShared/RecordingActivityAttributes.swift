@@ -14,6 +14,12 @@ struct RecordingActivityAttributes: ActivityAttributes {
         /// The note's title, shown where the activity has room for it. Nil for a
         /// note that has none yet, and in activities from before titles were shown.
         var title: String? = nil
+        /// The account the recording goes to, as the person knows it, and its
+        /// server's host. Set only when there is more than one account to tell
+        /// apart; never an email or anything secret. Optional, so activities
+        /// from before accounts decode.
+        var accountLabel: String? = nil
+        var accountHost: String? = nil
 
         /// The title as it is shown: trimmed, on one line, and not at all when empty.
         static func shownTitle(_ text: String) -> String? {
@@ -45,9 +51,16 @@ struct RecordingActivityAttributes: ActivityAttributes {
     var noteID: UUID
     // Optional preserves decoding of activities created before preview QA existed.
     var presentation: Presentation? = nil
+    /// The account the note belongs to: 64 lower-case hex characters. Nil in
+    /// activities from before accounts, and for the local demo.
+    var accountID: String? = nil
     var isPreview: Bool { presentation == .preview }
 
+    /// `cereal://recording/<note>?a=<account>`. The link only ever opens a note.
     var recordingURL: URL {
-        URL(string: "cereal://\(isPreview ? "live-activity-preview" : "recording")/\(noteID.uuidString)")!
+        let base = "cereal://\(isPreview ? "live-activity-preview" : "recording")/\(noteID.uuidString)"
+        guard !isPreview, let accountID, accountID.utf8.count == 64,
+              accountID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { return URL(string: base)! }
+        return URL(string: base + "?a=" + accountID)!
     }
 }

@@ -2,6 +2,7 @@
 // through the main actor and the pending-task chain; no concurrent updates are issued.
 @preconcurrency import ActivityKit
 import Foundation
+import APIClient
 
 /// Injectable boundary keeps lifecycle tests independent from device authorization,
 /// microphone hardware, widget rendering, and the user's existing activities.
@@ -18,14 +19,22 @@ import Foundation
 @MainActor protocol RecordingActivityBackend {
     var enabled: Bool { get }
     var activities: [any RecordingActivitySession] { get }
-    func request(noteID: UUID, state: RecordingActivityAttributes.ContentState, staleDate: Date, presentation: RecordingActivityAttributes.Presentation?) throws -> any RecordingActivitySession
+    func request(noteID: UUID, accountID: String?, state: RecordingActivityAttributes.ContentState, staleDate: Date, presentation: RecordingActivityAttributes.Presentation?) throws -> any RecordingActivitySession
+}
+
+/// The account a recording goes to, as its Live Activity may show it. The
+/// label and host are given only when there are several accounts.
+struct RecordingActivityAccount: Equatable {
+    let id: String
+    var label: String?
+    var host: String?
 }
 
 @MainActor private struct SystemRecordingActivityBackend: RecordingActivityBackend {
     var enabled: Bool { ActivityAuthorizationInfo().areActivitiesEnabled }
     var activities: [any RecordingActivitySession] { Activity<RecordingActivityAttributes>.activities.map(SystemRecordingActivitySession.init) }
-    func request(noteID: UUID, state: RecordingActivityAttributes.ContentState, staleDate: Date, presentation: RecordingActivityAttributes.Presentation?) throws -> any RecordingActivitySession {
-        SystemRecordingActivitySession(try Activity.request(attributes: RecordingActivityAttributes(noteID: noteID, presentation: presentation),
+    func request(noteID: UUID, accountID: String?, state: RecordingActivityAttributes.ContentState, staleDate: Date, presentation: RecordingActivityAttributes.Presentation?) throws -> any RecordingActivitySession {
+        SystemRecordingActivitySession(try Activity.request(attributes: RecordingActivityAttributes(noteID: noteID, presentation: presentation, accountID: accountID),
             content: ActivityContent(state: state, staleDate: staleDate), pushType: nil))
     }
 }
@@ -61,6 +70,8 @@ import Foundation
     private var latestState: RecordingActivityAttributes.ContentState?
     /// The recorded note's title as the activity shows it. Nil for a note without one.
     private var title: String?
+    /// The account of the note being recorded. Nil for the local demo.
+    private var account: RecordingActivityAccount?
     private var pending: Task<Void, Never>?
     private var gate = RecordingActivityUpdateGate()
 
@@ -86,8 +97,9 @@ import Foundation
 
     /// An empty `title` means "as it was": a resume or a new part of the same
     /// recording does not know the title and must not blank it.
-    func start(noteID: UUID, title: String, elapsed: TimeInterval) {
+    func start(noteID: UUID, title: String, elapsed: TimeInterval, account: RecordingActivityAccount? = nil) {
         lastError = nil
+        if activity?.noteID != noteID || account != nil { self.account = account }
         let shown = RecordingActivityAttributes.ContentState.shownTitle(title)
         if activity?.noteID == noteID {
             if let shown { self.title = shown }
@@ -101,7 +113,7 @@ import Foundation
         guard backend.enabled else { lastError = "Live Activities are disabled in Settings."; return }
         let state = contentState(phase: .recording, elapsed: elapsed)
         do {
-            activity = try backend.request(noteID: noteID, state: state, staleDate: state.updatedAt.addingTimeInterval(75), presentation: presentation)
+            activity = try backend.request(noteID: noteID, accountID: account?.id, state: state, staleDate: state.updatedAt.addingTimeInterval(75), presentation: presentation)
             latestState = state
             _ = gate.shouldUpdate(at: uptime(), force: true)
         } catch {
@@ -168,19 +180,53 @@ import Foundation
     private func contentState(phase: RecordingActivityAttributes.ContentState.Phase, elapsed: TimeInterval) -> RecordingActivityAttributes.ContentState {
         let date = now()
         let elapsed = elapsed.isFinite ? max(0, elapsed) : 0
-        return .init(phase: phase, elapsed: elapsed, timerAnchor: date.addingTimeInterval(-elapsed), updatedAt: date, title: title)
+        return .init(phase: phase, elapsed: elapsed, timerAnchor: date.addingTimeInterval(-elapsed), updatedAt: date, title: title,
+                     accountLabel: account?.label, accountHost: account?.host)
     }
 }
 
-/// A running server capture takes precedence over the selected browsing mode,
-/// but never over the authenticated principal to which that capture belongs.
+/// Where a tap on a recording's Live Activity leads. Pure, so the rules can be
+/// tested. The link only ever opens a note: it starts, stops and sends nothing.
 enum RecordingActivityLinkPolicy {
-    static func activeServerNoteID(url: URL, activeNoteID: String?, recordingIdentity: String?, accountIdentity: String?) -> UUID? {
+    struct Link: Equatable {
+        let noteID: UUID
+        /// The account the activity named. Nil in a link from before accounts.
+        let account: AccountID?
+    }
+
+    enum Target: Equatable {
+        case note(NoteRef)
+        /// Nothing here matches the link. Home, or the local demo's own note of that id.
+        case home
+    }
+
+    /// `cereal://recording/<note uuid>` with at most one parameter, `a`, of 64
+    /// lower-case hex characters. Anything else is not a recording link.
+    static func link(_ url: URL) -> Link? {
         guard url.scheme == AppIdentity.urlScheme, url.host == "recording", url.user == nil, url.password == nil,
-              url.query == nil, url.fragment == nil, url.pathComponents.count == 2,
+              url.port == nil, url.fragment == nil, url.pathComponents.count == 2,
               let id = UUID(uuidString: url.lastPathComponent),
-              let recordingIdentity, !recordingIdentity.isEmpty, recordingIdentity == accountIdentity,
-              activeNoteID.flatMap(UUID.init(uuidString:)) == id else { return nil }
-        return id
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        guard components.query != nil else { return Link(noteID: id, account: nil) }
+        guard let items = components.queryItems, items.count == 1, items[0].name == "a",
+              let account = items[0].value.flatMap(AccountID.init(_:)), components.percentEncodedQuery == "a=" + account.raw else { return nil }
+        return Link(noteID: id, account: account)
+    }
+
+    /// - The recording in progress, when the link is for its note and names its
+    ///   account or none: a running recording comes before anything else.
+    /// - Otherwise the note in the account the link names, if that account is here.
+    /// - A link without an account is looked up in each account's capture ledger.
+    /// - Otherwise Home.
+    static func target(_ link: Link, active: NoteRef?, accounts: [AccountID], ledger: (AccountID) -> Set<String>) -> Target {
+        let id = link.noteID.uuidString.lowercased()
+        if let active, UUID(uuidString: active.id) == link.noteID, link.account == nil || link.account == active.account {
+            return .note(active)
+        }
+        if let account = link.account {
+            return accounts.contains(account) ? .note(NoteRef(account: account, id: id)) : .home
+        }
+        if let owner = accounts.first(where: { ledger($0).contains(id) }) { return .note(NoteRef(account: owner, id: id)) }
+        return .home
     }
 }

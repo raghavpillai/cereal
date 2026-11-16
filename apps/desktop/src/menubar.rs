@@ -416,6 +416,10 @@ pub fn quit_plan(kind: QuitKind, menu_bar_item: bool, recording: bool) -> QuitPl
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reminder {
     pub event_id: String,
+    /// The account the event was read through. A reminder carries its
+    /// account: two accounts on one server return the same event id for a
+    /// shared calendar.
+    pub account: Option<crate::accounts::AccountId>,
     pub title: String,
     pub body: String,
     /// One minute before the meeting starts.
@@ -438,6 +442,7 @@ pub fn reminders(events: &[&CalendarEventDTO], now: DateTime<Local>) -> Vec<Remi
                 }
                 Reminder {
                     event_id: event.id.clone(),
+                    account: None,
                     title: row.title,
                     body,
                     fire_at: start - Duration::seconds(REMINDER_LEAD_SECONDS),
@@ -454,8 +459,38 @@ pub fn reminders(events: &[&CalendarEventDTO], now: DateTime<Local>) -> Vec<Remi
     planned
 }
 
-/// What to change with macOS so that the reminders `waiting` there (event
-/// id to the second each fires) become the ones `wanted`: the event ids to
+impl Reminder {
+    /// What the reminder is known by here and, behind `meeting-`, with
+    /// macOS: `<AccountId>-<event id>`.
+    pub fn key(&self) -> String {
+        reminder_key(self.account.as_ref(), &self.event_id)
+    }
+
+}
+
+pub fn reminder_key(account: Option<&crate::accounts::AccountId>, event_id: &str) -> String {
+    match account {
+        Some(account) => format!("{}-{event_id}", account.as_str()),
+        None => event_id.to_owned(),
+    }
+}
+
+/// The identifiers of reminders changed with this build (they now carry the
+/// account). Pending reminders registered under an older scheme are cleared
+/// once and registered again.
+pub const REMINDER_SCHEME: u32 = 2;
+
+/// The account and event a reminder's click names. A reminder from before
+/// accounts names an event only.
+pub fn reminder_target(argument: &str) -> (Option<crate::accounts::AccountId>, &str) {
+    match argument.split_once('/') {
+        Some((account, event)) => (crate::accounts::AccountId::parse(account), event),
+        None => (None, argument),
+    }
+}
+
+/// What to change with macOS so that the reminders `waiting` there (key
+/// to the second each fires) become the ones `wanted`: the keys to
 /// withdraw, and the reminders to add or move. One that is already due is
 /// never withdrawn: it is macOS's to deliver.
 pub fn reminder_changes<'a>(
@@ -466,14 +501,14 @@ pub fn reminder_changes<'a>(
     let mut remove: Vec<String> = waiting
         .iter()
         .filter(|(id, fire_at)| {
-            **fire_at > now.timestamp() && !wanted.iter().any(|reminder| reminder.event_id == **id)
+            **fire_at > now.timestamp() && !wanted.iter().any(|reminder| reminder.key() == **id)
         })
         .map(|(id, _)| id.clone())
         .collect();
     remove.sort();
     let add = wanted
         .iter()
-        .filter(|reminder| waiting.get(&reminder.event_id) != Some(&reminder.fire_at.timestamp()))
+        .filter(|reminder| waiting.get(&reminder.key()) != Some(&reminder.fire_at.timestamp()))
         .collect();
     (remove, add)
 }
@@ -495,7 +530,8 @@ pub struct State {
     pushed: String,
     /// What the model was last built from.
     signature: Option<(u64, u64, &'static str, bool, u64, bool)>,
-    /// Reminders waiting with macOS: event id to the second they fire.
+    /// Reminders waiting with macOS: key (account and event) to the second
+    /// they fire.
     reminders: HashMap<String, i64>,
     /// "Scheduled meetings" was just turned on and macOS has not answered.
     asking: bool,
@@ -511,7 +547,16 @@ fn logging() -> bool {
 
 impl Cereal {
     fn menu_bar_events(&self) -> Vec<&CalendarEventDTO> {
-        if !crate::server::enabled() || crate::account::identity().is_none() {
+        // The events of the account they were read through, while that
+        // account's session may be used.
+        if !crate::server::enabled()
+            || !self
+                .calendars
+                .account
+                .as_ref()
+                .and_then(crate::accounts::get)
+                .is_some_and(|account| account.shown())
+        {
             return Vec::new();
         }
         let filter = self.calendars.filter();
@@ -559,12 +604,45 @@ impl Cereal {
         self.sync_reminders();
     }
 
+    /// Withdraw every reminder waiting with macOS: their account is
+    /// leaving, or its session has ended. Touches only the item's own state.
+    pub fn withdraw_reminders(&mut self) {
+        if self.menu_bar.reminders.is_empty() {
+            return;
+        }
+        let remove: Vec<String> = self
+            .menu_bar
+            .reminders
+            .drain()
+            .map(|(key, _)| format!("meeting-{key}"))
+            .collect();
+        let change = serde_json::json!({ "remove": remove, "add": [] }).to_string();
+        if logging() {
+            eprintln!("menubar reminders {change}");
+        }
+        native::notifications_apply(&change);
+    }
+
     fn sync_reminders(&mut self) {
-        let wanted = if crate::desktop_preferences::meeting().scheduled_notifications {
+        let preferences = crate::desktop_preferences::meeting();
+        if preferences.reminder_scheme < REMINDER_SCHEME {
+            // The first launch of the build that changed the identifiers:
+            // what an older build registered is cleared once, and what is
+            // wanted is registered again below.
+            native::notifications_clear();
+            self.menu_bar.reminders.clear();
+            let _ = crate::desktop_preferences::update_meeting(|preferences| {
+                preferences.reminder_scheme = REMINDER_SCHEME
+            });
+        }
+        let mut wanted = if preferences.scheduled_notifications {
             reminders(&self.menu_bar_events(), now())
         } else {
             Vec::new()
         };
+        for reminder in &mut wanted {
+            reminder.account = self.calendars.account.clone();
+        }
         let (remove, add) = reminder_changes(&self.menu_bar.reminders, &wanted, now());
         let remove: Vec<String> = remove.iter().map(|id| format!("meeting-{id}")).collect();
         if remove.is_empty() && add.is_empty() {
@@ -575,11 +653,12 @@ impl Cereal {
         let change = serde_json::json!({
             "remove": remove,
             "add": add.iter().map(|reminder| serde_json::json!({
-                "id": format!("meeting-{}", reminder.event_id),
+                "id": format!("meeting-{}", reminder.key()),
                 "title": reminder.title,
                 "body": reminder.body,
                 "fireAt": reminder.fire_at.timestamp() - offset,
                 "eventId": reminder.event_id,
+                "account": reminder.account.as_ref().map(|account| account.as_str()),
             })).collect::<Vec<_>>(),
         })
         .to_string();
@@ -589,7 +668,7 @@ impl Cereal {
         native::notifications_apply(&change);
         self.menu_bar.reminders = wanted
             .into_iter()
-            .map(|reminder| (reminder.event_id, reminder.fire_at.timestamp()))
+            .map(|reminder| (reminder.key(), reminder.fire_at.timestamp()))
             .collect();
     }
 
@@ -601,8 +680,10 @@ impl Cereal {
             crate::desktop_preferences::meeting_revision(),
             self.updates.status(),
             self.updates.row().2,
-            crate::account::epoch(),
-            crate::account::identity().is_some(),
+            // The registry's revision: it moves whenever an account
+            // comes, goes or changes state.
+            crate::accounts::revision(),
+            crate::accounts::any_shown(),
         );
         if self.menu_bar.signature != Some(signature) {
             self.menu_bar.signature = Some(signature);
@@ -722,8 +803,13 @@ impl Cereal {
             "open" => self.reveal_main_window(window, cx),
             "event" | "open-event" => {
                 self.reveal_main_window(window, cx);
-                if !welcome && !argument.is_empty() {
-                    self.open_calendar_event(argument.to_owned(), cx);
+                // A reminder names its account. One whose account is no
+                // longer the one these events were read through does
+                // nothing.
+                let (account, event) = reminder_target(argument);
+                let current = account.is_none() || account == self.calendars.account;
+                if !welcome && !event.is_empty() && current {
+                    self.open_calendar_event(event.to_owned(), cx);
                 }
             }
             "new-note" => {

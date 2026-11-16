@@ -267,22 +267,23 @@ struct ServerChatView: View {
             try? await Task.sleep(for: .milliseconds(300))
             guard !Task.isCancelled, let account, server.accountIdentity == account,
                   server.title(ofNote: note.id) != nil else { return }
-            router.path.append(.serverChat(note.id))
+            if let id = server.accountID { router.path.append(.serverChat(id, noteID: note.id)) }
         }
     }
     private func openMeeting(_ meeting: ChatToolMeetingDTO, turnID: UUID) {
         guard messages.first(where: { $0.id == turnID })?.annotations?.tools.contains(where: { $0.results?.contains(where: { $0.noteId == meeting.noteId }) == true }) == true,
-              session?.key == sessionKey, server.accountIdentity != nil, let id = UUID(uuidString: meeting.noteId) else { return }
+              session?.key == sessionKey, let owner = server.accountID, let id = UUID(uuidString: meeting.noteId) else { return }
         focused = false
-        router.path.append(.serverNote(id.uuidString.lowercased()))
+        // A meeting an answer names opens in the thread's own account.
+        router.path.append(.serverNote(NoteRef(account: owner, id: id.uuidString.lowercased())))
     }
     private func openCitation(_ citation: ChatCitationDTO, turnID: UUID) {
         guard messages.first(where: { $0.id == turnID })?.annotations?.citations.contains(where: { $0.id == citation.id && $0.noteId == citation.noteId && $0.source == citation.source && $0.segmentId == citation.segmentId && $0.transcriptRevision == citation.transcriptRevision }) == true,
-              session?.key == sessionKey, let account = server.accountIdentity,
+              session?.key == sessionKey, let account = server.accountIdentity, let owner = server.accountID,
               let id = UUID(uuidString: citation.noteId) else { return }
         focused = false
         if citation.source == .transcript { selectedCitation = ChatCitationSelection(citation: citation, accountIdentity: account) }
-        else { router.path.append(.serverNoteSource(id.uuidString.lowercased(), raw: citation.source == .notes)) }
+        else { router.path.append(.serverNoteSource(NoteRef(account: owner, id: id.uuidString.lowercased()), raw: citation.source == .notes)) }
     }
 
     private func retryLastQuestion() { session?.retryLastQuestion(model: selectedModel) }
@@ -401,9 +402,27 @@ struct QueuedQuestionRow: View {
     /// The signed-in account changed, or there is none: every answer arriving for
     /// any other account ends, and nothing more is written to its conversation.
     func accountChanged(to identity: String?) {
-        for (key, session) in live where session.accountIdentity != identity {
+        accountsChanged(to: identity.map { [$0] } ?? [])
+    }
+
+    /// The accounts on this device are now `identities`: every answer arriving
+    /// for an account that is not among them ends, and nothing more is written
+    /// to its conversation. The others carry on.
+    func accountsChanged(to identities: Set<String>) {
+        for (key, session) in live where !identities.contains(session.accountIdentity) {
             session.end(); live[key] = nil; liveOrder.removeAll { $0 == key }
         }
+    }
+
+    /// The account was removed and its data erased: its saved conversations go too.
+    func erase(accountIdentity: String) {
+        accountsChanged(to: Set(live.values.map(\.accountIdentity)).subtracting([accountIdentity]))
+        let prefix = accountIdentity + "|"
+        let gone = values.keys.filter { $0.hasPrefix(prefix) }
+        guard !gone.isEmpty else { return }
+        for key in gone { values[key] = nil }
+        order.removeAll { $0.hasPrefix(prefix) }
+        persist()
     }
 
     /// The note was deleted: an answer arriving about it ends.
@@ -434,6 +453,10 @@ struct QueuedQuestionRow: View {
         values[key] = Self.finished(ConversationState(messages: Array(messages.suffix(200)), history: Self.archive(messages, in: history)))
         order.removeAll { $0 == key }; order.append(key)
         while order.count > 64 { values.removeValue(forKey: order.removeFirst()) }
+        persist()
+    }
+
+    private func persist() {
         guard let url = persistenceURL, !preserveUnreadable else { return }
         do {
             let data = try JSONEncoder().encode(HistoryFile(values: values, order: order))

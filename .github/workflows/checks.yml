@@ -38,13 +38,14 @@ jobs:
           RUN_PG_TESTS: "1"
           RUN_AUTH_PG_TESTS: "1"
         # Same grouping as scripts/test-postgres-isolated.ts: the sign-in suites share an in-memory
-        # rate limiter, and the 500-note benchmark needs a process to itself.
+        # rate limiter, and the 500-note benchmark and the 24 MB note import each need a process to themselves.
         run: |
-          separate='/(auth|sign-in|mcp-auth|organizations|note-summaries)-postgres\.test\.ts$'
+          separate='/(auth|sign-in|mcp-auth|organizations|note-summaries|import)-postgres\.test\.ts$'
           bun test --timeout 30000 ./apps/api/test/auth-postgres.test.ts
           bun test --timeout 30000 ./apps/api/test/sign-in-postgres.test.ts
           bun test --timeout 30000 $(ls apps/api/test/*.test.ts | grep -v -E "$separate" | sed 's|^|./|')
           bun test --timeout 30000 ./apps/api/test/note-summaries-postgres.test.ts
+          bun test --timeout 30000 ./apps/api/test/import-postgres.test.ts
           bun test --timeout 30000 ./apps/api/test/mcp-auth-postgres.test.ts
           bun test --timeout 30000 ./apps/api/test/organizations-postgres.test.ts
       - run: bun run build

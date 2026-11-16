@@ -64,6 +64,27 @@ function meetingLink(...values:unknown[]):string|null {
   }
   return null
 }
+/** The UID as an identity: trimmed, and none at all when it is longer than the contract allows (a shortened one would name another meeting). */
+const meetingUid=(uid:unknown)=>{const text=String(uid).trim();return text&&text.length<=2048?text:null}
+/** The three forms of `occurrence` in the contract. Anything else (a date no calendar could mean) is sent as no occurrence, never as a malformed one. */
+const OCCURRENCE=/^(single|date:\d{4}-\d{2}-\d{2}|instant:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)$/
+export const wellFormedOccurrence=(occurrence:string):string|null=>OCCURRENCE.test(occurrence)?occurrence:null
+const localDay=(date:Date)=>`${String(date.getFullYear()).padStart(4,"0")}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`
+const utcMidnight=(date:Date)=>new Date(Date.UTC(date.getFullYear(),date.getMonth(),date.getDate()))
+const address=(v:unknown)=>value(v).trim().replace(/^mailto:/i,"").toLowerCase()
+/** How many other people are invited: the ATTENDEE lines that are people, without the organizer. For
+ * anyone who is in the meeting that is the number of others: a feed that lists the organizer among the
+ * attendees (Google) and one that does not (Exchange) give the same count. Rooms and equipment
+ * (CUTYPE ROOM or RESOURCE) are left out. */
+export function otherInvitees(attendees:unknown,organizer:unknown):number {
+  const host=address(organizer),people=new Set<string>()
+  for(const attendee of(Array.isArray(attendees)?attendees:attendees?[attendees]:[]).slice(0,2000)){
+    const kind=typeof attendee==="object"&&attendee!==null&&"params"in attendee&&typeof attendee.params==="object"&&attendee.params!==null&&"CUTYPE"in attendee.params?String(attendee.params.CUTYPE).toUpperCase():""
+    const who=address(attendee)
+    if(who&&who!==host&&kind!=="ROOM"&&kind!=="RESOURCE")people.add(who)
+  }
+  return people.size
+}
 /** node-ical handles RRULE/EXDATE/RECURRENCE-ID/DST; bound source and expansion. */
 export async function parseCalendarFeed(calendarId:string, source:string, now:Date):Promise<StoredCalendarEvent[]> {
   if(Buffer.byteLength(source)>MAX_FEED_BYTES||!source.includes("BEGIN:VCALENDAR")||(source.match(/BEGIN:VEVENT/g)?.length??0)>2000)throw new Error("Invalid or oversized calendar")
@@ -78,9 +99,16 @@ export async function parseCalendarFeed(calendarId:string, source:string, now:Da
       const original=instance.event.recurrenceid??instance.start
       const occurrence=!instance.isRecurring?"single":instance.isFullDay?original.toISOString().slice(0,10):original.toISOString()
       const sourceKey=hash(event.uid+"\n"+occurrence), meetingKey=sourceKey
+      // The identity sent to the apps, in the one format both sources use (google.ts builds the same three
+      // forms). `meetingKey` above keeps its older spelling: notes are bound to it.
+      // node-ical gives an all-day date as midnight in this process's own time zone, so the day is read back
+      // in that zone: the identity is the same wherever the server runs.
+      const identity=!instance.isRecurring?"single":instance.isFullDay?"date:"+localDay(original):"instant:"+original.toISOString()
       const zone=instance.start.tz&&instance.start.tz!=="Etc/UTC"?instance.start.tz:null
-      const end=instance.end>instance.start?instance.end:new Date(instance.start.getTime()+(instance.isFullDay?86400000:0))
-      events.set(sourceKey,{id:uuid(calendarId+":"+sourceKey),calendarId,sourceKey,meetingKey,title:(value(instance.summary)||"Untitled event").slice(0,500),startAt:instance.start.toISOString(),endAt:end.toISOString(),allDay:instance.isFullDay,startDate:datePart(instance.start,instance.isFullDay?"UTC":zone),endDate:datePart(end,instance.isFullDay?"UTC":zone),timeZone:zone,location:value(instance.event.location).slice(0,1000)||null,meetingUrl:meetingLink(instance.event.url,instance.event.location,instance.event.description)})
+      // An all-day event's times are sent as UTC midnights of its days (as the Google source sends them), wherever this server runs.
+      const begin=instance.isFullDay?utcMidnight(instance.start):instance.start,finish=instance.isFullDay?utcMidnight(instance.end):instance.end
+      const end=finish>begin?finish:new Date(begin.getTime()+(instance.isFullDay?86400000:0))
+      events.set(sourceKey,{id:uuid(calendarId+":"+sourceKey),calendarId,sourceKey,meetingKey,title:(value(instance.summary)||"Untitled event").slice(0,500),startAt:begin.toISOString(),endAt:end.toISOString(),allDay:instance.isFullDay,startDate:datePart(begin,instance.isFullDay?"UTC":zone),endDate:datePart(end,instance.isFullDay?"UTC":zone),timeZone:zone,location:value(instance.event.location).slice(0,1000)||null,meetingUrl:meetingLink(instance.event.url,instance.event.location,instance.event.description),meetingUid:meetingUid(event.uid),occurrence:wellFormedOccurrence(identity),attendeeCount:otherInvitees(instance.event.attendee,instance.event.organizer)})
       if(events.size>5000)throw new Error("Too many calendar occurrences")
     }
   }

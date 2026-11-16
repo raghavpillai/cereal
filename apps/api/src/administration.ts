@@ -296,7 +296,7 @@ export function makeAdministrationService(store:CalendarStore,box:SecretBox=secr
  updateCalendar:(id:string,input:UpdateCalendarInput)=>boundary(async()=>{const{url,...fields}=input;const normalized=url===undefined?undefined:validatedURL(url);const c=await store.updateCalendar(id,{...fields,...(normalized?{encryptedURL:box.seal(normalized.href),sourceHost:normalized.hostname}:{})});if(!c)throw missing();return safe(c)}),
  deleteCalendar:(id:string)=>boundary(async()=>{if(!await store.deleteCalendar(id))throw missing();return{deleted:true as const}}),
  syncCalendar:(id:string)=>boundary(async()=>{const c=await sync(id);if(!c)throw missing();return c}),
- listEvents:(query:{from?:string;to?:string},userId?:string)=>boundary(async()=>{const{from,to}=await eventRange(query);const events=await store.listEvents(from,to,userId);if(events.length>10000)throw invalid("Too many events; request a shorter date range");return events.map(({sourceKey,meetingKey,...e}):CalendarEventDTO=>e)}),
+ listEvents:(query:{from?:string;to?:string},userId?:string)=>boundary(async()=>{const{from,to}=await eventRange(query);const events=await store.listEvents(from,to,userId);if(events.length>10000)throw invalid("Too many events; request a shorter date range");return events.map(({sourceKey,meetingKey,...e}):CalendarEventDTO=>({...e,meetingUid:e.meetingUid??null,occurrence:e.occurrence??null,attendeeCount:e.attendeeCount??null}))}),
  createEventNote:(id:string,userId?:string)=>boundary(async()=>{const note=await store.createEventNote(id,userId);if(!note)throw missing();return note}),
  async dispose(){disposed=true;if(timer)clearInterval(timer);await Promise.allSettled([...running.values()])},
  }

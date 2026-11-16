@@ -46,6 +46,10 @@ pub enum Menu {
     Shortcuts,
     /// Right-click menu of a note row in a list.
     NoteRow,
+    /// A sheet about an account: signing out, erasing, signing in to a
+    /// signed-out account, restoring a note deleted on the server. What it
+    /// says is in `Cereal::account_sheet`.
+    Account,
 }
 
 pub struct Cereal {
@@ -87,7 +91,29 @@ pub struct Cereal {
     pub audio_error: Option<String>,
     pub audio_pending: Vec<crate::audio::CaptureMonitor>,
     pub audio_quitting: bool,
-    pub server_bridge: Option<crate::server::Bridge>,
+    /// One serial worker per account (see `server.rs`).
+    pub bridges: std::collections::HashMap<crate::accounts::AccountId, crate::server::Bridge>,
+    /// Accounts whose notes list is being refreshed.
+    pub refreshing: std::collections::HashSet<crate::accounts::AccountId>,
+    /// Accounts whose saved session is being verified, and how often each
+    /// has gone unanswered.
+    pub verifying: std::collections::HashSet<crate::accounts::AccountId>,
+    pub verify_failures: std::collections::HashMap<crate::accounts::AccountId, u32>,
+    /// Accounts whose session ended, was replaced, or whose server did not
+    /// answer, since they were last Ready: when they are Ready again, what
+    /// they hold unsent is sent again.
+    pub interrupted: std::collections::HashSet<crate::accounts::AccountId>,
+    /// "Sign in to your server first" was said for this launch.
+    pub sign_in_asked: bool,
+    pub accounts_watched: bool,
+    /// The sign-out or erase sheet that is open (see `screens.rs`).
+    pub account_sheet: Option<crate::screens::AccountSheet>,
+    /// What Settings lists of signed-out and older data on this Mac, read
+    /// off the UI thread and kept until an account comes or goes.
+    pub saved_data: Option<crate::accounts::saved::Listing>,
+    pub saved_data_loading: bool,
+    /// `CEREAL_DEBUG_VIEW` has been shown (debug builds).
+    pub debug_view_shown: bool,
     pub server_pending: usize,
     pub server_status: Option<String>,
     pub generation: crate::recording::Generation,
@@ -256,7 +282,8 @@ impl Cereal {
                     crate::account::AccountEvent::SignedIn(account) => {
                         this.accept_account(account.clone(), cx)
                     }
-                    crate::account::AccountEvent::SignOut => this.sign_out_account(cx),
+                    // Signing out always says what stays first.
+                    crate::account::AccountEvent::SignOut => this.ask_sign_out_default(cx),
                 },
             ),
             cx.on_app_quit(|this, cx| {
@@ -340,14 +367,19 @@ impl Cereal {
             cx.subscribe(&ask, |this, _, _: &InputSubmitted, cx| this.submit_chat(cx)),
             cx.subscribe(&title_input, |this, _, ev: &InputChanged, cx| {
                 if let Some(note) = this.current_note.and_then(|id| this.workspace.note_mut(id)) {
-                    this.note_body_dirty |= note.title != ev.content;
+                    let changed = note.title != ev.content;
+                    this.note_body_dirty |= changed;
+                    // Unsent until a save of it is answered.
+                    note.unsent_edits |= changed && crate::server::enabled();
                     note.title = ev.content.clone();
                     this.persist(cx);
                 }
             }),
             cx.subscribe(&editor, |this, _, ev: &InputChanged, cx| {
                 if let Some(note) = this.current_note.and_then(|id| this.workspace.note_mut(id)) {
-                    this.note_body_dirty |= note.body != ev.content;
+                    let changed = note.body != ev.content;
+                    this.note_body_dirty |= changed;
+                    note.unsent_edits |= changed && crate::server::enabled();
                     note.body = ev.content.clone();
                     this.persist(cx);
                 }
@@ -422,7 +454,17 @@ impl Cereal {
             audio_error: None,
             audio_pending: Vec::new(),
             audio_quitting: false,
-            server_bridge: None,
+            bridges: Default::default(),
+            refreshing: Default::default(),
+            verifying: Default::default(),
+            verify_failures: Default::default(),
+            interrupted: Default::default(),
+            sign_in_asked: false,
+            accounts_watched: false,
+            account_sheet: None,
+            saved_data: None,
+            saved_data_loading: false,
+            debug_view_shown: false,
             server_pending: 0,
             server_status: None,
             generation: Default::default(),
@@ -497,7 +539,7 @@ impl Cereal {
         // A link's page is shown to anyone: it says where the note is and
         // reads nothing without a session on that server.
         let screen = if crate::server::enabled()
-            && crate::account::identity().is_none()
+            && !crate::accounts::any_shown()
             && !matches!(screen, Screen::Login | Screen::Link | Screen::Welcome)
         {
             Screen::Account
@@ -532,6 +574,7 @@ impl Cereal {
         }
         if screen == Screen::Settings {
             self.refresh_login_item();
+            self.refresh_saved_data(cx);
         }
         cx.notify();
     }
@@ -565,7 +608,6 @@ impl Cereal {
         self.toast_epoch = self.toast_epoch.wrapping_add(1);
         let epoch = self.toast_epoch;
         let message = message.to_string();
-        let account = crate::account::epoch();
         if self.toast.is_some() {
             // A replacement toast pops again instead of silently swapping text.
             self.stage.kick(("toast", 0), 0.6, crate::motion::GOOEY);
@@ -578,9 +620,7 @@ impl Cereal {
                 .timer(std::time::Duration::from_secs(4))
                 .await;
             let _ = this.update(cx, move |this, cx| {
-                if account == crate::account::epoch()
-                    && toast_should_expire(epoch, this.toast_epoch, &message, this.toast.as_deref())
-                {
+                if toast_should_expire(epoch, this.toast_epoch, &message, this.toast.as_deref()) {
                     this.toast = None;
                     cx.notify();
                 }
@@ -639,7 +679,7 @@ impl Cereal {
         }
     }
     pub fn new_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if crate::server::enabled() && crate::account::identity().is_none() {
+        if crate::server::enabled() && !crate::accounts::any_shown() {
             self.screen = Screen::Account;
             self.show_toast("Sign in before creating a server note", cx);
             return;
@@ -647,7 +687,10 @@ impl Cereal {
         self.finish_recording_preview(cx);
         self.recording_last_click = None;
         self.recording_changed_at = None;
-        let id = self.workspace.create_note();
+        let Some(id) = self.create_note_without_event() else {
+            self.show_toast("New notes cannot be saved for this account right now", cx);
+            return;
+        };
         self.workspace.note_mut(id).unwrap().title.clear();
         if let Screen::Folder(folder) = self.screen {
             self.workspace.note_mut(id).unwrap().folder_id = Some(folder);
@@ -660,6 +703,20 @@ impl Cereal {
         self.start_recording_preview(id, cx);
         self.editor.read(cx).focus_handle.focus(window);
     }
+    /// A new note with no calendar event. With accounts it goes to the
+    /// default account: if that account cannot be reached the note is still
+    /// made, in its slot, and is sent when it can be. Nothing falls back to
+    /// another account. `None` when that account's notes are not loaded.
+    pub fn create_note_without_event(&mut self) -> Option<u64> {
+        if !crate::server::enabled() {
+            return Some(self.workspace.create_note());
+        }
+        let slot = crate::accounts::registry()
+            .new_note_account()
+            .map(|account| account.slot)?;
+        self.workspace.create_note_in(slot)
+    }
+
     pub fn create_folder(&mut self, cx: &mut Context<Self>) {
         let name = self.folder_input.read(cx).content().trim().to_string();
         if name.is_empty() {

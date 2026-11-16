@@ -194,6 +194,16 @@
               "type": "null"
             }
           ]
+        },
+        "importedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [

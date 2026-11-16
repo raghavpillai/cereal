@@ -65,10 +65,15 @@ pub(crate) fn valid_citation_id(id: &str) -> bool {
     })
 }
 
+/// The note here that a citation names: a note of the conversation's own
+/// account (`slot`), on that account's server. A citation opens in the
+/// thread's account and no other. `slot` is `None` only where notes have
+/// no account.
 fn chat_source_note(
     notes: &[crate::model::Note],
     server_id: &str,
     server_url: &str,
+    slot: Option<u16>,
 ) -> Option<u64> {
     notes
         .iter()
@@ -76,6 +81,7 @@ fn chat_source_note(
             !note.trashed
                 && note.server_id.as_deref() == Some(server_id)
                 && note.server_url.as_deref() == Some(server_url)
+                && slot.is_none_or(|slot| crate::accounts::handle::slot_of(note.id) == Some(slot))
         })
         .map(|note| note.id)
 }
@@ -253,6 +259,7 @@ impl Chats<'_> {
                 .map(|(question, _)| chat_title(question))
                 .unwrap_or_default(),
             messages: self.messages.clone(),
+            account: None,
             interrupted: self.interrupted.iter().copied().collect(),
             annotations: self.annotations.clone(),
             updated_at: Some(chrono::Utc::now().to_rfc3339()),
@@ -482,7 +489,15 @@ fn follow_up_prompt(index: usize, turns: &[(String, String)]) -> Option<String> 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct ArchivedChat {
     pub id: String,
+    /// The note the conversation is about, or 0 for one across meetings.
+    /// On disk a file id; in memory a handle. 0 is never either.
+    #[serde(serialize_with = "archived_note_id")]
     pub note_id: u64,
+    /// The account the thread belongs to, for life. Not persisted: implied
+    /// by which account's `chats.json` it was read from. `None` in local
+    /// mode.
+    #[serde(skip)]
+    pub account: Option<crate::accounts::AccountId>,
     pub title: String,
     pub messages: Vec<(String, String)>,
     pub interrupted: Vec<usize>,
@@ -490,6 +505,98 @@ pub struct ArchivedChat {
     pub annotations: std::collections::HashMap<usize, ChatTurnAnnotations>,
     #[serde(default)]
     pub updated_at: Option<String>,
+}
+
+fn archived_note_id<S: serde::Serializer>(id: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_u64(crate::accounts::handle::on_disk(*id))
+}
+
+/// Saved conversations kept per account at most.
+const THREADS_PER_ACCOUNT: usize = 20;
+
+/// The account a new thread belongs to: its note's, or for a conversation
+/// across meetings the default account (until the scope can be chosen).
+/// `None` in local mode.
+fn thread_account(note_id: u64) -> Option<crate::accounts::AccountId> {
+    if !crate::server::enabled() {
+        return None;
+    }
+    if note_id == crate::accounts::handle::NO_NOTE {
+        crate::accounts::default_account().map(|account| account.id)
+    } else {
+        crate::accounts::of_note(note_id).map(|account| account.id)
+    }
+}
+
+/// `recipes.json`: the person's prompts, device-level. Each account's
+/// `chats.json` keeps a copy, and is folded in here once.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct RecipesFile {
+    version: u32,
+    recipes: Vec<ChatRecipe>,
+    /// Accounts whose recipes have been folded in.
+    #[serde(default)]
+    seeded: Vec<String>,
+}
+
+fn valid_recipe(recipe: &ChatRecipe) -> bool {
+    !recipe.id.is_empty()
+        && !recipe.title.trim().is_empty()
+        && recipe.title.chars().count() <= 100
+        && !recipe.prompt.trim().is_empty()
+        && recipe.prompt.encode_utf16().count() <= 20_000
+}
+
+fn read_recipes_file(paths: &crate::accounts::Paths) -> RecipesFile {
+    std::fs::read(paths.recipes())
+        .ok()
+        .filter(|bytes| bytes.len() <= 4 * 1024 * 1024)
+        .and_then(|bytes| serde_json::from_slice::<RecipesFile>(&bytes).ok())
+        .filter(|file| file.version == 1)
+        .unwrap_or_default()
+}
+
+/// Fold an account's recipes into the device's, once per account: the
+/// union, with exact duplicates dropped. Returns whether anything changed.
+fn merge_recipes(device: &mut Vec<ChatRecipe>, theirs: Vec<ChatRecipe>) -> bool {
+    let mut changed = false;
+    for recipe in theirs.into_iter().filter(valid_recipe) {
+        let duplicate = device.iter().any(|known| {
+            known.id == recipe.id
+                || (known.title == recipe.title
+                    && known.prompt == recipe.prompt
+                    && known.multiple_meetings == recipe.multiple_meetings)
+        });
+        if !duplicate && device.len() < 100 {
+            device.push(recipe);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// The threads of one account's file as they are kept in memory: tagged
+/// with the account, their note ids as handles in its slot, the newest
+/// [`THREADS_PER_ACCOUNT`]. A thread about a note id that cannot be a
+/// note's is left out.
+fn adopt_threads(
+    sessions: Vec<ArchivedChat>,
+    account: &crate::accounts::AccountId,
+    slot: u16,
+) -> Vec<ArchivedChat> {
+    let mut threads: Vec<ArchivedChat> = sessions
+        .into_iter()
+        .filter_map(|mut chat| {
+            if chat.note_id != crate::accounts::handle::NO_NOTE {
+                chat.note_id = crate::accounts::handle::handle(slot, chat.note_id)?;
+            }
+            chat.account = Some(account.clone());
+            Some(chat)
+        })
+        .collect();
+    let extra = threads.len().saturating_sub(THREADS_PER_ACCOUNT);
+    threads.drain(..extra);
+    threads
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -578,14 +685,17 @@ fn chat_date_group_at(value: Option<&str>, now: chrono::DateTime<chrono::Local>)
     }
 }
 
+/// Local mode's history file. An account's is `Paths::chats`.
 fn history_path() -> Result<std::path::PathBuf, String> {
-    crate::model::audio_directory()?
+    crate::model::audio_directory(None)?
         .parent()
         .map(|p| p.join("chats.json"))
         .ok_or("Chat workspace is unavailable".into())
 }
+/// Local mode's saved conversations. Each account's are read when its
+/// session has been verified (`load_account_chats`).
 pub fn load_history() -> Vec<ArchivedChat> {
-    if crate::audio::preview_mode() {
+    if crate::audio::preview_mode() || crate::server::enabled() {
         return vec![];
     }
     crate::store::wait_idle();
@@ -615,6 +725,16 @@ pub fn load_history() -> Vec<ArchivedChat> {
 pub fn load_recipes() -> Vec<ChatRecipe> {
     if crate::audio::preview_mode() {
         return vec![];
+    }
+    if crate::server::enabled() {
+        // The person's prompts are this Mac's, not an account's.
+        return crate::accounts::Paths::of_environment()
+            .map(|paths| read_recipes_file(&paths).recipes)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(valid_recipe)
+            .take(100)
+            .collect();
     }
     let read = || -> Option<Vec<ChatRecipe>> {
         let path = history_path().ok()?;
@@ -717,17 +837,82 @@ fn upsert_chat_archive(archives: &mut Vec<ArchivedChat>, mut entry: ArchivedChat
     // A thread's original note/workspace scope never changes merely because a
     // later UI navigation saved its messages while another screen was visible.
     entry.note_id = archived_thread_scope(archives, &entry.id, entry.note_id);
+    // A thread belongs to one account for life.
+    if let Some(existing) = archives.iter().find(|chat| chat.id == entry.id) {
+        entry.account = existing.account.clone();
+    }
+    let account = entry.account.clone();
     archives.retain(|chat| chat.id != entry.id);
     archives.push(entry);
-    while archives.len() > 20 {
-        archives.remove(0);
+    // The cap is per account: one account's threads cannot push out
+    // another's.
+    while archives.iter().filter(|chat| chat.account == account).count() > THREADS_PER_ACCOUNT {
+        let oldest = archives
+            .iter()
+            .position(|chat| chat.account == account)
+            .expect("counted above");
+        archives.remove(oldest);
     }
 }
 
 impl crate::app::Cereal {
+    /// The account the conversation on screen belongs to: its note's, or
+    /// for one across meetings its thread's (the default account for a new
+    /// one).
+    fn chat_scope(&self) -> Option<crate::accounts::Account> {
+        let thread = self
+            .chat_archives
+            .iter()
+            .find(|chat| chat.id == self.chat_thread_id)
+            .and_then(|chat| chat.account.clone());
+        match (self.current_note, thread) {
+            (Some(note), _) => crate::accounts::of_note(note),
+            (None, Some(account)) => crate::accounts::get(&account),
+            (None, None) => crate::accounts::default_account(),
+        }
+    }
+
     fn local_chat_source(&self, server_id: &str) -> Option<u64> {
-        let url = crate::account::configured_url();
-        chat_source_note(&self.workspace.notes, server_id, &url)
+        let scope = self.chat_scope()?;
+        chat_source_note(&self.workspace.notes, server_id, &scope.url, Some(scope.slot))
+    }
+
+    /// Read an account's saved conversations (and fold its recipes into
+    /// this Mac's, once), now that its notes are loaded.
+    pub fn load_account_chats(
+        &mut self,
+        account: &crate::accounts::Account,
+        paths: &crate::accounts::Paths,
+    ) {
+        if crate::audio::preview_mode() {
+            return;
+        }
+        crate::store::wait_idle();
+        let file = std::fs::read(paths.chats(&account.id))
+            .ok()
+            .filter(|bytes| bytes.len() <= 4 * 1024 * 1024)
+            .and_then(|bytes| serde_json::from_slice::<HistoryFile>(&bytes).ok())
+            .filter(|history| history.version == 1);
+        let Some(file) = file else {
+            return;
+        };
+        self.chat_archives
+            .retain(|chat| chat.account.as_ref() != Some(&account.id));
+        self.chat_archives
+            .extend(adopt_threads(file.sessions, &account.id, account.slot));
+        // The history shows the union, by when each was last used.
+        self.chat_archives
+            .sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
+        let mut recipes = read_recipes_file(paths);
+        if !recipes.seeded.iter().any(|id| id == account.id.as_str()) {
+            merge_recipes(&mut recipes.recipes, file.recipes);
+            recipes.seeded.push(account.id.as_str().to_owned());
+            recipes.version = 1;
+            if let Ok(bytes) = serde_json::to_vec_pretty(&recipes) {
+                let _ = crate::shared::write_private(&paths.recipes(), &bytes);
+            }
+            self.chat_recipes = recipes.recipes.into_iter().filter(valid_recipe).take(100).collect();
+        }
     }
 
     fn open_chat_source_note(&mut self, server_id: &str, cx: &mut Context<Self>) {
@@ -1014,9 +1199,11 @@ impl crate::app::Cereal {
                         == serde_json::to_value(&self.chat_annotations).ok()
             });
         if !self.chat_messages.is_empty() && !unchanged {
+            let scope = self.current_note.unwrap_or(0);
             let entry = ArchivedChat {
                 id: self.chat_thread_id.clone(),
-                note_id: self.current_note.unwrap_or(0),
+                note_id: scope,
+                account: thread_account(scope),
                 title: chat_title(&self.chat_messages[0].0),
                 messages: self.chat_messages.clone(),
                 interrupted: self.chat_interrupted.iter().copied().collect(),
@@ -1038,7 +1225,44 @@ impl crate::app::Cereal {
         // Connected to a server with nobody signed in: there is no private
         // history to write and no account to keep it under. (A link's page
         // can be opened and left in this state.)
-        if crate::server::enabled() && crate::account::identity().is_none() {
+        if crate::server::enabled() {
+            let Some(paths) = crate::accounts::Paths::of_environment() else {
+                return;
+            };
+            // Each account's threads go to its own file, with a copy of the
+            // recipes; only accounts whose notes are loaded are written.
+            for slot in self.workspace.slots.values() {
+                if slot.state != crate::model::SlotState::Loaded {
+                    continue;
+                }
+                let threads: Vec<ArchivedChat> = self
+                    .chat_archives
+                    .iter()
+                    .filter(|chat| chat.account.as_ref() == Some(&slot.account))
+                    .cloned()
+                    .collect();
+                let keep = threads.len().saturating_sub(THREADS_PER_ACCOUNT);
+                let encoded = crate::accounts::handle::encoding_account_file(|| {
+                    encode_history(&threads[keep..], &self.chat_recipes)
+                });
+                match encoded {
+                    Ok(bytes) => {
+                        crate::store::queue_chat_history(paths.chats(&slot.account), bytes);
+                    }
+                    Err(error) => self.toast = Some(error),
+                }
+            }
+            // The recipes themselves are this Mac's.
+            let mut recipes = read_recipes_file(&paths);
+            let same = serde_json::to_value(&recipes.recipes).ok()
+                == serde_json::to_value(&self.chat_recipes).ok();
+            if !same && (!self.workspace.slots.is_empty() || paths.recipes().exists()) {
+                recipes.version = 1;
+                recipes.recipes = self.chat_recipes.clone();
+                if let Ok(bytes) = serde_json::to_vec_pretty(&recipes) {
+                    let _ = crate::shared::write_private(&paths.recipes(), &bytes);
+                }
+            }
             return;
         }
         // Encode here, write in the background: the next render starts the
@@ -1239,7 +1463,8 @@ impl crate::app::Cereal {
         editor.test_answer = Some(String::new());
         editor.test_annotations = Default::default();
         editor.test_cancel = Some(cancel.clone());
-        let receiver = crate::server::stream_chat_with_model(note, prompt, vec![], cancel, self.selected_chat_model.clone());
+        let scope = self.chat_scope().map(|account| account.id);
+        let receiver = crate::server::stream_chat_with_model(note, scope, prompt, vec![], cancel, self.selected_chat_model.clone());
         cx.notify();
         cx.spawn(async move |this, cx| {
             loop {
@@ -1607,8 +1832,10 @@ impl crate::app::Cereal {
             history,
             ..
         } = begun;
+        let scope = self.chat_scope().map(|account| account.id);
         let receiver = crate::server::stream_chat_with_model(
             note,
+            scope,
             question,
             history,
             cancel.clone(),
@@ -3880,15 +4107,15 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            chat_source_note(&[note.clone()], "note-one", "https://one.example"),
+            chat_source_note(&[note.clone()], "note-one", "https://one.example", None),
             Some(41)
         );
         assert_eq!(
-            chat_source_note(&[note.clone()], "note-one", "https://two.example"),
+            chat_source_note(&[note.clone()], "note-one", "https://two.example", None),
             None
         );
         assert_eq!(
-            chat_source_note(&[note.clone()], "note-other", "https://one.example"),
+            chat_source_note(&[note.clone()], "note-other", "https://one.example", None),
             None
         );
         assert_eq!(
@@ -3898,7 +4125,8 @@ mod tests {
                     ..note
                 }],
                 "note-one",
-                "https://one.example"
+                "https://one.example",
+                None
             ),
             None
         );
@@ -3960,6 +4188,7 @@ mod tests {
         let sessions = vec![ArchivedChat {
             id: "thread-one".into(),
             note_id: 41,
+            account: None,
             title: "Café 🦊".into(),
             messages: vec![("Who owns it?".into(), "Mira.".into())],
             interrupted: vec![],
@@ -3998,6 +4227,7 @@ mod tests {
         let entry = |id: &str, note_id, question: &str| ArchivedChat {
             id: id.into(),
             note_id,
+            account: None,
             title: question.into(),
             messages: vec![(question.into(), "Answer from its original context".into())],
             interrupted: vec![],
@@ -4394,5 +4624,86 @@ mod stream_tests {
         assert_eq!(desk.chats().event(&thread, turn.epoch, turn.index, Delta("x".into())), Applied::Gone);
         assert!(turn.cancel.load(Ordering::Acquire));
         assert!(desk.parked.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+    // `gpui::*` re-exports its own `test` attribute; these are plain unit tests.
+    use std::prelude::v1::test;
+    use crate::accounts::{AccountId, handle};
+
+    fn thread(id: &str, note_id: u64, at: &str) -> ArchivedChat {
+        ArchivedChat {
+            id: id.into(),
+            note_id,
+            account: None,
+            title: id.into(),
+            messages: vec![("Question".into(), "Answer".into())],
+            interrupted: vec![],
+            annotations: Default::default(),
+            updated_at: Some(at.into()),
+        }
+    }
+
+    #[test]
+    fn h6_a_thread_keeps_its_account_and_one_account_cannot_push_out_another() {
+        let (a, b) = (
+            AccountId::of("https://a.example", "00000000-0000-4000-8000-000000000001"),
+            AccountId::of("https://b.example", "00000000-0000-4000-8000-000000000002"),
+        );
+        // Read from A's file: a thread across meetings and one about note 7.
+        let threads = adopt_threads(
+            vec![thread("across", 0, "2026-11-15T10:00:00Z"), thread("about-7", 7, "2026-11-15T11:00:00Z")],
+            &a,
+            1,
+        );
+        assert_eq!(threads[0].note_id, handle::NO_NOTE, "0 is never tagged");
+        assert_eq!(threads[1].note_id, handle::handle(1, 7).unwrap());
+        assert!(threads.iter().all(|chat| chat.account.as_ref() == Some(&a)));
+        // Written back: file ids, and the account is implied by the file.
+        let bytes = handle::encoding_account_file(|| encode_history(&threads, &[])).unwrap();
+        let file: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(file["sessions"][0]["note_id"], 0);
+        assert_eq!(file["sessions"][1]["note_id"], 7);
+        assert!(file["sessions"][0].get("account").is_none());
+        let back = adopt_threads(serde_json::from_value(file["sessions"].clone()).unwrap(), &a, 1);
+        assert_eq!(back.iter().map(|chat| (chat.id.clone(), chat.note_id)).collect::<Vec<_>>(),
+                   threads.iter().map(|chat| (chat.id.clone(), chat.note_id)).collect::<Vec<_>>());
+        // Twenty-five new threads in B do not remove A's.
+        let mut archives = threads;
+        for n in 0..25 {
+            let mut entry = thread(&format!("b-{n}"), 0, "2026-11-16T10:00:00Z");
+            entry.account = Some(b.clone());
+            upsert_chat_archive(&mut archives, entry);
+        }
+        assert_eq!(archives.iter().filter(|chat| chat.account.as_ref() == Some(&a)).count(), 2);
+        assert_eq!(archives.iter().filter(|chat| chat.account.as_ref() == Some(&b)).count(), THREADS_PER_ACCOUNT);
+        // Saving a thread again never changes its account.
+        let mut again = thread("across", 0, "2026-11-16T12:00:00Z");
+        again.account = Some(b.clone());
+        upsert_chat_archive(&mut archives, again);
+        assert_eq!(archives.iter().find(|chat| chat.id == "across").unwrap().account.as_ref(), Some(&a));
+        // A file holding more than the cap keeps its newest.
+        let many: Vec<_> = (0..30).map(|n| thread(&format!("a-{n}"), 0, "2026-11-16T10:00:00Z")).collect();
+        let kept = adopt_threads(many, &a, 1);
+        assert_eq!(kept.len(), THREADS_PER_ACCOUNT);
+        assert_eq!(kept[0].id, "a-10");
+    }
+
+    #[test]
+    fn recipes_become_this_macs_once_without_duplicates() {
+        let recipe = |id: &str, title: &str| ChatRecipe {
+            id: id.into(),
+            title: title.into(),
+            prompt: "List the action items.".into(),
+            multiple_meetings: false,
+        };
+        let mut device = vec![recipe("r1", "Action items")];
+        // The same recipe again (by id, or exactly the same text) is not added.
+        assert!(!merge_recipes(&mut device, vec![recipe("r1", "Action items"), recipe("r9", "Action items")]));
+        assert!(merge_recipes(&mut device, vec![recipe("r2", "Decisions")]));
+        assert_eq!(device.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["r1", "r2"]);
     }
 }

@@ -17,10 +17,15 @@ import {SignInFailure,rateLimiter} from "./sign-in"
 import {DOWNLOAD_FILES_PATH,makeDownloads,type DownloadsService} from "./downloads"
 import {readAppVersion} from "./version"
 import type {StorageService} from "./storage"
+import {MAX_IMPORT_BYTES,importDigest,importedSegmentId,parseNoteStamp} from "./note-import"
 import {InvalidPageRequest,parseListInput,parseSearchInput,selectNoteSearch,selectNoteSummaries,withMeeting} from "./note-summaries"
 
 const unavailable = { error: "unavailable", message: "The note service is temporarily unavailable" } as const
 const missingNote = { error: "not_found", message: "Note not found" } as const
+// One answer for every id that is taken, whoever holds it and whatever is in it: it says nothing about other people's notes.
+const importConflict = { error: "conflict", message: "A note with this id already exists" } as const
+/** What this server can do beyond the first v1; the apps read it before relying on any of it. */
+export const SERVER_FEATURES = ["note-import", "conditional-delete", "meeting-identity"] as const
 const missingShare = { error: "not_found", message: "Shared note not found" } as const
 const persist = <A>(effect: Effect.Effect<A, RepositoryError>) => Effect.mapError(effect, () => unavailable)
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex")
@@ -113,7 +118,7 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
   const setupByClient=rateLimiter(10,60_000,clock),setupOverall=rateLimiter(120,60_000,clock)
   const signInFailure=(error:unknown)=>error instanceof SignInFailure?{error:error.code,message:error.message}:{error:"unavailable" as const,message:"Sign-in is temporarily unavailable"}
   const publicHandlers = HttpApiBuilder.group(MeetingsApi, "public", (handlers) => handlers
-    .handle("health", () => Effect.succeed({ status: "ok", version: "v1" } as const))
+    .handle("health", () => Effect.succeed({ status: "ok", version: "v1", features: SERVER_FEATURES } as const))
     // What the sign-in page and the apps offer. Nothing here depends on who is asking.
     .handle("getAuthMethods", () => Effect.tryPromise({try:async()=>{const[policy,claimed]=await Promise.all([administration.signInPolicy(),ownerReady()]);return{password:policy.password,google:policy.google&&!!options.authentication,instanceName:policy.instanceName,setupRequired:!claimed,transport:administration.transport}},catch:()=>({error:"unavailable",message:"Sign-in is temporarily unavailable"} as const)}))
     .handle("getGoogleVerification", () => Effect.gen(function*(){
@@ -244,7 +249,20 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
       const note = yield* persist(repo.updateNote(params.id, payload))
       return note ?? (yield* Effect.fail(missingNote))
     }))
-    .handle("deleteNote", ({params}) => useProcessing(service => service.deleteNote(params.id)))
+    .handle("importNote", ({ payload }) => Effect.gen(function*() {
+      const repo = yield* NotesRepository
+      const result = yield* persist(repo.importNote({ input: payload, digest: importDigest(payload), now: clock() }))
+      if (result.outcome === "conflict") return yield* Effect.fail(importConflict)
+      // Worked out again from the request at every answer, so a repeat gives the same map as the first time.
+      return { note: result.note, segmentIds: payload.transcriptSegments.map(segment => ({ from: segment.id, to: importedSegmentId(result.note.id, segment.id) })) }
+    }))
+    .handle("deleteNote", ({params,query}) => Effect.gen(function*(){
+      if(query.ifStamp===undefined&&query.ifChunks===undefined)return yield* useProcessing(service => service.deleteNote(params.id))
+      const stamp=query.ifStamp===undefined?undefined:parseNoteStamp(query.ifStamp)
+      // A precondition that cannot be read is refused: it is never treated as absent.
+      if(stamp===null)return yield* Effect.fail({error:"invalid_request",message:"ifStamp must be updatedAt|transcriptRevision|generatedRevision"} as const)
+      return yield* useProcessing(service => service.deleteNote(params.id,{...(stamp?{stamp}:{}),...(query.ifChunks===undefined?{}:{chunks:Number(query.ifChunks)})}))
+    }))
     .handle("listShares", ({ params }) => Effect.gen(function*() {
       const repo = yield* NotesRepository
       if (!(yield* persist(repo.getNote(params.id)))) return yield* Effect.fail(missingNote)
@@ -318,6 +336,18 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
         if(!options.authentication)return new Response(null,{status:303,headers:{...headers,Location:"/login?error=google_unavailable"}})
         const response=signInRoute==="start"?await options.authentication.signIn.googleStart(request):await options.authentication.signIn.googleCallback(request)
         response.headers.set("X-Content-Type-Options","nosniff");return response
+      }
+      // A note import is the one large JSON request. Its own limit is answered here, in JSON, before the body is
+      // parsed: by the declared length where there is one, else by what actually arrives.
+      if(pathname==="/api/v1/notes/import"&&request.method==="POST"){
+        const tooLarge=()=>new Response(JSON.stringify({error:"payload_too_large",message:"A note import is limited to 24 MB"}),{status:413,headers:{"Content-Type":"application/json","Cache-Control":"no-store","Referrer-Policy":"no-referrer","X-Content-Type-Options":"nosniff"}})
+        const declared=Number(request.headers.get("content-length")??NaN)
+        if(declared>MAX_IMPORT_BYTES)return tooLarge()
+        if(!Number.isFinite(declared)){
+          const body=await request.arrayBuffer()
+          if(body.byteLength>MAX_IMPORT_BYTES)return tooLarge()
+          request=new Request(request,{body})
+        }
       }
       const streamAbort=/^\/api\/v1\/(?:notes\/[^/]+\/)?chat\/stream$/.test(new URL(request.url).pathname)?new AbortController():null
       const forwarded=streamAbort?new Request(request,{signal:AbortSignal.any([request.signal,streamAbort.signal])}):request

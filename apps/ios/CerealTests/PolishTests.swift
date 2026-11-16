@@ -148,14 +148,16 @@ private func savedNotes(_ url: URL) throws -> [Note] {
     }
 
     @Test func openingASourceDoesNotCancelButLeavingTheChatDoes() {
-        let chat = Route.serverChat("note-1")
+        let account = AccountID(address: "https://example.test", userID: "00000000-0000-4000-8000-000000000001")
+        let one = NoteRef(account: account, id: "note-1"), two = NoteRef(account: account, id: "note-2")
+        let chat = Route.serverChat(account, noteID: "note-1")
         // A note pushed on top of the chat covers it; the chat is still in the path.
-        #expect(!ChatStreamPolicy.shouldCancelOnDisappear(path: [.serverNote("note-1"), chat, .serverNote("note-2")], route: chat))
-        #expect(!ChatStreamPolicy.shouldCancelOnDisappear(path: [chat, .serverNoteSource("note-2", raw: true)], route: chat))
+        #expect(!ChatStreamPolicy.shouldCancelOnDisappear(path: [.serverNote(one), chat, .serverNote(two)], route: chat))
+        #expect(!ChatStreamPolicy.shouldCancelOnDisappear(path: [chat, .serverNoteSource(two, raw: true)], route: chat))
         // Going back removes it.
-        #expect(ChatStreamPolicy.shouldCancelOnDisappear(path: [.serverNote("note-1")], route: chat))
+        #expect(ChatStreamPolicy.shouldCancelOnDisappear(path: [.serverNote(one)], route: chat))
         #expect(ChatStreamPolicy.shouldCancelOnDisappear(path: [], route: chat))
-        #expect(ChatStreamPolicy.shouldCancelOnDisappear(path: [.serverChat("note-2")], route: chat))
+        #expect(ChatStreamPolicy.shouldCancelOnDisappear(path: [.serverChat(account, noteID: "note-2")], route: chat))
     }
 
     /// `scrollTo` puts the marker's anchor point on the scroll view's anchor
@@ -494,8 +496,9 @@ struct RecordingPolishTests {
                                 excerpt: [.init(text: "… slips the ", isMatch: false), .init(text: "roadmap", isMatch: true), .init(text: " to next quarter", isMatch: false)]),
             ServerNoteSearchHit(row: row("33333333-3333-4333-8333-333333333333", "Recorded here", created: "2026-11-11T10:00:00Z", attendees: ["Alan Turing"], total: 2), excerpt: nil),
         ]
-        let rows = NoteSearch.server(hits) { $0.hasPrefix("3333") }
-        #expect(rows.map(\.route) == hits.map { Route.serverNote($0.id) })
+        let account = AccountID(address: "https://example.test", userID: "00000000-0000-4000-8000-000000000001")
+        let rows = NoteSearch.server(hits, account: account) { $0.account == account && $0.id.hasPrefix("3333") }
+        #expect(rows.map(\.route) == hits.map { Route.serverNote(NoteRef(account: account, id: $0.id)) })
         #expect(rows.map(\.tile) == [.letter("G"), .document, .phone])
         #expect(rows.map(\.title) == ["Roadmap review", "Untitled note", "Recorded here"])
         #expect(rows[0].excerpt == nil && rows[1].excerpt == "… slips the roadmap to next quarter")
@@ -503,6 +506,6 @@ struct RecordingPolishTests {
         #expect(String(marked.characters) == "… slips the roadmap to next quarter")
         let coloured = marked.runs.filter { $0.foregroundColor != nil }.map { String(marked[$0.range].characters) }
         #expect(coloured == ["roadmap"])
-        #expect(NoteSearch.server([]).isEmpty)
+        #expect(NoteSearch.server([], account: account).isEmpty)
     }
 }

@@ -170,6 +170,14 @@ public final class SharedNoteHistory {
         save()
     }
 
+    /// Forgets the notes opened from one server: for when the last account
+    /// that could read them has been removed and its data erased.
+    public func removeAll(on origin: ServerOrigin) {
+        guard visits.contains(where: { $0.link.origin == origin }) else { return }
+        visits.removeAll { $0.link.origin == origin }
+        save()
+    }
+
     private func save() {
         let saved = visits.map { Saved(url: $0.id, title: $0.title, openedAt: $0.openedAt) }
         if let data = try? JSONEncoder().encode(saved) { defaults.set(data, forKey: key) }

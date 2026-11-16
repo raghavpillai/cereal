@@ -8,7 +8,7 @@ import APIClient
 /// offers the browser, and nothing is fetched.
 struct SharedNoteView: View {
     let link: SharedNoteLink
-    @Environment(ServerNotesModel.self) private var server
+    @Environment(AccountsModel.self) private var accounts
     @Environment(ConnectionMode.self) private var mode
     @Environment(SharedNoteHistory.self) private var history
     @Environment(\.dismiss) private var dismiss
@@ -24,7 +24,7 @@ struct SharedNoteView: View {
     }
 
     private var access: LinkNavigation.SharedAccess {
-        LinkNavigation.sharedAccess(to: link.origin, instance: server.instance, signedIn: server.session != nil, demo: mode.isDemo)
+        LinkNavigation.sharedAccess(to: link.origin, accounts: accounts.linkAccounts, demo: mode.isDemo)
     }
 
     var body: some View {
@@ -37,7 +37,7 @@ struct SharedNoteView: View {
             }
         }
         // Signing in, signing out and leaving the local demo each change what this page may read.
-        .task(id: "\(server.accountIdentity ?? "")|\(mode.isDemo)|\(link.webURL.absoluteString)") { await load() }
+        .task(id: "\(accounts.signature)|\(mode.isDemo)|\(link.webURL.absoluteString)") { await load() }
     }
 
     private var reader: some View {
@@ -104,10 +104,11 @@ struct SharedNoteView: View {
 
     private func load() async {
         // Without a session on the link's own server nothing is asked of anyone.
-        guard access == .read else { phase = .loading; return }
+        // It is read with an account on the link's own origin, and its session goes nowhere else.
+        guard case .read(let account) = access, let reader = accounts.session(account)?.notes else { phase = .loading; return }
         if phase == .failed(.signInRequired) { phase = .loading }
         do {
-            let note = try await server.sharedNote(link)
+            let note = try await reader.sharedNote(link)
             phase = .loaded(note)
             history.record(link, title: note.title.isEmpty ? "Untitled note" : note.title)
         } catch is CancellationError {
@@ -196,12 +197,12 @@ private struct SharedNoteDocument: View {
 /// A link to a note of one's own on a server this app is not signed in to.
 struct NoteElsewhereView: View {
     let link: NoteLink
-    @Environment(ServerNotesModel.self) private var server
+    @Environment(AccountsModel.self) private var accounts
     @Environment(ConnectionMode.self) private var mode
 
     var body: some View {
         ServerSignInPrompt(origin: link.origin, webURL: link.webURL,
-                           offersSignIn: LinkNavigation.offersSignIn(signedIn: server.session != nil, demo: mode.isDemo))
+                           offersSignIn: LinkNavigation.offersSignIn(signedIn: !accounts.sessions.isEmpty, demo: mode.isDemo))
     }
 }
 
@@ -214,7 +215,7 @@ struct ServerSignInPrompt: View {
     let origin: ServerOrigin
     let webURL: URL
     let offersSignIn: Bool
-    @Environment(ServerNotesModel.self) private var server
+    @Environment(AccountsModel.self) private var accounts
     @Environment(Router.self) private var router
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
@@ -235,9 +236,10 @@ struct ServerSignInPrompt: View {
         }
     }
 
-    /// The server the app is signed in to, when it is another one.
+    /// The servers the app is signed in to, when this is not one of them.
     private var elsewhere: String? {
-        guard server.session != nil, let current = server.instance.flatMap(ServerOrigin.init(_:)), current != origin else { return nil }
-        return "You are signed in to \(current.displayHost)."
+        let hosts = accounts.sessions.compactMap(\.origin).filter { $0 != origin }.map(\.displayHost)
+        guard !hosts.isEmpty, accounts.sessions(on: origin).isEmpty else { return nil }
+        return "You are signed in to \(ListFormatter.localizedString(byJoining: hosts))."
     }
 }

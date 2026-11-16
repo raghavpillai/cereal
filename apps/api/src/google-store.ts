@@ -31,6 +31,11 @@ export interface GoogleStore {
 }
 
 const decodeContext = Schema.decodeUnknownSync(MeetingContextDTO)
+/** How many other people a Google event invites: its attendees without rooms and without the person themself. */
+const otherInvitees = (context: unknown): number | null => {
+  const people = typeof context === 'object' && context !== null && 'participants' in context ? context.participants : null
+  return Array.isArray(people) ? people.filter(person => typeof person === 'object' && person !== null && person.isResource !== true && person.isSelf !== true).length : null
+}
 export function makePrismaGoogleStore(db: Database): GoogleStore {
   const connection = (row: Awaited<ReturnType<Database['googleConnection']['findMany']>>[number]): GoogleConnection => ({
     ...row, status: row.status === 'connected' ? 'connected' : 'reconnect_required',
@@ -86,7 +91,7 @@ export function makePrismaGoogleStore(db: Database): GoogleStore {
     async listEvents(userId, from, to) {
       const rows = await db.googlePersonalEvent.findMany({ where: { calendar: { selected: true, connection: { userId } }, startAt: { lt: new Date(to) }, endAt: { gt: new Date(from) } }, include: { calendar: true }, orderBy: { startAt: 'asc' }, take: 10001 })
       const bindings = new Map((await db.googleMeeting.findMany({ where: { userId, meetingKey: { in: rows.map(r => r.meetingKey) }, note: { ownerId: userId } } })).map(r => [r.meetingKey, r.noteId]))
-      return rows.map(row => { const { remoteId, meetingKey, context, calendar: cal, ...dto } = row; return { ...dto, startAt: row.startAt.toISOString(), endAt: row.endAt.toISOString(), calendarName: cal.name, color: cal.color, noteId: bindings.get(row.meetingKey) ?? null } })
+      return rows.map(row => { const { remoteId, meetingKey, context, calendar: cal, ...dto } = row; return { ...dto, startAt: row.startAt.toISOString(), endAt: row.endAt.toISOString(), calendarName: cal.name, color: cal.color, noteId: bindings.get(row.meetingKey) ?? null, attendeeCount: otherInvitees(context) } })
     },
     async getEvent(userId, id) { const row = await db.googlePersonalEvent.findFirst({ where: { id, calendar: { selected: true, connection: { userId } } } }); return row ? event(row) : null },
     async createEventNote(userId, eventId) {
@@ -116,9 +121,17 @@ export function makePrismaGoogleStore(db: Database): GoogleStore {
         if (ifAbsent && old) return {noteId,meeting:decodeContext(old.meeting)}
         const previous=old?decodeContext(old.meeting):null
         let sameMeeting=false
+        // A context that came with an imported note names no event of this server. Saving it again (an attendee
+        // added, a name corrected) changes the saved details and binds nothing; it stays detached until a real
+        // event is attached.
+        const detached=async()=>{
+          if(!context||previous?.eventId!==context.eventId)return null
+          await tx.noteMeetingContext.update({where:{noteId},data:{meeting:JSON.parse(JSON.stringify(context))}})
+          return{noteId,meeting:context}
+        }
         if(context?.provider==='ics'){
           const event=await tx.calendarEvent.findFirst({where:{id:context.eventId,calendar:{enabled:true}}})
-          if(!event)return null
+          if(!event)return detached()
           await tx.$queryRawUnsafe('SELECT 1 FROM pg_advisory_xact_lock(hashtextextended($1,0))',userId+':'+event.meetingKey)
           const target=await tx.calendarMeeting.findUnique({where:{userId_meetingKey:{userId,meetingKey:event.meetingKey}}})
           if(target&&target.noteId!==noteId)throw new MeetingBindingConflict()
@@ -128,7 +141,7 @@ export function makePrismaGoogleStore(db: Database): GoogleStore {
           await tx.calendarMeeting.upsert({where:{userId_meetingKey:{userId,meetingKey:event.meetingKey}},create:{userId,noteId,meetingKey:event.meetingKey},update:{noteId}})
         }else if(context?.provider==='google'){
           const event=await tx.googlePersonalEvent.findFirst({where:{id:context.eventId,calendar:{selected:true,connection:{userId}}}})
-          if(!event)return null
+          if(!event)return detached()
           await tx.$queryRawUnsafe('SELECT 1 FROM pg_advisory_xact_lock(hashtextextended($1,0))',`google-note:${userId}:${event.meetingKey}`)
           const target=await tx.googleMeeting.findUnique({where:{userId_meetingKey:{userId,meetingKey:event.meetingKey}}})
           if(target&&target.noteId!==noteId)throw new MeetingBindingConflict()
@@ -158,6 +171,15 @@ export function makeMemoryGoogleStore(notes: NotesRepositoryService,sharedCalend
   const ownCalendar = (userId: string, id: string) => { const c = calendars.get(id); return c && connections.get(c.connectionId)?.userId === userId ? c : null }
   const ownEvent = (userId: string, id: string) => { const e = events.get(id); return e && ownCalendar(userId, e.calendarId)?.selected ? e : null }
   const getNote = (userId: string, id: string) => Effect.runPromise(notes.forUser(userId).getNote(id))
+  // A note that was just imported brings its own context (or none) and starts bound to nothing, whatever an
+  // earlier note with the same id left here. The Prisma store needs none of this: the import writes the row.
+  const adopt = async (userId: string, noteId: string) => {
+    const imported = notes.takeImportedContext?.(noteId)
+    if (imported === undefined) return
+    for (const [key, value] of bindings) if (value === noteId) bindings.delete(key)
+    await sharedCalendars?.unlinkNote(userId, noteId)
+    if (imported) contexts.set(noteId, { noteId, meeting: clone(imported) }); else contexts.delete(noteId)
+  }
   return {
     async saveState(state) { states.set(state.stateHash, clone(state)) },
     async consumeState(hash, userId, sessionHash, now) { const s = states.get(hash); if (!s || s.userId !== userId || s.sessionHash !== sessionHash || s.expiresAt <= now) return null; states.delete(hash); return clone(s) },
@@ -171,17 +193,20 @@ export function makeMemoryGoogleStore(notes: NotesRepositoryService,sharedCalend
     async getCalendar(userId, id) { return clone(ownCalendar(userId, id)) },
     async selectCalendar(userId, id, selected) { const c = ownCalendar(userId, id); if (!c) return null; const updated = { ...c, selected }; calendars.set(id, updated); return clone(updated) },
     async replaceEvents(userId,id,rows,expectedGrant){const cal=ownCalendar(userId,id);if(!cal||expectedGrant&&connections.get(cal.connectionId)?.encryptedGrant!==expectedGrant)return false; for (const [eid, e] of events) if (e.calendarId === id) events.delete(eid); for (const e of rows) events.set(e.id, clone(e));return true },
-    async listEvents(userId, from, to) { return clone([...events.values()].filter(e => ownCalendar(userId, e.calendarId)?.selected && e.startAt < to && e.endAt > from).map(e => { const { remoteId, meetingKey, context, ...dto } = e; const c = calendars.get(e.calendarId)!; return { ...dto, calendarName: c.name, color: c.color, noteId: bindings.get(`${userId}:${e.meetingKey}`) ?? null } })) },
+    async listEvents(userId, from, to) { return clone([...events.values()].filter(e => ownCalendar(userId, e.calendarId)?.selected && e.startAt < to && e.endAt > from).map(e => { const { remoteId, meetingKey, context, ...dto } = e; const c = calendars.get(e.calendarId)!; return { ...dto, meetingUid: e.meetingUid ?? null, occurrence: e.occurrence ?? null, calendarName: c.name, color: c.color, noteId: bindings.get(`${userId}:${e.meetingKey}`) ?? null, attendeeCount: otherInvitees(context) } })) },
     async getEvent(userId, id) { return clone(ownEvent(userId, id)) },
     createEventNote(userId, id) { const operation = queue.then(async () => { const e = ownEvent(userId, id); if (!e) return null; const key = `${userId}:${e.meetingKey}`, existing = bindings.get(key); if (existing) { const note = await getNote(userId, existing); if (note) return note } const note = await Effect.runPromise(notes.forUser(userId).createNote({ title: e.title, date: e.startDate })); bindings.set(key, note.id); contexts.set(note.id, { noteId: note.id, meeting: clone(e.context) }); return note }); queue = operation.then(() => {}, () => {}); return operation },
-    async getContext(userId, noteId) { return await getNote(userId, noteId) ? clone(contexts.get(noteId) ?? { noteId, meeting: null }) : null },
+    async getContext(userId, noteId) { if (!await getNote(userId, noteId)) return null; await adopt(userId, noteId); return clone(contexts.get(noteId) ?? { noteId, meeting: null }) },
     putContext(userId,noteId,meeting,ifAbsent=false){const operation=queue.then(async()=>{
       const note=await getNote(userId,noteId);if(!note)return null
+      await adopt(userId,noteId)
       const previous=contexts.get(noteId)?.meeting??null
       if(ifAbsent&&contexts.has(noteId))return clone(contexts.get(noteId)!)
       let sameMeeting=false
+      // The same rule as the Prisma store: a context that names no event here, saved again, stays detached.
+      const detached=()=>{if(!meeting||previous?.eventId!==meeting.eventId)return null;const context={noteId,meeting:clone(meeting)};contexts.set(noteId,context);return clone(context)}
       if(meeting?.provider==='google'){
-        const event=ownEvent(userId,meeting.eventId);if(!event)return null
+        const event=ownEvent(userId,meeting.eventId);if(!event)return detached()
         const key=`${userId}:${event.meetingKey}`,bound=bindings.get(key)
         if(bound&&bound!==noteId&&await getNote(userId,bound))throw new MeetingBindingConflict()
         sameMeeting=bound===noteId
@@ -189,7 +214,7 @@ export function makeMemoryGoogleStore(notes: NotesRepositoryService,sharedCalend
         await sharedCalendars?.unlinkNote(userId,noteId)
         bindings.set(key,noteId)
       }else if(meeting?.provider==='ics'){
-        if(!sharedCalendars||!await sharedCalendars.associateNote(userId,noteId,meeting.eventId))return null
+        if(!sharedCalendars||!await sharedCalendars.associateNote(userId,noteId,meeting.eventId))return detached()
         for(const[k,value]of bindings)if(value===noteId&&k.startsWith(userId+':'))bindings.delete(k)
       }else{
         for(const[k,value]of bindings)if(value===noteId&&k.startsWith(userId+':'))bindings.delete(k)

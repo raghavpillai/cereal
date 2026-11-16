@@ -171,7 +171,7 @@ impl Cereal {
         self.meeting.cancel = Some(cancel.clone());
         self.meeting.epoch = self.meeting.epoch.wrapping_add(1);
         let epoch = self.meeting.epoch;
-        let account = crate::account::epoch();
+        let account = crate::accounts::note_epoch(id);
         let submitted_title = note.title.clone();
         let manual = matches!(&command, MeetingCommand::UpsertParticipant(_));
         let selected = matches!(&command, MeetingCommand::SetEvent(_));
@@ -204,7 +204,7 @@ impl Cereal {
                 }
             };
             let _ = this.update(cx, |this, cx| {
-                if epoch != this.meeting.epoch || account != crate::account::epoch() {
+                if epoch != this.meeting.epoch || account != crate::accounts::note_epoch(id) {
                     return;
                 }
                 this.meeting.loading = false;
@@ -251,6 +251,10 @@ impl Cereal {
         cx.notify();
     }
     pub fn open_connected_event_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The picker lists the events of the note's own account.
+        let Some(note_id) = self.current_note else {
+            return;
+        };
         self.search.update(cx, |i, cx| {
             i.set_content("", cx);
             i.set_placeholder("Search event", cx)
@@ -264,12 +268,14 @@ impl Cereal {
         self.meeting.picker_cancel = Some(cancel.clone());
         self.meeting.picker_epoch = self.meeting.picker_epoch.wrapping_add(1);
         let epoch = self.meeting.picker_epoch;
-        let account = crate::account::epoch();
+        let account = crate::accounts::note_epoch(note_id);
         self.meeting.events_loading = true;
         self.meeting.events_error = None;
         let (send, receive) = mpsc::channel();
         std::thread::spawn(move || {
-            let _ = send.send(crate::server::meeting_picker_events(cancel));
+            // Only the note's own account's events: an event id of one
+            // account is never sent to another.
+            let _ = send.send(crate::server::meeting_picker_events(note_id, cancel));
         });
         cx.spawn(async move |this, cx| {
             let result = loop {
@@ -286,7 +292,9 @@ impl Cereal {
                 }
             };
             let _ = this.update(cx, |this, cx| {
-                if epoch != this.meeting.picker_epoch || account != crate::account::epoch() {
+                if epoch != this.meeting.picker_epoch
+                    || account != crate::accounts::note_epoch(note_id)
+                {
                     return;
                 }
                 this.meeting.events_loading = false;
@@ -517,7 +525,9 @@ impl Cereal {
             )),
         );
         if people.is_empty() && context.is_none() {
-            let name = crate::account::session()
+            let name = self
+                .current_note
+                .and_then(crate::accounts::session_of_note)
                 .map(|session| session.user.name)
                 .filter(|name| !name.trim().is_empty())
                 .unwrap_or_else(|| "Me".into());

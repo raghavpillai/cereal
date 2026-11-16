@@ -7,6 +7,21 @@ public struct MeetingNotesAPI: Sendable {
     private let credentials: InstanceCredentials
     private let session: URLSession
     private let transportState: TransportState
+    /// Told when any endpoint answers 401 or 403. That alone decides nothing:
+    /// whoever listens asks `/session` what the session's own state is.
+    private var onUnauthorized: (@Sendable () -> Void)?
+
+    /// The token, for this module only: to save it in the account's own
+    /// Keychain item and to tell two sessions apart. It is never handed out.
+    var bearerToken: String { credentials.bearerToken }
+    public var instance: InstanceURL { credentials.instance }
+
+    /// The same client, reporting refused requests to `handler`.
+    func observingUnauthorized(_ handler: @escaping @Sendable () -> Void) -> MeetingNotesAPI {
+        var copy = self
+        copy.onUnauthorized = handler
+        return copy
+    }
 
     public init(credentials: InstanceCredentials, configuration: URLSessionConfiguration = .ephemeral) {
         self.credentials = credentials
@@ -23,6 +38,43 @@ public struct MeetingNotesAPI: Sendable {
 
     public func session() async throws -> AuthSessionDTO {
         try await send("GET", route: ["session"])
+    }
+
+    /// What the server says about this session, asked of `/session` itself.
+    public enum SessionVerdict: Sendable {
+        case valid(AuthSessionDTO)
+        /// The API's own refusal: 401 with the JSON body `{"error":"unauthorized"}`.
+        /// A page from a proxy or a captive portal is not this, whatever its status.
+        case refused
+        case noAnswer(APIClientError)
+    }
+
+    public func verifySession() async -> SessionVerdict {
+        do {
+            try transportState.check()
+            var request = URLRequest(url: credentials.instance.endpoint(["api", "v1", "session"]))
+            request.httpMethod = "GET"
+            request.timeoutInterval = 30
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.setValue("Bearer \(credentials.bearerToken)", forHTTPHeaderField: "Authorization")
+            let (data, response) = try await session.data(for: request)
+            guard let response = response as? HTTPURLResponse else { return .noAnswer(.invalidResponse) }
+            switch response.statusCode {
+            case 200..<300:
+                guard let identity = try? JSONDecoder().decode(AuthSessionDTO.self, from: data) else { return .noAnswer(.invalidJSON) }
+                return .valid(identity)
+            case 401:
+                struct Refusal: Decodable { let error: String }
+                let refused = (try? JSONDecoder().decode(Refusal.self, from: data))?.error == "unauthorized"
+                return refused ? .refused : .noAnswer(.unauthorized)
+            case 403: return .noAnswer(.unauthorized)
+            case 404: return .noAnswer(.notFound)
+            case 503: return .noAnswer(.unavailable)
+            default: return .noAnswer(.httpStatus(response.statusCode))
+            }
+        } catch let error as URLError {
+            return .noAnswer(.transport(error.code))
+        } catch { return .noAnswer(error as? APIClientError ?? .invalidResponse) }
     }
 
     public func calendarPreferences() async throws -> CalendarPreferencesDTO {
@@ -231,7 +283,7 @@ public struct MeetingNotesAPI: Sendable {
                     guard let response = response as? HTTPURLResponse else { throw APIClientError.invalidResponse }
                     switch response.statusCode {
                     case 200..<300: break
-                    case 401, 403: throw APIClientError.unauthorized
+                    case 401, 403: onUnauthorized?(); throw APIClientError.unauthorized
                     case 404: throw APIClientError.notFound
                     case 503: throw APIClientError.unavailable
                     default: throw APIClientError.httpStatus(response.statusCode)
@@ -320,7 +372,9 @@ public struct MeetingNotesAPI: Sendable {
         request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(credentials.bearerToken)", forHTTPHeaderField: "Authorization")
-        let note = try await SharedNoteReader.read(request, session: session)
+        let note: SharedNote
+        do { note = try await SharedNoteReader.read(request, session: session) }
+        catch SharedNoteError.signInRequired { onUnauthorized?(); throw SharedNoteError.signInRequired }
         try transportState.check()
         return note
     }
@@ -357,7 +411,7 @@ public struct MeetingNotesAPI: Sendable {
         guard let response = response as? HTTPURLResponse else { throw APIClientError.invalidResponse }
         switch response.statusCode {
         case 200..<300: break
-        case 401, 403: throw APIClientError.unauthorized
+        case 401, 403: onUnauthorized?(); throw APIClientError.unauthorized
         case 404: throw APIClientError.notFound
         case 409: throw APIClientError.conflict
         case 413: throw APIClientError.audioTooLarge

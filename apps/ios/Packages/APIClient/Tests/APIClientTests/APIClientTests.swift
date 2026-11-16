@@ -341,7 +341,7 @@ private func requestBody(_ request: URLRequest) -> Data {
         let defaults = try #require(UserDefaults(suiteName: domain))
         defer { defaults.removePersistentDomain(forName: domain) }
         let fixture = CalendarResponseState()
-        let model = ServerNotesModel(settings: ConnectionSettingsStore(defaults: defaults, tokens: MemoryTokens()), makeAPI: { credentials in
+        let model = ServerNotesModel(makeAPI: { credentials in
             MeetingNotesAPI(credentials: credentials, configuration: configuration { request in
                 if isSummaries(request) { return Response(body: summariesPage([])) }
                 if request.url?.path.hasSuffix("/notes") == true { return Response(body: "[]") }
@@ -381,7 +381,7 @@ private func requestBody(_ request: URLRequest) -> Data {
         defer { defaults.removePersistentDomain(forName: domain) }
         let userA = "00000000-0000-4000-8000-000000000001"
         let userB = "00000000-0000-4000-8000-000000000002"
-        let model = ServerNotesModel(settings: ConnectionSettingsStore(defaults: defaults, tokens: MemoryTokens()), makeAPI: { credentials in
+        let model = ServerNotesModel(makeAPI: { credentials in
             MeetingNotesAPI(credentials: credentials, configuration: configuration(automaticSession: false) { request in
                 let isB = request.value(forHTTPHeaderField: "Authorization") == "Bearer token-user-b"
                 if request.url?.path.hasSuffix("/session") == true {
@@ -413,8 +413,7 @@ private func requestBody(_ request: URLRequest) -> Data {
         let domain = "MeetingNotes-partial-update-tests-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: domain))
         defer { defaults.removePersistentDomain(forName: domain) }
-        let settings = ConnectionSettingsStore(defaults: defaults, tokens: MemoryTokens())
-        let model = ServerNotesModel(settings: settings, makeAPI: { credentials in
+        let model = ServerNotesModel(makeAPI: { credentials in
             MeetingNotesAPI(credentials: credentials, configuration: configuration { request in
                 guard request.httpMethod == "PATCH" else { return Response(body: summariesPage([summaryJSON])) }
                 let payload = (try? JSONSerialization.jsonObject(with: requestBody(request))) as? [String: String]
@@ -438,8 +437,7 @@ private func requestBody(_ request: URLRequest) -> Data {
         let domain = "MeetingNotes-model-tests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: domain)!
         defer { defaults.removePersistentDomain(forName: domain) }
-        let settings = ConnectionSettingsStore(defaults: defaults, tokens: MemoryTokens())
-        let model = ServerNotesModel(settings: settings, makeAPI: { credentials in
+        let model = ServerNotesModel(makeAPI: { credentials in
             MeetingNotesAPI(credentials: credentials, configuration: configuration { request in
                 switch request.httpMethod {
                 case "POST": Response(body: noteJSON.replacingOccurrences(of: "Server note", with: "Created"))
@@ -454,7 +452,6 @@ private func requestBody(_ request: URLRequest) -> Data {
         // Connecting loads rows, not whole notes.
         #expect(model.list.rows.first?.title == "Server note")
         #expect(model.state.notes.isEmpty)
-        #expect(try settings.load()?.instance.description == "https://example.test")
         let created = try await model.create(title: "Created", body: "Body")
         #expect(created.title == "Created")
         #expect(model.state.notes.count == 1)
@@ -467,7 +464,6 @@ private func requestBody(_ request: URLRequest) -> Data {
         #expect(model.list.rows.isEmpty && model.list.total == 0)
         try model.disconnect()
         #expect(model.instance == nil)
-        #expect(try settings.load() == nil)
         await #expect(throws: APIClientError.unauthorized) { try await model.create(title: "No connection", body: "") }
     }
 
@@ -475,14 +471,12 @@ private func requestBody(_ request: URLRequest) -> Data {
         let domain = "MeetingNotes-rejected-tests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: domain)!
         defer { defaults.removePersistentDomain(forName: domain) }
-        let settings = ConnectionSettingsStore(defaults: defaults, tokens: MemoryTokens())
-        let model = ServerNotesModel(settings: settings, makeAPI: { credentials in
+        let model = ServerNotesModel(makeAPI: { credentials in
             MeetingNotesAPI(credentials: credentials, configuration: configuration { _ in Response(status: 401, body: "{}") })
         })
         await model.connect(instance: "https://example.test", token: "rejected-token")
         #expect(model.instance == nil)
         #expect(model.state.notes.isEmpty)
-        #expect(try settings.load() == nil)
         guard case .failed(.unauthorized, _) = model.state else { Issue.record("Expected an unauthorized connection state"); return }
     }
 }
@@ -638,7 +632,7 @@ private let invitationJSON = #"{"id":"00000000-0000-4000-8000-000000000013","org
         let defaults = try #require(UserDefaults(suiteName: domain))
         defer { defaults.removePersistentDomain(forName: domain) }
         let selection = CalendarResponseState()
-        let model = ServerNotesModel(settings: ConnectionSettingsStore(defaults: defaults, tokens: MemoryTokens()), makeAPI: { credentials in
+        let model = ServerNotesModel(makeAPI: { credentials in
             MeetingNotesAPI(credentials: credentials, configuration: configuration { request in
                 let path = request.url!.path
                 if path.hasSuffix("/notes/summaries") { return Response(body: summariesPage([summaryJSON])) }
@@ -812,7 +806,7 @@ private func queryText(of request: URLRequest) -> String? {
 @MainActor private func connected(_ handler: @escaping @Sendable (URLRequest) -> Response) async throws -> ServerNotesModel {
     let domain = "Cereal-list-tests-\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: domain))
-    let model = ServerNotesModel(settings: ConnectionSettingsStore(defaults: defaults, tokens: MemoryTokens()), makeAPI: { credentials in
+    let model = ServerNotesModel(makeAPI: { credentials in
         MeetingNotesAPI(credentials: credentials, configuration: configuration(handler))
     })
     await model.connect(instance: "https://example.test", token: "unit-test-token")

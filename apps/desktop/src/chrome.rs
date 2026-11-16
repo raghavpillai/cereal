@@ -501,7 +501,7 @@ impl Cereal {
 
     /// The signed-in person's name, or the local workspace's name.
     pub(crate) fn workspace_name(&self) -> String {
-        crate::account::session()
+        crate::accounts::default_session()
             .filter(|_| crate::server::enabled())
             .map(|session| session.user.name)
             .filter(|name| !name.trim().is_empty())
@@ -1236,7 +1236,7 @@ impl Cereal {
             }
             Menu::Workspace => {
                 let connected = crate::server::enabled();
-                let session = crate::account::session().filter(|_| connected);
+                let session = crate::accounts::default_session().filter(|_| connected);
                 content = content
                     .w(px(256.))
                     // 4 px under the last row.
@@ -1368,7 +1368,11 @@ impl Cereal {
                     230.
                 }));
                 if menu == Menu::Share {
-                    let account = crate::account::session();
+                    // The owner of a note is the person signed in to the
+                    // account the note belongs to.
+                    let account = self
+                        .current_note
+                        .and_then(crate::accounts::session_of_note);
                     let owner = account
                         .as_ref()
                         .map(|session| session.user.name.clone())
@@ -1813,7 +1817,11 @@ impl Cereal {
                 );
             }
             _ => {
+                let sheet = (menu == Menu::Account)
+                    .then(|| self.account_sheet.as_ref().map(|sheet| sheet.text()))
+                    .flatten();
                 let (title,description)=match &menu {
+                    Menu::Account=>sheet.as_ref().map(|sheet|(sheet.title.clone(),sheet.body.clone())).unwrap_or_default(),
                     Menu::NewFolder=>("Create folder".to_string(),"Name".to_string()),
                     Menu::RecordingHelp if crate::server::enabled()=>("Recording a meeting".into(),"Start captures your microphone and computer audio separately. Stop saves the recording and transcribes it without generating notes. Choose Generate notes when you are ready. Resume keeps the same transcript; after you stop again, Regenerate notes includes the new conversation.".into()),
                     Menu::RecordingHelp=>("Local audio recording".into(),"Start records your microphone and computer audio separately. Stop saves the audio on this Mac. Transcription and generated notes are available when you connect to your server.".into()),
@@ -1836,7 +1844,12 @@ impl Cereal {
                             .flex()
                             .justify_between()
                             .items_center()
-                            .child(if menu == Menu::NewFolder {
+                            // An account sheet names a host in full: its
+                            // title wraps rather than leave the dialog.
+                            .when(menu == Menu::Account, |row| row.items_start().gap(px(12.)))
+                            .child(if menu == Menu::Account {
+                                div().flex_1().min_w_0().child(heading(title, t))
+                            } else if menu == Menu::NewFolder {
                                 div()
                                     .font_family(FONT)
                                     .text_size(px(16.))
@@ -1938,6 +1951,8 @@ impl Cereal {
                                             .child("Create"),
                                     ),
                             );
+                } else if let Some(sheet) = sheet {
+                    content = content.child(self.account_sheet_actions(&sheet, cx));
                 } else if menu == Menu::Shortcuts {
                     for (label, key) in [
                         ("New note", "⌘ N"),
@@ -2798,7 +2813,7 @@ mod chrome_tests {
         let labels: Vec<_> = SettingsTab::ALL.iter().map(|tab| tab.label()).collect();
         assert_eq!(
             labels,
-            ["Preferences", "Profile", "Calendar", "Notifications", "About"]
+            ["Preferences", "Accounts", "Calendar", "Notifications", "About"]
         );
         // Each page has its own glyph and none stands in for an unbuilt feature.
         let mut icons: Vec<_> = SettingsTab::ALL.iter().map(|tab| tab.icon()).collect();

@@ -62,8 +62,9 @@ pub fn open_in_browser(url: &str, cx: &mut App) {
 }
 
 /// The identity the read-only note page gives the note renderer. No note of
-/// the workspace has it, so nothing that acts on a workspace note applies.
-const SHARED_NOTE_ID: u64 = u64::MAX;
+/// the workspace has it (it is never a handle, never looked up and never
+/// written as a note's id), so nothing that acts on a workspace note applies.
+use crate::accounts::handle::SHARED_NOTE_ID;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -185,8 +186,8 @@ impl Cereal {
         // this link may open is not known until that ends.
         if crate::link::must_wait(
             crate::server::enabled(),
-            crate::account::identity().is_some(),
-            self.server_pending > 0,
+            crate::accounts::any_shown(),
+            crate::accounts::any_checking() || !self.verifying.is_empty(),
         ) {
             self.links.pending = Some(link);
             return;
@@ -213,9 +214,10 @@ impl Cereal {
         // A note of one's own on the signed-in server opens as itself.
         if access == Access::Read
             && let AppLink::Note(note) = &link
+            && let Some(account) = self.link_reader(origin)
         {
             let id = note.note_id.clone();
-            self.open_server_note(id, cx);
+            self.open_server_note(account.id, id, cx);
             return;
         }
         self.show_link_page(link, cx);
@@ -227,12 +229,24 @@ impl Cereal {
         if !crate::server::enabled() {
             return crate::link::access(origin, None, false);
         }
-        let credentials = crate::account::credentials().ok();
-        let signed_in = credentials.is_some() && crate::account::session().is_some();
-        let server = credentials
-            .map(|credentials| credentials.url)
-            .unwrap_or_else(crate::account::configured_url);
+        // Read with an account on the link's own server, and no other.
+        if let Some(reader) = self.link_reader(origin) {
+            return crate::link::access(origin, Some(&reader.url), true);
+        }
+        let signed_in = crate::accounts::any_shown();
+        let server = crate::accounts::configured_url();
         crate::link::access(origin, Some(&server), signed_in)
+    }
+
+    /// The account a link on `origin` is read with: the first, in account
+    /// order, on that origin (with no path in its address) that is Ready.
+    fn link_reader(&self, origin: &ServerOrigin) -> Option<crate::accounts::Account> {
+        let registry = crate::accounts::registry();
+        let on_origin: Vec<crate::accounts::Account> =
+            registry.on(origin).into_iter().cloned().collect();
+        on_origin
+            .into_iter()
+            .find(|account| account.shown() && account.is_ready())
     }
 
     fn show_link_page(&mut self, link: AppLink, cx: &mut Context<Self>) {
@@ -267,16 +281,24 @@ impl Cereal {
             *phase = Phase::Loading;
         }
         let epoch = self.links.epoch;
-        let account = crate::account::epoch();
-        let credentials = crate::account::credentials().ok();
+        let Some(reader) = self.link_reader(&link.origin) else {
+            return;
+        };
+        let account = reader.epoch();
         cx.spawn(async move |this, cx| {
             let asked = link.clone();
+            let with = reader.id.clone();
             let result = cx
                 .background_executor()
-                .spawn(async move { crate::shared::fetch(&asked, credentials.as_ref()) })
+                .spawn(async move {
+                    let client = crate::accounts::client(&with).ok();
+                    crate::shared::fetch(&asked, client.as_ref())
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.links.epoch != epoch || crate::account::epoch() != account {
+                if this.links.epoch != epoch
+                    || crate::accounts::epoch_of(&reader.id) != Some(account)
+                {
                     return;
                 }
                 let phase = match result {
@@ -522,10 +544,9 @@ impl Cereal {
     ) -> AnyElement {
         let t = self.theme();
         // The server the app is signed in to, when it is another one.
-        let elsewhere = crate::account::credentials()
-            .ok()
-            .filter(|_| crate::server::enabled() && crate::account::session().is_some())
-            .and_then(|credentials| ServerOrigin::of_server(&credentials.url))
+        let elsewhere = crate::accounts::default_account()
+            .filter(|account| crate::server::enabled() && account.shown())
+            .and_then(|account| account.origin)
             .filter(|current| current != origin)
             .map(|current| format!("You are signed in to {}.", current.display_host()));
         let browser = pill("link-open-browser", "Open in browser", "globe", t).on_click(

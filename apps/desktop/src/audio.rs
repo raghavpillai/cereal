@@ -145,6 +145,12 @@ impl CaptureManifest {
     }
 }
 
+/// Where the captures of a note are kept under `root`: `note-<file id>`. A
+/// handle never names anything on disk.
+pub fn capture_directory(root: &Path, note_id: u64) -> PathBuf {
+    root.join(format!("note-{}", crate::accounts::handle::file_id(note_id)))
+}
+
 #[derive(Clone)]
 pub struct CaptureMonitor(Arc<Mutex<CaptureManifest>>);
 impl CaptureMonitor {
@@ -158,6 +164,9 @@ pub struct Capture {
 }
 impl Capture {
     pub fn start(note_id: u64, root: &Path, options: CaptureOptions) -> Result<Self, String> {
+        // On disk a note is always named by its file id: the directory
+        // `note-<id>` and the manifest never hold a handle.
+        let note_id = crate::accounts::handle::file_id(note_id);
         if options.flags() == 0 {
             return Err("Enable microphone or system audio before recording".into());
         }
@@ -166,7 +175,7 @@ impl Capture {
             .map_err(|e| e.to_string())?
             .as_nanos();
         let capture_id = format!("capture-{}-{stamp}", std::process::id());
-        let directory = root.join(format!("note-{note_id}")).join(&capture_id);
+        let directory = capture_directory(root, note_id).join(&capture_id);
         private_directory(&directory)?;
         let manifest = CaptureManifest {
             version: 1,

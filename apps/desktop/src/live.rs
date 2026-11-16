@@ -795,9 +795,9 @@ impl Source {
 /// Where a capture's stream connects.
 #[derive(Clone, Debug)]
 pub struct Target {
-    /// `ws://` or `wss://` URL of the note's live endpoint.
-    pub url: String,
-    pub token: String,
+    /// The note's live endpoint and the session for it, made together by
+    /// the client of the note's account.
+    pub endpoint: crate::accounts::client::LiveEndpoint,
     pub capture_id: String,
     /// Note-timeline position of the capture's first sample.
     pub base_ms: u64,
@@ -1097,20 +1097,18 @@ fn would_block(error: &io::Error) -> bool {
 
 fn connect(target: &Target) -> Result<(Socket, TcpStream), Outcome> {
     use tungstenite::{
-        client::IntoClientRequest,
-        handshake::HandshakeError,
-        http::{HeaderValue, header::AUTHORIZATION},
-        protocol::WebSocketConfig,
+        client::IntoClientRequest, handshake::HandshakeError, protocol::WebSocketConfig,
     };
     let mut request = target
+        .endpoint
         .url
         .as_str()
         .into_client_request()
         .map_err(|_| Outcome::Stop(false))?;
-    let mut bearer = HeaderValue::from_str(&format!("Bearer {}", target.token))
+    target
+        .endpoint
+        .authorize(request.headers_mut())
         .map_err(|_| Outcome::Stop(false))?;
-    bearer.set_sensitive(true);
-    request.headers_mut().insert(AUTHORIZATION, bearer);
     let secure = request.uri().scheme_str() == Some("wss");
     let host = request.uri().host().ok_or(Outcome::Stop(false))?.to_owned();
     let port = request
@@ -2481,8 +2479,10 @@ pub(crate) mod tests {
 
     fn target(server: &Server, fixture: &Fixture) -> Target {
         Target {
-            url: server.url.clone(),
-            token: "t".repeat(40),
+            endpoint: crate::accounts::client::LiveEndpoint::for_test(
+                server.url.clone(),
+                &"t".repeat(40),
+            ),
             capture_id: fixture.manifest.capture_id.clone(),
             base_ms: 754_000,
         }

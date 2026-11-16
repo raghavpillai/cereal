@@ -411,7 +411,7 @@ fn hex_color(text: &str, fallback: Hsla) -> Hsla {
 impl Cereal {
     /// Whether a session exists on the server this app is set up to use.
     fn welcome_session(&self) -> Option<meeting_notes_api_types::AuthSessionDTO> {
-        crate::account::session().filter(|_| crate::server::enabled())
+        crate::accounts::default_session().filter(|_| crate::server::enabled())
     }
 
     fn welcome_calendar(&self) -> bool {
@@ -487,7 +487,7 @@ impl Cereal {
         }
         match flow.step {
             Step::Server => {
-                let signed_in = crate::account::session().is_some() && crate::server::enabled();
+                let signed_in = crate::accounts::default_session().is_some() && crate::server::enabled();
                 if !signed_in {
                     onboarding.focus_field = Some(Field::Address);
                 }
@@ -795,7 +795,7 @@ impl Cereal {
             )
         };
         let address = if address.trim().is_empty() {
-            crate::account::configured_url()
+            crate::accounts::configured_url()
         } else {
             address
         };
@@ -1024,7 +1024,7 @@ impl Cereal {
                             .into_any_element(),
                         );
                     }
-                    if !crate::account::configured() && !flow.local {
+                    if !crate::accounts::server_mode() && !flow.local {
                         body.push(
                             div()
                                 .flex()

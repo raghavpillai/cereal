@@ -1,7 +1,8 @@
 import { Effect, Schema } from "effect"
 import { createDatabase, type Database } from "@meeting-notes/database"
 import { NoteDTO, SharedNoteDTO, type ShareDTO, type CreateNoteInput } from "@meeting-notes/contracts"
-import { BOOTSTRAP_OWNER_ID, RepositoryError, scopeRepository, transcriptContentKey, withoutPlaceholderTitle, type NotesRepositoryService, type StoredShare, type StoredAudioChunk } from "./repository"
+import { BOOTSTRAP_OWNER_ID, RepositoryError, scopeRepository, transcriptContentKey, withoutPlaceholderTitle, type ImportNoteCommand, type ImportNoteResult, type NotesRepositoryService, type StoredShare, type StoredAudioChunk } from "./repository"
+import {IMPORT_TRANSACTION_MS,clampCreatedAt,importedSegmentId,matchesStamp} from "./note-import"
 import {isDefaultNoteTitle} from "./meeting-context-errors"
 import {meetingSearchTerms,transcriptPassage} from "./meeting-search"
 import {DEFAULT_ORGANIZATION_ID} from "./organizations"
@@ -15,6 +16,8 @@ export const noteDTO = (note: DbNote): NoteDTO => Schema.decodeUnknownSync(NoteD
   id: note.id, title: note.title, body: note.body, enhanced: note.enhanced, date: note.date.toISOString().slice(0, 10), duration: note.duration,
   createdAt: note.createdAt.toISOString(), updatedAt: note.updatedAt.toISOString(), transcriptSegments: note.transcriptSegments ?? [],
   recordingState: note.recordingState, generationState: note.generationState, transcriptRevision: note.transcriptRevision, generatedRevision: note.generatedRevision,
+  // Only a note that was imported says so: every other note reads exactly as it did before the field existed.
+  ...(note.importedAt ? { importedAt: note.importedAt.toISOString() } : {}),
 })
 type DbShare = Awaited<ReturnType<Database["sharedNote"]["findMany"]>>[number]
 const shareDTO = (share: DbShare): ShareDTO => ({ id: share.id, noteId: share.noteId, createdAt: share.createdAt.toISOString(), expiresAt: share.expiresAt?.toISOString() ?? null, revokedAt: share.revokedAt?.toISOString() ?? null })
@@ -28,21 +31,67 @@ const chunkDTO = (c: DbAudioChunk): StoredAudioChunk => ({id:c.id,noteId:c.noteI
 /** Prisma remains behind the Effect repository boundary; generated entities never cross the API. */
 export function makePrismaRepository(databaseUrl: string) {
   const db = createDatabase(databaseUrl)
-  const createNoteForUser = (ownerId: string, input: CreateNoteInput, organizationId?:string) => attempt("createNote", async () => {
-    // A new note follows the user's selected workspace, without widening the
-    // existing native API's private owner boundary. Validate membership afresh.
+  // A new note follows the user's selected workspace, without widening the
+  // existing native API's private owner boundary. Validate membership afresh.
+  const workspaceFor = async (ownerId: string, organizationId: string | undefined, operation: string): Promise<string | null> => {
     const selected=organizationId??(await db.userWorkspaceState.findUnique({where:{userId:ownerId}}))?.activeOrganizationId;
     const membership=selected?await db.member.findUnique({where:{organizationId_userId:{organizationId:selected,userId:ownerId}}}):null;
-    if(organizationId&&!membership)throw new RepositoryError("createNote");
+    if(organizationId&&!membership)throw new RepositoryError(operation);
     const fallback=membership??await db.member.findFirst({where:{userId:ownerId},orderBy:[{createdAt:"asc"},{id:"asc"}]});
     const preferred=!membership?await db.member.findUnique({where:{organizationId_userId:{organizationId:DEFAULT_ORGANIZATION_ID,userId:ownerId}}}):null;
+    return membership?.organizationId??preferred?.organizationId??fallback?.organizationId??null
+  }
+  const createNoteForUser = (ownerId: string, input: CreateNoteInput, organizationId?:string) => attempt("createNote", async () => {
     return noteDTO(await db.note.create({ data: {
     ownerId,
-    organizationId:membership?.organizationId??preferred?.organizationId??fallback?.organizationId??null,
+    organizationId:await workspaceFor(ownerId,organizationId,"createNote"),
     title: input.title, body: input.body ?? "", enhanced: input.enhanced ?? "", date: new Date(`${input.date ?? new Date().toISOString().slice(0, 10)}T00:00:00.000Z`), duration: input.duration ?? "",
     transcriptRevision: transcriptContentKey(input.transcriptSegments ?? []) === "[]" ? 0 : 1,
     transcriptSegments: { create: [...(input.transcriptSegments ?? [])] },
   }, include }))})
+  const importNoteForUser = (ownerId: string, { input, digest, now }: ImportNoteCommand, organizationId?: string) => attempt("importNote", async (): Promise<ImportNoteResult> => {
+    const id = input.id.toLowerCase(), transcriptRevision = input.transcriptSegments.length ? 1 : 0, generatedRevision = input.generated ? transcriptRevision : null
+    // An id that exists gets one of two answers. The same request again, for a note nothing has touched since
+    // (the import wrote `updatedAt` and `importedAt` from one clock reading), is given the note. Everything
+    // else, whoever owns the note, is a conflict.
+    const existing = async (): Promise<ImportNoteResult | null> => {
+      const row = await db.note.findUnique({ where: { id }, include })
+      if (!row) return null
+      return row.ownerId === ownerId && row.importDigest === digest && row.importedAt?.getTime() === row.updatedAt.getTime() && row.transcriptRevision === transcriptRevision && row.generatedRevision === generatedRevision
+        ? { outcome: "replayed", note: noteDTO(row) } : { outcome: "conflict" }
+    }
+    const found = await existing()
+    if (found) return found
+    const organization = await workspaceFor(ownerId, organizationId, "importNote")
+    try {
+      return await db.$transaction(async tx => {
+        const row = await tx.note.create({ data: {
+          id, ownerId, organizationId: organization,
+          title: input.title, body: input.body, enhanced: input.enhanced, date: new Date(`${input.date}T00:00:00.000Z`), duration: input.duration,
+          createdAt: clampCreatedAt(input.createdAt, now), updatedAt: now, importedAt: now, importDigest: digest,
+          recordingState: input.recordingState, generationState: input.generated ? "ready" : "idle", transcriptRevision, generatedRevision,
+        } })
+        // Every id is derived from the note's own, so no segment of anyone else's is looked up or can be in the way.
+        // Written a thousand at a time: each statement stays small, and far inside the per-statement time limit.
+        const segments = input.transcriptSegments.map(segment => ({ ...segment, id: importedSegmentId(id, segment.id) }))
+        for (let start = 0; start < segments.length; start += 1000)
+          await tx.transcriptSegment.createMany({ data: segments.slice(start, start + 1000).map(segment => ({ ...segment, noteId: id, origin: "batch" })) })
+        // The meeting details travel as they were saved. They name no event of this server: the event id is a
+        // new one, nothing is looked up, and no calendar binding is made.
+        if (input.meeting) await tx.noteMeetingContext.create({ data: { noteId: id, userId: ownerId, meeting: JSON.parse(JSON.stringify({ ...input.meeting, eventId: crypto.randomUUID() })) } })
+        // Answered from what was just written, in the order a read gives it, instead of reading tens of thousands of rows back.
+        return { outcome: "created" as const, note: noteDTO({ ...row, transcriptSegments: segments.sort((a, b) => a.startMs - b.startMs) }) }
+      }, { timeout: IMPORT_TRANSACTION_MS, maxWait: 10_000 })
+    } catch (error) {
+      // Two requests with one id at once: the one that lost finds the other's note and is answered from it.
+      const raced = await existing()
+      if (raced) return raced
+      // A derived segment id that is already somebody's row (it can only have been put there on purpose) is
+      // answered like any id that is taken. Nothing was written: the transaction is gone.
+      if (typeof error === "object" && error !== null && "code" in error && error.code === "P2002") return { outcome: "conflict" }
+      throw error
+    }
+  })
   const noteSummaries = makePrismaNoteSummaries(db)
   const repository: NotesRepositoryService = {
     live: makePrismaLiveRepository(db),
@@ -69,6 +118,7 @@ export function makePrismaRepository(databaseUrl: string) {
       listNoteSummaries: input => attempt("listNoteSummaries",()=>noteSummaries.list(userId,organizationId,input)),
       searchNoteSummaries: input => attempt("searchNoteSummaries",()=>noteSummaries.search(userId,organizationId,input)),
       createNote: input => createNoteForUser(userId, input, organizationId),
+      importNote: command => importNoteForUser(userId, command, organizationId),
     }, organizationId),
     recording: (id, command) => attempt("recording", () => db.$transaction(async tx => {
       await tx.$queryRaw`SELECT "id" FROM "Note" WHERE "id" = ${id}::uuid FOR UPDATE`
@@ -142,6 +192,20 @@ export function makePrismaRepository(databaseUrl: string) {
       }, include }))
     })),
     deleteNote: (id) => attempt("deleteNote", async () => (await db.note.deleteMany({ where: { id } })).count > 0),
+    importNote: command => importNoteForUser(BOOTSTRAP_OWNER_ID, command),
+    // The row lock is the one every write to a note takes (edits, recording commands, new audio parts,
+    // generation), so nothing can change between the comparison and the delete.
+    deleteNoteIf: (id, preconditions) => attempt("deleteNoteIf", () => db.$transaction(async tx => {
+      await tx.$queryRaw`SELECT "id" FROM "Note" WHERE "id" = ${id}::uuid FOR UPDATE`
+      const note = await tx.note.findUnique({ where: { id }, select: { updatedAt: true, transcriptRevision: true, generatedRevision: true, recordingState: true } })
+      if (!note) return "missing" as const
+      const parts = await tx.audioChunk.findMany({ where: { noteId: id }, select: { state: true } })
+      if (note.recordingState === "recording" || parts.some(part => part.state !== "ready")
+        || preconditions.stamp && !matchesStamp(preconditions.stamp, { updatedAt: note.updatedAt.getTime(), transcriptRevision: note.transcriptRevision, generatedRevision: note.generatedRevision })
+        || preconditions.chunks !== undefined && preconditions.chunks !== parts.length) return "conflict" as const
+      await tx.note.delete({ where: { id } })
+      return "deleted" as const
+    })),
     listShares: (noteId) => attempt("listShares", async () => (await db.sharedNote.findMany({ where: { noteId }, orderBy: { createdAt: "desc" } })).map(shareDTO)),
     createShare: (share) => attempt("createShare", async () => storedShare(await db.sharedNote.create({ data: {
       id: share.metadata.id, noteId: share.metadata.noteId, tokenHash: share.tokenHash,

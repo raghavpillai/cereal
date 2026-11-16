@@ -33,6 +33,8 @@ private struct ReminderEntry: Decodable, Sendable {
     /// Seconds since 1970.
     let fireAt: Double
     let eventId: String
+    /// The account the event was read through. Absent before accounts.
+    let account: String?
 }
 
 private struct ReminderChange: Decodable, Sendable {
@@ -255,7 +257,7 @@ private final class Reminders: NSObject, UNUserNotificationCenterDelegate {
             content.title = reminder.title
             content.body = reminder.body
             content.sound = .default
-            content.userInfo = ["eventId": reminder.eventId]
+            content.userInfo = ["eventId": reminder.eventId, "account": reminder.account ?? ""]
             let wait = reminder.fireAt - Date().timeIntervalSince1970
             let trigger: UNNotificationTrigger
             if wait <= 2 {
@@ -288,9 +290,13 @@ private final class Reminders: NSObject, UNUserNotificationCenterDelegate {
         _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        let event = response.notification.request.content.userInfo["eventId"] as? String ?? ""
+        let info = response.notification.request.content.userInfo
+        let event = info["eventId"] as? String ?? ""
+        let account = info["account"] as? String ?? ""
+        // A reminder names its account: "<account>/<event>".
+        let target = account.isEmpty ? event : account + "/" + event
         DispatchQueue.main.async {
-            MainActor.assumeIsolated { MenuBar.shared.send("open-event", event) }
+            MainActor.assumeIsolated { MenuBar.shared.send("open-event", target) }
         }
         completionHandler()
     }

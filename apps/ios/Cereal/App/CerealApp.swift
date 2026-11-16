@@ -5,9 +5,9 @@ import APIClient
 struct CerealApp: App {
     @State private var store = NoteStore()
     @State private var router = Router()
-    @State private var server = ServerNotesModel()
+    @State private var accounts = AppAccounts.make()
     @State private var connectionMode = ConnectionMode()
-    @State private var serverRecording = ServerRecordingController()
+    @State private var serverRecording = ServerRecordingController(outboxRoot: AppAccounts.outboxRoot)
     @State private var sharedHistory = SharedNoteHistory()
 
     var body: some Scene {
@@ -15,7 +15,7 @@ struct CerealApp: App {
             RootView()
                 .environment(store)
                 .environment(router)
-                .environment(server)
+                .environment(accounts)
                 .environment(connectionMode)
                 .environment(serverRecording)
                 .environment(sharedHistory)
@@ -25,13 +25,57 @@ struct CerealApp: App {
     }
 }
 
+/// How the app's accounts are kept. There is one list for the whole app;
+/// nothing in it is "current".
+enum AppAccounts {
+    /// Several accounts at once are switched off until every view that needs
+    /// them is in. The switch gates only the ways to get a second account.
+    static var allowsMultiple: Bool {
+        #if DEBUG
+        // Debug only: `-qa-accounts` runs with two accounts taken from the environment.
+        if isTwoAccountRun { return true }
+        #endif
+        return false
+    }
+
+    #if DEBUG
+    static var isTwoAccountRun: Bool { ProcessInfo.processInfo.arguments.contains("-qa-accounts") }
+    #endif
+
+    /// Where recordings are kept. Nil is the usual place; the two-account debug
+    /// run has its own, so it never touches what the signed-in account keeps.
+    static var outboxRoot: URL? {
+        #if DEBUG
+        if isTwoAccountRun {
+            return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("qa-accounts-outbox", isDirectory: true)
+        }
+        #endif
+        return nil
+    }
+
+    @MainActor static func make() -> AccountsModel {
+        #if DEBUG
+        if isTwoAccountRun {
+            // Sessions in memory, a list of its own: nothing the real account saved is read or changed.
+            let name = "dev.cereal.mobile.qa-accounts"
+            UserDefaults().removePersistentDomain(forName: name)
+            return AccountsModel(defaults: UserDefaults(suiteName: name) ?? .standard, credentials: MemoryAccountStore(), legacy: nil,
+                                 storage: AccountStorage(root: outboxRoot), allowsMultiple: true)
+        }
+        #endif
+        return AccountsModel(legacy: ConnectionSettingsStore(), allowsMultiple: allowsMultiple)
+    }
+}
+
 enum Route: Hashable {
     case note(UUID)
     case chat(noteID: UUID?)
-    case serverNote(String)
-    case serverNoteSource(String, raw: Bool)
-    case serverChat(String?)
-    /// Search across the notes of the current mode (local demo or signed-in account).
+    case serverNote(NoteRef)
+    case serverNoteSource(NoteRef, raw: Bool)
+    /// A chat in one account: about a note of it, or across its meetings.
+    case serverChat(AccountID, noteID: String?)
+    /// Search across the notes of the local demo, or of the accounts.
     case search
     /// A read-only note someone shared. It is read with an account on its own server.
     case sharedNote(SharedNoteLink)
@@ -79,17 +123,15 @@ final class Router {
     /// The server address the connection sheet opens with, when a page asked
     /// for a sign-in to a particular server.
     @ObservationIgnored var signInAddress: String?
-    /// The account a link has just opened a note in, until that account's
-    /// arrival has been handled: its own reset of the stack must not close the note.
-    @ObservationIgnored var linkOpenedIn: String??
 }
 
 struct RootView: View {
     @Environment(NoteStore.self) private var store
     @Environment(Router.self) private var router
-    @Environment(ServerNotesModel.self) private var server
+    @Environment(AccountsModel.self) private var accounts
     @Environment(ConnectionMode.self) private var connectionMode
     @Environment(ServerRecordingController.self) private var serverRecording
+    @Environment(SharedNoteHistory.self) private var sharedHistory
     @Environment(\.openURL) private var openURL
     /// A link to a note of one's own that arrived before the saved session was
     /// restored. Where it leads depends on which server that session is for.
@@ -121,9 +163,9 @@ struct RootView: View {
                     switch route {
                     case .note(let id): NoteView(noteID: id)
                     case .chat(let id): ChatView(noteID: id)
-                    case .serverNote(let id): ServerNoteView(noteID: id)
-                    case .serverNoteSource(let id, let raw): ServerNoteView(noteID: id, showMineInitially: raw)
-                    case .serverChat(let id): ServerChatView(noteID: id)
+                    case .serverNote(let ref): AccountScope(ref.account) { ServerNoteView(noteID: ref.id) }
+                    case .serverNoteSource(let ref, let raw): AccountScope(ref.account) { ServerNoteView(noteID: ref.id, showMineInitially: raw) }
+                    case .serverChat(let account, let id): AccountScope(account) { ServerChatView(noteID: id) }
                     case .search: SearchView()
                     case .sharedNote(let link): SharedNoteView(link: link)
                     case .sharedWithMe: SharedWithMeView()
@@ -150,33 +192,49 @@ struct RootView: View {
             // another app answers to the same scheme.
             if let url = UserDefaults.standard.string(forKey: "qa.openURL").flatMap(URL.init(string:)) { receive(url) }
             #endif
+            // A recording must be stopped before its account can go, so its Live Activity never outlives it.
+            accounts.removalBlock = { [serverRecording] in serverRecording.removalBlock(for: $0) }
+            accounts.onRemoved = { [sharedHistory, accounts] record, erased in
+                guard erased else { return }
+                // What only that account could read goes with it.
+                if let identity = record.identity { ServerChatSessions.shared.erase(accountIdentity: identity) }
+                if let origin = record.origin, accounts.sessions(on: origin).isEmpty { sharedHistory.removeAll(on: origin) }
+            }
+            serverRecording.accountPresentation = { [accounts] id in
+                guard accounts.showsAccountLabels, let session = accounts.session(id) else { return nil }
+                return (accounts.label(for: id), session.host)
+            }
             if await configureQAIfRequested() { restoring = false; openPendingLink(); await orphans; return }
             let interval = Signpost.ui.beginInterval("Launch.Restore")
-            await server.restore()
+            await accounts.restoreAll()
             Signpost.ui.endInterval("Launch.Restore", interval)
             restoring = false
             openPendingLink()
             await orphans
         }
         .fullScreenCover(item: $router.serverCapture) { target in
-            RailMetricsReader { NavigationStack { ServerCaptureView(noteID: target.id) } }
-                .zoomDestination(ZoomID.capture, enabled: CaptureNavigation.zoomsFromSource(path: router.path, noteID: target.id))
+            RailMetricsReader { NavigationStack { AccountScope(target.ref.account) { ServerCaptureView(noteID: target.ref.id) } } }
+                .zoomDestination(ZoomID.capture, enabled: CaptureNavigation.zoomsFromSource(path: router.path, note: target.ref))
                 .environment(\.zoomNamespace, zoom)
         }
-        .task(id: server.accountIdentity) {
-            // A shared note's page stays across a sign-in or sign-out and shows what the account may see.
-            router.path = LinkNavigation.pathAfterAccountChange(router.path, linkOpenedIn: router.linkOpenedIn, account: server.accountIdentity)
-            router.linkOpenedIn = nil
-            router.newNoteID = nil; router.serverCapture = nil
-            // Answers still arriving for an account that is no longer signed in end here.
-            ServerChatSessions.shared.accountChanged(to: server.accountIdentity)
+        .onChange(of: accounts.sessions.map(\.id)) { old, new in
+            // Screens of an account that has gone are closed. Everything else stays where it is.
+            let removed = Set(old).subtracting(new)
+            guard !removed.isEmpty else { return }
+            router.path = LinkNavigation.path(router.path, removing: removed)
+            if let capture = router.serverCapture, removed.contains(capture.ref.account) { router.serverCapture = nil }
+        }
+        .task(id: accounts.signature) {
+            // Answers still arriving for an account that is no longer here end.
+            ServerChatSessions.shared.accountsChanged(to: Set(accounts.sessions.compactMap { $0.notes.accountIdentity }))
             #if DEBUG
-            // After the reset above, so a `-screen` deep link is not cleared by it.
             openDebugScreen(first: !debugScreenOpened)
             debugScreenOpened = true
-            if ProcessInfo.processInfo.arguments.contains("server-chat-sample") { router.path = [.serverChat(nil)] }
+            if ProcessInfo.processInfo.arguments.contains("server-chat-sample"), let account = accounts.defaultSession?.id {
+                router.path = [.serverChat(account, noteID: nil)]
+            }
             #endif
-            await serverRecording.attach(to: server)
+            await serverRecording.sync(with: accounts.sessions.map(\.notes))
             #if DEBUG
             await runQARecordingFlowIfRequested()
             #endif
@@ -206,7 +264,30 @@ struct RootView: View {
 
 /// A server note's recording screen, as something to present.
 struct ServerCaptureTarget: Identifiable, Hashable {
-    let id: String
+    let ref: NoteRef
+    var id: NoteRef { ref }
+    init(_ ref: NoteRef) { self.ref = ref }
+}
+
+/// A screen of one account. Everything inside asks that account's own model,
+/// which is the only way to its server; when the account has gone, so has the screen.
+struct AccountScope<Content: View>: View {
+    @Environment(AccountsModel.self) private var accounts
+    private let account: AccountID
+    private let content: Content
+
+    init(_ account: AccountID, @ViewBuilder content: () -> Content) {
+        self.account = account
+        self.content = content()
+    }
+
+    var body: some View {
+        if let session = accounts.session(account) {
+            content.environment(session.notes).environment(\.account, account)
+        } else {
+            ContentUnavailableView("This account is no longer on this iPhone", systemImage: "person.crop.circle.badge.xmark")
+        }
+    }
 }
 
 /// Where the screens around a recording lead. Pure, so the rules can be tested:
@@ -214,27 +295,27 @@ struct ServerCaptureTarget: Identifiable, Hashable {
 enum CaptureNavigation {
     /// The stack after asking a question from the recording screen: the note,
     /// then its chat, so Back from the chat lands on the note being recorded.
-    static func pathForChat(from path: [Route], noteID: String) -> [Route] {
+    static func pathForChat(from path: [Route], note: NoteRef) -> [Route] {
         var result = path
-        if result.last == .serverChat(noteID) { return result }
-        if result.last != .serverNote(noteID) { result.append(.serverNote(noteID)) }
-        result.append(.serverChat(noteID))
+        if result.last == .serverChat(note.account, noteID: note.id) { return result }
+        if result.last != .serverNote(note) { result.append(.serverNote(note)) }
+        result.append(.serverChat(note.account, noteID: note.id))
         return result
     }
 
     /// The stack after closing the recording screen. While the recording runs
     /// the user returns to where they were. Once it has been stopped, closing
     /// lands on the note, where its notes are generated.
-    static func pathAfterClosing(from path: [Route], noteID: String, recording: Bool) -> [Route] {
-        recording || path.last == .serverNote(noteID) ? path : path + [.serverNote(noteID)]
+    static func pathAfterClosing(from path: [Route], note: NoteRef, recording: Bool) -> [Route] {
+        recording || path.last == .serverNote(note) ? path : path + [.serverNote(note)]
     }
 
     /// The note's page reads its note again when the recording screen over it
     /// closes. What was typed there and the notes generated there were saved by
     /// the recording screen; the page behind it still held what it had loaded
     /// before, and went on offering "Generate notes" for notes that existed.
-    static func noteReloads(noteID: String, captureWas old: String?, captureIs new: String?) -> Bool {
-        old == noteID && new != noteID
+    static func noteReloads(note: NoteRef?, captureWas old: NoteRef?, captureIs new: NoteRef?) -> Bool {
+        note != nil && old == note && new != note
     }
 
     /// The indicator stays while there is a recording to return to: running,
@@ -250,8 +331,8 @@ enum CaptureNavigation {
 
     /// The recording screen grows out of the + button or the indicator, which
     /// are on Home and on the note being recorded.
-    static func zoomsFromSource(path: [Route], noteID: String) -> Bool {
-        path.isEmpty || path.last == .serverNote(noteID)
+    static func zoomsFromSource(path: [Route], note: NoteRef) -> Bool {
+        path.isEmpty || path.last == .serverNote(note)
     }
 }
 
@@ -266,31 +347,26 @@ extension RootView {
         }
         #endif
         if open(url) { return }
-        guard url.scheme == AppIdentity.urlScheme, url.host == "recording" else { return }
+        guard let link = RecordingActivityLinkPolicy.link(url) else { return }
         if restoring { pendingRecording = url; return }
         // A server recording can stay active while the user browses the
-        // local demo. Its Live Activity must return to its own account/note.
-        if let id = RecordingActivityLinkPolicy.activeServerNoteID(url: url,
-            activeNoteID: serverRecording.activeNoteID,
-            recordingIdentity: serverRecording.instanceIdentity,
-            accountIdentity: server.accountIdentity) {
+        // local demo. Its Live Activity returns to its own account and note.
+        switch RecordingActivityLinkPolicy.target(link, active: serverRecording.active, accounts: accounts.sessions.map(\.id),
+                                                  ledger: { serverRecording.ledger(of: $0) }) {
+        case .note(let ref) where serverRecording.active == ref || !connectionMode.isDemo:
             connectionMode.isDemo = false
-            router.path = [.serverNote(id.uuidString.lowercased())]
-            router.linkOpenedIn = .some(server.accountIdentity)
-            return
+            router.path = [.serverNote(ref)]
+        case .note, .home:
+            guard connectionMode.isDemo, store.note(link.noteID) != nil else {
+                if !connectionMode.isDemo { router.path = [] }
+                return
+            }
+            guard router.newNoteID != link.noteID else { return }
+            // A Live Activity opens the existing note without starting or
+            // resuming capture. An already presented capture stays intact.
+            guard router.newNoteID == nil else { return }
+            router.path = [.note(link.noteID)]
         }
-        if !connectionMode.isDemo, let id = UUID(uuidString: url.lastPathComponent) {
-            router.path = [.serverNote(id.uuidString.lowercased())]
-            router.linkOpenedIn = .some(server.accountIdentity)
-            return
-        }
-        guard connectionMode.isDemo,
-              let id = UUID(uuidString: url.lastPathComponent), store.note(id) != nil else { return }
-        guard router.newNoteID != id else { return }
-        // A Live Activity opens the existing note without starting or
-        // resuming capture. An already presented capture stays intact.
-        guard router.newNoteID == nil else { return }
-        router.path = [.note(id)]
     }
 
     /// Follows a shared-note or note link, in its web or `cereal://` form.
@@ -301,7 +377,7 @@ extension RootView {
         // An answer to a sign-in goes to the sheet that asked; one arriving here has nobody waiting.
         case .auth: break
         case .note where restoring: pendingLink = link
-        case .note, .shared: router.open(link, server: server, mode: connectionMode)
+        case .note, .shared: router.open(link, accounts: accounts, mode: connectionMode)
         }
         return true
     }
@@ -310,7 +386,7 @@ extension RootView {
         if let url = pendingRecording { pendingRecording = nil; receive(url) }
         guard let link = pendingLink else { return }
         pendingLink = nil
-        router.open(link, server: server, mode: connectionMode)
+        router.open(link, accounts: accounts, mode: connectionMode)
     }
 
     /// Explicit Debug-only QA opt-in. Values are never logged, placed in
@@ -327,10 +403,21 @@ extension RootView {
         if arguments.contains("-qa-connect") {
             connectionMode.isDemo = false
             let environment = ProcessInfo.processInfo.environment
-            await server.connect(instance: environment["CEREAL_QA_INSTANCE_URL"] ?? "", token: environment["CEREAL_QA_OWNER_TOKEN"] ?? "")
-            if server.instance != nil, let id = environment["CEREAL_QA_NOTE_ID"], UUID(uuidString: id) != nil {
-                router.path = [.serverNote(id)]
+            await accounts.restoreAll()
+            let account = try? await accounts.connect(instance: environment["CEREAL_QA_INSTANCE_URL"] ?? "", token: environment["CEREAL_QA_OWNER_TOKEN"] ?? "")
+            if let account, let id = environment["CEREAL_QA_NOTE_ID"], UUID(uuidString: id) != nil {
+                router.path = [.serverNote(NoteRef(account: account, id: id))]
             }
+            return true
+        }
+        if arguments.contains("-qa-accounts") {
+            // Two accounts, for the first slice of several: `CEREAL_QA_INSTANCE_URL`/`_OWNER_TOKEN`
+            // and the same with `_2`. `-qa.newNoteAccount 2` makes the second the one new notes go to.
+            connectionMode.isDemo = false
+            let environment = ProcessInfo.processInfo.environment
+            _ = try? await accounts.connect(instance: environment["CEREAL_QA_INSTANCE_URL"] ?? "", token: environment["CEREAL_QA_OWNER_TOKEN"] ?? "")
+            let second = try? await accounts.connect(instance: environment["CEREAL_QA_INSTANCE_URL_2"] ?? "", token: environment["CEREAL_QA_OWNER_TOKEN_2"] ?? "")
+            if UserDefaults.standard.integer(forKey: "qa.newNoteAccount") == 2, let second { accounts.setDefault(second) }
             return true
         }
         guard let index = arguments.firstIndex(of: "-screen"), index + 1 < arguments.count else { return false }
@@ -345,8 +432,8 @@ extension RootView {
         }
         connectionMode.isDemo = false
         connectionMode.previewLabel = label
-        server.showQAState(state)
-        if arguments[index + 1] == "server-chat-sample" { router.path = [.serverChat(nil)] }
+        accounts.showQAState(state)
+        if arguments[index + 1] == "server-chat-sample", let account = accounts.defaultSession?.id { router.path = [.serverChat(account, noteID: nil)] }
         return true
         #else
         return false
@@ -359,16 +446,17 @@ extension RootView {
     /// screen after `-qa.leaveAfter` seconds for Home, the note or the note's chat, with
     /// the recording still running. For displays that simulated touches cannot reach.
     fileprivate func runQARecordingFlowIfRequested() async {
-        guard server.instance != nil, router.serverCapture == nil, serverRecording.indicatorNoteID == nil,
+        guard let session = accounts.defaultSession, session.isReady, router.serverCapture == nil, serverRecording.indicator == nil,
               let flow = UserDefaults.standard.string(forKey: "qa.flow"), flow.hasPrefix("record"),
-              let note = try? await server.create(title: "", body: "") else { return }
-        router.serverCapture = ServerCaptureTarget(id: note.id)
+              let created = try? await session.notes.create(title: "", body: "") else { return }
+        let note = NoteRef(account: session.id, id: created.id)
+        router.serverCapture = ServerCaptureTarget(note)
         guard flow != "record" else { return }
         let delay = max(2, UserDefaults.standard.double(forKey: "qa.leaveAfter"))
         try? await Task.sleep(for: .seconds(delay))
         switch flow {
-        case "record-note": router.path = [.serverNote(note.id)]
-        case "record-chat": router.path = CaptureNavigation.pathForChat(from: [], noteID: note.id)
+        case "record-note": router.path = [.serverNote(note)]
+        case "record-chat": router.path = CaptureNavigation.pathForChat(from: [], note: note)
         default: break
         }
         router.serverCapture = nil
@@ -413,6 +501,8 @@ extension RootView {
 
 extension EnvironmentValues {
     @Entry var restoringConnection = false
+    /// The account of the screen this view is part of. Nil outside an account's screens.
+    @Entry var account: AccountID? = nil
 }
 
 extension UUID: @retroactive Identifiable {

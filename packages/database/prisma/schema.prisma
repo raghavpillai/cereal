@@ -33,6 +33,9 @@ model Note {
   transcriptRevision Int                 @default(0)
   generatedRevision  Int?
   generationRun      String?             @db.Uuid
+  /// Set once, by POST /api/v1/notes/import: when the note arrived, and the SHA-256 of the request that made it.
+  importedAt         DateTime?           @db.Timestamptz(3)
+  importDigest       String?             @db.Char(64)
   transcriptSegments TranscriptSegment[]
   shares             SharedNote[]
   audioChunks        AudioChunk[]
@@ -205,6 +208,11 @@ model CalendarEvent {
   timeZone     String? @db.VarChar(200)
   location     String? @db.VarChar(1000)
   meetingUrl   String? @db.VarChar(4096)
+  /// The iCalendar UID and which occurrence this is; filled at the next sync after they were added.
+  meetingUid   String? @db.VarChar(2048)
+  occurrence   String? @db.VarChar(40)
+  /// Invitees other than the organizer, rooms and equipment left out.
+  attendeeCount Int?
   calendar     CalendarSubscription @relation(fields: [calendarId], references: [id], onDelete: Cascade)
 
   @@unique([calendarId, sourceKey])
@@ -393,6 +401,8 @@ model GooglePersonalEvent {
  timeZone String? @db.VarChar(200)
  location String? @db.VarChar(1000)
  meetingUrl String? @db.VarChar(4096)
+ meetingUid String? @db.VarChar(2048)
+ occurrence String? @db.VarChar(40)
  context Json
  @@index([startAt,endAt])
  @@unique([calendarId,remoteId])

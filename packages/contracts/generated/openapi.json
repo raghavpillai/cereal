@@ -11712,6 +11712,24 @@
               "$ref": "#/components/schemas/UUID"
             },
             "required": true
+          },
+          {
+            "name": "ifStamp",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "required": false
+          },
+          {
+            "name": "ifChunks",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
           }
         ],
         "security": [
@@ -11886,6 +11904,224 @@
               }
             }
           }
+        }
+      }
+    },
+    "/api/v1/notes/import": {
+      "post": {
+        "tags": [
+          "owner"
+        ],
+        "operationId": "owner.importNote",
+        "parameters": [],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ImportedNoteDTO",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportedNoteDTO"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "invalid_request"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unauthorized"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "forbidden"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "not_found"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "conflict"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "payload_too_large"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unavailable"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportNoteInput"
+              }
+            }
+          },
+          "required": true
         }
       }
     },
@@ -14646,6 +14882,16 @@
                 "type": "null"
               }
             ]
+          },
+          "importedAt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -14664,6 +14910,9 @@
           "generatedRevision"
         ],
         "additionalProperties": false
+      },
+      "Timestamp": {
+        "type": "string"
       },
       "GenerationState": {
         "type": "string",
@@ -14770,9 +15019,6 @@
           "mic",
           "system"
         ]
-      },
-      "Timestamp": {
-        "type": "string"
       },
       "GenerateNotesCommandDTO": {
         "type": "object",
@@ -15052,6 +15298,309 @@
           "deleted"
         ],
         "additionalProperties": false
+      },
+      "ImportedNoteDTO": {
+        "type": "object",
+        "properties": {
+          "note": {
+            "$ref": "#/components/schemas/NoteDTO"
+          },
+          "segmentIds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImportedSegmentIdDTO"
+            }
+          }
+        },
+        "required": [
+          "note",
+          "segmentIds"
+        ],
+        "additionalProperties": false
+      },
+      "ImportedSegmentIdDTO": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "$ref": "#/components/schemas/UUID"
+          },
+          "to": {
+            "$ref": "#/components/schemas/UUID"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "additionalProperties": false
+      },
+      "ImportNoteInput": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/UUID"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 1000000
+          },
+          "enhanced": {
+            "type": "string",
+            "maxLength": 1000000
+          },
+          "date": {
+            "type": "string"
+          },
+          "duration": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "createdAt": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "generated": {
+            "type": "boolean"
+          },
+          "recordingState": {
+            "$ref": "#/components/schemas/ImportedRecordingState"
+          },
+          "transcriptSegments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TranscriptSegmentDTO"
+            },
+            "maxItems": 50000
+          },
+          "meeting": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MeetingContextDTO"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "body",
+          "enhanced",
+          "date",
+          "duration",
+          "createdAt",
+          "generated",
+          "recordingState",
+          "transcriptSegments",
+          "meeting"
+        ],
+        "additionalProperties": false
+      },
+      "MeetingContextDTO": {
+        "type": "object",
+        "properties": {
+          "eventId": {
+            "$ref": "#/components/schemas/UUID"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "google",
+              "ics"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "calendarName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "startAt": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "endAt": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "allDay": {
+            "type": "boolean"
+          },
+          "timeZone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "meetingUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "eventUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "organizer": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MeetingParticipantDTO"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "participants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MeetingParticipantDTO"
+            }
+          }
+        },
+        "required": [
+          "eventId",
+          "provider",
+          "title",
+          "calendarName",
+          "startAt",
+          "endAt",
+          "allDay",
+          "timeZone",
+          "location",
+          "meetingUrl",
+          "eventUrl",
+          "organizer",
+          "participants"
+        ],
+        "additionalProperties": false
+      },
+      "MeetingParticipantDTO": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/UUID"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "displayName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "givenName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "familyName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "nameSource": {
+            "type": "string",
+            "enum": [
+              "calendar",
+              "contacts",
+              "manual",
+              "unknown"
+            ]
+          },
+          "isSelf": {
+            "type": "boolean"
+          },
+          "isOrganizer": {
+            "type": "boolean"
+          },
+          "isResource": {
+            "type": "boolean"
+          },
+          "responseStatus": {
+            "type": "string",
+            "enum": [
+              "needsAction",
+              "declined",
+              "tentative",
+              "accepted",
+              "unknown"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "displayName",
+          "givenName",
+          "familyName",
+          "nameSource",
+          "isSelf",
+          "isOrganizer",
+          "isResource",
+          "responseStatus"
+        ],
+        "additionalProperties": false
+      },
+      "ImportedRecordingState": {
+        "type": "string",
+        "enum": [
+          "idle",
+          "stopped"
+        ]
       },
       "UpdateNoteInput": {
         "type": "object",
@@ -15663,6 +16212,49 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/UUID"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "meetingUid": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "occurrence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "attendeeCount": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "allOf": [
+                  {
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "minimum": -2147483648,
+                    "maximum": 2147483647
+                  }
+                ],
+                "minimum": 0
               },
               {
                 "type": "null"
@@ -17536,200 +18128,6 @@
         ],
         "additionalProperties": false
       },
-      "MeetingContextDTO": {
-        "type": "object",
-        "properties": {
-          "eventId": {
-            "$ref": "#/components/schemas/UUID"
-          },
-          "provider": {
-            "type": "string",
-            "enum": [
-              "google",
-              "ics"
-            ]
-          },
-          "title": {
-            "type": "string",
-            "maxLength": 500
-          },
-          "calendarName": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 200
-          },
-          "startAt": {
-            "$ref": "#/components/schemas/Timestamp"
-          },
-          "endAt": {
-            "$ref": "#/components/schemas/Timestamp"
-          },
-          "allDay": {
-            "type": "boolean"
-          },
-          "timeZone": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "location": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "meetingUrl": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "eventUrl": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "organizer": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/MeetingParticipantDTO"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "participants": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/MeetingParticipantDTO"
-            }
-          }
-        },
-        "required": [
-          "eventId",
-          "provider",
-          "title",
-          "calendarName",
-          "startAt",
-          "endAt",
-          "allDay",
-          "timeZone",
-          "location",
-          "meetingUrl",
-          "eventUrl",
-          "organizer",
-          "participants"
-        ],
-        "additionalProperties": false
-      },
-      "MeetingParticipantDTO": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "$ref": "#/components/schemas/UUID"
-          },
-          "email": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "displayName": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "givenName": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "familyName": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "nameSource": {
-            "type": "string",
-            "enum": [
-              "calendar",
-              "contacts",
-              "manual",
-              "unknown"
-            ]
-          },
-          "isSelf": {
-            "type": "boolean"
-          },
-          "isOrganizer": {
-            "type": "boolean"
-          },
-          "isResource": {
-            "type": "boolean"
-          },
-          "responseStatus": {
-            "type": "string",
-            "enum": [
-              "needsAction",
-              "declined",
-              "tentative",
-              "accepted",
-              "unknown"
-            ]
-          }
-        },
-        "required": [
-          "id",
-          "email",
-          "displayName",
-          "givenName",
-          "familyName",
-          "nameSource",
-          "isSelf",
-          "isOrganizer",
-          "isResource",
-          "responseStatus"
-        ],
-        "additionalProperties": false
-      },
       "UpdateNoteContextInput": {
         "type": "object",
         "properties": {
@@ -18177,6 +18575,12 @@
             "enum": [
               "v1"
             ]
+          },
+          "features": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         },
         "required": [

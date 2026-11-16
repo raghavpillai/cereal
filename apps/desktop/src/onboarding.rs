@@ -270,7 +270,7 @@ pub fn at_launch() -> Option<Flow> {
     let path = marker_path()?;
     let root = path.parent()?;
     let marker = read_marker(&path);
-    let existing = existing_in(root, crate::account::has_saved_session());
+    let existing = existing_in(root, crate::accounts::has_saved_session());
     let flow = first_run(marker, existing);
     if flow.is_none() && marker == Marker::Missing {
         // An install from before the welcome: say so once, so that signing

@@ -4,6 +4,7 @@ import {ModelCatalogInput,ModelCatalogDTO,ChatModelsDTO} from "./index"
 import {NoteListFilter,NoteSummariesPageDTO,NoteSearchPageDTO} from "./index"
 import {AuthMethodsDTO,AppHandoffInput,AppHandoffDTO,AppHandoffExchangeInput,AppHandoffTokenDTO} from "./index"
 import {DownloadsDTO} from "./index"
+import {ImportNoteInput,ImportedNoteDTO} from "./index"
 import {StorageTestInput,StorageTestDTO} from "./index"
 import {OnboardingStepInput,GoogleVerificationInput,GoogleVerificationStartDTO,GoogleVerificationStatusDTO,SwitchToPasswordInput} from "./index"
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, HttpApiSecurity, OpenApi } from "effect/http-api"
@@ -17,12 +18,17 @@ export const InvalidRequest = Schema.Struct({ error: Schema.Literal("invalid_req
 export const Unavailable = Schema.Struct({ error: Schema.Literal("unavailable"), message: Schema.String }).pipe(HttpApiSchema.status(503))
 /** The app sign-in handoff: an unknown, used, expired or mismatched code, and too many attempts. */
 export const InvalidCode = Schema.Struct({ error: Schema.Literal("invalid_code"), message: Schema.String }).pipe(HttpApiSchema.status(401))
+/** A request body over the limit of its endpoint (24 MB for a note import). */
+export const PayloadTooLarge = Schema.Struct({ error: Schema.Literal("payload_too_large"), message: Schema.String }).pipe(HttpApiSchema.status(413))
 export const RateLimited = Schema.Struct({ error: Schema.Literal("rate_limited"), message: Schema.String }).pipe(HttpApiSchema.status(429))
 export type ApiError = typeof Unauthorized.Type | typeof Forbidden.Type | typeof Conflict.Type | typeof NotFound.Type | typeof InvalidRequest.Type | typeof Unavailable.Type
 const errors = [Unauthorized, Forbidden, Conflict, NotFound, InvalidRequest, Unavailable] as const
 
 /** Query strings arrive as text: a page size of 1 to 999 (the server caps it) and an opaque cursor. */
 const PageLimit = Schema.String.check(Schema.isPattern(/^[1-9][0-9]{0,2}$/))
+/** `updatedAt|transcriptRevision|generatedRevision` of the note as the caller last read it; the last part is empty for a note without generated notes. */
+const NoteStamp = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128))
+const ChunkCount = Schema.String.check(Schema.isPattern(/^(0|[1-9][0-9]{0,8})$/))
 const PageCursor = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512), Schema.isPattern(/^[A-Za-z0-9_-]+$/))
 
 export interface PrincipalData {id:string;name:string;email:string;role:"owner"|"admin"|"user";source:"bootstrap"|"session";expiresAt:string|null;createdAt:string;sessionId?:string}
@@ -118,7 +124,13 @@ export const MeetingsApi = HttpApi.make("MeetingNotesApi")
     .add(HttpApiEndpoint.post("createNote", "/api/v1/notes", { payload: CreateNoteInput, success: NoteDTO, error: errors }))
     .add(HttpApiEndpoint.get("getNote", "/api/v1/notes/:id", { params: { id: UUID }, success: NoteDTO, error: errors }))
     .add(HttpApiEndpoint.patch("updateNote", "/api/v1/notes/:id", { params: { id: UUID }, payload: UpdateNoteInput, success: NoteDTO, error: errors }))
-    .add(HttpApiEndpoint.delete("deleteNote", "/api/v1/notes/:id", { params: { id: UUID }, success: DeletedDTO, error: errors }))
+    // A note moved here from another account, whole. Idempotent by the id the client chose: the same body again
+    // answers 200 with the same note; any other use of an id that exists (somebody else's note, another body, a
+    // note changed since) answers one and the same 409. At most 50,000 segments and 24 MB (413 beyond).
+    .add(HttpApiEndpoint.post("importNote", "/api/v1/notes/import", { payload: ImportNoteInput, success: ImportedNoteDTO, error: [...errors, PayloadTooLarge] }))
+    // With `ifStamp` or `ifChunks` the note is deleted only if it is still what the caller read: 409 when the
+    // stamp differs, the number of audio parts differs, a part is not ready, or the note is recording.
+    .add(HttpApiEndpoint.delete("deleteNote", "/api/v1/notes/:id", { params: { id: UUID }, query: { ifStamp: Schema.optionalKey(NoteStamp), ifChunks: Schema.optionalKey(ChunkCount) }, success: DeletedDTO, error: errors }))
     .add(HttpApiEndpoint.get("listShares", "/api/v1/notes/:id/shares", { params: { id: UUID }, success: SharesDTO, error: errors }))
     .add(HttpApiEndpoint.post("createShare", "/api/v1/notes/:id/shares", { params: { id: UUID }, payload: CreateShareInput, success: CreatedShareDTO, error: errors }))
     .add(HttpApiEndpoint.delete("revokeShare", "/api/v1/shares/:id", { params: { id: UUID }, success: ShareDTO, error: errors }))

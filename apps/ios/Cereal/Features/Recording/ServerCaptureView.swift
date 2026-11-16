@@ -28,6 +28,8 @@ struct ServerCaptureView: View {
     let noteID: String
     @Environment(ServerNotesModel.self) private var server
     @Environment(ServerRecordingController.self) private var recording
+    @Environment(\.account) private var account
+    private var ref: NoteRef? { account.map { NoteRef(account: $0, id: noteID) } }
     @Environment(Router.self) private var router
     @Environment(\.dismiss) private var dismiss
     @Environment(\.motion) private var motion
@@ -56,7 +58,7 @@ struct ServerCaptureView: View {
     @Environment(\.layoutDirection) private var layoutDirection
     @FocusState private var focus: CaptureEditorField?
     private var note: NoteDTO? { server.state.notes.first { $0.id == noteID } ?? initial }
-    private var ownsCapture: Bool { recording.activeNoteID == noteID }
+    private var ownsCapture: Bool { recording.isActive(ref) }
     private var active: Bool { ownsCapture && recording.isCapturing }
 
     var body: some View {
@@ -74,7 +76,7 @@ struct ServerCaptureView: View {
                 if let message = error ?? (ownsCapture ? recording.error : nil) {
                     Text(message).font(.system(size: 13)).foregroundStyle(Theme.danger).multilineTextAlignment(.center)
                         .transition(motion.fade)
-                } else if active, let live = recording.transcript(for: noteID) {
+                } else if active, let live = recording.transcript(for: ref) {
                     // While recording, the only status is the live stream's, and only when
                     // it has something to say. The line follows the stream by itself.
                     LiveStatusLine(live: live, font: .system(size: 13), color: Theme.textSecondary)
@@ -134,7 +136,7 @@ struct ServerCaptureView: View {
                                           rightToLeft: layoutDirection == .rightToLeft, keyboardUp: focus != nil) { close() }
         })
         .captureChrome(close: close) {
-            if recording.transcript(for: noteID) != nil {
+            if recording.transcript(for: ref) != nil {
                 // One tap from the recording to what has been said so far.
                 RailIcon(systemImage: "text.alignleft") { focus = nil; showingTranscript = true }
                     .accessibilityLabel("View transcript")
@@ -166,7 +168,7 @@ struct ServerCaptureView: View {
                 initial = value; title = value.title; serverTitle = value.title; text = value.body; loaded = true
                 // Returning to a recording in progress neither restarts it nor raises the keyboard.
                 let returning = active
-                if !returning { await recording.start(note: value) }
+                if !returning { await recording.start(note: value, in: account) }
                 if text.isEmpty && !returning { focus = .body }
                 meetingContext = try? await server.noteContext(id: noteID)
             } catch { self.error = error.localizedDescription }
@@ -181,7 +183,7 @@ struct ServerCaptureView: View {
             }
         } }
         .sheet(isPresented: $showingTranscript) {
-            if let note { ServerTranscriptView(note: note, live: recording.transcript(for: noteID), recording: active) }
+            if let note { ServerTranscriptView(note: note, live: recording.transcript(for: ref), recording: active) }
         }
         .onChange(of: title) { queueSave() }.onChange(of: text) { queueSave() }
         // A title the server gave the note (its notes were generated) appears in
@@ -200,7 +202,7 @@ struct ServerCaptureView: View {
 
     private var showsGenerate: Bool {
         guard !active, let note else { return false }
-        return note.transcriptRevision > 0 && !recording.hasPendingAudio(noteID: noteID)
+        return note.transcriptRevision > 0 && !recording.hasPendingAudio(ref)
     }
     /// Drives the fade between the error, "Transcribing..." and nothing.
     private var statusLine: String {
@@ -209,7 +211,7 @@ struct ServerCaptureView: View {
     private var date: Date {
         note.flatMap { MeetingPresentation.metadataDate(createdAt: $0.createdAt, fallbackDate: $0.date, meeting: meetingContext?.meeting) } ?? .now
     }
-    private func start() { if let note { Task { await recording.start(note: note) } } }
+    private func start() { if let note { Task { await recording.start(note: note, in: account) } } }
     private func stop() { focus = nil; if active { recording.stop() } }
     private func queueSave() {
         guard loaded else { return }
@@ -260,13 +262,13 @@ struct ServerCaptureView: View {
     }
 
     private func close() {
-        leave { CaptureNavigation.pathAfterClosing(from: router.path, noteID: noteID, recording: active) }
+        leave { ref.map { CaptureNavigation.pathAfterClosing(from: router.path, note: $0, recording: active) } ?? router.path }
     }
     private func viewNotes() {
-        leave { CaptureNavigation.pathAfterClosing(from: router.path, noteID: noteID, recording: false) }
+        leave { ref.map { CaptureNavigation.pathAfterClosing(from: router.path, note: $0, recording: false) } ?? router.path }
     }
     private func ask() {
-        leave { CaptureNavigation.pathForChat(from: router.path, noteID: noteID) }
+        leave { ref.map { CaptureNavigation.pathForChat(from: router.path, note: $0) } ?? router.path }
     }
     private func generate() {
         guard !active, !generating, let note else { return }
@@ -277,7 +279,7 @@ struct ServerCaptureView: View {
             do {
                 try await save()
                 _ = try await server.generate(noteID: noteID, expectedTranscriptRevision: note.transcriptRevision)
-                router.path = CaptureNavigation.pathAfterClosing(from: router.path, noteID: noteID, recording: false)
+                router.path = ref.map { CaptureNavigation.pathAfterClosing(from: router.path, note: $0, recording: false) } ?? router.path
                 router.serverCapture = nil
                 dismiss()
             } catch { self.error = error.localizedDescription }

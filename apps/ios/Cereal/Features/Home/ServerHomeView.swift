@@ -2,9 +2,11 @@ import SwiftUI
 import APIClient
 import Contracts
 
+/// Home for the accounts on this device. It is built here, from each account's
+/// own list and calendar; with one account it is that account's Home.
 struct ServerHomeView: View {
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(ServerNotesModel.self) private var server
+    @Environment(AccountsModel.self) private var accounts
     @Environment(Router.self) private var router
     @Environment(ConnectionMode.self) private var mode
     @Environment(ServerRecordingController.self) private var recording
@@ -12,7 +14,7 @@ struct ServerHomeView: View {
     @State private var requestingMic = false
     @State private var creationError: String?
     @State private var dayOffset = 0
-    @State private var openingEventID: String?
+    @State private var openingEvent: EventRef?
     @State private var entrance = EntranceGate()
     @State private var sections: [ServerHomeSection] = []
     @State private var steppedForward = true
@@ -24,11 +26,24 @@ struct ServerHomeView: View {
     /// recording started from + begins while its screen is still growing out of +.
     @State private var indicatorIsZoomSource = false
 
+    /// The accounts whose rows are listed. An account that must sign in again is
+    /// left out of the list (its notes are not gone; this is only what is shown).
+    private var listed: [AccountSession] { accounts.sessions.filter { $0.status != .needsSignIn } }
+    /// Rows of every listed account, each with its account. Grouping sorts them by day.
+    private var rows: [AccountNoteRow] {
+        listed.flatMap { session in session.notes.list.rows.map { AccountNoteRow(account: session.notes.accountID, row: $0) } }
+    }
+    /// Changes when any account's rows, or the accounts themselves, change.
+    private var listSignature: [String] {
+        accounts.sessions.map { "\($0.key)/\($0.notes.list.revision)/\($0.status == .needsSignIn)" }
+    }
+
     var body: some View {
         let _ = PerfProbe.hit("ServerHomeView.body")
         // The note being recorded, if any. This screen follows whether there is a
         // recording, never its clock or level: those are read inside the pill.
-        let indicator = recording.indicatorNoteID
+        let indicator = recording.indicator
+        let total = sections.reduce(0) { $0 + $1.rows.count }
         RailScaffold {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -39,29 +54,29 @@ struct ServerHomeView: View {
                     HomeDivider()
                     status
                     if let creationError { Text(creationError).font(.footnote).foregroundStyle(Theme.danger).padding(.bottom, 16) }
-                    if let error = recording.error, recording.activeNoteID == nil {
+                    if let error = recording.error, recording.active == nil {
                         Text(error).font(.footnote).foregroundStyle(Theme.danger).padding(.bottom, 16)
                     }
                     // Sections are grouped once per change to the notes, not on every body pass.
                     ForEach(sections) { section in
                         HomeSectionHeader(title: section.title)
                             .staggeredEntrance(section.rows.first?.order ?? 0, gate: entrance)
-                        ForEach(section.rows) { item in
-                            Button { router.path.append(.serverNote(item.id)) } label: {
+                        ForEach(section.rows, id: \.listID) { item in
+                            Button { if let ref = item.ref { router.path.append(.serverNote(ref)) } } label: {
                                 ServerHomeNoteRow(item: item)
                             }
-                                .buttonStyle(RowPressStyle(isOrigin: router.origin == .serverNote(item.id)))
+                                .buttonStyle(RowPressStyle(isOrigin: item.ref.map { router.origin == .serverNote($0) } ?? false))
                                 .transition(motion.fade)
                                 .staggeredEntrance(item.order, gate: entrance)
                                 // The next page is asked for while its first row is still a screen away.
-                                .onAppear { if item.order >= server.list.rows.count - ServerHomeGrouping.rowsBeforeNextPage { Task { await server.loadMore() } } }
+                                .onAppear { if item.order >= total - ServerHomeGrouping.rowsBeforeNextPage { loadMore() } }
                         }
                         Color.clear.frame(height: 22)
                     }
-                    if let failure = server.list.moreError {
+                    if let failure = listed.lazy.compactMap({ $0.notes.list.moreError }).first {
                         VStack(alignment: .leading, spacing: 0) {
                             Text("More notes could not load. " + failure.localizedDescription).font(.footnote)
-                            Button("Retry") { Task { await server.loadMore() } }
+                            Button("Retry") { loadMore() }
                                 .foregroundStyle(Theme.accent)
                                 .frame(minHeight: 44).contentShape(Rectangle())
                         }.foregroundStyle(Theme.textSecondary).transition(motion.fade)
@@ -71,8 +86,8 @@ struct ServerHomeView: View {
                     // Loading turning into content, refreshes, and notes created or deleted elsewhere.
                     .animation(motion.settle, value: sections.map(\.id))
                     .animation(motion.snappy, value: statusKind)
-            }.scrollIndicators(.hidden).refreshable { await server.refresh(); await refreshCalendars() }
-            .onChange(of: server.list.revision, initial: true) { regroup() }
+            }.scrollIndicators(.hidden).refreshable { await refresh() }
+            .onChange(of: listSignature, initial: true) { regroup() }
         } standalone: {
             GlassCircleButton(systemImage: "folder") { SidebarModel.shared.open() }
         } rail: {
@@ -86,16 +101,20 @@ struct ServerHomeView: View {
                 // recording screen's own pill; it buds off the Ask pill and one tap returns.
                 if let indicator {
                     RecordingPill(recorder: recording.recorder, onStop: {}, onStart: {},
-                                  onOpen: { router.serverCapture = ServerCaptureTarget(id: indicator) },
+                                  onOpen: { router.serverCapture = ServerCaptureTarget(indicator) },
                                   zoomsToCapture: indicatorIsZoomSource)
                         .glassMorph("recording", in: glass)
                         .accessibilityIdentifier("recording-indicator")
                 }
             } ask: {
-                AskAnythingPill(prominent: true) { router.path.append(.serverChat(nil)) }.disabled(server.accountIdentity == nil)
+                // Until a chat can choose its account, questions across meetings go to the default account.
+                AskAnythingPill(prominent: true) {
+                    if let account = accounts.defaultSession?.notes.accountID { router.path.append(.serverChat(account, noteID: nil)) }
+                }.disabled(accounts.defaultSession?.notes.accountIdentity == nil)
             } add: {
                 // While a recording runs, + returns to it and the indicator is what the screen grows out of.
-                AccentFAB(busy: creating, zoomsToCapture: !indicatorIsZoomSource) { Task { await createMeeting() } }.accessibilityLabel("Create server note").disabled(server.instance == nil || creating)
+                AccentFAB(busy: creating, zoomsToCapture: !indicatorIsZoomSource) { Task { await createMeeting() } }.accessibilityLabel("Create server note")
+                    .disabled(accounts.defaultSession?.notes.instance == nil || creating)
             }
             .animation(motion.animation(.gooey, entering: indicator != nil), value: indicator != nil)
             .task(id: indicator != nil) {
@@ -104,14 +123,17 @@ struct ServerHomeView: View {
             }
         }
         .toolbarVisibility(.visible, for: .navigationBar)
-        .task(id: "\(server.accountIdentity ?? "")/\(dayOffset)") { await refreshCalendars() }
-        .onChange(of: server.accountIdentity) {
-            openingEventID = nil
+        .task(id: "\(accounts.signature)/\(dayOffset)") { await refreshCalendars() }
+        .onChange(of: accounts.sessions.map(\.id)) {
+            openingEvent = nil
             creationError = nil; SidebarModel.shared.close()
         }
         .onChange(of: scenePhase) { _, phase in
             // Day titles ("Earlier today") can be stale after time in the background.
-            if phase == .active { regroup(); Task { await refreshCalendars() } }
+            if phase == .active {
+                regroup()
+                Task { await accounts.retryUnreachable(); await refreshCalendars() }
+            }
         }
         .sensoryFeedback(.selection, trigger: dayOffset)
         .sheet(isPresented: $requestingMic) {
@@ -125,61 +147,98 @@ struct ServerHomeView: View {
         Calendar.current.date(byAdding: .day, value: dayOffset, to: .now) ?? .now
     }
 
+    private func refresh() async {
+        await accounts.retryUnreachable()
+        await withTaskGroup(of: Void.self) { group in
+            for session in accounts.sessions where session.isReady { group.addTask { await session.notes.refresh() } }
+        }
+        await refreshCalendars()
+    }
+
+    /// Each account pages its own list.
+    private func loadMore() {
+        for session in listed where session.notes.list.hasMore { Task { await session.notes.loadMore() } }
+    }
+
+    /// Each account is asked for its own calendars, with its own client.
     private func refreshCalendars() async {
         let start = Calendar.current.startOfDay(for: selectedCalendarDay)
         guard let end = Calendar.current.date(byAdding: .day, value: 1, to: start) else { return }
-        await server.refreshCalendars(from: start, to: end)
+        await withTaskGroup(of: Void.self) { group in
+            for session in accounts.sessions where session.isReady { group.addTask { await session.notes.refreshCalendars(from: start, to: end) } }
+        }
+    }
+
+    /// An event with the account it was read through. An event id of one account is never sent to another.
+    private struct AccountEvent: Identifiable {
+        let session: AccountSession
+        let account: AccountID?
+        let event: CalendarEventDTO
+        var ref: EventRef? { account.map { EventRef(account: $0, id: event.id) } }
+        var id: String { "\(session.key)/\(event.id)" }
     }
 
     /// Same block as the local Home: 4 pt bar, 10 pt gap, the measured events
     /// text. It reserves the empty line's height so the list does not move
     /// when calendars finish loading.
     @ViewBuilder private var upcoming: some View {
-        let snapshot = server.calendarState.snapshot
-        let enabledIDs = Set(snapshot.calendars.filter(\.enabled).map(\.id))
-        let events = CalendarSchedule.events(snapshot.events, on: selectedCalendarDay, enabledCalendarIDs: enabledIDs, knownCalendarIDs: Set(snapshot.calendars.map(\.id)))
+        let ready = accounts.sessions.filter(\.isReady)
+        let snapshots = ready.map { $0.notes.calendarState.snapshot }
+        let events: [AccountEvent] = ready.flatMap { session -> [AccountEvent] in
+            let snapshot = session.notes.calendarState.snapshot
+            let enabledIDs = Set(snapshot.calendars.filter(\.enabled).map(\.id))
+            return CalendarSchedule.events(snapshot.events, on: selectedCalendarDay, enabledCalendarIDs: enabledIDs, knownCalendarIDs: Set(snapshot.calendars.map(\.id)))
+                .map { AccountEvent(session: session, account: session.notes.accountID, event: $0) }
+        }
+        let failed = ready.contains { if case .failed = $0.notes.calendarState { true } else { false } }
+        let loaded = !ready.isEmpty && ready.allSatisfy { if case .loaded = $0.notes.calendarState { true } else { false } }
+        let loading = ready.contains { if case .loading = $0.notes.calendarState { $0.notes.calendarState.snapshot.calendars.isEmpty } else { false } }
         VStack(alignment: .leading, spacing: 10) {
-            if case .failed = server.calendarState {
+            if failed {
                 HStack {
                     Text("Calendar events could not refresh.").font(.footnote).foregroundStyle(Theme.danger)
                     Button("Retry") { Task { await refreshCalendars() } }.font(.footnote)
                         .frame(minHeight: 44).contentShape(Rectangle())
                 }
             }
-            if snapshot.personalCalendarIssue || snapshot.calendars.contains(where: { $0.enabled && $0.lastSyncError != nil }) {
+            if let troubled = ready.first(where: { session in
+                let snapshot = session.notes.calendarState.snapshot
+                return snapshot.personalCalendarIssue || snapshot.calendars.contains(where: { $0.enabled && $0.lastSyncError != nil })
+            }) {
                 Text("A linked calendar needs attention. Its saved events may be out of date.")
                     .font(.footnote).foregroundStyle(Theme.textSecondary)
                 // The one case where the user needs the connections page from here.
-                if let instance = server.instance {
+                if let instance = troubled.notes.instance {
                     Link("Calendar connections", destination: instance.url.appendingPathComponent("account"))
                         .font(.footnote).foregroundStyle(Theme.textSecondary)
                         .frame(minHeight: 44).contentShape(Rectangle())
                 }
             }
             if !events.isEmpty {
-                ForEach(events, id: \.id) { event in
+                ForEach(events) { item in
+                    let event = item.event
                     HStack(alignment: .center, spacing: 8) {
-                        Button { Task { await openEvent(event) } } label: {
+                        Button { Task { await openEvent(item) } } label: {
                             HomeEventsBlock(barColor: calendarColor(event.color)) {
                                 Text(event.title).font(.system(size: HomeMetrics.eventsText, weight: .medium)).foregroundStyle(Theme.textPrimary)
                                 Text(eventTime(event)).font(.system(size: 14)).foregroundStyle(Theme.textSecondary)
                                 Text(event.calendarName).font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
                                 if let location = event.location, !location.isEmpty { Text(location).font(.caption).foregroundStyle(Theme.textSecondary) }
                             }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                        }.buttonStyle(.plain).disabled(openingEventID != nil || creating)
+                        }.buttonStyle(.plain).disabled(openingEvent != nil || creating)
                             .accessibilityLabel("Open note for \(event.title), \(event.calendarName)")
-                        if openingEventID == event.id { ProgressView() }
+                        if openingEvent != nil, openingEvent == item.ref { ProgressView() }
                         if let url = CalendarSchedule.meetingURL(event.meetingUrl) {
                             Link("Join", destination: url).font(.footnote).foregroundStyle(Theme.accent)
                                 .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
                         }
                     }
                 }
-            } else if case .loaded = server.calendarState {
-                if snapshot.personalCalendarsLinked || snapshot.calendars.contains(where: \.enabled) {
+            } else if loaded {
+                if snapshots.contains(where: { $0.personalCalendarsLinked || $0.calendars.contains(where: \.enabled) }) {
                     HomeEventsEmpty(text: dayOffset == 0 ? "No more events today" : "No events")
                 } else { HomeEventsEmpty(text: "Link calendars to see upcoming meetings") }
-            } else if case .loading = server.calendarState, snapshot.calendars.isEmpty {
+            } else if loading {
                 // Holds the block's place while the first calendars load.
                 HomeEventsEmpty(text: "Loading calendars…")
             }
@@ -199,35 +258,40 @@ struct ServerHomeView: View {
         return start.formatted(date: .omitted, time: .shortened) + " – " + end.formatted(date: .omitted, time: .shortened)
     }
 
-    private func openEvent(_ event: CalendarEventDTO) async {
-        guard openingEventID == nil, !creating else { return }
+    /// A note from an event belongs to the event's account, and is asked of that account alone.
+    private func openEvent(_ item: AccountEvent) async {
+        guard openingEvent == nil, !creating, let eventRef = item.ref else { return }
+        let event = item.event
         let activeAtGesture = CalendarSchedule.isActiveTimedEvent(event)
-        openingEventID = event.id; creationError = nil
-        defer { openingEventID = nil }
+        openingEvent = eventRef; creationError = nil
+        defer { openingEvent = nil }
         do {
-            let note = try await server.noteForCalendarEvent(id: event.id)
+            let created = try await item.session.notes.noteForCalendarEvent(id: event.id)
+            let note = NoteRef(account: eventRef.account, id: created.id)
             if activeAtGesture && CalendarSchedule.isActiveTimedEvent(event) {
-                if recording.isCapturing, recording.activeNoteID != note.id {
+                if recording.isCapturing, recording.active != note {
                     creationError = "A recording is already active in another note."
-                    router.path.append(.serverNote(note.id))
-                } else { router.serverCapture = ServerCaptureTarget(id: note.id) }
-            } else { router.path.append(.serverNote(note.id)) }
+                    router.path.append(.serverNote(note))
+                } else { router.serverCapture = ServerCaptureTarget(note) }
+            } else { router.path.append(.serverNote(note)) }
         } catch is CancellationError { }
         catch { creationError = error.localizedDescription }
     }
 
+    /// A new note with no calendar event goes to the default account, and to no other by itself.
     private func createMeeting() async {
         guard !creating else { return }
-        if let id = recording.indicatorNoteID {
-            router.serverCapture = ServerCaptureTarget(id: id)
+        if let ref = recording.indicator {
+            router.serverCapture = ServerCaptureTarget(ref)
             return
         }
+        guard let session = accounts.defaultSession, let account = session.notes.accountID else { return }
         guard await MicPermission.isGranted else { requestingMic = true; return }
         creating = true; creationError = nil
         defer { creating = false }
         do {
-            let note = try await server.create(title: "", body: "")
-            router.serverCapture = ServerCaptureTarget(id: note.id)
+            let note = try await session.notes.create(title: "", body: "")
+            router.serverCapture = ServerCaptureTarget(NoteRef(account: account, id: note.id))
         } catch { creationError = error.localizedDescription }
     }
 
@@ -239,23 +303,32 @@ struct ServerHomeView: View {
     }
 
     private func regroup() {
-        sections = Signpost.interval("Home.Group") { ServerHomeGrouping.sections(server.list.rows) }
+        sections = Signpost.interval("Home.Group") { ServerHomeGrouping.sections(rows) }
     }
 
-
     /// Drives the cross-fade between the loading, error, empty and loaded states.
-    private var statusKind: Int {
-        switch server.state {
-        case .disconnected: 0
-        case .loading: 1
-        case .failed: 2
-        case .loaded: server.list.rows.isEmpty ? 3 : 4
+    private var statusKind: [Int] {
+        guard !accounts.sessions.isEmpty else { return [0] }
+        return accounts.sessions.map { session in
+            switch session.status {
+            case .checking: return 1
+            case .unreachable: return 2
+            case .needsSignIn: return 5
+            case .ready:
+                switch session.notes.state {
+                case .disconnected: return 0
+                case .loading: return 1
+                case .failed: return 2
+                case .loaded: return session.notes.list.rows.isEmpty ? 3 : 4
+                }
+            }
         }
     }
 
+    /// One block per account that has something to say, in the person's order.
+    /// An account that cannot be reached, or must sign in again, never hides another's notes.
     @ViewBuilder private var status: some View {
-        switch server.state {
-        case .disconnected:
+        if accounts.sessions.isEmpty {
             if restoring {
                 // A signed-in launch is restoring its session; do not flash "Connect".
                 loadingRows
@@ -267,19 +340,47 @@ struct ServerHomeView: View {
                         .frame(minHeight: 44).contentShape(Rectangle())
                 }.foregroundStyle(Theme.textSecondary)
             }
-        case .loading:
-            if server.list.rows.isEmpty { loadingRows }
-        case .failed(let error, _):
-            VStack(alignment: .leading, spacing: 0) {
-                Text(error.localizedDescription)
-                if !server.list.rows.isEmpty { Text("Showing the last loaded notes.").font(.footnote).padding(.top, 10) }
-                Button("Retry") { Task { await server.refresh() } }
-                    .foregroundStyle(Theme.accent)
-                    .frame(minHeight: 44).contentShape(Rectangle())
-            }.foregroundStyle(Theme.textSecondary).padding(.bottom, 6)
-        case .loaded:
-            if server.list.rows.isEmpty { Text("No notes yet. Create your first note with +.").foregroundStyle(Theme.textSecondary) }
+        } else {
+            if sections.isEmpty, accounts.sessions.contains(where: { session in
+                if session.status == .checking { return true }
+                if case .loading = session.notes.state, session.isReady { return true }
+                return false
+            }) { loadingRows }
+            ForEach(accounts.sessions, id: \.key) { session in
+                switch session.status {
+                case .checking: EmptyView()
+                case .unreachable(let error):
+                    // With several accounts the line says whose server it is; with one it reads as it always has.
+                    notice(accounts.showsAccountLabels ? "\(session.host): \(error.localizedDescription)" : error.localizedDescription,
+                           action: "Retry") { Task { await accounts.retryUnreachable() } }
+                case .needsSignIn:
+                    notice("Sign in to \(session.host) again.", action: "Sign in") {
+                        router.signInAddress = session.record.instanceURL
+                        router.showConnection = true
+                    }.accessibilityIdentifier("home-sign-in-again")
+                case .ready:
+                    if case .failed(let error, _) = session.notes.state {
+                        notice(accounts.showsAccountLabels ? "\(session.host): \(error.localizedDescription)" : error.localizedDescription,
+                               detail: session.notes.list.rows.isEmpty ? nil : "Showing the last loaded notes.",
+                               action: "Retry") { Task { await session.notes.refresh() } }
+                    }
+                }
+            }
+            if sections.isEmpty, accounts.sessions.allSatisfy({ session in
+                if case .loaded = session.notes.state, session.isReady { return true }
+                return false
+            }) { Text("No notes yet. Create your first note with +.").foregroundStyle(Theme.textSecondary) }
         }
+    }
+
+    private func notice(_ text: String, detail: String? = nil, action: String, perform: @escaping () -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(text)
+            if let detail { Text(detail).font(.footnote).padding(.top, 10) }
+            Button(action, action: perform)
+                .foregroundStyle(Theme.accent)
+                .frame(minHeight: 44).contentShape(Rectangle())
+        }.foregroundStyle(Theme.textSecondary).padding(.bottom, 6)
     }
 
     /// Row-shaped placeholders, so the list does not jump when notes arrive.
@@ -303,9 +404,21 @@ private struct ServerHomeNoteRow: View {
 
     var body: some View {
         // Audio still on this phone comes first; otherwise a meeting shows the other party's initial.
-        NoteListRow(tile: recording.activeNoteID == item.id || recording.hasPendingAudio(noteID: item.id) ? .phone : item.tile,
+        NoteListRow(tile: recording.isActive(item.ref) || recording.hasPendingAudio(item.ref) ? .phone : item.tile,
                     title: item.title, subtitle: item.subtitle)
     }
+}
+
+/// A list row with the account it was read through.
+struct AccountNoteRow: HomeListNote {
+    let account: AccountID?
+    let row: ServerNoteRow
+    var id: String { row.id }
+    var title: String { row.title }
+    var date: String { row.date }
+    var createdAt: String { row.createdAt }
+    var homeAttendee: String? { row.firstAttendee }
+    var homeAccount: AccountID? { account }
 }
 
 /// One day of notes on the server Home, with everything a row needs already computed.
@@ -317,6 +430,11 @@ struct ServerHomeSection: Identifiable, Equatable {
 
 struct ServerHomeRow: Identifiable, Equatable {
     let id: String
+    /// The account the note belongs to. Nil only where there is none (previews of a list).
+    var account: AccountID? = nil
+    /// The note with its account: two servers can hand out the same note id.
+    var ref: NoteRef? { account.map { NoteRef(account: $0, id: id) } }
+    var listID: String { (account?.raw ?? "") + "/" + id }
     let title: String
     let subtitle: String
     /// A letter for a meeting with other people, a document otherwise.
@@ -334,7 +452,10 @@ protocol HomeListNote {
     var createdAt: String { get }
     /// The other party of a meeting, when there is one.
     var homeAttendee: String? { get }
+    /// The account the note was read through.
+    var homeAccount: AccountID? { get }
 }
+extension HomeListNote { var homeAccount: AccountID? { nil } }
 extension ServerNoteRow: HomeListNote { var homeAttendee: String? { firstAttendee } }
 extension NoteDTO: HomeListNote { var homeAttendee: String? { nil } }
 
@@ -372,6 +493,7 @@ enum ServerHomeGrouping {
             if groups[day] == nil { order.append(day) }
             groups[day, default: []].append(ServerHomeRow(
                 id: item.note.id,
+                account: item.note.homeAccount,
                 title: item.note.title.isEmpty ? "Untitled note" : item.note.title,
                 subtitle: item.created.formatted(date: .omitted, time: .shortened),
                 tile: tile(for: item.note),

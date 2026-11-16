@@ -74,6 +74,26 @@ for (const [name, schema] of objects) {
   const encode = properties.map(([key]) => `        try container.${required.has(key) ? "encode" : "encodeIfPresent"}(${property(key)}, forKey: .${key})`).join("\n")
   swiftSource += `\n\nextension ${swiftName} {\n    private enum ContractWireKeys: String, CodingKey {\n${keys}\n    }\n    public func encode(to encoder: Encoder) throws {\n        var container = encoder.container(keyedBy: ContractWireKeys.self)\n${encode}\n    }\n}\n`
 }
+// A key that may be left out of the JSON may be left out of the memberwise initializer too (`= nil`), so
+// adding an optional field to a contract never breaks Swift code that builds the type by hand.
+for (const [name, schema] of objects) {
+  if (!schema?.properties) continue
+  const required = new Set(schema.required ?? [])
+  const optional = Object.keys(schema.properties).filter(key => !required.has(key))
+  const swiftName = swiftSymbols.get(name.toLowerCase())
+  if (!optional.length || !swiftName) continue
+  const start = swiftSource.search(new RegExp(`^public struct ${swiftName}:`, "m")), end = swiftSource.indexOf("\n}\n", start)
+  let body = swiftSource.slice(start, end)
+  const signature = /^    public init\(.*\) \{$/m.exec(body)?.[0]
+  if (!signature) continue
+  let defaulted = signature
+  for (const key of optional) {
+    const property = new RegExp(`case (\\w+) = "${key}"`).exec(body)?.[1] ?? key
+    defaulted = defaulted.replace(new RegExp(`([(, ]${property}: [^,)]+\\?)(?=, |\\) \\{$)`), "$1 = nil")
+  }
+  body = body.replace(signature, defaulted)
+  swiftSource = swiftSource.slice(0, start) + body + swiftSource.slice(end)
+}
 // A generated type with the name of a SwiftUI type makes every `@State` or `View` in a file that imports
 // Contracts ambiguous, and only an iPhone build shows it. Name the schema instead (see OnboardingStepState).
 const swiftUINames = new Set(["State", "Binding", "View", "Text", "Color", "Image", "Button", "Environment", "Label", "Link", "List", "Section", "Group", "Form", "Menu", "Picker", "Toggle", "Font", "Animation", "Shape", "Path", "Alignment", "Scene", "App", "Observable", "Transaction", "Namespace"])

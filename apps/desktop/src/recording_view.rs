@@ -208,7 +208,8 @@ impl Cereal {
         if self.microphone_muted {
             options.microphone = false;
         }
-        let result = crate::model::audio_directory()
+        // The capture is kept in the directory of the note's account.
+        let result = crate::model::audio_directory_of(id)
             .and_then(|directory| crate::audio::Capture::start(id, &directory, options));
         let capture = match result {
             Ok(capture) => capture,
@@ -227,12 +228,13 @@ impl Cereal {
         let initial = monitor.snapshot();
         if let Some(note) = self.workspace.note_mut(id) {
             note.audio_captures.push(initial.clone());
+            // Unsent until an upload of it has been answered.
+            note.unsent_capture = crate::server::enabled();
         }
         self.audio_capture = Some(capture);
         // Persist the immutable session directory association before any speech
         // arrives, so shutdown cannot orphan audio from its owner note.
         self.persist(cx);
-        let account_epoch = crate::account::epoch();
         cx.spawn(async move |this, cx| {
             let mut held = false;
             loop {
@@ -242,7 +244,11 @@ impl Cereal {
                 let snapshot = monitor.snapshot();
                 let completed = snapshot.completed();
                 let Ok(keep) = this.update(cx, |this, cx| {
-                    if crate::account::epoch() != account_epoch {
+                    // The capture is local: it carries on whatever happens
+                    // to the account's session, for as long as its note is
+                    // here (a recording must be stopped before its account
+                    // can be signed out of or removed).
+                    if this.workspace.note(id).is_none() {
                         return false;
                     }
                     // A recording put on hold pauses its live transcript at

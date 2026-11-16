@@ -28,6 +28,7 @@ import { liveChatState } from "./live/chat";
 import type { LiveConversationStore } from "./ai/live-conversation";
 import { cleanNoteTitle, isUntitled } from "./ai/note-title";
 import { audioKey, audioPrefix, makeStorage, type StorageService } from "./storage";
+import type { DeletePreconditions } from "./note-import";
 
 const invalid = (message: string): ApiError => ({
   error: "invalid_request",
@@ -36,6 +37,10 @@ const invalid = (message: string): ApiError => ({
 const missing: ApiError = {
   error: "not_found",
   message: "Note or audio chunk not found",
+};
+const changedSinceRead: ApiError = {
+  error: "conflict",
+  message: "The note changed since it was read, so it was not deleted",
 };
 const unavailable: ApiError = {
   error: "unavailable",
@@ -252,9 +257,15 @@ function makeProcessingServiceBase(
     );
   };
   return {
-    deleteNote: (id: string) =>
+    /** With preconditions the note is deleted only if it is still what the caller read (409 otherwise). The
+     * audio is removed after the row, so a refused delete leaves the note with all of its recording. */
+    deleteNote: (id: string, preconditions?: DeletePreconditions) =>
       Effect.gen(function* () {
-        const deleted = yield* persist(repository.deleteNote(id));
+        const outcome = preconditions
+          ? yield* persist(repository.deleteNoteIf(id, preconditions))
+          : (yield* persist(repository.deleteNote(id))) ? ("deleted" as const) : ("missing" as const);
+        if (outcome === "conflict") return yield* Effect.fail(changedSinceRead);
+        const deleted = outcome === "deleted";
         if (!deleted) return yield* Effect.fail(missing);
         yield* Effect.tryPromise({
           try: () => storage.audio.deletePrefix(audioPrefix(id)),

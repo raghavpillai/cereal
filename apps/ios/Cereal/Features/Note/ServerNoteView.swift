@@ -40,6 +40,9 @@ struct ServerNoteView: View {
     let noteID: String
     @Environment(ServerNotesModel.self) private var server
     @Environment(ServerRecordingController.self) private var recording
+    @Environment(\.account) private var account
+    /// The note with its account, which is what a route, the recorder and a chat know it by.
+    private var ref: NoteRef? { account.map { NoteRef(account: $0, id: noteID) } }
     @Environment(Router.self) private var router
     @Environment(\.dismiss) private var dismiss
     @State private var loaded: NoteDTO?
@@ -101,23 +104,23 @@ struct ServerNoteView: View {
                         // at once so two layouts never ghost over each other.
                         .id(DocumentIdentity(showMine: showMine, revision: note.generatedRevision))
                         .transition(.asymmetric(insertion: motion.fade, removal: .identity))
-                        if recording.activeNoteID == noteID || recording.hasPendingAudio(noteID: noteID) {
+                        if recording.isActive(ref) || recording.hasPendingAudio(ref) {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text(recording.status).font(.footnote).contentTransition(motion.reduceMotion ? .identity : .opacity)
                                 if let message = recording.error {
                                     Text(message).foregroundStyle(Theme.danger)
-                                    Button("Retry audio delivery") { recording.retry(noteID: noteID) }
+                                    Button("Retry audio delivery") { recording.retry(ref) }
                                         .disabled(recording.isSyncing)
                                         .frame(minHeight: 44, alignment: .leading).contentShape(Rectangle())
                                 }
                             }.foregroundStyle(Theme.textTertiary).padding(.top, 16)
                                 .transition(motion.rise)
                         }
-                        if recording.hasPendingAudio(noteID: noteID), !recording.isCapturing {
+                        if recording.hasPendingAudio(ref), !recording.isCapturing {
                             HStack {
                                 if recording.isSyncing { ProgressView() }
                                 Text("Saved audio is waiting for transcription.").font(.footnote)
-                                Button("Retry") { recording.retry(noteID: noteID) }.disabled(recording.isSyncing)
+                                Button("Retry") { recording.retry(ref) }.disabled(recording.isSyncing)
                                     .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
                             }
                         }
@@ -156,17 +159,17 @@ struct ServerNoteView: View {
                     copiedCount += 1
                 }
                 Divider()
-                Button(recording.isCapturing && recording.activeNoteID == noteID ? "Stop recording" : note?.recordingState == .idle ? "Start recording" : "Resume recording", systemImage: "mic") {
+                Button(recording.isCapturing && recording.isActive(ref) ? "Stop recording" : note?.recordingState == .idle ? "Start recording" : "Resume recording", systemImage: "mic") {
                     if recording.isCapturing { recording.stop() }
                     else { openCapture() }
-                }.disabled(recording.isBusy || recording.isCapturing && recording.activeNoteID != noteID)
+                }.disabled(recording.isBusy || recording.isCapturing && !recording.isActive(ref))
                 if note?.generatedRevision != note?.transcriptRevision && (note?.transcriptRevision ?? 0) > 0 {
                     Button(note?.generatedRevision == nil ? "Generate notes" : "Regenerate notes", systemImage: "sparkles") { generate() }
                         .disabled(!canGenerate)
                 }
                 Divider()
                 Button("Delete note", systemImage: "trash", role: .destructive) { confirmDelete = true }
-                    .disabled(recording.isCapturing && recording.activeNoteID == noteID)
+                    .disabled(recording.isCapturing && recording.isActive(ref))
             } label: {
                 RailGlyph(systemImage: "ellipsis")
             }.menuOrder(.fixed).tint(Theme.textSecondary).glass(Circle()).disabled(note == nil || busy)
@@ -203,7 +206,7 @@ struct ServerNoteView: View {
                             .accessibilityIdentifier("server-recording-control")
                             .glassMorph("recording", in: glass)
                         }
-                        AskAnythingPill { router.path.append(.serverChat(noteID)) }.accessibilityIdentifier("server-chat-open")
+                        AskAnythingPill { if let account { router.path.append(.serverChat(account, noteID: noteID)) } }.accessibilityIdentifier("server-chat-open")
                             .glassMorph("ask", in: glass)
                     }
                 }
@@ -232,8 +235,8 @@ struct ServerNoteView: View {
         // page is read again when delivery settles after the recording, not at each part.
         .onChange(of: recording.isSyncing) { _, syncing in if !syncing && !capturingHere { Task { await load() } } }
         .onChange(of: recording.isBusy) { _, busy in if !busy { Task { await load() } } }
-        .onChange(of: router.serverCapture?.id) { old, new in
-            if CaptureNavigation.noteReloads(noteID: noteID, captureWas: old, captureIs: new) { Task { await load() } }
+        .onChange(of: router.serverCapture?.ref) { old, new in
+            if CaptureNavigation.noteReloads(note: ref, captureWas: old, captureIs: new) { Task { await load() } }
         }
         .sheet(item: $editorDraft) { draft in
                 ServerNoteEditor(title: draft.title, body: draft.text, contentTitle: draft.content.title) { title, text in
@@ -248,7 +251,7 @@ struct ServerNoteView: View {
             if let note {
                 // While this device records the note, or its audio is still being transcribed,
                 // the sheet follows the growing transcript; afterwards it shows the saved note.
-                ServerTranscriptView(note: note, live: capturingHere || recording.hasPendingAudio(noteID: noteID) ? recording.transcript(for: noteID) : nil,
+                ServerTranscriptView(note: note, live: capturingHere || recording.hasPendingAudio(ref) ? recording.transcript(for: ref) : nil,
                                      recording: capturingHere)
             }
         }
@@ -262,7 +265,7 @@ struct ServerNoteView: View {
                         let account = server.accountIdentity
                         try await server.delete(id: noteID)
                         ServerChatSessions.shared.noteDeleted(noteID, accountIdentity: account)
-                        try recording.forgetDeletedNote(noteID)
+                        try recording.forgetDeletedNote(ref)
                         dismiss()
                     }
                     catch is CancellationError { }
@@ -289,10 +292,10 @@ struct ServerNoteView: View {
         }
     }
 
-    private var capturingHere: Bool { recording.isCapturing && recording.activeNoteID == noteID }
+    private var capturingHere: Bool { recording.isCapturing && recording.isActive(ref) }
     /// This note has a recording to return to: running, paused, or interrupted.
-    private var indicatorHere: Bool { recording.indicatorNoteID == noteID }
-    private func openCapture() { router.serverCapture = ServerCaptureTarget(id: noteID) }
+    private var indicatorHere: Bool { recording.isIndicator(ref) }
+    private func openCapture() { if let ref { router.serverCapture = ServerCaptureTarget(ref) } }
     private var showsScheduledStart: Bool {
         guard !recording.isCapturing, note?.recordingState == .idle, let meeting = meetingContext?.meeting else { return false }
         return MeetingPresentation.startLabel(meeting) != nil
@@ -301,7 +304,7 @@ struct ServerNoteView: View {
     private var canGenerate: Bool {
         guard let note else { return false }
         return !busy && !recording.isBusy && !recording.isCapturing && !recording.isSyncing &&
-            !recording.hasPendingAudio(noteID: noteID) && note.recordingState != .recording &&
+            !recording.hasPendingAudio(ref) && note.recordingState != .recording &&
             note.transcriptRevision > 0 && note.generatedRevision != note.transcriptRevision
     }
 

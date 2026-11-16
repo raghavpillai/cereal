@@ -52,6 +52,10 @@ export const NoteDTO = Schema.Struct({
   generationState: GenerationState,
   transcriptRevision: Revision,
   generatedRevision: Schema.NullOr(Revision),
+  /** When this note arrived through `POST /api/v1/notes/import` (it was moved here from another account).
+   * Absent on a note made here, and on a server without the import. `createdAt` of such a note is the
+   * time it was first made elsewhere. */
+  importedAt: Schema.optionalKey(Schema.NullOr(Timestamp)),
 }).annotate({ identifier: "NoteDTO" })
 export type NoteDTO = typeof NoteDTO.Type
 
@@ -109,7 +113,11 @@ export type CreatedShareDTO = typeof CreatedShareDTO.Type
 export const ApiErrorCode = Schema.Literals(["unauthorized", "forbidden", "conflict", "not_found", "invalid_request", "unavailable"]).annotate({ identifier: "ApiErrorCode" })
 export const ApiErrorDTO = Schema.Struct({ error: ApiErrorCode, message: Schema.String }).annotate({ identifier: "ApiErrorDTO" })
 export type ApiErrorDTO = typeof ApiErrorDTO.Type
-export const HealthDTO = Schema.Struct({ status: Schema.Literal("ok"), version: Schema.Literal("v1") }).annotate({ identifier: "HealthDTO" })
+/** `features` names what this server can do beyond the first v1: "note-import" (POST /api/v1/notes/import),
+ * "conditional-delete" (`ifStamp` and `ifChunks` on DELETE /api/v1/notes/{id}) and "meeting-identity"
+ * (`meetingUid` and `occurrence` on calendar events). Absent on a server older than all three. A feature
+ * only ever adds a check the server makes; a client never relaxes one of its own because of it. */
+export const HealthDTO = Schema.Struct({ status: Schema.Literal("ok"), version: Schema.Literal("v1"), features: Schema.optionalKey(Schema.Array(Schema.String)) }).annotate({ identifier: "HealthDTO" })
 export const DeletedDTO = Schema.Struct({ deleted: Schema.Boolean }).annotate({ identifier: "DeletedDTO" })
 /** One file this server hands out: its name, the path to fetch it from on this server, its size in bytes and its SHA-256 in lower-case hex. */
 export const DownloadFileDTO = Schema.Struct({
@@ -501,6 +509,17 @@ export const CalendarEventDTO = Schema.Struct({
   startAt: Timestamp, endAt: Timestamp, allDay: Schema.Boolean, startDate: NoteDate, endDate: NoteDate,
   timeZone: Schema.NullOr(Schema.String), location: Schema.NullOr(Schema.String),
   meetingUrl: Schema.NullOr(Schema.String), noteId: Schema.NullOr(UUID),
+  /** The meeting's identity across calendars and servers: the iCalendar UID, and which occurrence of it this
+   * is. `occurrence` is "single" for an event that does not repeat, "date:YYYY-MM-DD" for an all-day
+   * occurrence and "instant:<UTC time with milliseconds>" for a timed one, always the time the occurrence
+   * was first scheduled for, so a moved occurrence keeps it. Null where the source gives no UID, and until the
+   * calendar is next refreshed on a server that has just gained these fields. */
+  meetingUid: Schema.optionalKey(Schema.NullOr(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048)))),
+  occurrence: Schema.optionalKey(Schema.NullOr(Schema.String.check(Schema.isPattern(
+    /^(single|date:\d{4}-\d{2}-\d{2}|instant:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)$/)))),
+  /** How many other people are invited: invitees without rooms and equipment and without the person
+   * themself. Null where the server has not counted (a calendar not refreshed since the field arrived). */
+  attendeeCount: Schema.optionalKey(Schema.NullOr(Revision)),
 }).annotate({ identifier: "CalendarEventDTO" })
 export type CalendarEventDTO = typeof CalendarEventDTO.Type
 export const CalendarEventsDTO = Schema.Array(CalendarEventDTO)
@@ -544,6 +563,33 @@ export const MeetingContextDTO = Schema.Struct({
 export type MeetingContextDTO = typeof MeetingContextDTO.Type
 export const NoteContextDTO = Schema.Struct({ noteId: UUID, meeting: Schema.NullOr(MeetingContextDTO) }).annotate({ identifier: "NoteContextDTO" })
 export type NoteContextDTO = typeof NoteContextDTO.Type
+/** A whole note brought from another account. `id` is chosen by the client and makes the request safe to
+ * repeat: the same body again answers with the same note. Segment ids in the answer are derived, never
+ * taken: uuid v5 with the note id as namespace and the request's segment id as name. The meeting context
+ * is saved as it is given and bound to no calendar event here. */
+export const ImportedRecordingState = Schema.Literals(["idle", "stopped"]).annotate({ identifier: "ImportedRecordingState" })
+export const ImportNoteInput = Schema.Struct({
+  id: UUID,
+  title: NoteTitle, body: NoteText, enhanced: NoteText, date: NoteDate,
+  duration: Schema.String.check(Schema.isMaxLength(32)),
+  /** Kept between 2000-01-01 and five minutes after the server's own clock; outside that it is moved to the nearer bound, never refused. */
+  createdAt: Timestamp,
+  generated: Schema.Boolean,
+  recordingState: ImportedRecordingState,
+  transcriptSegments: Schema.Array(TranscriptSegmentDTO).check(Schema.isMaxLength(50_000)),
+  meeting: Schema.NullOr(MeetingContextDTO),
+}).check(
+  Schema.makeFilter((input) => !input.meeting || input.meeting.participants.length <= 500 || "A meeting supports at most 500 attendees"),
+  Schema.makeFilter((input) => new Set(input.transcriptSegments.map((segment) => segment.id.toLowerCase())).size === input.transcriptSegments.length || "Transcript segment ids must be unique"),
+).annotate({ identifier: "ImportNoteInput" })
+export type ImportNoteInput = typeof ImportNoteInput.Type
+export const ImportedSegmentIdDTO = Schema.Struct({ from: UUID, to: UUID }).annotate({ identifier: "ImportedSegmentIdDTO" })
+export const ImportedNoteDTO = Schema.Struct({
+  note: NoteDTO,
+  /** Every segment: its id in the request and its id here, uuid v5(note id, request id). */
+  segmentIds: Schema.Array(ImportedSegmentIdDTO),
+}).annotate({ identifier: "ImportedNoteDTO" })
+export type ImportedNoteDTO = typeof ImportedNoteDTO.Type
 export const ManualParticipantInput = Schema.Struct({
   id:UUID,
   displayName:Schema.String.check(Schema.isMinLength(1),Schema.isMaxLength(200)),
@@ -651,7 +697,7 @@ export const WireSchemas = {
   AdminSettingsDTO, UpdateAdminSettingsInput, CalendarDTO, CreateCalendarInput, UpdateCalendarInput, CalendarEventDTO,
   UploadAudioChunkInput, AudioChunkDTO, ChatMessageDTO, ChatInput, ChatAnswerDTO, ChatCitationDTO, ChatToolMeetingDTO, ChatToolProgressDTO, ChatStreamEventDTO,
   EvidenceRequestDTO, EvidenceQuoteDTO, EvidenceDTO,
-  TranscriptSegmentDTO, NoteDTO, CreateNoteInput, UpdateNoteInput, RecordingCommandDTO, GenerateNotesCommandDTO, GenerationProgressDTO,
+  TranscriptSegmentDTO, NoteDTO, CreateNoteInput, UpdateNoteInput, ImportedRecordingState, ImportNoteInput, ImportedSegmentIdDTO, ImportedNoteDTO, RecordingCommandDTO, GenerateNotesCommandDTO, GenerationProgressDTO,
   SharedNoteDTO, CreateShareInput, ShareDTO, CreatedShareDTO, HealthDTO, DeletedDTO, ApiErrorDTO,
   DownloadFileDTO, MacDownloadDTO, DownloadsDTO,
   StorageSettingsDTO, UpdateStorageSettingsInput, StorageTestInput, StorageTestDTO,

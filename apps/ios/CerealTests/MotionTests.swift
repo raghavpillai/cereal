@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import Testing
+import APIClient
 @testable import Cereal
 
 struct MotionTests {
@@ -80,11 +81,13 @@ struct MotionTests {
 
     @MainActor @Test func reopeningBeforeReleaseKeepsTheNewOrigin() async throws {
         let router = Router()
-        router.path = [.serverNote("a")]
+        let account = AccountID(address: "https://example.test", userID: "00000000-0000-4000-8000-000000000001")
+        let a = NoteRef(account: account, id: "a"), b = NoteRef(account: account, id: "b")
+        router.path = [.serverNote(a)]
         router.path = []
-        router.path = [.serverNote("b")]
+        router.path = [.serverNote(b)]
         try await Task.sleep(for: .milliseconds(600))
-        #expect(router.origin == .serverNote("b"))
+        #expect(router.origin == .serverNote(b))
     }
 }
 
@@ -209,7 +212,7 @@ struct NoteSearchTests {
 
     @Test func anEmptyQueryFindsNothing() {
         #expect(NoteSearch.local(notes, query: "   ", currentUser: me).isEmpty)
-        #expect(NoteSearch.server([], onThisPhone: { _ in true }).isEmpty)
+        #expect(NoteSearch.server([], account: AccountID(address: "https://example.test", userID: "00000000-0000-4000-8000-000000000001"), onThisPhone: { _ in true }).isEmpty)
     }
 
     @Test func searchCoversTitleNotesAndPeople() {

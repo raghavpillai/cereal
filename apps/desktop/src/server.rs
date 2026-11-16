@@ -1,11 +1,19 @@
 //! Native client of our owner-authenticated API. Provider credentials never enter
-//! this process. A single worker preserves Start/Stop/Resume ordering; GPUI only
-//! polls completions. Failed uploads keep their immutable local WAVs for retry.
-use crate::{app::Cereal, model::Note};
+//! this process. One serial worker per account preserves Start/Stop/Resume
+//! ordering; GPUI only polls completions. Failed uploads keep their immutable
+//! local WAVs for retry.
+//!
+//! Every request here goes through the client of the account that owns the
+//! thing it is about (`accounts::AccountClient`): a note's account, an
+//! event's account. There is no "current" account to fall back to.
+use crate::{
+    accounts::{AccountClient as Client, AccountId, handle},
+    app::Cereal,
+    model::Note,
+};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use gpui::*;
 use meeting_notes_api_types::{AudioChunkDTO, AudioChunkState as State, ChatAnswerDTO, NoteDTO};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -13,7 +21,6 @@ use std::{
     fs,
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::Path,
-    process::{Command, Stdio},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -23,13 +30,15 @@ use std::{
 };
 
 pub fn enabled() -> bool {
-    !crate::audio::preview_mode() && crate::account::configured()
+    !crate::audio::preview_mode() && crate::accounts::server_mode()
 }
 
+/// Where the default account's calendar connections are managed: a page of
+/// its own server, opened in the browser.
 pub fn calendar_connections_url() -> Option<String> {
-    Client::new()
-        .ok()
-        .map(|client| format!("{}/account", client.url))
+    crate::accounts::default_account()
+        .filter(|account| account.shown())
+        .map(|account| format!("{}/account", account.url))
 }
 
 fn capability_share_url(base_url: &str, token: &str, path: &str) -> Result<String, String> {
@@ -44,11 +53,13 @@ fn capability_share_url(base_url: &str, token: &str, path: &str) -> Result<Strin
     Ok(format!("{}{path}", base_url.trim_end_matches('/')))
 }
 
+/// The calendars and events of one account, read with its own client.
 pub fn load_calendar_events(
+    account: &AccountId,
     from: &str,
     cancel: Arc<AtomicBool>,
 ) -> Result<crate::calendar::CalendarSnapshot, String> {
-    let client = Client::new()?;
+    let client = crate::accounts::client(account)?;
     load_calendar_events_with_client(&client, from, cancel)
 }
 
@@ -155,15 +166,10 @@ fn calendar_events(
     Ok((events, attendees))
 }
 
-/// The server this app is signed in to, as notes record it.
-pub fn origin() -> Option<String> {
-    Client::new().ok().map(|client| client.url)
-}
-
-/// Select or deselect one of the signed-in person's own calendars.
-pub fn select_personal_calendar(id: &str, selected: bool) -> Result<(), String> {
+/// Select or deselect one of an account's own calendars, on its server.
+pub fn select_personal_calendar(account: &AccountId, id: &str, selected: bool) -> Result<(), String> {
     uuid::Uuid::parse_str(id).map_err(|_| "Invalid calendar".to_string())?;
-    let client = Client::new()?;
+    let client = crate::accounts::client(account)?;
     let _: meeting_notes_api_types::GoogleCalendarDTO = client.request(
         "PATCH",
         &format!("/api/v1/integrations/google/calendars/{id}"),
@@ -172,12 +178,15 @@ pub fn select_personal_calendar(id: &str, selected: bool) -> Result<(), String> 
     Ok(())
 }
 
+/// The note of a calendar event, asked of the event's own account. An
+/// event id of one account is never sent to another.
 pub fn note_for_calendar_event(
+    account: &AccountId,
     event_id: &str,
     cancel: Arc<AtomicBool>,
 ) -> Result<(String, NoteDTO), String> {
     uuid::Uuid::parse_str(event_id).map_err(|_| "Invalid calendar event".to_string())?;
-    let client = Client::new()?;
+    let client = crate::accounts::client(account)?;
     let note = client.request_with_cancel(
         "POST",
         &format!("/api/v1/calendar/events/{event_id}/note"),
@@ -187,26 +196,44 @@ pub fn note_for_calendar_event(
     Ok((client.url, note))
 }
 
-pub fn import_calendar_note(
-    workspace: &mut crate::model::Workspace,
-    remote: NoteDTO,
-    url: String,
-) -> u64 {
-    let existing = workspace
+/// The note kept here for a server note of the account in `slot`: found by
+/// `(slot, server id)`, with the address as a second check.
+pub fn cached_note(
+    workspace: &crate::model::Workspace,
+    slot: u16,
+    server_id: &str,
+    url: &str,
+) -> Option<u64> {
+    workspace
         .notes
         .iter()
         .find(|n| {
-            n.server_id.as_deref() == Some(remote.id.as_str())
-                && n.server_url.as_deref() == Some(url.as_str())
+            // Note ids are UUIDs: compared whatever their case.
+            handle::slot_of(n.id) == Some(slot)
+                && n.server_id
+                    .as_deref()
+                    .is_some_and(|id| id.eq_ignore_ascii_case(server_id))
+                && n.server_url.as_deref() == Some(url)
         })
-        .map(|n| n.id);
-    if let Some(id) = existing {
+        .map(|n| n.id)
+}
+
+/// The note of a calendar event, kept in the event's account. `None` when
+/// that account's notes are not loaded.
+pub fn import_calendar_note(
+    workspace: &mut crate::model::Workspace,
+    slot: u16,
+    remote: NoteDTO,
+    url: String,
+) -> Option<u64> {
+    if let Some(id) = cached_note(workspace, slot, &remote.id, &url) {
         if let Some(note) = workspace.note_mut(id) {
             note.trashed = false;
+            note.server_missing_since = None;
         }
-        return id;
+        return Some(id);
     }
-    let id = workspace.create_note();
+    let id = workspace.create_note_in(slot)?;
     if let Some(note) = workspace.note_mut(id) {
         note.trashed = false;
         note.title = remote.title.clone();
@@ -225,7 +252,7 @@ pub fn import_calendar_note(
         note.server_id = Some(remote.id);
         note.server_url = Some(url);
     }
-    id
+    Some(id)
 }
 
 #[derive(Clone)]
@@ -243,7 +270,7 @@ pub fn meeting_context(
     command: MeetingCommand,
     cancel: Arc<AtomicBool>,
 ) -> Result<MeetingReply, String> {
-    let client = Client::new()?;
+    let client = crate::accounts::client_of_note(note.id)?;
     let id = note
         .server_id
         .as_ref()
@@ -279,10 +306,13 @@ pub fn meeting_context(
     };
     Ok(MeetingReply { context, note })
 }
+/// The events a note may be attached to: those of the note's own account,
+/// and no other's.
 pub fn meeting_picker_events(
+    note_id: u64,
     cancel: Arc<AtomicBool>,
 ) -> Result<Vec<meeting_notes_api_types::CalendarEventDTO>, String> {
-    let client = Client::new()?;
+    let client = crate::accounts::client_of_note(note_id)?;
     let now = chrono::Utc::now();
     let from = (now - chrono::Duration::days(7)).format("%Y-%m-%dT%H:%M:%SZ");
     let to = (now + chrono::Duration::days(60)).format("%Y-%m-%dT%H:%M:%SZ");
@@ -397,15 +427,18 @@ pub fn chat_model_key(choice: &meeting_notes_api_types::LanguageModelSelection) 
     let provider = match choice.provider { Provider::Openrouter => "openrouter", Provider::Openai => "openai", Provider::Anthropic => "anthropic" };
     format!("{provider}:{}", choice.model)
 }
-pub fn stream_chat(
-    note: Option<Note>, message: String, history: Vec<Value>, cancel: Arc<AtomicBool>,
-) -> mpsc::Receiver<ChatStreamEvent> {
-    stream_chat_with_model(note, message, history, cancel, None)
-}
+/// A chat about a note goes to the note's account. A chat across meetings
+/// belongs to one account: `scope`, or the default account when none is
+/// named (until the scope can be chosen, section 4.2).
 pub fn stream_chat_with_model(
-    note: Option<Note>, message: String, history: Vec<Value>, cancel: Arc<AtomicBool>, model: Option<String>,
+    note: Option<Note>, scope: Option<AccountId>, message: String, history: Vec<Value>, cancel: Arc<AtomicBool>, model: Option<String>,
 ) -> mpsc::Receiver<ChatStreamEvent> {
-    stream_chat_with_client(Client::new(), note, message, history, cancel, model)
+    let client = match (&note, &scope) {
+        (Some(note), _) => crate::accounts::client_of_note(note.id),
+        (None, Some(account)) => crate::accounts::client(account),
+        (None, None) => crate::accounts::default_client(),
+    };
+    stream_chat_with_client(client, note, message, history, cancel, model)
 }
 fn stream_chat_with_client(
     client: Result<Client, String>,
@@ -436,57 +469,14 @@ fn stream_chat_with_client(
             } else {
                 "/api/v1/chat/stream".into()
             };
-            fn quote(value: &str) -> String {
-                format!(
-                    "\"{}\"",
-                    value
-                        .replace('\\', "\\\\")
-                        .replace('"', "\\\"")
-                        .replace('\n', "\\n")
-                        .replace('\r', "\\r")
-                )
-            }
             let mut payload = json!({"message":message,"history":history,"includeSources":true});
             if let Some(model) = &model { payload["model"] = json!(model); }
             if let Ok(time_zone) = iana_time_zone::get_timezone() {
                 payload["timeZone"] = json!(time_zone);
             }
-            let config = format!(
-                "url = {}\nrequest = \"POST\"\nheader = {}\nheader = \"Content-Type: application/json\"\nheader = \"Accept: text/event-stream\"\ndata-binary = {}\n",
-                quote(&format!("{}{path}", client.url)),
-                quote(&format!("Authorization: Bearer {}", client.token)),
-                quote(&payload.to_string())
-            );
-            let mut child = Command::new("/usr/bin/curl")
-                .args([
-                    "--disable",
-                    "--config",
-                    "-",
-                    "--silent",
-                    "--show-error",
-                    "--fail",
-                    "--no-buffer",
-                    "--connect-timeout",
-                    "10",
-                    "--max-time",
-                    "180",
-                ])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .map_err(|_| "Cannot start chat transport")?;
-            let Some(mut input) = child.stdin.take() else {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("Chat transport input unavailable".into());
-            };
-            if input.write_all(config.as_bytes()).is_err() {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("Cannot send chat request".into());
-            }
-            drop(input);
+            // The stream's own transport, started by the account's client:
+            // the session and the address come from the same place.
+            let mut child = client.chat_stream(&path, &payload)?;
             let Some(output) = child.stdout.take() else {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -603,15 +593,31 @@ pub struct Bridge {
     sender: mpsc::Sender<Job>,
 }
 impl Bridge {
-    pub fn new() -> Self {
+    /// The serial worker of one account. Its client is made again whenever
+    /// the account's epoch has moved (a replaced token), keeping what it
+    /// knows of which notes are on the server.
+    pub fn new(account: AccountId) -> Self {
         let (sender, receiver) = mpsc::channel::<Job>();
         std::thread::spawn(move || {
-            let mut client = Client::new();
+            let mut client: Option<Client> = None;
             while let Ok(job) = receiver.recv() {
-                let result = match &mut client {
-                    Ok(client) => client.run(&job.note, job.action),
-                    Err(error) => Err(error.clone()),
-                };
+                if client.as_ref().is_none_or(|client| client.stale()) {
+                    let ids = client.take().map(|client| client.ids).unwrap_or_default();
+                    client = match crate::accounts::client(&account) {
+                        Ok(mut fresh) => {
+                            fresh.ids = ids;
+                            Some(fresh)
+                        }
+                        Err(error) => {
+                            let _ = job.reply.send(Err(error));
+                            continue;
+                        }
+                    };
+                }
+                let result = client
+                    .as_mut()
+                    .expect("the client was just made")
+                    .run(&job.note, job.action);
                 let _ = job.reply.send(result);
             }
         });
@@ -628,216 +634,38 @@ impl Bridge {
     }
 }
 
-struct Client {
-    url: String,
-    token: String,
-    ids: HashMap<u64, String>,
-    account_epoch: Option<u64>,
-    storage_root: Option<std::path::PathBuf>,
-}
 impl Client {
-    fn new() -> Result<Self, String> {
-        let epoch = crate::account::epoch();
-        let credentials = crate::account::credentials()?;
-        let url = credentials.url;
-        let token = credentials.token;
-        // The session goes to the address it was issued for and nowhere
-        // else (it is stored with that address): HTTPS, or plain HTTP for a
-        // server on a private network.
-        if !(url.starts_with("https://") || url.starts_with("http://"))
-            || url.contains(['\n', '\r', '"', '@', '?', '#'])
-            || token.len() < 32
-            || token.contains(['\n', '\r'])
-        {
-            return Err("Configure CEREAL_SERVER_URL (https:// or http://) and CEREAL_SERVER_TOKEN before connecting".into());
-        }
-        let storage_root = crate::model::audio_directory()?;
-        if epoch != crate::account::epoch() {
-            return Err("Account changed; request cancelled".into());
-        }
-        Ok(Self {
-            url,
-            token,
-            ids: HashMap::new(),
-            account_epoch: Some(epoch),
-            storage_root: Some(storage_root),
-        })
-    }
-    fn request<T: DeserializeOwned>(
-        &self,
-        method: &str,
-        path: &str,
-        body: Option<Value>,
-    ) -> Result<T, String> {
-        self.request_with_cancel(method, path, body, None)
-    }
-    fn request_with_cancel<T: DeserializeOwned>(
-        &self,
-        method: &str,
-        path: &str,
-        body: Option<Value>,
-        cancel: Option<Arc<AtomicBool>>,
-    ) -> Result<T, String> {
-        if self
-            .account_epoch
-            .is_some_and(|epoch| epoch != crate::account::epoch())
-            || cancel
-                .as_ref()
-                .is_some_and(|cancel| cancel.load(Ordering::Acquire))
-        {
-            return Err("Request cancelled".into());
-        }
-        // curl reads the owner token over stdin, never argv or a temporary file.
-        // Config escaping is separate from shell escaping; no shell is involved.
-        fn quote(s: &str) -> String {
-            format!(
-                "\"{}\"",
-                s.replace('\\', "\\\\")
-                    .replace('"', "\\\"")
-                    .replace('\n', "\\n")
-                    .replace('\r', "\\r")
-            )
-        }
-        let mut config = format!(
-            "url = {}\nrequest = {}\nheader = {}\nheader = \"Content-Type: application/json\"\n",
-            quote(&format!("{}{path}", self.url)),
-            quote(method),
-            quote(&format!("Authorization: Bearer {}", self.token))
-        );
-        if let Some(body) = body {
-            config.push_str(&format!("data-binary = {}\n", quote(&body.to_string())));
-        }
-        let mut child = Command::new("/usr/bin/curl")
-            .args([
-                "--disable",
-                "--config",
-                "-",
-                "--silent",
-                "--show-error",
-                "--connect-timeout",
-                "10",
-                "--max-time",
-                "180",
-                "--max-filesize",
-                "8388608",
-                "--write-out",
-                "\n%{http_code}",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| "Cannot start the native HTTP transport")?;
-        let Some(mut input) = child.stdin.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("HTTP transport input unavailable".into());
-        };
-        if input.write_all(config.as_bytes()).is_err() {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("Cannot send request to the HTTP transport".into());
-        }
-        drop(input);
-        let Some(stdout) = child.stdout.take() else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("HTTP transport output unavailable".into());
-        };
-        // Drain concurrently: waiting for process exit before reading a long
-        // transcript response would fill the pipe and stall the child.
-        let reader = std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            stdout
-                .take(8_388_613)
-                .read_to_end(&mut bytes)
-                .map(|_| bytes)
-        });
-        let status = loop {
-            if self
-                .account_epoch
-                .is_some_and(|epoch| epoch != crate::account::epoch())
-                || cancel
-                    .as_ref()
-                    .is_some_and(|cancel| cancel.load(Ordering::Acquire))
-            {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = reader.join();
-                return Err("Request cancelled".into());
-            }
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-                Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = reader.join();
-                    return Err("HTTP transport failed".into());
-                }
-            }
-        };
-        let output = reader
-            .join()
-            .map_err(|_| "HTTP transport output failed")?
-            .map_err(|_| "HTTP transport output failed")?;
-        if !status.success() || output.len() > 8_388_612 {
-            return Err(format!(
-                "Server request failed (transport exit {}). Local audio is preserved; retry when connected.",
-                status
-                    .code()
-                    .map(|code| code.to_string())
-                    .unwrap_or_else(|| "interrupted".into())
-            ));
-        }
-        let split = output
-            .iter()
-            .rposition(|b| *b == b'\n')
-            .ok_or("Invalid server response")?;
-        let status = std::str::from_utf8(&output[split + 1..]).unwrap_or("");
-        if !status.starts_with('2') {
-            let error = serde_json::from_slice::<Value>(&output[..split]).ok();
-            // Only our bounded public API error message is displayed, never raw
-            // provider bodies or arbitrary response text.
-            let message = error
-                .as_ref()
-                .and_then(|e| e.get("message"))
-                .and_then(Value::as_str)
-                .filter(|s| s.len() <= 500);
-            return Err(message
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("Server rejected the request (HTTP {status})")));
-        }
-        if self
-            .account_epoch
-            .is_some_and(|epoch| epoch != crate::account::epoch())
-        {
-            return Err("Account changed; request cancelled".into());
-        }
-        serde_json::from_slice(&output[..split])
-            .map_err(|_| "Server response does not match the shared API contract".into())
-    }
     fn association_path(&self, local_id: u64) -> Result<std::path::PathBuf, String> {
         let root = self
             .storage_root
             .clone()
-            .map(Ok)
-            .unwrap_or_else(crate::model::audio_directory)?;
+            .ok_or("This account has no place to keep recordings yet")?;
         let namespace = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, self.url.as_bytes());
+        // On disk a note is always named by its file id.
         Ok(root
             .join("server-associations")
             .join(namespace.to_string())
-            .join(format!("{local_id}.txt")))
+            .join(format!("{}.txt", handle::file_id(local_id))))
     }
     fn ensure(&mut self, note: &Note) -> Result<String, String> {
-        if self
-            .account_epoch
-            .is_some_and(|epoch| epoch != crate::account::epoch())
-        {
+        if self.stale() {
             return Err("Account changed; request cancelled".into());
         }
-        if let Some(id) = self.ids.get(&note.id) {
-            return Ok(id.clone());
+        // A note is only ever sent to the account it belongs to.
+        if let (Some(mine), Some(theirs)) = (self.slot, handle::slot_of(note.id))
+            && mine != theirs
+        {
+            return Err("This note belongs to another account".into());
+        }
+        let sidecar = self.association_path(note.id)?;
+        if let Some(id) = self.ids.get(&note.id).cloned() {
+            // What this worker remembers holds only while the note is still
+            // attached: a note restored from "Deleted on the server" has
+            // neither a server id nor a sidecar, and is created again.
+            if note.server_id.is_some() || sidecar.exists() {
+                return Ok(id);
+            }
+            self.ids.remove(&note.id);
         }
         if let Some(id) = &note.server_id {
             if note.server_url.as_deref() != Some(&self.url) {
@@ -848,7 +676,6 @@ impl Client {
         }
         // Recover the association even if the process exited before the UI saved
         // its completion. Sidecar contains identifiers only, never credentials.
-        let sidecar = self.association_path(note.id)?;
         if let Ok(id) = fs::read_to_string(&sidecar)
             && uuid::Uuid::parse_str(id.trim()).is_ok()
         {
@@ -1282,7 +1109,7 @@ pub fn load_evidence(
     paragraph: &str,
     cancel: Arc<AtomicBool>,
 ) -> Result<meeting_notes_api_types::EvidenceDTO, String> {
-    let client = Client::new()?;
+    let client = crate::accounts::client_of_note(note.id)?;
     let id = note
         .server_id
         .as_deref()
@@ -1317,8 +1144,12 @@ pub fn load_evidence(
 /// parts the stream already covered.
 pub fn live_target(note: &Note, capture_id: &str) -> crate::live::Resolved {
     use crate::live::Resolved;
-    let Ok(client) = Client::new() else {
-        return Resolved::Never;
+    // The note's own account, however long the stream has been waiting: a
+    // session that has ended leaves it waiting for the sign-in.
+    let client = match crate::accounts::client_of_note(note.id) {
+        Ok(client) => client,
+        Err(_) if crate::accounts::of_note(note.id).is_some() => return Resolved::Later,
+        Err(_) => return Resolved::Never,
     };
     let Some(id) = note
         .server_id
@@ -1332,12 +1163,10 @@ pub fn live_target(note: &Note, capture_id: &str) -> crate::live::Resolved {
     }
     match client.live_capture_base(note, id, capture_id) {
         Ok(base_ms) => Resolved::Ready(crate::live::Target {
-            url: live_url(&client.url, id),
-            token: client.token.clone(),
+            endpoint: client.live(id),
             capture_id: capture_id.to_owned(),
             base_ms,
         }),
-        Err(_) if client.account_epoch != Some(crate::account::epoch()) => Resolved::Never,
         // The server did not answer, or an earlier capture is not final yet.
         Err(_) => Resolved::Later,
     }
@@ -1402,7 +1231,13 @@ impl PartUploads {
     /// Follow capture `capture_id` of `note` (which must already be on the
     /// server) through `source`.
     pub fn start(note: Note, capture_id: String, source: crate::live::Source) -> Self {
-        Self::start_with(Client::new, note, capture_id, source)
+        let id = note.id;
+        Self::start_with(
+            move || crate::accounts::client_of_note(id),
+            note,
+            capture_id,
+            source,
+        )
     }
 
     fn start_with(
@@ -1648,12 +1483,6 @@ fn upload_parts(
             break; // Everything left is the after-Stop upload's.
         }
     }
-}
-
-/// `https://host` becomes `wss://host/api/v1/notes/<id>/live`; loopback
-/// development servers stay unencrypted, as they are for every other request.
-fn live_url(base: &str, note_id: &str) -> String {
-    format!("ws{}/api/v1/notes/{note_id}/live", base.trim_start_matches("http"))
 }
 
 impl Client {
@@ -1940,6 +1769,12 @@ enum SyncMessage {
         read: usize,
         wanted: usize,
     },
+    /// The ids the listing held. A note marked "Deleted on the server" that
+    /// is listed again loses the mark.
+    Listed(std::collections::HashSet<String>),
+    /// Notes the server answered 404 for, asked one by one after a complete
+    /// listing that did not hold them.
+    Missing(Vec<String>),
     Finished(Result<Vec<meeting_notes_api_types::LanguageModelSelection>, String>),
 }
 
@@ -1970,6 +1805,26 @@ fn notes_to_read(
         .collect()
 }
 
+/// An account's notes list as the server gave it.
+struct Listing {
+    rows: Vec<meeting_notes_api_types::NoteSummaryDTO>,
+    /// Every page was read **and no row was skipped**. A row whose id is not
+    /// a UUID is dropped, and makes the listing incomplete: nothing may be
+    /// concluded from a note's absence in it.
+    complete: bool,
+}
+
+/// The most notes one refresh asks for one by one because a complete
+/// listing did not hold them. The rest wait for the next refresh.
+const MISSING_CHECKS: usize = 500;
+
+/// What one refresh found out about notes that are gone from the server.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Gone {
+    /// The server answered 404 for the note itself.
+    missing: Vec<String>,
+}
+
 /// Refresh the notes kept here from the server. The list comes as rows without
 /// text, a page at a time; a note is read whole only when it is new or has
 /// changed, so a refresh with nothing new downloads no note at all and no
@@ -1980,49 +1835,87 @@ fn notes_to_read(
 /// A server from before the list endpoint refuses the first request; it is then
 /// asked for every note at once, as before. If the server cannot be reached,
 /// that request fails too and its error is the one reported.
+///
+/// Notes that are gone from the server (`candidates`: the cached notes of
+/// this account that are not open and have nothing unsent). After a
+/// **complete** listing, each candidate that is not in it is asked for
+/// directly, and only a 404 from that request says it is gone. A short
+/// listing, a skipped row, a failed request or any other answer concludes
+/// nothing. Nothing is ever deleted here.
 fn refresh_notes(
     client: &Client,
     kept: &HashMap<String, String>,
+    candidates: &[String],
     mut deliver: impl FnMut(Vec<NoteDTO>, usize, usize),
-) -> Result<(), String> {
-    let Ok(rows) = client.note_rows() else {
+    mut listed: impl FnMut(std::collections::HashSet<String>),
+) -> Result<Gone, String> {
+    let Ok(listing) = client.note_rows() else {
         let notes: Vec<NoteDTO> = client.request("GET", "/api/v1/notes", None)?;
         let total = notes.len();
+        listed(notes.iter().map(|note| note.id.to_ascii_lowercase()).collect());
         deliver(notes, total, total);
-        return Ok(());
+        return Ok(Gone::default());
     };
+    let rows = listing.rows;
+    let present: std::collections::HashSet<String> =
+        rows.iter().map(|row| row.id.to_ascii_lowercase()).collect();
+    listed(present.clone());
     let wanted = notes_to_read(&rows, kept);
     let mut read = 0;
     for ids in wanted.chunks(SYNC_BATCH) {
         let mut notes = Vec::with_capacity(ids.len());
         for id in ids {
-            match client.request::<NoteDTO>("GET", &format!("/api/v1/notes/{id}"), None) {
+            match client.send::<NoteDTO>("GET", &format!("/api/v1/notes/{id}"), None, None) {
                 Ok(note) => notes.push(note),
                 // Deleted on the server since its row was listed.
-                Err(error) if error == "Note not found" => {}
+                Err(error) if error.is_not_found() => {}
                 Err(error) => {
                     // What was read before the failure is still worth keeping.
                     if !notes.is_empty() {
                         read += notes.len();
                         deliver(notes, read, wanted.len());
                     }
-                    return Err(error);
+                    return Err(error.message());
                 }
             }
         }
         read += ids.len();
         deliver(notes, read, wanted.len());
     }
-    Ok(())
+    let mut gone = Gone::default();
+    if !listing.complete {
+        return Ok(gone);
+    }
+    let mut found = Vec::new();
+    for id in candidates
+        .iter()
+        .filter(|id| !present.contains(&id.to_ascii_lowercase()) && uuid::Uuid::parse_str(id).is_ok())
+        .take(MISSING_CHECKS)
+    {
+        match client.send::<NoteDTO>("GET", &format!("/api/v1/notes/{id}"), None, None) {
+            // Only this answer says the note is gone.
+            Err(error) if error.is_not_found() => gone.missing.push(id.to_ascii_lowercase()),
+            // It is there after all: the listing was short.
+            Ok(note) => found.push(note),
+            // No answer, a 5xx, a 403, an HTML page: nothing is concluded.
+            Err(_) => {}
+        }
+    }
+    if !found.is_empty() {
+        let total = found.len();
+        deliver(found, total, total);
+    }
+    Ok(gone)
 }
 
 impl Client {
     /// Every row of the account's notes list, newest meeting first. IDs and
     /// cursors go into request paths, so anything that is not one is refused.
-    fn note_rows(&self) -> Result<Vec<meeting_notes_api_types::NoteSummaryDTO>, String> {
+    fn note_rows(&self) -> Result<Listing, String> {
         let mut rows: Vec<meeting_notes_api_types::NoteSummaryDTO> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut cursor: Option<String> = None;
+        let mut complete = true;
         // Far more pages than any account has; a server that never ends its list cannot hold the refresh forever.
         for _ in 0..10_000 {
             let path = match &cursor {
@@ -2032,12 +1925,16 @@ impl Client {
             let page: meeting_notes_api_types::NoteSummariesPageDTO =
                 self.request("GET", &path, None)?;
             for row in page.notes {
-                if uuid::Uuid::parse_str(&row.id).is_ok() && seen.insert(row.id.clone()) {
+                if uuid::Uuid::parse_str(&row.id).is_err() {
+                    // Dropped, and not silently: the listing no longer
+                    // says which notes exist.
+                    complete = false;
+                } else if seen.insert(row.id.clone()) {
                     rows.push(row);
                 }
             }
             match page.next_cursor {
-                None => return Ok(rows),
+                None => return Ok(Listing { rows, complete }),
                 Some(next)
                     if !next.is_empty()
                         && next.len() <= 512
@@ -2054,53 +1951,178 @@ impl Client {
     }
 }
 
+/// Where the association of a note with its server note is kept, under its
+/// account's `recordings` directory. Identifiers only, never credentials.
+pub fn association_file(recordings: &Path, url: &str, note_id: u64) -> std::path::PathBuf {
+    let namespace = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, url.as_bytes());
+    recordings
+        .join("server-associations")
+        .join(namespace.to_string())
+        .join(format!("{}.txt", handle::file_id(note_id)))
+}
+
+/// What is queued again for a note when its account is Ready: the capture
+/// (which saves the text on its way) or the edit.
+///
+/// A capture is sent again only when the account comes back (`returning`:
+/// its session ended, was replaced, or its server could not be reached), and
+/// only once every capture of the note is final; an edit is always sent.
+pub fn requeue_action(note: &Note, returning: bool) -> Option<Action> {
+    if note.trashed && note.server_missing_since.is_some() {
+        return None;
+    }
+    let captures_final = !note.audio_captures.is_empty()
+        && note.audio_captures.iter().all(|capture| {
+            std::fs::read(&capture.manifest_path)
+                .ok()
+                .and_then(|data| serde_json::from_slice::<crate::audio::CaptureManifest>(&data).ok())
+                .unwrap_or_else(|| capture.clone())
+                .completed()
+        });
+    if returning && note.unsent_capture && captures_final {
+        Some(Action::Sync)
+    } else if note.unsent_edits || note.enhanced_dirty {
+        Some(Action::Save)
+    } else {
+        None
+    }
+}
+
+/// Put a note in Trash as "Deleted on the server": its own server answered
+/// 404 for it. Its text, folder, favourite and capture files stay. A note
+/// that is open, or has anything unsent, is left alone.
+pub fn mark_missing(note: &mut Note, now: &str) -> bool {
+    if note.has_unsent_work() || note.server_missing_since.is_some() {
+        return false;
+    }
+    note.server_missing_since = Some(now.to_owned());
+    note.trashed = true;
+    true
+}
+
+/// A note marked "Deleted on the server" is listed again: both marks go.
+pub fn mark_listed(note: &mut Note) -> bool {
+    if note.server_missing_since.take().is_some() {
+        note.trashed = false;
+        return true;
+    }
+    false
+}
+
+/// Restore a "Deleted on the server" note from Trash: it becomes a note of
+/// this Mac that is created again on the server at the next save. Returns
+/// the address it was on, for the sidecar to be removed.
+pub fn detach_from_server(note: &mut Note) -> Option<String> {
+    note.server_missing_since.take()?;
+    note.trashed = false;
+    note.server_id = None;
+    note.server_sync_stamp = None;
+    note.unsent_edits = true;
+    note.server_url.take()
+}
+
 impl Cereal {
     /// Server-backed notes use their own workspace. Loading a remote list never
     /// imports or rewrites the legacy local demo workspace.
+    ///
+    /// Each account is verified on its own, and each account that is Ready
+    /// refreshes its own slice of the workspace with its own client.
     pub fn connect_server(&mut self, cx: &mut Context<Self>) {
-        if enabled() && crate::account::identity().is_none() {
-            self.restore_account(cx);
+        if !enabled() {
             return;
         }
-        let account_epoch = crate::account::epoch();
-        if enabled() {
-            self.load_calendar_events(cx);
-        }
-        if !enabled() || self.server_pending > 0 {
+        self.verify_accounts(cx);
+        let ready: Vec<_> = crate::accounts::all()
+            .into_iter()
+            .filter(|account| account.is_ready() && account.verified_this_launch)
+            .collect();
+        if ready.is_empty() {
             return;
         }
+        self.load_calendar_events(cx);
+        if self.server_pending > 0 {
+            return;
+        }
+        for account in ready {
+            self.refresh_account(&account, cx);
+        }
+    }
+
+    /// Refresh one account's notes from its own server.
+    fn refresh_account(&mut self, account: &crate::accounts::Account, cx: &mut Context<Self>) {
+        if !self.refreshing.insert(account.id.clone()) {
+            return;
+        }
+        let Some(slot_loaded) = self
+            .workspace
+            .slots
+            .get(&account.slot)
+            .map(|slot| slot.state == crate::model::SlotState::Loaded)
+        else {
+            self.refreshing.remove(&account.id);
+            return;
+        };
+        if !slot_loaded {
+            // Its file was refused: nothing is read into it or written.
+            self.refreshing.remove(&account.id);
+            return;
+        }
+        let account_epoch = account.epoch();
+        let (id, slot, url) = (account.id.clone(), account.slot, account.url.clone());
         self.server_pending += 1;
         self.server_status = Some("Loading server notes…".into());
         // What is already here, so the worker reads whole only the notes that are new or have changed.
-        let kept: Vec<(String, String, String)> = self
-            .workspace
-            .notes
-            .iter()
-            .filter_map(|note| {
-                Some((
-                    note.server_url.clone()?,
-                    note.server_id.clone()?,
-                    note.server_sync_stamp.clone()?,
-                ))
-            })
-            .collect();
+        let mut kept = HashMap::new();
+        let mut candidates = Vec::new();
+        let recording = self.recording.note_id.filter(|_| self.recording.is_active());
+        for note in self.workspace.notes_of(slot) {
+            let (Some(server_id), Some(server_url)) = (&note.server_id, &note.server_url) else {
+                continue;
+            };
+            if *server_url != url {
+                continue;
+            }
+            if let Some(stamp) = &note.server_sync_stamp {
+                kept.insert(server_id.clone(), stamp.clone());
+            }
+            if self.current_note != Some(note.id)
+                && recording != Some(note.id)
+                && !note.has_unsent_work()
+                && note.server_missing_since.is_none()
+            {
+                candidates.push(server_id.clone());
+            }
+        }
+        // The chat models are those of the account cross-meeting chat asks.
+        let wants_models = crate::accounts::default_account().is_some_and(|default| default.id == id);
         let (sender, receiver) = mpsc::channel();
+        let account_id = id.clone();
         std::thread::spawn(move || {
-            let result = Client::new().and_then(|client| {
-                let kept: HashMap<String, String> = kept
-                    .into_iter()
-                    .filter(|(url, _, _)| *url == client.url)
-                    .map(|(_, id, stamp)| (id, stamp))
-                    .collect();
-                refresh_notes(&client, &kept, |notes, read, wanted| {
-                    let _ = sender.send(SyncMessage::Notes {
-                        url: client.url.clone(),
-                        notes,
-                        read,
-                        wanted,
-                    });
-                })?;
-                let models = client.request::<meeting_notes_api_types::ChatModelsDTO>("GET", "/api/v1/models/chat", None).map(|response| response.models).unwrap_or_default();
+            let result = crate::accounts::client(&account_id).and_then(|client| {
+                let gone = refresh_notes(
+                    &client,
+                    &kept,
+                    &candidates,
+                    |notes, read, wanted| {
+                        let _ = sender.send(SyncMessage::Notes {
+                            url: client.url.clone(),
+                            notes,
+                            read,
+                            wanted,
+                        });
+                    },
+                    |present| {
+                        let _ = sender.send(SyncMessage::Listed(present));
+                    },
+                )?;
+                if !gone.missing.is_empty() {
+                    let _ = sender.send(SyncMessage::Missing(gone.missing));
+                }
+                let models = if wants_models {
+                    client.request::<meeting_notes_api_types::ChatModelsDTO>("GET", "/api/v1/models/chat", None).map(|response| response.models).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 Ok(models)
             });
             let _ = sender.send(SyncMessage::Finished(result));
@@ -2121,7 +2143,16 @@ impl Cereal {
                 };
                 let finished = matches!(message, SyncMessage::Finished(_));
                 let _ = this.update(cx, |this, cx| {
-                    if crate::account::epoch() != account_epoch {
+                    if finished {
+                        this.refreshing.remove(&id);
+                        this.server_pending = this.server_pending.saturating_sub(1);
+                    }
+                    if crate::accounts::epoch_of(&id) != Some(account_epoch) {
+                        // The account was signed out of, or its session was
+                        // replaced or ended: what was on its way is dropped.
+                        if finished && this.server_pending == 0 {
+                            this.server_status = None;
+                        }
                         return;
                     }
                     match message {
@@ -2133,7 +2164,7 @@ impl Cereal {
                             wanted,
                         } => {
                             for remote in notes {
-                                this.apply_server_note(remote, &url);
+                                this.apply_server_note(remote, slot, &url);
                             }
                             if read < wanted {
                                 this.server_status =
@@ -2141,13 +2172,54 @@ impl Cereal {
                             }
                             cx.notify();
                         }
+                        SyncMessage::Listed(present) => {
+                            let relisted: Vec<u64> = this
+                                .workspace
+                                .notes_of(slot)
+                                .filter(|note| {
+                                    note.server_missing_since.is_some()
+                                        && note.server_url.as_deref() == Some(url.as_str())
+                                        && note.server_id.as_ref().is_some_and(|id| present.contains(&id.to_ascii_lowercase()))
+                                })
+                                .map(|note| note.id)
+                                .collect();
+                            for note_id in relisted {
+                                if let Some(note) = this.workspace.note_mut(note_id) {
+                                    mark_listed(note);
+                                }
+                            }
+                        }
+                        SyncMessage::Missing(missing) => {
+                            let now = chrono::Utc::now().to_rfc3339();
+                            let recording = this.recording.note_id.filter(|_| this.recording.is_active());
+                            let gone: Vec<u64> = this
+                                .workspace
+                                .notes_of(slot)
+                                .filter(|note| {
+                                    note.server_url.as_deref() == Some(url.as_str())
+                                        && note.server_id.as_ref().is_some_and(|id| missing.contains(&id.to_ascii_lowercase()))
+                                        && this.current_note != Some(note.id)
+                                        && recording != Some(note.id)
+                                })
+                                .map(|note| note.id)
+                                .collect();
+                            for note_id in gone {
+                                if let Some(note) = this.workspace.note_mut(note_id) {
+                                    mark_missing(note, &now);
+                                }
+                            }
+                            cx.notify();
+                        }
                         SyncMessage::Finished(result) => {
-                            this.server_pending = this.server_pending.saturating_sub(1);
                             match result {
                                 Ok(models) => {
-                                    this.chat_models = models;
-                                    if !this.chat_models.iter().any(|choice| Some(chat_model_key(choice)) == this.selected_chat_model) { this.selected_chat_model = None; }
-                                    this.server_status = None;
+                                    if wants_models {
+                                        this.chat_models = models;
+                                        if !this.chat_models.iter().any(|choice| Some(chat_model_key(choice)) == this.selected_chat_model) { this.selected_chat_model = None; }
+                                    }
+                                    if this.server_pending == 0 {
+                                        this.server_status = None;
+                                    }
                                 }
                                 Err(error) => {
                                     this.server_status = Some(error.clone());
@@ -2167,48 +2239,37 @@ impl Cereal {
         .detach();
     }
 
-    /// Open the note of the signed-in account that the server calls
-    /// `server_id` (a link to it was followed). One that has not been listed
-    /// here yet is read from the server first; one the server does not have
-    /// for this account says so.
-    pub fn open_server_note(&mut self, server_id: String, cx: &mut Context<Self>) {
-        let Ok(credentials) = crate::account::credentials() else {
+    /// Open the note that `account`'s server calls `server_id` (a link to it
+    /// was followed). One that has not been listed here yet is read from
+    /// that server first, with that account's client; one the server does
+    /// not have for this account says so.
+    pub fn open_server_note(&mut self, account: AccountId, server_id: String, cx: &mut Context<Self>) {
+        let Some(account) = crate::accounts::get(&account) else {
             return;
         };
-        let url = credentials.url.clone();
-        let local = |this: &Self, server_id: &str, url: &str| {
-            this.workspace
-                .notes
-                .iter()
-                .find(|note| {
-                    note.server_id.as_deref() == Some(server_id)
-                        && note.server_url.as_deref() == Some(url)
-                })
-                .map(|note| note.id)
-        };
-        if let Some(id) = local(self, &server_id, &url) {
+        let (slot, url) = (account.slot, account.url.clone());
+        if let Some(id) = cached_note(&self.workspace, slot, &server_id, &url) {
             self.open_note(id, cx);
             return;
         }
-        let account_epoch = crate::account::epoch();
-        let token = credentials.token;
+        let Ok(path_id) = crate::accounts::client::path_id(&server_id) else {
+            return;
+        };
+        let account_epoch = account.epoch();
+        let account_id = account.id.clone();
         cx.spawn(async move |this, cx| {
-            let address = format!("{url}/api/v1/notes/{server_id}");
-            // Asked of the signed-in server, with its own session.
+            // Asked of the note's own server, with that account's session.
+            let asked = account_id.clone();
             let reply = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::fetch::Request {
-                        method: "GET",
-                        url: &address,
-                        bearer: Some(&token),
-                        body: None,
-                    }
-                    .send(8 * 1024 * 1024)
+                    crate::accounts::client(&asked)
+                        .map_err(|_| crate::fetch::Failure::Transport)?
+                        .fetch(&format!("/api/v1/notes/{path_id}"), 8 * 1024 * 1024)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if crate::account::epoch() != account_epoch {
+                if crate::accounts::epoch_of(&account_id) != Some(account_epoch) {
                     return;
                 }
                 let remote = match reply {
@@ -2229,9 +2290,9 @@ impl Cereal {
                 match remote.filter(|remote| remote.id.eq_ignore_ascii_case(&server_id)) {
                     Some(remote) => {
                         let server_id = remote.id.clone();
-                        this.apply_server_note(remote, &url);
+                        this.apply_server_note(remote, slot, &url);
                         this.persist(cx);
-                        if let Some(id) = local(this, &server_id, &url) {
+                        if let Some(id) = cached_note(&this.workspace, slot, &server_id, &url) {
                             this.open_note(id, cx);
                         }
                     }
@@ -2243,18 +2304,15 @@ impl Cereal {
         .detach();
     }
 
-    /// Bring the copy of a server note kept here up to date, creating it when it
-    /// is new. The note open for editing is left as it is.
-    fn apply_server_note(&mut self, remote: NoteDTO, url: &str) {
-        let id = self
-            .workspace
-            .notes
-            .iter()
-            .find(|n| {
-                n.server_id.as_deref() == Some(&remote.id) && n.server_url.as_deref() == Some(url)
-            })
-            .map(|n| n.id)
-            .unwrap_or_else(|| self.workspace.create_note());
+    /// Bring the copy of a server note kept here up to date, creating it in
+    /// its account's slot when it is new. The note open for editing is left
+    /// as it is, and text that has not been sent yet is not replaced.
+    fn apply_server_note(&mut self, remote: NoteDTO, slot: u16, url: &str) {
+        let Some(id) = cached_note(&self.workspace, slot, &remote.id, url)
+            .or_else(|| self.workspace.create_note_in(slot))
+        else {
+            return;
+        };
         if self.current_note == Some(id) {
             return;
         }
@@ -2264,8 +2322,12 @@ impl Cereal {
                 remote.transcript_revision,
                 remote.generated_revision,
             ));
-            note.title = remote.title.clone();
-            note.body = remote.body.clone();
+            // It is on the server: a "Deleted on the server" mark goes.
+            mark_listed(note);
+            if !note.unsent_edits {
+                note.title = remote.title.clone();
+                note.body = remote.body.clone();
+            }
             if !note.enhanced_dirty {
                 note.enhanced = remote.enhanced.clone();
             }
@@ -2281,16 +2343,55 @@ impl Cereal {
             note.server_url = Some(url.to_string());
         }
     }
+
+    /// Every note of an account with an unsent capture or edit is queued
+    /// again: the account has just become Ready (its session was verified,
+    /// replaced, or signed in to again).
+    pub fn requeue_unsent(
+        &mut self,
+        account: &crate::accounts::Account,
+        returning: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let recording = self.recording.note_id.filter(|_| self.recording.is_active());
+        let queue: Vec<(u64, Action)> = self
+            .workspace
+            .notes_of(account.slot)
+            .filter(|note| recording != Some(note.id) && self.current_note != Some(note.id))
+            .filter_map(|note| Some((note.id, requeue_action(note, returning)?)))
+            .collect();
+        for (id, action) in queue {
+            self.server_action(id, action, cx);
+        }
+    }
+
+    /// Send something about a note to the account it belongs to, through
+    /// that account's serial worker. Nothing falls back to another account.
     pub fn server_action(&mut self, id: u64, action: Action, cx: &mut Context<Self>) {
-        if !enabled() || crate::account::identity().is_none() {
+        if !enabled() {
             return;
         }
-        let account_epoch = crate::account::epoch();
+        let Some(account) = crate::accounts::of_note(id) else {
+            return;
+        };
+        if !account.shown() {
+            // Its session has ended (or was never verified in this launch):
+            // nothing is sent. What is unsent stays marked on the note and
+            // is queued again after the sign-in.
+            return;
+        }
+        let account_epoch = account.epoch();
+        let account_id = account.id.clone();
         let Some(note) = self.workspace.note(id).cloned() else {
             return;
         };
         let generating = matches!(&action, Action::Generate);
         let chat = matches!(&action, Action::Chat { .. });
+        // An action that ends with every part of the note's audio sent.
+        let uploads = matches!(
+            &action,
+            Action::Recording("stop") | Action::Sync | Action::Generate
+        );
         let chat_index = self.chat_messages.len().checked_sub(1);
         let epoch = if generating {
             Some(self.generation.begin(id, note.transcript_revision))
@@ -2300,9 +2401,11 @@ impl Cereal {
         let submitted_enhanced = note.enhanced.clone();
         let submitted_enhanced_dirty = note.enhanced_dirty;
         let submitted_title = note.title.clone();
+        let submitted_body = note.body.clone();
         let receiver = self
-            .server_bridge
-            .get_or_insert_with(Bridge::new)
+            .bridges
+            .entry(account_id.clone())
+            .or_insert_with(|| Bridge::new(account_id.clone()))
             .send(note, action);
         self.server_pending += 1;
         self.server_status = Some(
@@ -2331,10 +2434,20 @@ impl Cereal {
                 }
             };
             let _ = this.update(cx, |this, cx| {
-                if crate::account::epoch() != account_epoch {
+                this.server_pending = this.server_pending.saturating_sub(1);
+                if crate::accounts::epoch_of(&account_id) != Some(account_epoch) {
+                    // The account's session was replaced or ended, or it
+                    // was signed out of. The note keeps its unsent marks
+                    // and is queued again when the account is Ready.
+                    if this.server_pending == 0 {
+                        this.server_status = None;
+                    }
+                    if generating && epoch == Some(this.generation.epoch) {
+                        this.generation.cancel();
+                    }
+                    cx.notify();
                     return;
                 }
-                this.server_pending = this.server_pending.saturating_sub(1);
                 match result {
                     Ok(reply) => {
                         if let Some(url) = reply.share_url {
@@ -2345,10 +2458,20 @@ impl Cereal {
                             );
                         }
                         let live_note = this.live.streams(id);
+                        let recording_now =
+                            this.recording.note_id == Some(id) && this.recording.is_active();
                         let mut named = None;
                         if let Some(note) = this.workspace.note_mut(id) {
                             note.server_id = Some(reply.note.id.clone());
                             note.server_url = Some(reply.url);
+                            // The server has what was sent: what is unsent
+                            // now is only what changed since.
+                            if note.title == submitted_title && note.body == submitted_body {
+                                note.unsent_edits = false;
+                            }
+                            if uploads && !recording_now {
+                                note.unsent_capture = false;
+                            }
                             // The server names a note nobody has named when
                             // its notes are generated: the list row and the
                             // title field show that name at once, and later
@@ -2468,13 +2591,7 @@ pub(crate) mod testing {
     use super::*;
 
     fn client(url: &str, root: &Path) -> Client {
-        Client {
-            url: url.to_owned(),
-            token: "fictional-part-upload-owner-token-0000".into(),
-            ids: HashMap::new(),
-            account_epoch: None,
-            storage_root: Some(root.to_path_buf()),
-        }
+        Client::for_test(url.to_owned(), "fictional-part-upload-owner-token-0000", Some(root))
     }
 
     /// Record, before anything has placed the capture, that its parts are
@@ -2512,23 +2629,8 @@ pub(crate) mod testing {
     }
 
     pub(crate) fn live_url(url: &str, note_id: &str) -> String {
-        super::live_url(url, note_id)
+        crate::accounts::client::live_url(url, note_id)
     }
-}
-
-#[cfg(test)]
-pub(crate) fn test_client_for_auth_probe(
-    url: String,
-    token: String,
-) -> impl Fn(&str) -> Result<serde_json::Value, String> {
-    let client = Client {
-        url,
-        token,
-        ids: HashMap::new(),
-        account_epoch: None,
-        storage_root: None,
-    };
-    move |path| client.request("DELETE", path, None)
 }
 
 #[cfg(test)]
@@ -2696,13 +2798,7 @@ mod tests {
                 write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
             }
         });
-        let client = Client {
-            url: format!("http://{address}"),
-            token: "fixture-calendar-owner".into(),
-            ids: HashMap::new(),
-            account_epoch: None,
-            storage_root: None,
-        };
+        let client = Client::for_test(format!("http://{address}"), "fixture-calendar-owner", None);
         let snapshot = super::load_calendar_events_with_client(
             &client,
             "2026-11-12T00:00:00-05:00",
@@ -2739,12 +2835,16 @@ mod tests {
         let remote: meeting_notes_api_types::NoteDTO = serde_json::from_value(serde_json::json!({
             "id":"3a49a4af-c660-42e9-a36a-a806fbb41e0d","title":"Meeting","body":"","enhanced":"","date":"2026-11-26","duration":"","createdAt":"2026-11-26T10:00:00Z","updatedAt":"2026-11-26T10:00:00Z","recordingState":"idle","generationState":"idle","transcriptRevision":0,"generatedRevision":null,"transcriptSegments":[]
         })).unwrap();
-        let mut workspace = crate::model::Workspace::default();
+        let mut workspace = crate::model::Workspace::with_slots(&[1, 2]);
         let id = super::import_calendar_note(
             &mut workspace,
+            1,
             remote.clone(),
             "https://one.example".into(),
-        );
+        )
+        .unwrap();
+        // In memory the note is known by a handle in its account's slot.
+        assert_eq!(crate::accounts::handle::split(id), Some((1, 1)));
         let note = workspace.note_mut(id).unwrap();
         note.body = "Unsaved typed notes".into();
         note.enhanced_dirty = true;
@@ -2753,21 +2853,42 @@ mod tests {
         assert_eq!(
             super::import_calendar_note(
                 &mut workspace,
+                1,
                 remote.clone(),
                 "https://one.example".into()
             ),
-            id
+            Some(id)
         );
         assert_eq!(workspace.notes.len(), 1);
         let note = workspace.note_mut(id).unwrap();
         assert_eq!(note.body, "Unsaved typed notes");
         assert_eq!(note.enhanced, "Unsaved enhanced edit");
         assert!(!note.trashed);
-        let other =
-            super::import_calendar_note(&mut workspace, remote, "https://other.example".into());
+        let other = super::import_calendar_note(
+            &mut workspace,
+            1,
+            remote.clone(),
+            "https://other.example".into(),
+        );
         assert_ne!(
-            other, id,
+            other,
+            Some(id),
             "An event note from another instance is never reused"
+        );
+        // The same note id from another account, even on the same server,
+        // is another note: everything is keyed with the account.
+        let theirs =
+            super::import_calendar_note(&mut workspace, 2, remote, "https://one.example".into())
+                .unwrap();
+        assert_ne!(theirs, id);
+        assert_eq!(crate::accounts::handle::slot_of(theirs), Some(2));
+        // An account whose notes are not loaded keeps nothing.
+        let unloaded: meeting_notes_api_types::NoteDTO = serde_json::from_value(serde_json::json!({
+            "id":"3a49a4af-c660-42e9-a36a-a806fbb41e0e","title":"Meeting","body":"","enhanced":"","date":"2026-11-26","duration":"","createdAt":"2026-11-26T10:00:00Z","updatedAt":"2026-11-26T10:00:00Z","recordingState":"idle","generationState":"idle","transcriptRevision":0,"generatedRevision":null,"transcriptSegments":[]
+        })).unwrap();
+        assert_eq!(
+            super::import_calendar_note(&mut workspace, 9, unloaded, "https://one.example".into()),
+            None
         );
     }
 
@@ -2898,17 +3019,11 @@ mod tests {
             let mut socket = accept_test_request(listener);
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}").unwrap();
         });
-        let client = Client {
-            url: format!("http://{address}"),
-            token: "fictional-large-upload-owner".into(),
-            ids: HashMap::new(),
-            account_epoch: None,
-            storage_root: None,
-        };
+        let client = Client::for_test(format!("http://{address}"), "fictional-large-upload-owner", None);
         let response: serde_json::Value = client
             .request(
                 "PUT",
-                "/fixture",
+                "/api/v1/fixture",
                 Some(serde_json::json!({"audioBase64":"A".repeat(8_000_000)})),
             )
             .unwrap();
@@ -2945,13 +3060,7 @@ mod tests {
                 .write_all(b"data: {\"type\":\"done\",\"text\":\"\"}\n\n")
                 .unwrap();
         });
-        let client = Client {
-            url: format!("http://{address}"),
-            token: "fictional-stream-owner".into(),
-            ids: HashMap::new(),
-            account_epoch: None,
-            storage_root: None,
-        };
+        let client = Client::for_test(format!("http://{address}"), "fictional-stream-owner", None);
         let receiver = stream_chat_with_client(
             Ok(client),
             None,
@@ -2997,13 +3106,7 @@ mod tests {
             let closed = socket.read(&mut byte);
             assert!(matches!(closed, Ok(0)) || closed.is_err());
         });
-        let client = Client {
-            url: format!("http://{address}"),
-            token: "fictional-cancel-owner".into(),
-            ids: HashMap::new(),
-            account_epoch: None,
-            storage_root: None,
-        };
+        let client = Client::for_test(format!("http://{address}"), "fictional-cancel-owner", None);
         let cancel = Arc::new(AtomicBool::new(false));
         let receiver =
             stream_chat_with_client(Ok(client), None, "Question".into(), vec![], cancel.clone(), None);
@@ -3039,7 +3142,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
-        let mut client = Client::new().unwrap();
+        let mut client = crate::accounts::default_client().unwrap();
         let mut first = Note {
             id: stamp,
             title: "Fictional desktop provider pipeline acceptance".into(),
@@ -3128,7 +3231,7 @@ mod tests {
                 server_url: Some(created.url.clone()),
                 ..Default::default()
             };
-            let mut second = Client::new()?;
+            let mut second = crate::accounts::default_client()?;
             second.run(&imported, Action::Recording("start"))?;
             imported
                 .audio_captures
@@ -3243,13 +3346,7 @@ mod tests {
             assert_eq!(body["message"], "Olá \"team\"\nAction: résumé");
             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}").unwrap();
         });
-        let client = Client {
-            url: format!("http://{address}"),
-            token: "fixture-owner-credential-only-for-test".into(),
-            ids: HashMap::new(),
-            account_epoch: None,
-            storage_root: None,
-        };
+        let client = Client::for_test(format!("http://{address}"), "fixture-owner-credential-only-for-test", None);
         let reply: serde_json::Value = client
             .request(
                 "POST",
@@ -3375,16 +3472,10 @@ mod evidence_transport_tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let request_cancel = cancel.clone();
         let request = std::thread::spawn(move || {
-            let client = Client {
-                url: format!("http://{address}"),
-                token: "fictional-evidence-transport-owner-token".into(),
-                ids: HashMap::new(),
-                account_epoch: None,
-                storage_root: None,
-            };
+            let client = Client::for_test(format!("http://{address}"), "fictional-evidence-transport-owner-token", None);
             client.request_with_cancel::<serde_json::Value>(
                 "GET",
-                "/pending",
+                "/api/v1/pending",
                 None,
                 Some(request_cancel),
             )
@@ -3405,11 +3496,11 @@ mod evidence_transport_tests {
     fn the_live_socket_is_on_the_notes_own_server_with_tls_wherever_requests_have_it() {
         let id = "419d65d1-7a2c-44ca-84cc-ad489522d561";
         assert_eq!(
-            super::live_url("https://notes.example", id),
+            crate::accounts::client::live_url("https://notes.example", id),
             format!("wss://notes.example/api/v1/notes/{id}/live")
         );
         assert_eq!(
-            super::live_url("http://127.0.0.1:3000", id),
+            crate::accounts::client::live_url("http://127.0.0.1:3000", id),
             format!("ws://127.0.0.1:3000/api/v1/notes/{id}/live")
         );
     }
@@ -3444,13 +3535,7 @@ mod evidence_transport_tests {
         use std::collections::HashMap;
         let root = std::env::temp_dir().join(format!("cereal-part-plan-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let client = Client {
-            url: "http://127.0.0.1:9".into(),
-            token: "fictional-part-plan-owner-token-00000".into(),
-            ids: HashMap::new(),
-            account_epoch: None,
-            storage_root: Some(root.clone()),
-        };
+        let client = Client::for_test("http://127.0.0.1:9", "fictional-part-plan-owner-token-00000", Some(&root));
         let id = "419d65d1-7a2c-44ca-84cc-ad489522d561";
         let note = crate::model::Note { id: 5, server_id: Some(id.into()), ..Default::default() };
         let mapping_root = client.mapping_root(&note, id).unwrap();
@@ -3621,13 +3706,7 @@ mod evidence_transport_tests {
             ],
             ..Default::default()
         };
-        let client = Client {
-            url: format!("http://{address}"),
-            token: "fictional-live-base-owner-token-0000".into(),
-            ids: HashMap::new(),
-            account_epoch: None,
-            storage_root: Some(root.clone()),
-        };
+        let client = Client::for_test(format!("http://{address}"), "fictional-live-base-owner-token-0000", Some(&root));
         assert_eq!(client.live_capture_base(&note, id, "capture-live"), Ok(12_500));
         // What `upload` will read for each capture when the recording stops.
         let saved = |name: &str| -> u64 {
@@ -3740,13 +3819,7 @@ mod note_sync_tests {
                 .unwrap();
             }
         });
-        let client = Client {
-            url: format!("http://{address}"),
-            token: "fixture-owner-credential-only-for-test".into(),
-            ids: HashMap::new(),
-            account_epoch: None,
-            storage_root: None,
-        };
+        let client = Client::for_test(format!("http://{address}"), "fixture-owner-credential-only-for-test", None);
         (client, seen, server, done)
     }
 
@@ -3822,10 +3895,10 @@ mod note_sync_tests {
         ]);
         let mut delivered = Vec::new();
         let mut progress = Vec::new();
-        refresh_notes(&client, &kept, |notes, read, wanted| {
+        refresh_notes(&client, &kept, &[], |notes, read, wanted| {
             delivered.extend(notes.into_iter().map(|note| (note.id, note.body)));
             progress.push((read, wanted));
-        })
+        }, |_| {})
         .unwrap();
         *done.lock().unwrap() = true;
         server.join().unwrap();
@@ -3858,7 +3931,7 @@ mod note_sync_tests {
         });
         let kept = HashMap::from([(id(1), sync_stamp("2026-11-12T10:00:00.000Z", 1, None))]);
         let mut batches = 0;
-        refresh_notes(&client, &kept, |_, _, _| batches += 1).unwrap();
+        refresh_notes(&client, &kept, &[], |_, _, _| batches += 1, |_| {}).unwrap();
         *done.lock().unwrap() = true;
         server.join().unwrap();
         assert_eq!(batches, 0);
@@ -3885,9 +3958,9 @@ mod note_sync_tests {
             (500, "{}".into())
         });
         let mut delivered = Vec::new();
-        refresh_notes(&client, &HashMap::new(), |notes, read, wanted| {
+        refresh_notes(&client, &HashMap::new(), &[], |notes, read, wanted| {
             delivered.push((notes.len(), read, wanted))
-        })
+        }, |_| {})
         .unwrap();
         *done.lock().unwrap() = true;
         server.join().unwrap();
@@ -3922,12 +3995,15 @@ mod note_sync_tests {
             (503, r#"{"error":"unavailable","message":"The note service is temporarily unavailable"}"#.into())
         });
         let mut delivered = Vec::new();
-        let result = refresh_notes(&client, &HashMap::new(), |notes, read, wanted| {
+        let result = refresh_notes(&client, &HashMap::new(), &[], |notes, read, wanted| {
             delivered.push((notes.into_iter().map(|note| note.id).collect::<Vec<_>>(), read, wanted))
-        });
+        }, |_| {});
         *done.lock().unwrap() = true;
         server.join().unwrap();
-        assert_eq!(result, Err("The note service is temporarily unavailable".to_string()));
+        assert_eq!(
+            result.map(|_| ()),
+            Err("The note service is temporarily unavailable".to_string())
+        );
         assert_eq!(delivered, vec![(vec![id(1)], 1, 2)]);
     }
 
@@ -3947,3 +4023,253 @@ mod note_sync_tests {
     }
 }
 
+
+/// Notes of an account against its own server: the Trash rule, a restored
+/// note, and ids that are never reused.
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+    // `gpui::*` re-exports its own `test` attribute; these are plain unit tests.
+    use std::prelude::v1::test;
+    use crate::accounts::client::testing::{Fake, json};
+
+    const TOKEN: &str = "fictional-account-note-token-000000000000";
+
+    fn note_json(id: &str, title: &str) -> String {
+        serde_json::json!({
+            "id": id, "title": title, "body": "", "enhanced": "", "date": "2026-11-16", "duration": "",
+            "createdAt": "2026-11-16T10:00:00Z", "updatedAt": "2026-11-16T10:00:00Z",
+            "recordingState": "idle", "generationState": "idle", "transcriptRevision": 0,
+            "generatedRevision": null, "transcriptSegments": []
+        })
+        .to_string()
+    }
+
+    fn row(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "title": "Row", "date": "2026-11-16", "duration": "",
+            "createdAt": "2026-11-16T10:00:00Z", "updatedAt": "2026-11-16T10:00:00Z",
+            "recordingState": "idle", "generationState": "idle", "transcriptRevision": 0,
+            "generatedRevision": null, "hasBody": true, "hasSummary": false, "hasTranscript": false,
+            "speakerCount": 0, "excerpt": "", "meeting": null,
+            "attendees": {"people": [], "others": 0, "total": 0}, "organizationId": null, "folders": []
+        })
+    }
+
+    fn page(rows: &[serde_json::Value]) -> String {
+        serde_json::json!({"notes": rows, "nextCursor": null, "total": rows.len()}).to_string()
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("cereal-server-{name}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    const A: &str = "3a49a4af-c660-42e9-a36a-a806fbb41e01";
+    const B: &str = "3a49a4af-c660-42e9-a36a-a806fbb41e02";
+    const C: &str = "3a49a4af-c660-42e9-a36a-a806fbb41e03";
+    const D: &str = "3a49a4af-c660-42e9-a36a-a806fbb41e04";
+
+    #[test]
+    fn v4_only_a_404_for_the_note_itself_after_a_complete_listing_marks_it_gone() {
+        // The server lists A only. Of the notes kept here, B is gone (404),
+        // C is there after all (the listing was short), and D's request
+        // fails: only B is concluded to be gone.
+        let server = Fake::start(|request| match request.path.as_str() {
+            path if path.starts_with("/api/v1/notes/summaries") => json(200, page(&[row(A)])),
+            path if path == format!("/api/v1/notes/{B}") => json(404, r#"{"error":"not_found","message":"Note not found"}"#),
+            path if path == format!("/api/v1/notes/{C}") => json(200, note_json(C, "Still here")),
+            path if path == format!("/api/v1/notes/{D}") => (503, "text/html", "<html>busy</html>".into(), vec![]),
+            path if path == format!("/api/v1/notes/{A}") => json(200, note_json(A, "Listed")),
+            _ => json(500, "{}"),
+        });
+        let client = Client::for_test(&server.url, TOKEN, None);
+        let mut delivered = Vec::new();
+        let mut listed = std::collections::HashSet::new();
+        // Candidates are compared whatever the case of their ids.
+        let candidates = [A.to_uppercase(), B.into(), C.into(), D.into()];
+        let gone = refresh_notes(
+            &client,
+            &HashMap::new(),
+            &candidates,
+            |notes, _, _| delivered.extend(notes.into_iter().map(|note| note.id)),
+            |present| listed = present,
+        )
+        .unwrap();
+        assert_eq!(gone.missing, [B.to_string()]);
+        assert_eq!(delivered, [A.to_string(), C.to_string()]);
+        assert!(listed.contains(A));
+        assert!(!server.paths().contains(&format!("GET /api/v1/notes/{}", A.to_uppercase())), "a listed note is not asked for");
+
+        // A listing with a row whose id is not a UUID is incomplete:
+        // nothing is asked, nothing is concluded.
+        let skipped = Fake::start(|request| {
+            if request.path.starts_with("/api/v1/notes/summaries") {
+                json(200, page(&[row(A), row("not-a-uuid")]))
+            } else {
+                json(404, r#"{"error":"not_found","message":"Note not found"}"#)
+            }
+        });
+        let client = Client::for_test(&skipped.url, TOKEN, None);
+        let gone = refresh_notes(&client, &HashMap::new(), &[B.into()], |_, _, _| {}, |_| {}).unwrap();
+        assert!(gone.missing.is_empty());
+        assert!(!skipped.paths().contains(&format!("GET /api/v1/notes/{B}")));
+
+        // A listing that fails part way concludes nothing either.
+        let failing = Fake::start(|_| json(503, r#"{"error":"unavailable"}"#));
+        let client = Client::for_test(&failing.url, TOKEN, None);
+        assert!(refresh_notes(&client, &HashMap::new(), &[B.into()], |_, _, _| {}, |_| {}).is_err());
+
+        // The marks: nothing is erased, a note with unsent work is left
+        // alone, and a note that is listed again comes back.
+        let mut note = Note {
+            id: 7,
+            title: "Gone on the server".into(),
+            body: "Its text".into(),
+            server_id: Some(B.into()),
+            folder_id: Some(3),
+            favorite: true,
+            ..Default::default()
+        };
+        assert!(mark_missing(&mut note, "2026-11-16T10:00:00Z"));
+        assert!(note.trashed);
+        assert_eq!(note.server_missing_since.as_deref(), Some("2026-11-16T10:00:00Z"));
+        assert_eq!((note.body.as_str(), note.folder_id, note.favorite), ("Its text", Some(3), true));
+        assert!(mark_listed(&mut note));
+        assert!(!note.trashed && note.server_missing_since.is_none());
+        let mut unsent = Note { unsent_edits: true, ..Default::default() };
+        assert!(!mark_missing(&mut unsent, "now"));
+        assert!(!unsent.trashed);
+        let mut capturing = Note { unsent_capture: true, ..Default::default() };
+        assert!(!mark_missing(&mut capturing, "now"));
+    }
+
+    #[test]
+    fn r1_a_restored_note_deleted_on_the_server_is_created_there_again() {
+        let created = "3a49a4af-c660-42e9-a36a-a806fbb41e99";
+        let server = Fake::start(move |request| match (request.method.as_str(), request.path.as_str()) {
+            ("POST", "/api/v1/notes") => json(200, note_json(created, "Restored")),
+            (_, path) if path == format!("/api/v1/notes/{created}") => json(200, note_json(created, "Restored")),
+            // The old note is gone.
+            _ => json(404, r#"{"error":"not_found","message":"Note not found"}"#),
+        });
+        let root = scratch("r1");
+        let mut client = Client::for_test(&server.url, TOKEN, Some(&root));
+        let id = handle::handle(1, 5).unwrap();
+        let mut note = Note {
+            id,
+            title: "Restored".into(),
+            body: "Kept text".into(),
+            server_id: Some(B.into()),
+            server_url: Some(server.url.clone()),
+            ..Default::default()
+        };
+        // The worker had known it, and its sidecar was on disk.
+        client.ids.insert(id, B.into());
+        let sidecar = association_file(&root, &server.url, id);
+        fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        fs::write(&sidecar, B).unwrap();
+        // Trash marked it; restore detaches it.
+        mark_missing(&mut note, "2026-11-16T10:00:00Z");
+        let url = detach_from_server(&mut note).unwrap();
+        fs::remove_file(association_file(&root, &url, id)).unwrap();
+        assert!(!note.trashed && note.server_id.is_none() && note.server_url.is_none());
+        assert!(note.unsent_edits, "it is saved at once");
+        let reply = client.run(&note, Action::Save).unwrap();
+        assert_eq!(reply.note.id, created);
+        assert_eq!(
+            server.paths(),
+            [
+                "POST /api/v1/notes".to_string(),
+                format!("PATCH /api/v1/notes/{created}"),
+                format!("GET /api/v1/notes/{created}"),
+            ]
+        );
+        assert_eq!(fs::read_to_string(&sidecar).unwrap(), created);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn h3_a_new_note_is_created_on_the_server_and_adopts_no_sidecar_of_an_old_id() {
+        let created = "3a49a4af-c660-42e9-a36a-a806fbb41e98";
+        let server = Fake::start(move |request| match (request.method.as_str(), request.path.as_str()) {
+            ("POST", "/api/v1/notes") => json(200, note_json(created, "New")),
+            _ => json(200, note_json(created, "New")),
+        });
+        let root = scratch("h3");
+        // The old note 3 left a sidecar and a capture directory behind.
+        let old = handle::handle(1, 3).unwrap();
+        let old_sidecar = association_file(&root, &server.url, old);
+        fs::create_dir_all(old_sidecar.parent().unwrap()).unwrap();
+        fs::write(&old_sidecar, A).unwrap();
+        fs::create_dir_all(root.join("note-3")).unwrap();
+        // Its id is never handed out again (`model::account_tests::h3_…`),
+        // so the next note is 4, which nothing on disk names.
+        let mut client = Client::for_test(&server.url, TOKEN, Some(&root));
+        let note = Note { id: handle::handle(1, 4).unwrap(), title: "New".into(), ..Default::default() };
+        assert_eq!(client.ensure(&note).unwrap(), created);
+        assert_eq!(server.paths(), ["POST /api/v1/notes"]);
+        assert_eq!(fs::read_to_string(association_file(&root, &server.url, note.id)).unwrap(), created);
+        assert_eq!(fs::read_to_string(&old_sidecar).unwrap(), A, "the old one is untouched");
+        // On disk the sidecar is named by the file id.
+        assert!(association_file(&root, &server.url, note.id).ends_with("4.txt"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_note_is_only_ever_sent_to_its_own_account() {
+        let server = Fake::start(|_| json(200, "{}"));
+        let root = scratch("own");
+        let mut client = Client::for_test(&server.url, TOKEN, Some(&root));
+        client.slot = Some(1);
+        let theirs = Note { id: handle::handle(2, 1).unwrap(), ..Default::default() };
+        assert!(client.ensure(&theirs).is_err());
+        let elsewhere = Note {
+            id: handle::handle(1, 1).unwrap(),
+            server_id: Some(A.into()),
+            server_url: Some("https://other.example".into()),
+            ..Default::default()
+        };
+        assert!(client.ensure(&elsewhere).is_err());
+        assert!(server.requests().is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn s3_what_was_recorded_while_the_session_had_ended_is_sent_after_sign_in() {
+        let directory = scratch("s3");
+        let manifest_path = directory.join("manifest.json");
+        let manifest: crate::audio::CaptureManifest = serde_json::from_value(serde_json::json!({
+            "version": 1, "capture_id": "capture-1", "note_id": 1, "directory": directory,
+            "manifest_path": manifest_path, "started_at": "2026-11-16T10:00:00Z",
+            "finished_at": null, "stats": {}, "error": null
+        }))
+        .unwrap();
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let note = Note {
+            id: handle::handle(1, 1).unwrap(),
+            audio_captures: vec![manifest.clone()],
+            unsent_capture: true,
+            ..Default::default()
+        };
+        // Still recording: nothing is queued.
+        assert!(requeue_action(&note, true).is_none());
+        // Stopped: the capture is final.
+        let mut finished = manifest;
+        finished.finished_at = Some("2026-11-16T10:40:00Z".into());
+        fs::write(&manifest_path, serde_json::to_vec(&finished).unwrap()).unwrap();
+        // Back after the sign-in, its parts are sent with the identities
+        // they always had (the upload after Stop).
+        assert!(matches!(requeue_action(&note, true), Some(Action::Sync)));
+        // At an ordinary launch a capture is not sent by itself, as before.
+        assert!(requeue_action(&note, false).is_none());
+        // An unsent edit is sent either way.
+        let edited = Note { unsent_edits: true, ..note.clone() };
+        assert!(matches!(requeue_action(&edited, false), Some(Action::Save)));
+        // A note its server deleted is not sent at all.
+        let gone = Note { trashed: true, server_missing_since: Some("now".into()), ..note };
+        assert!(requeue_action(&gone, true).is_none());
+        let _ = fs::remove_dir_all(directory);
+    }
+}
