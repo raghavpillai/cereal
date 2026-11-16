@@ -52,7 +52,7 @@ export async function liveFixture(options: LiveFixtureOptions = {}) {
       yield "ok"
     },
   }
-  const processing = makeProcessingService(repository, { providers, live: hub })
+  const processing = makeProcessingService(repository, { labelledNoteChat: true, providers, live: hub })
   const endpoint = makeLiveEndpoint({
     repository, hub,
     resolvePrincipal: async headers => {

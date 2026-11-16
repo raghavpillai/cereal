@@ -122,39 +122,17 @@ function blocks(text:string,span:Span):Span[] {
 /** A progress step as the client saw it: the fields of a `tool` stream event. */
 export interface CoverageStep {name:string;status:string;label:string;resultCount?:number}
 /**
- * The closing "Coverage note" of an answer: what was searched and read, and
- * whether transcripts were consulted. It is a pure function of the progress
- * steps that were emitted, so it cannot claim a lookup that did not run; the
- * evaluation recomputes it from the stream's `tool` events and compares.
+ * What an answer has to admit about its research, or nothing. Most answers rest on lookups that all ran and
+ * read what they found, and say nothing about them. A note is written only when the research was partial: a
+ * lookup failed, something found did not fit and was left unread, or a period holds more meetings than were
+ * read. Then it is one short plain line. It is a pure function of the progress steps that were emitted, so it
+ * cannot claim what did not happen; the evaluation recomputes it from the stream's `tool` events and compares.
  */
 export function coverageNote(steps:ReadonlyArray<CoverageStep>):string {
-  const done:Array<{name:string;doing:string;label:string;count:number}>=[]
-  let doing="",failed=0
-  for(const step of steps){
-    if(step.status==="running")doing=step.label
-    else if(step.status==="completed"){done.push({name:step.name,doing,label:step.label,count:step.resultCount??0});doing=""}
-    else if(step.status==="failed"){failed++;doing=""}
-  }
-  if(!done.length)return failed?"The meeting lookup failed, so nothing was searched or read.":""
-  const lower=(text:string)=>text.charAt(0).toLowerCase()+text.slice(1),when=(text:string)=>/ (?:from|on|since|up to) \d{4}-\d{2}-\d{2}.*$/.exec(text)?.[0]??""
-  const phrase=(step:typeof done[number])=>
-    step.name==="search_meetings"?`${lower(step.doing).replace(/^searching meetings/,"searched your meetings")} (${step.count} found)`
-    :step.name==="list_meetings"?`listed ${plural(step.count,"meeting")}${when(step.doing)}`
-    :step.name==="get_meetings"?`${lower(step.label)}${when(step.doing)}`
-    :step.name==="search_transcripts"?`${lower(step.doing).replace(/^searching/,"searched")} (${lower(step.label).replace(/^found /,"")})`
-    :lower(step.label)
-  const heard=done.some(step=>(step.name==="search_transcripts"||step.name==="get_meeting_transcript")&&step.count>0)
-  const sum=(name:string)=>done.filter(step=>step.name===name).reduce((total,step)=>total+step.count,0),times=(name:string)=>done.filter(step=>step.name===name).length
-  const parts=done.length<=3?done.map(phrase):[
-    times("search_meetings")?`searched your meetings ${times("search_meetings")===1?"once":`${times("search_meetings")} times`}`:"",
-    times("list_meetings")?`listed ${plural(sum("list_meetings"),"meeting")}`:"",
-    times("get_meetings")?`looked deeper into ${plural(sum("get_meetings"),"note")}`:"",
-    times("search_transcripts")?`searched transcripts ${times("search_transcripts")===1?"once":`${times("search_transcripts")} times`} (${plural(sum("search_transcripts"),"passage")})`:"",
-    times("get_meeting_transcript")?`read ${plural(sum("get_meeting_transcript"),"transcript")}`:"",
-  ].filter(Boolean)
-  const periods=done.length<=3?[]:[...new Set(done.filter(step=>step.name==="get_meetings"||step.name==="list_meetings").map(step=>when(step.doing).trim()).filter(Boolean))]
-  const text=parts.join("; ")+(periods.length?` (${periods.join("; ")})`:"")
-  return `${text.charAt(0).toUpperCase()}${text.slice(1)}.${heard?"":" Transcripts were not consulted."}${failed?` ${failed===1?"One lookup":`${failed} lookups`} failed.`:""}`
+  const completed=steps.filter(step=>step.status==="completed"),failed=steps.filter(step=>step.status==="failed").length
+  if(!completed.length)return failed?"The meeting lookup failed, so nothing was searched or read.":""
+  const cut=completed.some(step=>step.label.includes("(context limit)")),more=completed.some(step=>step.label.includes("(more exist"))
+  return [failed?`${failed===1?"One lookup":`${failed} lookups`} failed, so this may be incomplete.`:"",cut?"Some of what was found was too long to read in full.":"",more?"More meetings exist in this period than were read.":""].filter(Boolean).join(" ")
 }
 
 export function createWorkspaceResearch(session:RetrievalSession) {
@@ -448,8 +426,8 @@ export function createWorkspaceResearch(session:RetrievalSession) {
     return {text:`${plural(shown,"passage")} in ${plural(found.length,"meeting")}${where}, best matches marked with ">" and shown with the turns around them:\n${out.join("\n")}${shown<chosen.length?"\n(context limit reached; some passages are not shown)":""}`,found,passages:shown,available:chosen.length}
   }
   /** Notes and summaries of several meetings. */
-  async function readMeetings(chosen:Meeting[],more:string):Promise<{text:string;found:Meeting[];heard:Meeting[]}> {
-    const out:string[]=[],found:Meeting[]=[],heard:Meeting[]=[]
+  async function readMeetings(chosen:Meeting[],more:string):Promise<{text:string;found:Meeting[];heard:Meeting[];limited:boolean}> {
+    const out:string[]=[],found:Meeting[]=[],heard:Meeting[]=[];let limited=false
     // Shrink the per-meeting allowance as more are read at once.
     const limits=chosen.length<=4?{summary:8000,notes:5000,transcript:9000}:chosen.length<=8?{summary:5000,notes:3000,transcript:5000}:{summary:3500,notes:2000,transcript:3000}
     for(const [index,meeting] of chosen.entries()){
@@ -464,13 +442,13 @@ export function createWorkspaceResearch(session:RetrievalSession) {
       const undo=snapshot(meeting)
       const documents=renderDocuments(meeting,note,limits,[...focus]),block=`${open(meeting,note)}\n${documents.text}\n</meeting>`
       if(block.length>remaining()){
-        undo()
+        undo();limited=true
         out.push(`(context limit reached; ${chosen.length-index} meetings not read: ${chosen.slice(index).map(item=>item.alias).join(", ")})`);break
       }
       spent+=block.length;out.push(block);found.push(meeting)
       if(documents.transcript)heard.push(meeting)
     }
-    return {text:`${out.join("\n")}${more}`||"None of those meetings could be read.",found,heard}
+    return {text:`${out.join("\n")}${more}`||"None of those meetings could be read.",found,heard,limited}
   }
   /** One meeting's transcript: whole when short, else the parts asked for. */
   async function readTranscript(meeting:Meeting,query:string|undefined,around:number|undefined):Promise<{text:string;found:Meeting[]}> {
@@ -540,16 +518,16 @@ export function createWorkspaceResearch(session:RetrievalSession) {
       else if(unique.length)also("get_meeting_transcript",`Reading ${unique.length} transcripts`,`Read ${unique.length} transcripts`,unique)
     }
     if(++calls>MAX_TOOL_CALLS)return fail("Lookup limit reached","No more lookups are available in this request. Reply READY.")
-    if(!raw||typeof raw!=="object"||Array.isArray(raw))return fail("Could not complete meeting lookup","Invalid arguments: pass a JSON object.")
+    if(!raw||typeof raw!=="object"||Array.isArray(raw))return fail("Couldn't finish this lookup","Invalid arguments: pass a JSON object.")
     const args=raw as Record<string,unknown>
     const from=args.from,to=args.to
-    if(from!==undefined&&!isDate(from)||to!==undefined&&!isDate(to)||isDate(from)&&isDate(to)&&from>to)return fail("Could not complete meeting lookup","Invalid date range: from and to are YYYY-MM-DD calendar dates, from on or before to.")
+    if(from!==undefined&&!isDate(from)||to!==undefined&&!isDate(to)||isDate(from)&&isDate(to)&&from>to)return fail("Couldn't finish this lookup","Invalid date range: from and to are YYYY-MM-DD calendar dates, from on or before to.")
     const range=[from as string|undefined,to as string|undefined] as const
     const final=args.then==="answer"
     try{
       if(name==="search_meetings"){
         const queries=strings(args.queries??args.query,6,300),limit=integer(args.limit,8,1,20)
-        if(!queries||limit===null)return fail("Could not complete meeting lookup","Invalid arguments: `queries` is a list of 1 to 6 short strings; `limit` is 1 to 20.")
+        if(!queries||limit===null)return fail("Couldn't finish this lookup","Invalid arguments: `queries` is a list of 1 to 6 short strings; `limit` is 1 to 20.")
         start(`Searching meetings for ${quoted(queries)}${between(...range)}`)
         const result=await searchMeetings(queries,range[0],range[1],limit,options.inline??3,options.inlineCoverage??0)
         const outcome=done(`Found ${plural(result.found.length,"meeting")}`,result.found,result.text)
@@ -559,7 +537,7 @@ export function createWorkspaceResearch(session:RetrievalSession) {
       }
       if(name==="list_meetings"){
         const limit=integer(args.limit,30,1,60)
-        if(limit===null)return fail("Could not complete meeting lookup","Invalid arguments: `limit` is 1 to 60.")
+        if(limit===null)return fail("Couldn't finish this lookup","Invalid arguments: `limit` is 1 to 60.")
         start(range[0]||range[1]?`Listing meetings${between(...range)}`:"Finding recent meetings")
         const {rows,more}=await listRange(range[0],range[1],limit),found=rows.map(register),lines:string[]=[]
         for(const meeting of found){const text=rowLine(meeting);if(text.length>remaining())break;spent+=text.length;lines.push(text);if(!listed.includes(meeting))listed.push(meeting)}
@@ -569,9 +547,9 @@ export function createWorkspaceResearch(session:RetrievalSession) {
       if(name==="search_transcripts"){
         const queries=strings(args.queries??args.query,6,300),limit=integer(args.limit,8,1,16)
         const ids=args.ids??args.noteIds??args.meeting_ids
-        if(!queries||limit===null||ids!==undefined&&(!Array.isArray(ids)||ids.length>8))return fail("Could not complete meeting lookup","Invalid arguments: `queries` is a list of 1 to 6 short strings; `ids` is a list of up to 8 meeting ids; `limit` is 1 to 16.")
+        if(!queries||limit===null||ids!==undefined&&(!Array.isArray(ids)||ids.length>8))return fail("Couldn't finish this lookup","Invalid arguments: `queries` is a list of 1 to 6 short strings; `ids` is a list of up to 8 meeting ids; `limit` is 1 to 16.")
         const scope=Array.isArray(ids)&&ids.length?(ids.map(resolve).filter(Boolean) as Meeting[]):null
-        if(scope&&!scope.length)return fail("Could not complete meeting lookup","None of those ids is a meeting from this conversation. Use ids exactly as returned by search or list results (for example m3).")
+        if(scope&&!scope.length)return fail("Couldn't finish this lookup","None of those ids is a meeting from this conversation. Use ids exactly as returned by search or list results (for example m3).")
         start(`Searching ${scope?(scope.length===1?`transcript of ${titled(scope[0]!)}`:`${scope.length} transcripts`):"transcripts"} for ${quoted(queries)}${scope?"":between(...range)}`)
         const result=await searchTranscripts(queries,scope,range[0],range[1],limit)
         const label=result.passages===result.available?`Found ${plural(result.passages,"transcript passage")} in ${plural(result.found.length,"meeting")}`:`Read ${result.passages} of ${result.available} transcript passages in ${plural(result.found.length,"meeting")} (context limit)`
@@ -582,32 +560,32 @@ export function createWorkspaceResearch(session:RetrievalSession) {
         let chosen:Meeting[],more=""
         const unknown:string[]=[]
         if(ids!==undefined){
-          if(!Array.isArray(ids)||!ids.length||ids.length>12||!ids.every(id=>typeof id==="string"))return fail("Could not complete meeting lookup","Invalid arguments: `ids` is a list of 1 to 12 meeting ids, or pass from/to to read by date.")
+          if(!Array.isArray(ids)||!ids.length||ids.length>12||!ids.every(id=>typeof id==="string"))return fail("Couldn't finish this lookup","Invalid arguments: `ids` is a list of 1 to 12 meeting ids, or pass from/to to read by date.")
           chosen=[...new Set(ids.map(id=>{const meeting=resolve(id);if(!meeting)unknown.push(String(id).slice(0,40));return meeting}).filter(Boolean) as Meeting[])]
-          if(!chosen.length)return fail("Could not complete meeting lookup","None of those ids is a meeting from this conversation. Use ids exactly as returned by search or list results (for example m3); you cannot read a meeting that has not been found first.")
+          if(!chosen.length)return fail("Couldn't finish this lookup","None of those ids is a meeting from this conversation. Use ids exactly as returned by search or list results (for example m3); you cannot read a meeting that has not been found first.")
         }else if(range[0]||range[1]){
           const listing=await listRange(range[0],range[1],12)
           chosen=listing.rows.map(register)
           if(listing.more)more=`\n(More meetings exist${between(...range)} than the 12 newest read here. To continue, call again with \`to\` set to ${listing.rows.at(-1)!.date}.)`
           if(!chosen.length){start(`Looking for meetings${between(...range)}`);return done("Found 0 meetings",[],`No meetings${between(...range)}.`)}
-        }else return fail("Could not complete meeting lookup","Invalid arguments: pass `ids`, or `from`/`to` to read every meeting in a date range.")
+        }else return fail("Couldn't finish this lookup","Invalid arguments: pass `ids`, or `from`/`to` to read every meeting in a date range.")
         start(`Looking deeper into ${plural(chosen.length,"note")}${ids===undefined?between(...range):""}`)
         const result=await readMeetings(chosen,more)
-        const outcome=done(`Looked deeper into ${plural(result.found.length,"note")}${more?" (more exist in this period)":""}`,result.found,result.text+(unknown.length?`\n(Not meetings from this conversation, so not read: ${unknown.join(", ")})`:""),final&&result.found.length>0)
+        const outcome=done(`Looked deeper into ${result.limited?`${result.found.length} of ${plural(chosen.length,"note")} (context limit)`:plural(result.found.length,"note")}${more?" (more exist in this period)":""}`,result.found,result.text+(unknown.length?`\n(Not meetings from this conversation, so not read: ${unknown.join(", ")})`:""),final&&result.found.length>0)
         transcriptsRead(result.heard)
         return outcome
       }
       const id=args.id??args.noteId??args.meeting_id,meeting=resolve(id)
-      if(!meeting)return fail("Could not complete meeting lookup","That id is not a meeting from this conversation. Use an id exactly as returned by search or list results (for example m3).")
+      if(!meeting)return fail("Couldn't finish this lookup","That id is not a meeting from this conversation. Use an id exactly as returned by search or list results (for example m3).")
       const query=args.query===undefined?undefined:typeof args.query==="string"&&args.query.length<=300?args.query:null
       const around=args.around!==undefined?minutes(args.around):args.startMs!==undefined?(Number.isInteger(args.startMs)&&Number(args.startMs)>=0?Number(args.startMs):null):undefined
-      if(query===null||around===null)return fail("Could not complete meeting lookup","Invalid arguments: `query` is a short string; `around` is a time such as \"12:30\".")
+      if(query===null||around===null)return fail("Couldn't finish this lookup","Invalid arguments: `query` is a short string; `around` is a time such as \"12:30\".")
       start(`Reading transcript for ${titled(meeting)}`)
       const result=await readTranscript(meeting,query,around)
       return done(result.found.length?`Read transcript for ${titled(meeting)}`:`No transcript read for ${titled(meeting)}`,result.found,result.text,final&&result.found.length>0)
     }catch(error){
       signal.throwIfAborted()
-      return fail("Could not complete meeting lookup","The lookup failed. Try once more or reply READY.")
+      return fail("Couldn't finish this lookup","The lookup failed. Try once more or reply READY.")
     }
   }
   const minutes=(value:unknown):number|null=>{

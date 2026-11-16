@@ -45,6 +45,12 @@ pub const GOOEY: Spring = Spring {
     millis: 420,
     damping: 0.68,
 };
+/// The Ask bar swelling into its tray: quicker than [`GOOEY`] and looser, so
+/// it overshoots by about a tenth and settles in one soft bounce.
+pub const ASK_TRAY: Spring = Spring {
+    millis: 340,
+    damping: 0.6,
+};
 /// Large panels, the sidebar and page-level transitions.
 pub const SETTLE: Spring = Spring {
     millis: 550,
@@ -529,6 +535,18 @@ impl Stage {
     /// Drop a track, so the surface is closed without playing its exit.
     pub fn forget(&self, key: TrackKey) {
         self.tracks.borrow_mut().remove(&key);
+    }
+
+    /// Put a presence track at rest, open or closed, without playing
+    /// anything: for a surface that comes back on screen in a state it
+    /// reached while it was away.
+    pub fn settle(&self, key: TrackKey, open: bool) {
+        let mut tracks = self.tracks.borrow_mut();
+        if open {
+            tracks.insert(key, Track::rest(1., Instant::now()));
+        } else {
+            tracks.remove(&key);
+        }
     }
 
     /// A value that springs towards `target`. The first call rests on it.
@@ -1213,6 +1231,7 @@ impl Pop {
 
     /// A panel that unfolds upwards out of a `bar`-tall strip at its bottom
     /// edge, the way the chat grows out of the composer.
+    #[allow(dead_code)]
     pub fn unfold(bar: f32, height: f32) -> Self {
         Self {
             anchor: (0.5, 1.),
@@ -1231,6 +1250,179 @@ impl Pop {
             rise: 0.,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The Ask bar: one pill that never moves, and what grows around it
+// ---------------------------------------------------------------------------
+
+/// The Ask pill's height at rest.
+pub const ASK_PILL: f32 = 58.;
+/// How far the tray and the chat panel stand out from the pill on its
+/// left, right and bottom: the same on all three, so their corners are
+/// concentric with the pill's.
+pub const ASK_INSET: f32 = 4.;
+/// How far the tray rises above the pill, for the recent-chats button.
+pub const ASK_HEAD: f32 = 39.;
+/// The focus halo's width. It is drawn inside the pill's own outline.
+pub const ASK_RING: f32 = 3.;
+/// The corner radius of what surrounds the pill: the pill's own plus the
+/// inset between them.
+pub const ASK_FRAME_RADIUS: f32 = ASK_PILL / 2. + ASK_INSET;
+
+/// Everything about the focused Ask bar that changes while it opens, as a
+/// function of its pose alone. The pill is not in here because nothing of
+/// it changes: its box, its padding and its text stay where they are, and
+/// the tray swells out from behind it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AskShape {
+    /// The tray's distance outside the pill on the left, right and bottom:
+    /// 0 is the pill's own outline. A little past [`ASK_INSET`] at the top
+    /// of the spring's overshoot.
+    pub out: f32,
+    /// The tray's rise above the pill.
+    pub head: f32,
+    /// The tray's corner radius, concentric with the pill's. Never past
+    /// its resting value, so an overshoot does not blunt the corners.
+    pub radius: f32,
+    /// The tray's opacity. It is solid while it moves, because it grows
+    /// out of a pill of its own colour and a fade would read as a flicker;
+    /// with reduced motion nothing moves and this fade is the transition.
+    pub opacity: f32,
+    /// The share of the tray's shadow that has arrived.
+    pub shadow: f32,
+    /// The halo's width inside the pill, never past [`ASK_RING`]: it stops
+    /// short of the text however far the spring overshoots.
+    pub ring: f32,
+    /// The gold line's and the halo's opacity.
+    pub ring_fade: f32,
+    /// The recent-chats button: its opacity, and how far below its place
+    /// it still is. It arrives late, once there is a tray to stand on.
+    pub history: f32,
+    pub history_drop: f32,
+}
+
+/// The Ask bar's shape at `pose` (see [`AskShape`]). A pose that is not
+/// visible is the bar at rest.
+pub fn ask_shape(pose: Pose) -> AskShape {
+    let level = if pose.visible && pose.value.is_finite() {
+        pose.value.max(0.)
+    } else {
+        0.
+    };
+    let within = level.min(1.);
+    // Reduced motion holds the level at 1 and carries the change in `fade`.
+    let still = pose.value >= 1.;
+    let fade = if pose.visible && pose.fade.is_finite() {
+        pose.fade.clamp(0., 1.)
+    } else {
+        0.
+    };
+    let history = {
+        let x = ((within - 0.45) / 0.55).clamp(0., 1.);
+        x * x * (3. - 2. * x)
+    };
+    AskShape {
+        out: ASK_INSET * level,
+        head: ASK_HEAD * level,
+        radius: ASK_PILL / 2. + ASK_INSET * within,
+        opacity: if still { fade } else { 1. },
+        shadow: if still { fade } else { within },
+        ring: ASK_RING * within,
+        ring_fade: fade,
+        history: history * if still { fade } else { 1. },
+        history_drop: 4. * (1. - history),
+    }
+}
+
+/// How the chat panel grows out of the Ask bar: from the pill's own outline
+/// (`foot` 0) or from the open tray's (`foot` 1) to a `panel`-sized frame
+/// whose pill stands [`ASK_INSET`] inside it. The pill itself is not part of
+/// what morphs; `pill` is its height.
+pub fn ask_unfold(foot: f32, pill: f32, panel: (f32, f32)) -> Pop {
+    let foot = if foot.is_finite() { foot.clamp(0., 1.) } else { 0. };
+    let (width, height) = (panel.0.max(1.), panel.1.max(1.));
+    let inside = 2. * ASK_INSET * (1. - foot);
+    Pop {
+        anchor: (0.5, 1.),
+        scale: (
+            ((width - inside) / width).clamp(0.05, 1.),
+            ((pill + (ASK_INSET + ASK_HEAD) * foot) / height).clamp(0.05, 1.),
+        ),
+        travel: 0.,
+        // Anchored at the panel's bottom edge, the outline is lifted to the
+        // pill's, which stands an inset above it.
+        rise: -ASK_INSET * (1. - foot),
+    }
+}
+
+/// How far the gap between a note's record capsule and its Ask pill has
+/// closed at panel level `level`: 0 is two capsules, 1 one body. The bridge
+/// forms early, while the body is still low, so the two read as drops
+/// running together rather than as a panel laid over them.
+pub fn bridge_level(level: f32) -> f32 {
+    let x = if level.is_finite() { (level / 0.45).clamp(0., 1.) } else { 1. };
+    x * x * (3. - 2. * x)
+}
+
+/// The open part of the gap at `bridge` (see [`bridge_level`]): how far the
+/// gap still reaches in from the row's top and bottom edges, of a row
+/// `height` tall. It closes from the middle outwards, like two drops
+/// joining at their waists.
+pub fn bridge_reach(bridge: f32, height: f32) -> f32 {
+    let bridge = if bridge.is_finite() { bridge.clamp(0., 1.) } else { 1. };
+    (height / 2. + BRIDGE_GAP) * (1. - bridge)
+}
+
+/// The gap between a note's record capsule and its Ask pill.
+pub const BRIDGE_GAP: f32 = 8.;
+
+/// The gap between a note's record capsule and its Ask pill while the chat
+/// panel grows out of them (or folds back into them): painted in the page's
+/// colour over the panel's body, cut to it, and closing from the middle
+/// outwards with rounded ends, so the capsules run together as the panel
+/// rises and come apart as it lands. `centre` is the gap's centre from the
+/// panel's leading edge, `row` the capsules' height, `reached` how much of
+/// the panel (from its bottom edge) the body covers.
+pub fn ask_bridge(centre: f32, row: f32, reached: f32, level: f32, page: Hsla) -> impl IntoElement {
+    let bridge = bridge_level(level);
+    let reach = bridge_reach(bridge, row);
+    // Apart, the cut takes in the capsules' facing ends (they paint over
+    // it), so what is left of the body round them is their own two
+    // outlines and no web between them; joined, it is the gap alone.
+    let half = BRIDGE_GAP / 2. + (row / 2. + ASK_INSET) * (1. - bridge);
+    let past = (ASK_INSET + 2.) * (1. - bridge);
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            if reach <= 0. {
+                return;
+            }
+            let bottom = bounds.bottom() - px(ASK_INSET);
+            let top = bottom - px(row);
+            let centre = bounds.left() + px(centre);
+            let body = Bounds::from_corners(
+                point(bounds.left(), (bounds.bottom() - px(reached)).max(bounds.top())),
+                bounds.bottom_right(),
+            );
+            let cut = |from: Pixels, to: Pixels| {
+                Bounds::from_corners(point(centre - px(half), from), point(centre + px(half), to))
+            };
+            window.with_content_mask(Some(ContentMask { bounds: body }), |window| {
+                let reach = px(reach);
+                for gap in [
+                    cut(top - px(past), top + reach),
+                    cut(bottom - reach, bottom + px(past)),
+                ] {
+                    window.paint_quad(fill(gap, page).corner_radii(px(half.min(row / 2.))));
+                }
+            });
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 /// Wraps an element and applies offset, opacity and a shell morph at paint
@@ -2410,23 +2602,6 @@ pub fn spinner(color: Hsla) -> AnyElement {
         .into_any_element()
 }
 
-/// The chat's thinking status: the mark and a five-second text sheen, rather
-/// than the generic circular request spinner. The existing vector mark is
-/// retained; its separate masked rainbow stroke animation still needs a
-/// native renderer.
-pub fn thinking_status(id: impl Into<ElementId>, theme: Theme, cx: &App) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .py(px(8.))
-        .text_size(px(14.))
-        .line_height(px(20.))
-        .text_color(theme.muted)
-        .child(icon("cereal", 16., theme.muted))
-        .child(shimmer_label(id, "Thinking...", theme, cx))
-}
-
 /// A short status in 14 px text with the chat's five-second sheen running
 /// across it ("Thinking...", "Reading the transcript…"). Reduced motion
 /// leaves it still.
@@ -2488,6 +2663,186 @@ pub fn shimmer_label(
             )
         },
     )
+}
+
+/// The mark while an answer is being thought about: it turns steadily and
+/// breathes (a little smaller and dimmer at the end of each breath), so the
+/// wait reads as work under way. Reduced motion leaves it still.
+pub fn thinking_mark(size: f32, color: Hsla) -> AnyElement {
+    let mark = icon("cereal", size, color);
+    if reduce_motion() {
+        return mark.into_any_element();
+    }
+    mark.with_animation(
+        "thinking-mark",
+        Animation::new(slow(Duration::from_millis(2400))).repeat(),
+        move |mark, progress| {
+            let (turn, scale, ink) = thinking_mark_pose(progress);
+            let mut color = color;
+            color.a *= ink;
+            mark.text_color(color).with_transformation(
+                Transformation::rotate(percentage(turn)).with_scaling(size2(scale, scale)),
+            )
+        },
+    )
+    .into_any_element()
+}
+
+fn size2(width: f32, height: f32) -> Size<f32> {
+    Size { width, height }
+}
+
+/// Where the thinking mark is `progress` of the way through its loop: its
+/// turn (0..=1, one whole turn a loop, swung rather than ticked), its scale
+/// and its ink. Two breaths a turn; the loop has no seam.
+pub fn thinking_mark_pose(progress: f32) -> (f32, f32, f32) {
+    let progress = progress.clamp(0., 1.);
+    let breath = 0.5 - 0.5 * (2. * std::f32::consts::TAU * progress).cos();
+    (fluid_turn(progress), 1. - 0.12 * breath, 1. - 0.35 * breath)
+}
+
+/// How much of the highlight a glyph centred at `glyph_center` (0..=1 along
+/// the label) carries when the band is `progress` of the way through a sweep:
+/// 1 under the middle of the band, falling smoothly to 0 at its edges. The
+/// band is `SHEEN_BAND` of the label wide, starts wholly before the label and
+/// ends wholly past it, so the loop has no seam.
+pub fn sheen_level(glyph_center: f32, progress: f32) -> f32 {
+    let half = SHEEN_BAND / 2.;
+    let centre = -half + (1. + SHEEN_BAND) * progress.clamp(0., 1.);
+    let distance = ((glyph_center - centre) / half).abs();
+    if distance >= 1. {
+        return 0.;
+    }
+    // Smoothstep down from the centre.
+    let t = 1. - distance;
+    t * t * (3. - 2. * t)
+}
+
+/// Width of the moving highlight as a share of the label's width.
+const SHEEN_BAND: f32 = 0.9;
+/// One sweep of the highlight, and the rest before the next.
+const SHEEN_SWEEP: Duration = Duration::from_millis(1500);
+const SHEEN_REST: Duration = Duration::from_millis(350);
+
+/// A status label in `base` ink with a band of `peak` ink sweeping across its
+/// glyphs from the leading end: "Thinking…" and the live name of what is
+/// being done. `size` is the text size it is drawn at. Reduced motion leaves
+/// it still, in `base`.
+pub fn sheen_label(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    size: f32,
+    base: Hsla,
+    peak: Hsla,
+    cx: &App,
+) -> SlowLoop<StyledText> {
+    let label: SharedString = label.into();
+    let font_id = cx.text_system().resolve_font(&font(FONT));
+    let mut x = 0.;
+    let mut glyphs: Vec<(std::ops::Range<usize>, f32)> = label
+        .char_indices()
+        .map(|(start, character)| {
+            let advance = cx
+                .text_system()
+                .advance(font_id, px(size), character)
+                .map(|size| f32::from(size.width))
+                .unwrap_or(size / 2.);
+            let centre = x + advance / 2.;
+            x += advance;
+            (start..start + character.len_utf8(), centre)
+        })
+        .collect();
+    let width = x.max(1.);
+    for (_, centre) in &mut glyphs {
+        *centre /= width;
+    }
+    let period = SHEEN_SWEEP + SHEEN_REST;
+    let sweep = SHEEN_SWEEP.as_secs_f32() / period.as_secs_f32();
+    slow_loop(id, period, StyledText::new(label), move |text, turns| {
+        let progress = (turns.fract() / sweep).min(1.);
+        text.with_highlights(
+            glyphs
+                .iter()
+                .map(|(range, centre)| {
+                    (
+                        range.clone(),
+                        HighlightStyle {
+                            color: Some(mix(base, peak, sheen_level(*centre, progress))),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Folds: a disclosure's body, growing and shrinking with its content
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// The natural height of each fold's content, as last laid out.
+    static FOLDS: RefCell<HashMap<TrackKey, f32>> = RefCell::new(HashMap::new());
+}
+
+/// How far a fold's content travels as it opens (it settles downwards into
+/// place) and closes.
+const FOLD_TRAVEL: f32 = 6.;
+
+/// The height a fold `level` open is drawn at when its content is `natural`
+/// tall. Never above its content: a spring's overshoot would open a gap under
+/// it and close it again.
+pub fn fold_height(natural: f32, level: f32) -> f32 {
+    (natural * level.clamp(0., 1.)).max(0.)
+}
+
+/// The body of a disclosure (an accordion): `content` clipped to the share of
+/// its own height that `pose` has reached, fading and settling into place, so
+/// whatever is below it slides instead of jumping. `pose` is the presence of
+/// `key` on the view's stage ([`Stage::presence`]); `None` once it has
+/// closed. The content is laid out at its natural height throughout and
+/// measured each frame, so it may change (text arriving, a fold inside it
+/// opening) while this one moves. At rest it is not clipped or sized at all.
+pub fn fold(stage: &Stage, key: TrackKey, pose: Pose, content: impl IntoElement) -> Option<Div> {
+    if !pose.visible {
+        FOLDS.with(|folds| folds.borrow_mut().remove(&key));
+        return None;
+    }
+    let probe = canvas(
+        move |bounds, _, _| {
+            FOLDS.with(|folds| folds.borrow_mut().insert(key, f32::from(bounds.size.height)));
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .inset_0();
+    let inner = div()
+        .relative()
+        .w_full()
+        .min_w_0()
+        .flex_shrink_0()
+        .flex()
+        .flex_col()
+        .child(content)
+        .child(probe);
+    let shell = div().w_full().min_w_0().flex().flex_col();
+    if pose.at_rest() {
+        return Some(shell.child(inner));
+    }
+    let level = pose.value.clamp(0., 1.);
+    Some(match FOLDS.with(|folds| folds.borrow().get(&key).copied()) {
+        Some(natural) => shell
+            .h(px(fold_height(natural, level)))
+            .overflow_hidden()
+            .opacity(pose.fade)
+            .child(inner.mt(px(-FOLD_TRAVEL * (1. - level)))),
+        // Not laid out yet: this frame measures it, the next shows it.
+        None => {
+            stage.keep_alive();
+            shell.h(px(0.)).overflow_hidden().opacity(0.).child(inner)
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2670,6 +3025,56 @@ mod tests {
     // `gpui::*` re-exports its own `test` attribute; these are plain unit tests.
     use std::prelude::v1::test;
 
+    #[test]
+    fn the_sheen_is_a_band_that_enters_crosses_and_leaves_the_label() {
+        // Before it enters and after it leaves, nothing is lit: no seam.
+        for centre in [0., 0.3, 0.7, 1.] {
+            assert_eq!(sheen_level(centre, 0.), 0.);
+            assert_eq!(sheen_level(centre, 1.), 0.);
+        }
+        // Mid-sweep the middle is brightest and both ends are dimmer, so part
+        // of the word is lit rather than all of it.
+        let (start, middle, end) = (sheen_level(0., 0.5), sheen_level(0.5, 0.5), sheen_level(1., 0.5));
+        assert!((middle - 1.).abs() < 1e-5 && start < 0.2 && end < 0.2, "{start} {middle} {end}");
+        // It travels from the leading end to the trailing end.
+        assert!(sheen_level(0.1, 0.3) > sheen_level(0.9, 0.3));
+        assert!(sheen_level(0.9, 0.7) > sheen_level(0.1, 0.7));
+        for step in 0..=100 {
+            let level = sheen_level(0.4, step as f32 / 100.);
+            assert!((0. ..=1.).contains(&level));
+        }
+    }
+
+    #[test]
+    fn the_thinking_mark_loops_without_a_seam() {
+        let (turn_start, scale_start, ink_start) = thinking_mark_pose(0.);
+        let (turn_end, scale_end, ink_end) = thinking_mark_pose(1.);
+        assert_eq!((turn_start, turn_end), (0., 1.));
+        assert!((scale_start - scale_end).abs() < 1e-5 && (ink_start - ink_end).abs() < 1e-5);
+        let mut last = 0.;
+        for step in 0..=120 {
+            let (turn, scale, ink) = thinking_mark_pose(step as f32 / 120.);
+            assert!(turn + 1e-6 >= last, "it never turns back");
+            assert!((0.85..=1.).contains(&scale) && (0.6..=1.).contains(&ink));
+            last = turn;
+        }
+    }
+
+    #[test]
+    fn a_fold_is_never_taller_than_its_content_or_below_nothing() {
+        assert_eq!(fold_height(120., 0.), 0.);
+        assert_eq!(fold_height(120., 0.5), 60.);
+        assert_eq!(fold_height(120., 1.), 120.);
+        // A spring's overshoot does not open a gap under the content.
+        assert_eq!(fold_height(120., 1.08), 120.);
+        assert_eq!(fold_height(120., -0.2), 0.);
+        // A closed fold whose presence has ended is not built at all.
+        let stage = Stage::default();
+        let closed = Pose { value: 0., fade: 0., visible: false, settled: true };
+        assert!(fold(&stage, ("test-fold", 1), closed, gpui::div()).is_none());
+        assert!(fold(&stage, ("test-fold", 1), Pose::REST, gpui::div()).is_some());
+    }
+
     const TOKENS: [Spring; 3] = [SNAPPY, GOOEY, SETTLE];
 
     #[test]
@@ -2685,6 +3090,160 @@ mod tests {
             // Starts from rest rather than jumping.
             assert!(spring.at(0.001) < 0.01);
         }
+    }
+
+    fn ask_pose(value: f32) -> Pose {
+        Pose {
+            value,
+            fade: fade_for(value),
+            visible: true,
+            settled: false,
+        }
+    }
+
+    #[test]
+    fn the_ask_tray_starts_as_the_pills_own_outline_and_ends_as_the_tray() {
+        // Closed, and on the first frame of opening, the tray is exactly
+        // the pill: nothing can flash into view around it.
+        for rest in [
+            ask_shape(Pose { visible: false, ..ask_pose(0.7) }),
+            ask_shape(ask_pose(0.)),
+            ask_shape(ask_pose(f32::NAN)),
+            ask_shape(ask_pose(-0.2)),
+        ] {
+            assert_eq!((rest.out, rest.head), (0., 0.));
+            assert_eq!(rest.radius, ASK_PILL / 2.);
+            assert_eq!((rest.ring, rest.ring_fade, rest.shadow, rest.history), (0., 0., 0., 0.));
+        }
+        let open = ask_shape(Pose::REST);
+        assert_eq!((open.out, open.head), (ASK_INSET, ASK_HEAD));
+        assert_eq!(open.radius, ASK_FRAME_RADIUS);
+        assert_eq!((open.ring, open.ring_fade, open.opacity, open.shadow), (ASK_RING, 1., 1., 1.));
+        assert_eq!((open.history, open.history_drop), (1., 0.));
+        // The frame's corners are concentric with the pill's.
+        assert_eq!(ASK_FRAME_RADIUS - ASK_INSET, ASK_PILL / 2.);
+    }
+
+    #[test]
+    fn the_ask_tray_overshoots_outwards_only() {
+        assert!(
+            (0.06..=0.12).contains(&ASK_TRAY.overshoot()),
+            "{}",
+            ASK_TRAY.overshoot()
+        );
+        let mut peak = 0f32;
+        let mut last = ask_shape(ask_pose(0.));
+        for tick in 0..=1000 {
+            let level = ASK_TRAY.at(tick as f32 / 1000.);
+            let shape = ask_shape(ask_pose(level));
+            peak = peak.max(shape.head);
+            // The tray may swell past its size; what is drawn inside the
+            // pill, and the corner radius, never pass theirs, so the halo
+            // stays clear of the text and the corners stay round.
+            assert!((0. ..=ASK_RING).contains(&shape.ring));
+            assert!((ASK_PILL / 2. ..=ASK_FRAME_RADIUS).contains(&shape.radius));
+            assert!((0. ..=1.).contains(&shape.ring_fade));
+            assert!((0. ..=1.).contains(&shape.history));
+            // Solid throughout: it grows out of a pill of its own colour.
+            assert_eq!(shape.opacity, 1.);
+            // No jump between consecutive samples (a 340 ms spring sampled
+            // every 0.34 ms).
+            assert!((shape.head - last.head).abs() < 0.5, "{tick}");
+            assert!((shape.ring - last.ring).abs() < 0.05, "{tick}");
+            assert!((shape.history - last.history).abs() < 0.03, "{tick}");
+            last = shape;
+        }
+        assert!(peak > ASK_HEAD * 1.05 && peak < ASK_HEAD * 1.13, "{peak}");
+        assert_eq!(last, ask_shape(Pose::REST).clone());
+        // The recent-chats button arrives late and is there at the end.
+        assert_eq!(ask_shape(ask_pose(0.45)).history, 0.);
+        assert!(ask_shape(ask_pose(0.8)).history > 0.5);
+    }
+
+    #[test]
+    fn with_reduced_motion_the_ask_tray_fades_at_full_size() {
+        let mut track = Track::rest(0., Instant::now());
+        let start = Instant::now();
+        track.present(true, ASK_TRAY, start, true);
+        let half = ask_shape(track.pose(start + REDUCED_FADE / 2, true));
+        assert_eq!((half.out, half.head, half.ring), (ASK_INSET, ASK_HEAD, ASK_RING));
+        assert_eq!(half.radius, ASK_FRAME_RADIUS);
+        assert!(half.opacity > 0. && half.opacity < 1.);
+        assert_eq!(half.opacity, half.ring_fade);
+        assert_eq!(half.history_drop, 0.);
+        let done = ask_shape(track.pose(start + REDUCED_FADE, true));
+        assert_eq!(done, ask_shape(Pose::REST));
+        // And back: closed means gone, not left part-open.
+        track.present(false, ASK_TRAY, start + REDUCED_FADE, true);
+        let gone = track.pose(start + REDUCED_FADE * 2, true);
+        assert!(!gone.visible);
+        assert_eq!(ask_shape(gone).opacity, 0.);
+    }
+
+    #[test]
+    fn an_interrupted_ask_tray_carries_on_from_where_it_was() {
+        let start = Instant::now();
+        let mut track = Track::rest(0., start);
+        let mut now = start;
+        let mut last = ask_shape(track.pose(now, false)).head;
+        // Ten changes of mind 45 ms apart, sampled every millisecond.
+        for flip in 0..10 {
+            track.present(flip % 2 == 0, ASK_TRAY, now, false);
+            for _ in 0..45 {
+                now += Duration::from_millis(1);
+                let head = ask_shape(track.pose(now, false)).head;
+                assert!((head - last).abs() < 1.6, "jumped {last} -> {head}");
+                last = head;
+            }
+        }
+        // Left alone it closes completely and its track can be dropped.
+        now += ASK_TRAY.duration();
+        let pose = track.pose(now, false);
+        assert!(pose.settled && !pose.visible);
+        assert_eq!(ask_shape(pose), ask_shape(ask_pose(0.)));
+    }
+
+    #[test]
+    fn a_notes_two_capsules_join_from_the_middle_and_part_the_same_way() {
+        // Apart at rest: the gap reaches past the row's middle from both
+        // edges, so nothing joins them.
+        assert_eq!(bridge_level(0.), 0.);
+        assert!(bridge_reach(0., 56.) > 28.);
+        // Joined well before the panel is open, and for good once it is.
+        assert_eq!(bridge_level(0.45), 1.);
+        assert_eq!(bridge_reach(bridge_level(1.08), 56.), 0.);
+        assert_eq!(bridge_reach(bridge_level(1.), 56.), 0.);
+        // Closing evenly, never jumping, and the same way back.
+        let mut last = bridge_reach(0., 56.);
+        for tick in 1..=200 {
+            let reach = bridge_reach(bridge_level(tick as f32 / 200.), 56.);
+            assert!(reach <= last && last - reach < 1.5, "{tick}: {last} -> {reach}");
+            last = reach;
+        }
+        assert_eq!(bridge_reach(bridge_level(f32::NAN), 56.), 0.);
+    }
+
+    #[test]
+    fn the_chat_panel_grows_from_the_pill_or_from_the_tray() {
+        let panel = (683., 467.);
+        // From the bar at rest: the frame starts as the pill's outline,
+        // an inset in from the panel on each side and above its bottom edge.
+        let pill = ask_unfold(0., ASK_PILL, panel);
+        assert!((pill.scale.0 * panel.0 - (panel.0 - 2. * ASK_INSET)).abs() < 1e-3);
+        assert!((pill.scale.1 * panel.1 - ASK_PILL).abs() < 1e-3);
+        assert_eq!((pill.anchor, pill.rise, pill.travel), ((0.5, 1.), -ASK_INSET, 0.));
+        // From the focused bar: the frame starts as the tray, which already
+        // has the panel's width and bottom edge.
+        let tray = ask_unfold(1., ASK_PILL, panel);
+        assert_eq!((tray.scale.0, tray.rise), (1., 0.));
+        assert!((tray.scale.1 * panel.1 - (ASK_PILL + ASK_INSET + ASK_HEAD)).abs() < 1e-3);
+        let open = ask_shape(Pose::REST);
+        assert_eq!(tray.scale.1 * panel.1, ASK_PILL + open.out + open.head);
+        // Out-of-range feet and degenerate panels stay drawable.
+        assert_eq!(ask_unfold(7., ASK_PILL, panel), tray);
+        assert_eq!(ask_unfold(f32::NAN, ASK_PILL, panel), pill);
+        let tiny = ask_unfold(1., ASK_PILL, (0., 0.));
+        assert!(tiny.scale.0 > 0. && tiny.scale.1 <= 1.);
     }
 
     #[test]

@@ -201,6 +201,14 @@ function Address({ href, children }: { href: string; children: ReactNode }) {
   return <a className="note-link" href={href} {...(here ? {} : { target: '_blank', rel: 'noopener noreferrer' })}>{children}</a>
 }
 
+/** The address of the closing chat line, when `line` is that line and holds nothing but the label and one address. */
+export function transcriptChatAddress(line: string): string | null {
+  const rest = /^Chat with meeting transcript:\s*(.*)$/.exec(line.trim())?.[1]
+  if (!rest) return null
+  const pieces = webLinks(rest.trim())
+  return pieces.length === 1 && pieces[0]!.href ? pieces[0]!.href : null
+}
+
 function Inline({ text }: { text: string }) {
   let spaced = false
   // Addresses are found in the text as written, before any Markdown is read, so a `*` or `_` inside one stays in it.
@@ -231,6 +239,12 @@ export const NoteText = memo(function NoteText({ value, sourced = false }: { val
     if (block.kind === 'rule') { out.push(<hr key={block.row} />); i++; continue }
     if (block.kind === 'heading') {
       out.push(<h2 key={block.row} className={block.row === 0 ? 'is-first' : undefined}><span className="note-hash" aria-hidden="true">#</span><Inline text={block.text} /></h2>)
+      i++; continue
+    }
+    // The closing "Chat with meeting transcript: <address>" line: a short, quiet link, as on the desktop.
+    const chat = block.kind === 'paragraph' ? transcriptChatAddress(block.text) : null
+    if (chat) {
+      out.push(<p key={block.row} className="note-line note-transcript-link"><Address href={chat}>Chat with meeting transcript ↗</Address></p>)
       i++; continue
     }
     if (block.kind === 'paragraph') {

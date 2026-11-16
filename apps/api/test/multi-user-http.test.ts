@@ -4,6 +4,7 @@ import type { PrincipalData } from "@meeting-notes/contracts/api"
 import { makeApiHandler } from "../src/api"
 import { makeMemoryRepository, BOOTSTRAP_OWNER_ID } from "../src/repository"
 import { makeProcessingService } from "../src/processing"
+import { makeMemoryNoteAccessStore, makeNoteAccessService } from "../src/note-access"
 
 const close: Array<() => Promise<void>> = []
 afterEach(async () => { for (const dispose of close.splice(0)) await dispose() })
@@ -18,6 +19,8 @@ function fixture() {
   } })
   const api = makeApiHandler(repository, "multiuser-bootstrap-test-at-least-32-characters", {
     processing,
+    // Everyone here is in one workspace: what a link reaches is then the note's own sharing.
+    noteAccess: makeNoteAccessService(makeMemoryNoteAccessStore(repository, { organization: { id: "20000000-0000-4000-8000-0000000000aa", name: "Acme" }, members: (Object.keys(ids) as Account[]).map(account => ({ userId: ids[account], name: account, email: `${account}@example.test` })) })),
     principalResolver: async headers => {
       const account = (headers.get("authorization") ?? "").replace("Bearer ", "") as Account
       if (!(account in ids)) return null
@@ -78,7 +81,11 @@ test("a shared link is read by any signed-in account that holds it, never anonym
   const share = await response.json()
   expect((await call("bob", `/shares/${share.share.id}`, "DELETE")).status).toBe(404)
   expect((await call(null, `/shared/${share.token}`)).status).toBe(401)
-  // Bob holds the link. He reads the snapshot, though the note itself is not his to open.
+  // Bob holds the link, but a new note is shared with nobody: the link alone opens nothing.
+  expect((await call("bob", `/notes/${note.id}`)).status).toBe(404)
+  expect((await call("bob", `/shared/${share.token}`)).status).toBe(404)
+  // Once Alice lets everyone in the workspace read it by link, he reads the snapshot; the note itself is still not his to open.
+  expect((await call("alice", `/notes/${note.id}/access`, "PATCH", { level: "organization" })).status).toBe(200)
   expect((await call("bob", `/notes/${note.id}`)).status).toBe(404)
   for (const reader of ["bob", "alice", "admin"] as const) {
     const read = await call(reader, `/shared/${share.token}`)

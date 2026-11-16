@@ -298,7 +298,7 @@ impl Cereal {
         let space = !home;
         // In pixels (see `page_column_width`): the page beside the sidebar,
         // less the scroll bar's gutter.
-        let page = f32::from(window.viewport_size().width) - 192. * self.sidebar_level - 10.;
+        let page = f32::from(window.viewport_size().width) - self.sidebar_inset() - 10.;
         let mut column = div()
             .w(px(page.clamp(240., if space { 768. } else { 674. })))
             .px(px(24.))
@@ -343,7 +343,19 @@ impl Cereal {
                 home.child(self.ask_bar(window, cx))
             })
             .when(assistant.visible, |home| {
-                home.child(self.render_note_assistant(assistant, window, cx))
+                // The page ends under the panel as it does under the bar,
+                // so nothing of the list shows below the pill while the
+                // panel opens or folds, and nothing pops when the bar is back.
+                home.child(
+                    div()
+                        .absolute()
+                        .bottom(px(27.))
+                        .left_0()
+                        .right_0()
+                        .h(px(crate::motion::ASK_PILL))
+                        .child(bar_scrim(t, 0.)),
+                )
+                .child(self.render_note_assistant(assistant, window, cx))
                     // Under the panel, centred on the 9 px between it and
                     // the window's edge.
                     .child(
@@ -745,7 +757,7 @@ impl Cereal {
         for (i, delta) in [0, 4, 5, 6, 11].iter().enumerate() {
             let day = today + Duration::days(*delta);
             let events = [
-                ("No events today", ""),
+                ("No more events today", ""),
                 ("Product & design sync", "10:30 – 11:00 AM"),
                 ("Weekly team standup", "9:00 – 9:30 AM"),
                 ("Customer discovery", "2:00 – 2:45 PM"),
@@ -958,25 +970,36 @@ impl Cereal {
     }
 
     /// Home's composer. At rest it is a single "Ask anything" pill; focused
-    /// (or holding a draft) it grows the model, attachment and voice
-    /// controls, and folds back when the focus leaves with nothing typed.
-    /// Focused, it also stands in a tray with the recent-chats button above
-    /// it: the footprint the conversation then grows from.
-    /// Sending opens the conversation out of it (`render_note_assistant`).
+    /// (or holding a draft) it shows the model and send controls, and folds
+    /// back when the focus leaves with nothing typed. Focused, a tray swells
+    /// out from behind it with the recent-chats button above: the footprint
+    /// the conversation then grows from (`render_note_assistant`).
+    ///
+    /// The pill itself never moves: its box, its padding and its text are
+    /// the same at rest, focused and all the way between (`motion::AskShape`
+    /// is everything that changes). A press anywhere outside the pill and
+    /// its tray gives the focus back to the page, which folds the tray.
     pub fn ask_bar(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        use crate::motion::{ASK_HEAD, ASK_INSET, ASK_TRAY};
         let t = self.theme();
         let focused = self.ask.read(cx).focus_handle.is_focused(window);
         let typed = !self.ask.read(cx).content().trim().is_empty();
-        let tray = self
-            .stage
-            .presence(("ask-tray", 0), focused, crate::motion::SNAPPY);
-        let open = if tray.visible { tray.value.clamp(0., 1.) } else { 0. };
+        // Back on screen after the panel, another page or a note: the bar is
+        // simply in the state it is in. What its tracks were doing when it
+        // left is not played now.
+        if !self.stage.continuous(("ask-bar", 0)) {
+            self.stage.settle(("ask-tray", 0), focused);
+            self.stage.settle(("chat-composer-ring", 0), focused);
+        }
+        self.stage.forget(("assistant-foot", 0));
+        let tray = self.stage.presence(("ask-tray", 0), focused, ASK_TRAY);
+        let shape = crate::motion::ask_shape(tray);
         div()
             .absolute()
-            // 58 px tall and 27 px above the window's edge. At rest the bar
-            // is 675 px wide; focused it is 669 px, its 3 px focus ring
-            // inside a 683 px tray that starts 39 px above it and ends 4 px
-            // below, as the reference measures.
+            // The pill is 58 px tall, 675 px wide and 27 px above the
+            // window's edge, always. Focused, its 3 px halo is drawn inside
+            // its outline and the tray stands 4 px outside it (683 px wide,
+            // ending 4 px below) and 39 px above, as the reference measures.
             .bottom(px(27.))
             .left_0()
             .right_0()
@@ -988,72 +1011,112 @@ impl Cereal {
                 div()
                     .relative()
                     .w_full()
-                    .max_w(px(683.))
-                    .px(px(4. + 3. * open))
+                    .max_w(px(675. + 2. * ASK_INSET))
+                    .px(px(ASK_INSET))
+                    // A press on the pill's own edge or padding is a press
+                    // on the field.
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            if !this.chat_messages.is_empty() || this.chat_stream.is_some() {
-                                this.assistant_open = true;
-                                cx.notify();
-                            }
+                        cx.listener(|this, _, window, cx| {
+                            this.ask.read(cx).focus_handle.focus(window);
+                            cx.notify();
                         }),
+                    )
+                    // The tray's whole footprint, there or not: a press
+                    // outside it leaves the bar. The press itself goes on to
+                    // whatever it was aimed at. With the model menu open it
+                    // only closes the menu (the menu sees to that).
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(-ASK_HEAD))
+                            .bottom(px(-ASK_INSET))
+                            .left_0()
+                            .right_0()
+                            .on_mouse_down_out(cx.listener(
+                                |this, event: &MouseDownEvent, window, cx| {
+                                    if event.button == MouseButton::Left
+                                        && !this.chat_popover_open()
+                                        && this.ask.read(cx).focus_handle.is_focused(window)
+                                    {
+                                        this.focus.focus(window);
+                                        cx.notify();
+                                    }
+                                },
+                            )),
                     )
                     .when(tray.visible, |bar| {
                         bar.child(
                             div()
                                 .absolute()
-                                .top(px(-39.))
-                                .bottom(px(-4.))
-                                .left_0()
-                                .right_0()
-                                .rounded(px(31.))
+                                // It grows out of the pill itself: from the
+                                // pill's own outline to the full tray.
+                                .top(px(-shape.head))
+                                .bottom(px(-shape.out))
+                                .left(px(ASK_INSET - shape.out))
+                                .right(px(ASK_INSET - shape.out))
+                                .rounded(px(shape.radius))
                                 .border_1()
-                                .border_color(t.border)
-                                .bg(t.card)
-                                .opacity(tray.fade)
+                                .border_color(t.border.opacity(shape.opacity))
+                                .bg(t.card.opacity(shape.opacity))
                                 .shadow(vec![BoxShadow {
-                                    color: rgba(0x2929290f).into(),
+                                    color: hsla(0., 0., 0.16, 0.06 * shape.shadow),
                                     offset: point(px(0.), px(4.)),
                                     blur_radius: px(16.),
                                     spread_radius: px(0.),
                                 }])
-                                .child(
-                                    // The glyph is 14 px, centred 28 px in
-                                    // and 20 px down.
-                                    div().absolute().left(px(13.)).top(px(5.)).child(
-                                        with_tooltip(
-                                            div()
-                                                .id("home-chat-history")
-                                                .size(px(28.))
-                                                .rounded(px(6.))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .cursor_default()
-                                                .child(crate::motion::tactile(t.hover).radius(6.))
-                                                .child(icon("chat-history", 17., t.muted))
-                                                .reach(),
-                                            "Recent chats".into(),
-                                            t,
-                                        )
-                                        // On the press, not the click: the
-                                        // press is also what takes the focus
-                                        // from the field and folds the tray.
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(|this, _, _, cx| {
-                                                cx.stop_propagation();
-                                                this.assistant_open = true;
-                                                this.chat_history_open = true;
-                                                cx.notify();
-                                            }),
-                                        ),
-                                    ),
-                                ),
+                                .when(shape.history > 0., |tray| {
+                                    tray.child(
+                                        // The glyph is 14 px, centred 28 px
+                                        // in and 20 px down.
+                                        div()
+                                            .absolute()
+                                            .left(px(13.))
+                                            .top(px(5. + shape.history_drop))
+                                            .opacity(shape.history)
+                                            .child(
+                                                with_tooltip(
+                                                    div()
+                                                        .id("home-chat-history")
+                                                        .size(px(28.))
+                                                        .rounded(px(6.))
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .cursor_default()
+                                                        .child(
+                                                            crate::motion::tactile(t.hover)
+                                                                .radius(6.),
+                                                        )
+                                                        .child(icon("chat-history", 17., t.muted))
+                                                        .reach(),
+                                                    "Recent chats".into(),
+                                                    t,
+                                                )
+                                                // On the press, not the click:
+                                                // the press is also what takes
+                                                // the focus from the field.
+                                                .on_mouse_down(
+                                                    MouseButton::Left,
+                                                    cx.listener(|this, _, _, cx| {
+                                                        cx.stop_propagation();
+                                                        this.assistant_open = true;
+                                                        this.chat_history_open = true;
+                                                        cx.notify();
+                                                    }),
+                                                ),
+                                            ),
+                                    )
+                                }),
                         )
                     })
-                    .child(self.render_chat_composer(focused, !focused && !typed, cx)),
+                    // An answer arriving keeps its stop button in the folded
+                    // bar: it says the conversation is still going.
+                    .child(self.render_chat_composer_in_tray(
+                        focused,
+                        !focused && !typed && self.chat_stream.is_none(),
+                        cx,
+                    )),
             )
     }
 }

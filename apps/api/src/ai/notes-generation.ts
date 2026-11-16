@@ -10,6 +10,10 @@
  * about speakers, what kind of typed notes the author left, and how long and
  * how divided the document may be. The user message is the context as JSON.
  *
+ * The document: a few thematic sections, top-level bullets that each state a point, and indented
+ * sub-bullets for the detail under it; a final actions section only when somebody took a task on. A
+ * note nobody has named gets its title from the same request (`titleRules`).
+ *
  * The document conventions (headings, fragment bullets, the actions section)
  * are restated as checks in `eval/lib/generation-checks.ts`. Measure any change
  * with `bun --env-file=.env apps/api/eval/run.ts generation --fast`.
@@ -18,6 +22,7 @@ import type {ProviderNote} from "../providers"
 import type {LanguageMessage,LanguageRequestParameters} from "./shared"
 import {analyseNote,elapsed,voiceTags,type NoteAnalysis} from "./notes-generation-analysis"
 import {withoutTranscriptLink} from "../transcript-link"
+import {isUntitled,TITLE_MAX_CHARACTERS} from "./note-title"
 
 /** Output budget: the prompt held a 100-minute meeting to about 650 words (at
  * most 1,100 output tokens, measured). The cap is far above that because a
@@ -73,49 +78,62 @@ Write in English by default; use another language only when the author's notes o
 
 const FORMAT=`# The document
 
-Start with the first heading and end with the last bullet. No title, no introduction or summary paragraph, no date, no list of attendees, no closing remark. The app shows the title, date and participants itself.
+The document starts with the first heading and ends with the last bullet. No introduction or summary paragraph, no date, no list of attendees, no closing remark. The app shows the date and participants itself.
 
 Sections
-- Sections use level-one Markdown headings and nothing deeper: each starts with a line "# Heading".
-- A heading is a short noun phrase in Title Case (small words such as and, of, the, for, to stay lower case) that names the concrete topic: "Warehouse Lease Renewal", "Budget and Staffing", "Lisbon Pilot Site". Never a generic label (Discussion, Overview, Summary, Key Points, Updates, Miscellaneous) and never the meeting's title.
-- Topical sections come first, in the order the meeting took them (or the author's order, see below). Action items go in one final section, called "Next Steps" unless the author's notes name it differently. If nobody took or was given a task, there is no such section.
+- Sections use level-one Markdown headings and nothing deeper: each starts with a line "# Heading", with one blank line before every heading but the first.
+- A heading is a short noun phrase in Title Case (small words such as and, of, the, for, to stay lower case) that names the theme: "Warehouse Lease Renewal", "Budget and Staffing", "Checkout Flow Issues". Never a generic label (Discussion, Overview, Summary, Key Points, Updates, Miscellaneous) and never the meeting's title.
+- Group by theme, not by the minute: points about one subject sit together even when the meeting came back to it later. Sections follow the order in which the meeting first reached them (or the author's order, see below).
+- When the whole meeting was one review, comparison or walkthrough, the first section may set the scene in one or two bullets: what was looked at, and the overall verdict if one was stated.
 
 Bullets
 - Every line under a heading is a bullet starting with "- ".
-- Bullets are terse fragments, not sentences: no "The team discussed", no "It was agreed that", no full stop at the end. Colons and semicolons do the work of verbs: "Print budget: €18,000; spent so far: €11,500". One point per bullet, rarely more than 15 words.
+- There are two levels. A top-level bullet states one point so that it can be read on its own: the decision, the finding, the problem, the figure. Sub-bullets (two spaces, then "- ") hold what belongs to that point: the reason, the number behind it, the condition, the example, what is to be done about it. Never nest deeper.
+- Nest instead of listing flat. When a bullet would need "because", "so", "but" or a semicolon to fit everything in, the second half is a sub-bullet. A typical section has two to four top-level bullets, and about half of them carry one to three sub-bullets. A point with nothing more to say stands alone: never invent a sub-bullet to fill, and never repeat the parent in other words.
+- Bullets are telegraphic fragments, not sentences: no "The team discussed", no "It was agreed that", no full stop at the end, rarely more than 12 words. Lead with the subject and let a colon do the work of the verb: "Print budget: €18,000, €11,500 spent", "Search field: sits 2px low, needs realigning", "Onboarding email: open rate down to 31%".
 - Do not narrate who said what. State the content. Name a person only where it matters who it was: an owner, the holder of a position in a disagreement, a party's requirement or concern.
-- Use one level of sub-bullets (two spaces, then "- ") for the figures, reasons or conditions that belong to the bullet above, most often under a decision. Never nest deeper.
 - A decision is the first bullet of its section, stated as the outcome: "Moving payroll from Ardent to Brightside from 1 July", "Approved: second delivery van (€31,000 over 4 years)". Something left open is stated as open: "Logo colour: undecided until printed proofs arrive Tuesday".
 - Write numbers as digits with their unit or symbol: "€42/seat", "27%", "35 min", "$2.6M", "~6 hours/week", "71% vs. 64%". Write dates in digits in the order the speakers used ("May 6", "14 October", "the 22nd", "Monday, June 3"). Never add a month, year or weekday that nobody said.
 
-Action items, in the final section
-- One bullet each: the task in bold as an imperative phrase that can be understood on its own, then the owner in parentheses: "- **Send the revised floor plan to the landlord** (Noemi)".
-- A deadline goes on a single plain line directly beneath, indented two spaces and ending with a full stop: "  Deadline: Friday." or "  Deadline: before the 22nd." If there is no deadline but the owner needs one detail to do the task, that line is a short plain sentence instead: "  The landlord needs it as a PDF." Most action items need no second line.
-- Owner: the first name the meeting used; two people as "(Farid and Elena)". If the sources do not establish the owner, leave the parentheses out. If the meeting said the task is needed and nobody took it, write "(no owner)".
+Action items
+- An action item is a task a person took on: they said they would do it, or were asked and did not decline. Only these go in one final section, called "Next Steps" unless the author's notes name it differently.
+- If nobody took on a task, there is no such section. Never close the document with a list of what should happen, and never restate the document's points as tasks.
+- Something that needs doing but that nobody took on (a fix that is wanted, a thing worth looking into) stays where it belongs, as a sub-bullet under its point, written as the action: "  - Fix: dismiss on outside click", "  - Worth investigating how the shimmer is done". The same holds when the recording is one person thinking aloud: their intentions stay with the points they belong to.
+- One bullet per action item: the owner's first name, a colon, then the task as a short phrase that can be understood on its own, with the deadline at the end in the speakers' own terms: "- Noemi: send the revised floor plan to the landlord by Friday". Two people: "- Farid and Elena: go through the draft together before the 22nd".
+- If the sources do not establish the owner, write the task alone: "- Find two more adult helpers". Never a placeholder such as "(no owner)", "Unassigned", "TBD", "Someone" or "Team".
+- One detail the owner needs to do the task may follow as a sub-bullet: "  - Landlord needs it as a PDF". Most action items need none.
 - A promise made to someone outside the group on the group's behalf ("we'll send you the samples next week") is an action item for the side that made it.
 - Leave out a task that was finished or overtaken before the meeting ended (someone said they would read a draft during the break, and later reported on it).
-- Give a deadline in the speakers' own terms ("Deadline: end of the month.", "Deadline: before the 22nd.").
 - Keep the task as it was committed to: if two people agreed to go through a draft together, the task is to go through it together, not to rewrite it; if someone said they would ask, the task is to ask.
 - List every action item of the meeting, in the order they arose. Do not repeat as a topical bullet what is only an action item.
 
-Bold is used only for the task of an action item. No other emphasis, tables, code blocks, links, quotation of speech, or emoji.
+Plain text only: no bold or other emphasis, tables, code blocks, links, quotation of speech, or emoji.
 
 Example of the layout (an unrelated meeting; copy the form, not the content):
 
 # Coach Booking
 - Booked: 52-seat coach with Hartley Travel, £640 return
   - Cheaper quote (£590) rejected: no seat belts
-- Departure 8:15 from the main gate; back by 17:30
+- Departure 8:15 from the main gate
+  - Back by 17:30
 
 # Museum Visit
-- Workshop slot unconfirmed; museum replies Thursday
-- Group limit: 30 per workshop, so two sessions needed
+- Workshop slot still unconfirmed
+  - Museum replies Thursday
+- Group limit: 30 per workshop
+  - Two sessions needed
+- Gift shop stop: dropped, not enough time
+
+# Consent Forms
+- Paper forms only this year; the online form lost 9 replies last time
+- 14 of 58 still missing
+  - Reminder needed before Friday
 
 # Next Steps
-- **Send consent forms to parents** (Amara)
-  Deadline: Friday.
-- **Confirm workshop slots with the museum** (Ewan)
-- **Find two more adult helpers**`
+- Amara: send consent forms to parents by Friday
+- Ewan: confirm workshop slots with the museum
+  - Needs final headcount first
+- Find two more adult helpers`
 
 const CONTENT=`# What goes in
 
@@ -146,14 +164,14 @@ const typedNotesRules=(analysis:NoteAnalysis,policy:UnnotedTopicsPolicy)=>{
 The author typed nothing. Build the outline from the transcript: one section per real topic, in the order the meeting took them. Every topic the meeting actually spent time on has a place, including reports and updates that led to no decision.`
   const theirs=`- Nothing the author wrote may be lost. Rewrite each of their lines as a clean bullet, completed with the facts from the transcript and with typos and abbreviations fixed: "2nd van 31k - 4 yrs" becomes "Second delivery van approved: €31,000 spread over 4 years". Where their note and the transcript disagree on a fact, the transcript's final value goes in the bullet.
 - Some of what they wrote was never said aloud: their own take, a doubt, a reminder to themselves ("MY TAKE: ask for a rent freeze", "impression: he is stalling", "note to self: call Dana first"). Keep each one, in their words tidied up, marked as theirs the way they marked it ("My take: ask for a rent freeze"), under the heading it belongs to. If they did not mark it ("she looked unconvinced"), give it a bullet of its own that starts "My note:"; do not fold it into a bullet of facts. Never turn it into something the meeting said, agreed or assigned, and never attribute it to a participant.
-- Tasks the author noted for themselves or others ("me: send floor plan Fri") are action items and follow the action-item form. A remark stays a remark wherever they put it: "feels like nobody wants to chair the next one - raise it again" is kept as a plain bullet of theirs, not turned into a task.`
+- Tasks the author noted for themselves or others ("me: send floor plan Fri") are action items and are written as action items. A remark stays a remark wherever they put it: "feels like nobody wants to chair the next one - raise it again" is kept as a plain bullet of theirs, not turned into a task.`
   if(analysis.notes.mode==="outline")return `# The author's original notes
 
 The author typed notes with their own headings (${analysis.notes.headings.map(heading=>`"${heading}"`).join(", ")}). Their notes are the skeleton of your document; the transcript fills it in.
 - Use every one of their headings, in their order and their wording (Title Case, typos fixed), even where the meeting went in a different order. Do not rename, merge, split or drop them.
 ${theirs}
 - File what the transcript adds under the closest of their headings. Add a section of your own only for a substantial topic that fits none of them, and place it after theirs.
-- ${analysis.notes.actionHeading?`Their heading "${analysis.notes.actionHeading}" is the section for action items: keep it where they put it and under their name for it, and make it complete, including tasks they did not write down.`:`They have no heading for tasks, so add "Next Steps" as the last section for the action items.`}
+- ${analysis.notes.actionHeading?`Their heading "${analysis.notes.actionHeading}" is the section for action items: keep it where they put it and under their name for it, and make it complete, including tasks they did not write down.`:`They have no heading for tasks, so add "Next Steps" as the last section for the action items, if there are any.`}
 - Every decision and action item of the meeting appears, whether or not they noted it.`
   const unnoted=policy==="strict"?"Leave out topics the author did not note. The action items are the exception: the final section lists all of them."
     :policy==="keep"?"After the author's topics, cover what else mattered in the meeting briefly, in at most two further sections within the limit: decisions first, then the key figures."
@@ -174,7 +192,7 @@ const peopleRules=(analysis:NoteAnalysis)=>{
     :`One microphone in the room heard everyone ("mic" lines). The channel identifies nobody, the author included.`
   return `# People and owners
 
-- The author${owner?` is ${owner.name}. In the notes they are "${owner.first}", including for tasks they typed as "me" or "I".`:"'s name is not in the context. Use it only if the meeting says it; otherwise their own tasks have no owner in parentheses."}
+- The author${owner?` is ${owner.name}. In the notes they are "${owner.first}", including for tasks they typed as "me" or "I".`:"'s name is not in the context. Use it only if the meeting says it; otherwise their own tasks are written without an owner."}
 ${invited.length?`- Invited besides the author: ${invited.join(", ")}. An invitation is not attendance and does not tell you whose voice is whose.\n`:""}- ${recording}
 - A voice tag such as "sys p4 v2" reads: channel, audio part, voice within that part; "speakerId" is the stored identifier behind the tag. Repeated labels on different speakerIds are not the same person: each part is transcribed on its own, so v2 in part 4 and v2 in part 5 are unrelated. Within one part the same tag is the same person.
 ${channels.liveVoices?`- A voice tag such as "sys live v2" comes from live transcription and is not tied to a part: the same tag is the same voice for the whole recording. After an interruption a voice can come back under a new number, so two live tags can be one person.\n`:""}- A line holds everything one voice said in a stretch of up to a minute, so lines overlap in time: a reply can stand before the question it answers, and one line can hold several questions. Pair them by content.
@@ -184,7 +202,7 @@ An action item's owner is the person who said they would do it, or who was asked
 - A first-person commitment ("I'll send it by Friday") belongs to the speaker when you can tell who the speaker is: the author on a mic line of a two-channel recording; the only other person on a two-person call; or a voice that, close by in the same part, is addressed by name, answers a question put to a named person, names itself, or is thanked by name ("I'll take that." "Thanks, Farid").
 - When a task is handed on ("I'm away next week, can you take it?" "Yes"), the owner is whoever ended up with it.
 - Across parts you may recognise a person by what only they could be saying: the thread they were in when they were named, their role, their side of the call. If the person addressed as Elena was the one explaining the payroll export, a later first-person offer to send the export file is Elena's. Use this only when exactly one participant fits; if two could have said it, there is no owner.
-- Otherwise write no owner. A missing owner is a small gap; a wrong owner sends the task to the wrong person. Being invited, having talked about the topic, or carrying the same voice number in another part is not evidence. Never write a placeholder such as "the seller", "a participant", "the team" or "Speaker 2".`
+- Otherwise write the task without an owner. A missing owner is a small gap; a wrong owner sends the task to the wrong person. Being invited, having talked about the topic, or carrying the same voice number in another part is not evidence. Never write a placeholder such as "the seller", "a participant", "the team" or "Speaker 2".`
 }
 
 const limits=(analysis:NoteAnalysis)=>{
@@ -192,17 +210,61 @@ const limits=(analysis:NoteAnalysis)=>{
   return `# This meeting
 
 - The transcript is about ${words.toLocaleString("en-US")} words.
-- ${tiny?"It was a very short exchange: write one or two sections of a few bullets, with no sub-bullets, and stay well under the length of the exchange itself."
-    :`At most ${maxSections} sections, counting the final one${analysis.notes.mode==="outline"?" (the author's headings are all kept even if that exceeds the limit)":""}. ${maxSections===4?"For a meeting this size that usually means three topics and the action items.":"Group related agenda items rather than giving each its own section."} Use fewer if the meeting had fewer topics; never split a topic to reach a number.`}
+- ${tiny?"It was a very short exchange: write one or two sections of a few bullets, with a sub-bullet only where a point really has a detail of its own, and stay well under the length of the exchange itself."
+    :`At most ${maxSections} sections, counting the final one${analysis.notes.mode==="outline"?" (the author's headings are all kept even if that exceeds the limit)":""}. ${maxSections===4?"For a meeting this size that usually means three or four themes.":"Group related agenda items rather than giving each its own section."} Use fewer if the meeting had fewer topics; never split a topic to reach a number.`}
 - Aim for ${targetWords[0]} to ${targetWords[1]} words. Spend them on decisions, action items and figures; cut words, not facts.`
 }
+
+/** A note nobody has named is named by the same request: the model writes one line, `Title: …`, before
+ * the document (`GeneratedTitleReader` takes it off again). It has the whole meeting in front of it, so
+ * the title costs a dozen output tokens instead of a second request after the notes, and it is the first
+ * thing a streamed generation shows. The rules are the ones `note-title.ts` asks for. */
+const titleRules=`# The title
+
+This note has no title yet. Before the document, write one line that starts with "Title: " and gives the meeting a title, then one blank line, then the document. This line is the only thing that may stand before the first heading.
+- The title says what this meeting was actually about: its subject and what was done with it. 3 to 7 words, at most ${TITLE_MAX_CHARACTERS} characters. Examples of the form: "Flour supplier switch to Windrush", "Hiring plan and budget for Q3", "Onboarding call with Northwind", "Checkout redesign critique and fixes".
+- Specific enough to tell this meeting from the next one in a list. Never a generic label (Meeting notes, Team meeting, Discussion, Call summary, Catch-up, Weekly sync), never a date or a time, never a list of the people who were there.
+- Sentence case, the way a person types a title: a capital for the first word and for proper nouns, nothing else capitalised. No quotation marks, no emoji, no Markdown, no punctuation at the end.
+- In the language the meeting was held in. Only what the sources say: never invent a name, a number or a topic.
+- If there is too little to name a subject, write "Title: NONE".`
+
+/** Takes the `Title: …` line off the front of a generation answer, as it streams or whole.
+ * `push` returns the document text that the piece completes (nothing while the first line is still
+ * undecided); `title` is the raw title once its line has ended, for `cleanNoteTitle` to judge. An answer
+ * that does not begin with the line is passed through untouched. */
+export class GeneratedTitleReader {
+  title:string|null=null
+  private pending="";private state:"start"|"gap"|"document"="start"
+  push(piece:string,end=false):string {
+    if(this.state==="document")return piece
+    this.pending+=piece
+    if(this.state==="start"){
+      const text=this.pending.replace(/^\s+/,"")
+      const probe=text.slice(0,6).toLowerCase()
+      // Not (or no longer possibly) a title line: everything held back is document.
+      if(probe&&!"title:".startsWith(probe)&&!probe.startsWith("title:")){this.state="document";const out=this.pending;this.pending="";return out}
+      const newline=text.indexOf("\n")
+      if(newline<0&&!end)return ""
+      if(!/^title:/i.test(text)){this.state="document";const out=this.pending;this.pending="";return out}
+      this.title=(newline<0?text:text.slice(0,newline)).replace(/^title:/i,"").trim()
+      this.pending=newline<0?"":text.slice(newline+1);this.state="gap"
+    }
+    // The blank line after the title is not part of the document.
+    const rest=this.pending.replace(/^\s+/,"")
+    if(!rest)return ""
+    this.state="document";this.pending=""
+    return rest
+  }
+}
+/** A whole generation answer as its title line (raw, or null) and the document. */
+export const splitGeneratedTitle=(answer:string):{title:string|null;document:string}=>{const reader=new GeneratedTitleReader(),document=reader.push(answer,true);return {title:reader.title,document}}
 
 /** Static core of the prompt, for callers that want to show or hash it. The
  * full system prompt adds the sections that depend on the note. */
 export const GENERATION_INSTRUCTIONS=[ROLE,FORMAT,CONTENT].join("\n\n")
 export const generationSystemPrompt=(note:ProviderNote,policy:UnnotedTopicsPolicy=unnotedTopicsPolicy())=>{
   const analysis=analyseNote(note)
-  return [ROLE,FORMAT,CONTENT,typedNotesRules(analysis,policy),peopleRules(analysis),limits(analysis)].join("\n\n")
+  return [ROLE,FORMAT,CONTENT,typedNotesRules(analysis,policy),peopleRules(analysis),limits(analysis),...(isUntitled(note.title)?[titleRules]:[])].join("\n\n")
 }
 /** The system prompt in two pieces that join into `generationSystemPrompt(note)` exactly: the core that is the
  * same for every note, marked so a provider can serve it from its prompt cache, then the sections that depend on

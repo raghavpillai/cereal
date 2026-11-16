@@ -16,6 +16,10 @@ pub enum Screen {
     SearchResults,
     Favorites,
     Shared,
+    /// The team space: notes shown to the whole workspace (`team_space.rs`).
+    TeamSpace,
+    /// Someone else's note from the team space, read-only.
+    TeamNote,
     /// The page a link opened: a shared note, read-only, or where a note
     /// is when the app is not signed in to its server (see `shared_view`).
     Link,
@@ -29,7 +33,11 @@ pub enum NoteTab {
 }
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Menu {
+    /// The transcript panel's footer: the sound settings popover, the
+    /// microphone menu and the transcript language menu.
     RecordingSettings,
+    RecordingInput,
+    RecordingLanguage,
     NoteDetails,
     CalendarEvent,
     RecordingHelp,
@@ -46,6 +54,8 @@ pub enum Menu {
     Account,
     /// The Trash popover, opened from the sidebar's trash button.
     Trash,
+    /// Settings › Appearance: System, Light or Dark.
+    Theme,
 }
 
 pub struct Cereal {
@@ -78,6 +88,8 @@ pub struct Cereal {
     pub transcript_find_open: bool,
     /// The live-transcript revision the panel last followed to the bottom.
     pub transcript_last_live: u64,
+    /// The transcript panel's own state (see `transcript_panel`).
+    pub panel: crate::transcript_panel::PanelState,
     /// Live transcription of the current recording (see `live_view.rs`).
     pub live: crate::live_view::LiveTranscript,
     pub recording: crate::recording::Recording,
@@ -111,6 +123,8 @@ pub struct Cereal {
     pub server_pending: usize,
     pub server_status: Option<String>,
     pub generation: crate::recording::Generation,
+    /// The notes of that generation as they are written (see `Draft`).
+    pub generation_draft: crate::recording::Draft,
     pub recording_transcript_start: Option<(u64, String)>,
     pub regeneration_notice_dismissed: Option<(u64, u64)>,
     pub recording_from: crate::recording::Phase,
@@ -149,6 +163,18 @@ pub struct Cereal {
     pub stage: crate::motion::Stage,
     /// How much of the sidebar's width is on screen right now, 0..=1.
     pub sidebar_level: f32,
+    /// The sidebar's chosen width in points (dragged at its edge, saved with
+    /// this Mac's layout preferences), within its limits.
+    pub sidebar_width: f32,
+    /// The width the sidebar is drawn at in this window: the chosen width,
+    /// less what a narrow window needs for the page (see
+    /// `desktop_preferences::sidebar_width_in`).
+    pub sidebar_span: f32,
+    /// While the sidebar's edge is being dragged: how far the pointer was
+    /// from the edge when it took hold, so the edge follows it exactly.
+    pub sidebar_grab: Option<f32>,
+    /// The pointer is over the sidebar's edge.
+    pub sidebar_edge_hovered: bool,
     /// How open the search dialog is right now.
     pub search_pose: crate::motion::Pose,
     /// Identity of the page on screen; a change replays the page entrance.
@@ -173,6 +199,8 @@ pub struct Cereal {
     pub chat_models: Vec<meeting_notes_api_types::LanguageModelSelection>,
     pub selected_chat_model: Option<String>,
     pub chat_model_picker_open: bool,
+    /// The row of the open model menu the arrow keys are on.
+    pub chat_model_cursor: Option<usize>,
     pub chat_messages: Vec<(String, String)>,
     pub chat_annotations: std::collections::HashMap<usize, crate::chat::ChatTurnAnnotations>,
     pub chat_epoch: u64,
@@ -192,6 +220,9 @@ pub struct Cereal {
     /// When a press outside the recent-chats list last closed it (see
     /// `toggle_chat_history`).
     pub chat_history_closed_at: Option<std::time::Instant>,
+    /// When a press outside the model menu last closed it (see
+    /// `toggle_chat_model_picker`).
+    pub chat_model_picker_closed_at: Option<std::time::Instant>,
     pub chat_scroll: ScrollHandle,
     pub chat_archives: Vec<crate::chat::ArchivedChat>,
     /// Each account's saved threads on its server (`chat_sync.rs`).
@@ -203,6 +234,10 @@ pub struct Cereal {
     pub meeting: crate::meeting::MeetingState,
     /// Links into the app and "Shared with me" (see `shared_view.rs`).
     pub links: crate::shared_view::Links,
+    /// The Share popover of a note, and "Shared with me" as the server lists it (see `share_popover.rs`).
+    pub share: crate::share_popover::Share,
+    /// The team space page (`team_space.rs`).
+    pub team: crate::team_space::TeamSpace,
     /// "Check for updates" (see `update_view.rs`).
     pub updates: crate::update_view::Updates,
     /// The first-run welcome: its step, and what this Mac has allowed.
@@ -213,6 +248,12 @@ pub struct Cereal {
     pub _subscriptions: Vec<Subscription>,
     /// Registered with the window on the first frame: see `render`.
     focus_lost: Option<Subscription>,
+    /// Redraws when macOS switches between light and dark, for the System
+    /// theme. Registered with the window on the first frame.
+    appearance_watch: Option<Subscription>,
+    /// Where the theme button of Settings was last painted: its menu opens
+    /// from there.
+    pub theme_anchor: std::rc::Rc<std::cell::Cell<Bounds<Pixels>>>,
 }
 
 actions!(
@@ -251,6 +292,15 @@ impl Cereal {
         editor.update(cx, |input, _| input.attach_scroll(note_scroll.clone()));
         let attendee_input = cx.new(|cx| TextInput::new("Add attendees...", false, cx));
         let menu_key_listener = cx.listener(|this, event: &KeystrokeEvent, window, cx| {
+            // The Share popover keeps the arrows, Return and Escape for its picker.
+            if this.handle_share_key(event, window, cx) {
+                return;
+            }
+            // The open model menu takes the arrows, Return and Escape from
+            // the composer it opened from.
+            if this.handle_chat_model_key(event, cx) {
+                return;
+            }
             this.handle_palette_key(event, window, cx);
             if this.focus.contains_focused(window, cx) {
                 this.handle_menu_key(event, window, cx);
@@ -258,6 +308,8 @@ impl Cereal {
         });
         let menu_key_subscription = cx.intercept_keystrokes(menu_key_listener);
         let (links, link_subscriptions) = crate::shared_view::Links::new(cx);
+        let (share, share_subscriptions) = crate::share_popover::Share::new(cx);
+        let (team, team_subscriptions) = crate::team_space::TeamSpace::new(cx);
         // The welcome draws the account form's fields in its own layout.
         let (account_address, account_email) = {
             let account = account.read(cx);
@@ -347,10 +399,14 @@ impl Cereal {
             // The composer's send button and its open or folded shape
             // follow what has been typed.
             cx.subscribe(&ask, |_, _, _: &InputChanged, cx| cx.notify()),
+            // The bar says "Continue chat" while a conversation is folded
+            // into it: taking the field (a press, Tab) opens that
+            // conversation again, on a note and on Home alike, answer still
+            // arriving or not.
             cx.subscribe(&ask, |this, _, _: &InputFocused, cx| {
-                if this.current_note.is_some()
+                if (this.current_note.is_some() || this.screen == Screen::Home)
                     && !this.assistant_open
-                    && !this.chat_messages.is_empty()
+                    && (!this.chat_messages.is_empty() || this.chat_stream.is_some())
                 {
                     this.assistant_open = true;
                     this.ask
@@ -402,6 +458,8 @@ impl Cereal {
             }),
         ];
         subscriptions.extend(link_subscriptions);
+        subscriptions.extend(share_subscriptions);
+        subscriptions.extend(team_subscriptions);
         let mut this = Self {
             workspace: Workspace::load(),
             login,
@@ -435,6 +493,7 @@ impl Cereal {
             transcript_find_index: 0,
             transcript_find_open: false,
             transcript_last_live: 0,
+            panel: Default::default(),
             live: Default::default(),
             recording: Default::default(),
             audio_capture: None,
@@ -455,6 +514,7 @@ impl Cereal {
             server_pending: 0,
             server_status: None,
             generation: Default::default(),
+            generation_draft: Default::default(),
             recording_transcript_start: None,
             regeneration_notice_dismissed: None,
             recording_from: crate::recording::Phase::Idle,
@@ -479,6 +539,10 @@ impl Cereal {
             toast_epoch: 0,
             stage: Default::default(),
             sidebar_level: 1.,
+            sidebar_width: crate::desktop_preferences::sidebar_width(),
+            sidebar_span: crate::desktop_preferences::sidebar_width(),
+            sidebar_grab: None,
+            sidebar_edge_hovered: false,
             search_pose: crate::motion::Pose::REST,
             page_key: 0,
             autosave: Default::default(),
@@ -492,6 +556,7 @@ impl Cereal {
             chat_models: vec![],
             selected_chat_model: None,
             chat_model_picker_open: false,
+            chat_model_cursor: None,
             chat_messages: vec![],
             chat_annotations: Default::default(),
             chat_epoch: 0,
@@ -504,6 +569,7 @@ impl Cereal {
             chat_threads_expanded: false,
             chat_history_open: false,
             chat_history_closed_at: None,
+            chat_model_picker_closed_at: None,
             chat_scroll: ScrollHandle::new(),
             chat_archives: crate::chat::load_history(),
             chat_sync: Default::default(),
@@ -513,12 +579,16 @@ impl Cereal {
             home_scroll: ScrollHandle::new(),
             meeting: Default::default(),
             links,
+            share,
+            team,
             updates: Default::default(),
             onboarding: crate::onboarding_view::Onboarding::new(welcome, cx),
             menu_bar: Default::default(),
             focus: cx.focus_handle(),
             _subscriptions: subscriptions,
             focus_lost: None,
+            appearance_watch: None,
+            theme_anchor: Default::default(),
         };
         this.restore_note_chat(0, cx);
         this
@@ -562,6 +632,10 @@ impl Cereal {
         self.search_open = false;
         if screen == Screen::Home {
             self.connect_server(cx);
+        }
+        // The team space is read when it is opened, and once from Home so the sidebar can name it.
+        if screen == Screen::TeamSpace || (screen == Screen::Home && self.team.page.is_none()) {
+            self.load_team_space(cx);
         }
         if screen == Screen::Settings {
             self.refresh_login_item();
@@ -913,8 +987,12 @@ impl Cereal {
             self.focus.focus(window);
             return;
         }
+        // The composer's popovers close and leave the field its keyboard,
+        // as a press outside them does: the next Escape folds the bar.
         if self.chat_model_picker_open {
             self.chat_model_picker_open = false;
+            cx.notify();
+            return;
         } else if self.summary.open.is_some() {
             self.summary.dismiss();
         } else if self.search_open {
@@ -922,12 +1000,14 @@ impl Cereal {
         } else if self.menu.is_some() {
             self.menu = None;
         } else if self.transcript_find_open {
-            self.transcript_find_open = false;
+            self.transcript_find_end(window, cx);
         } else if self.transcript_open {
             self.transcript_open = false;
             self.transcript_epoch = self.transcript_epoch.wrapping_add(1);
         } else if self.chat_history_open {
             self.chat_history_open = false;
+            cx.notify();
+            return;
         } else if self.chat_editing.is_some() {
             self.cancel_chat_edit(cx);
         } else if self.chat_maximized {
@@ -936,7 +1016,9 @@ impl Cereal {
             self.close_chat_surface(cx);
         } else if self.current_note.is_some() {
             self.navigate(Screen::Home, cx);
-        } else if self.screen == Screen::Link {
+        } else if !matches!(self.screen, Screen::Home | Screen::Welcome | Screen::Login) {
+            // With nothing left to close, Escape is the back pill: every
+            // page but Home steps back to where it came from.
             self.go_back(cx);
         }
         self.focus.focus(window);
@@ -964,6 +1046,23 @@ impl Render for Cereal {
                 cx.notify();
             }));
         }
+        // The System theme follows macOS, live; Light and Dark hold.
+        if self.appearance_watch.is_none() {
+            self.appearance_watch =
+                Some(cx.observe_window_appearance(window, |_, _, cx| cx.notify()));
+        }
+        self.workspace.settings.resolve_theme(matches!(
+            window.appearance(),
+            WindowAppearance::Dark | WindowAppearance::VibrantDark
+        ));
+        // The theme menu belongs to its button on the Preferences page.
+        if self.menu == Some(Menu::Theme)
+            && !(self.screen == Screen::Settings
+                && self.current_note.is_none()
+                && self.settings_tab == crate::screens::SettingsTab::Preferences)
+        {
+            self.menu = None;
+        }
         // The Trash popover belongs to the sidebar's footer: it goes when
         // the footer does (a note opened, the sidebar hidden).
         if self.menu == Some(Menu::Trash) && !self.trash_button_shown() {
@@ -973,6 +1072,7 @@ impl Render for Cereal {
             self.trash_ask = None;
             self.trash_reveal = None;
         }
+        self.sync_share(window, cx);
         match self.menu.clone() {
             Some(menu) if self.visible_menu.as_ref() != Some(&menu) || self.menu_exiting => {
                 // One menu replacing another in place pops again from part-way,
@@ -1016,7 +1116,8 @@ impl Render for Cereal {
         if self.menu.is_some()
             && !matches!(
                 self.menu,
-                Some(Menu::NoteDetails | Menu::CalendarEvent)
+                // These hold a text field of their own.
+                Some(Menu::NoteDetails | Menu::CalendarEvent | Menu::Share)
             )
         {
             self.focus.focus(window);
@@ -1028,6 +1129,14 @@ impl Render for Cereal {
         crate::ui::provision_focus(cx);
         crate::ui::set_popover_open(self.visible_menu.is_some() || self.search_open);
         self.drain_chat_history(cx);
+        if !self.sidebar_open {
+            self.sidebar_grab = None;
+            self.sidebar_edge_hovered = false;
+        }
+        self.sidebar_span = crate::desktop_preferences::sidebar_width_in(
+            self.sidebar_width,
+            f32::from(window.viewport_size().width),
+        );
         let t = self.theme();
         let login = matches!(
             self.screen,
@@ -1055,6 +1164,8 @@ impl Render for Cereal {
         } else {
             match self.screen {
                 Screen::Home | Screen::MyNotes | Screen::Favorites => self.render_home(window, cx),
+                Screen::TeamSpace => self.render_team_space(window, cx),
+                Screen::TeamNote => self.render_team_note(window, cx),
                 _ => self.render_screen(window, cx),
             }
         };
@@ -1200,7 +1311,7 @@ impl Render for Cereal {
                         .relative()
                         // Clamped: the spring's overshoot must not shove the
                         // whole page sideways and back.
-                        .w(px(192. * sidebar.value.clamp(0., 1.)))
+                        .w(px(self.sidebar_span * sidebar.value.clamp(0., 1.)))
                         .h_full()
                         .flex_shrink_0()
                         .overflow_hidden()
@@ -1214,7 +1325,7 @@ impl Render for Cereal {
                                 .top_0()
                                 .bottom_0()
                                 .right_0()
-                                .w(px(192.))
+                                .w(px(self.sidebar_span))
                                 .child(self.render_sidebar(cx)),
                         ),
                 )
@@ -1248,6 +1359,9 @@ impl Render for Cereal {
                             .child(content),
                     )),
             )
+            // The sidebar's edge: the strip that resizes it, over both the
+            // sidebar and the page, under every popover.
+            .children(self.render_sidebar_edge(sidebar, cx))
             .when(self.search_pose.visible, |s| {
                 s.child(self.render_search(cx))
             })
@@ -1256,7 +1370,7 @@ impl Render for Cereal {
                     div()
                         .absolute()
                         .top(px(42.))
-                        .left(px(192. * self.sidebar_level
+                        .left(px(self.sidebar_inset()
                             + if self.current_note.is_some() { 62. } else { 8. }))
                         .child(crate::motion::pop(
                             self.render_chat_history(cx),

@@ -6,7 +6,6 @@ use gpui::{prelude::*, *};
 
 #[derive(Clone, Copy)]
 enum SettingToggle {
-    DarkMode,
     MenuBarEvents,
     EventsWithoutParticipants,
     Notification(crate::notifications::Kind),
@@ -263,7 +262,11 @@ impl Cereal {
                         .child(problem),
                 )
             });
-        if visits.is_empty() {
+        // Notes shared with this account by name, as its server lists them.
+        let by_name = self.render_shared_by_name(cx);
+        let nothing = visits.is_empty() && by_name.is_none();
+        column = column.children(by_name);
+        if nothing {
             column = column.child(
                 div()
                     .mt(px(58.))
@@ -587,17 +590,6 @@ impl Cereal {
                     .items_center()
                     .gap(px(10.))
                     .child(
-                        tool_tip(
-                            "personal-chat-attachment",
-                            "paperclip",
-                            "Attachments are not available yet",
-                            t,
-                        )
-                        .size(px(24.))
-                        .cursor(CursorStyle::Arrow)
-                        .opacity(DISABLED),
-                    )
-                    .child(
                         self.render_chat_model_button("personal-chat-configured-model", cx)
                             .ml(px(2.)),
                     )
@@ -624,12 +616,8 @@ impl Cereal {
                             }))
                             .on_click(cx.listener(|this, _, _, cx| this.submit_chat(cx)))
                     } else {
-                        round_tool(
-                            "personal-chat-voice-input",
-                            "mic",
-                            "Voice input is not configured",
-                            t,
-                        )
+                        // Nothing typed yet: the send arrow, dimmed.
+                        round_tool("send-chat-idle", "arrow-up", "Type a question to send", t)
                         .size(px(32.))
                         .rounded_full()
                         .bg(t.fill)
@@ -646,7 +634,12 @@ impl Cereal {
         let t = self.theme();
         let glide = self.stage.glide("sidebar");
         let connected = crate::server::enabled();
-        let session = crate::accounts::default_session().filter(|_| connected);
+        let session = crate::accounts::default_session()
+            .filter(|_| connected)
+            .or_else(|| crate::portrait::tour_session(cx));
+        let picture = session
+            .as_ref()
+            .and_then(|session| crate::portrait::of(session, cx));
         let name = self.workspace_name();
         let detail = match &session {
             Some(session) => session.user.email.clone(),
@@ -675,16 +668,20 @@ impl Cereal {
                 ),
             None => avatar.child(icon("cereal", 18., t.accent)),
         };
+        let avatar = crate::portrait::avatar(picture, 32., avatar);
         let mut tabs = div().pt(px(20.)).px(px(8.)).flex().flex_col().gap(px(1.));
         for tab in SettingsTab::ALL {
             tabs = tabs.child(
                 div()
                     .id(tab.label())
                     .h(px(28.))
-                    .px(px(6.))
+                    // As the workspace sidebar's rows: an 18 pt glyph, a step
+                    // quieter than its label, which starts 38 pt in.
+                    .pl(px(5.))
+                    .pr(px(6.))
                     .flex()
                     .items_center()
-                    .gap(px(6.))
+                    .gap(px(7.))
                     .rounded(px(8.))
                     .text_color(t.secondary)
                     .cursor_default()
@@ -692,7 +689,7 @@ impl Cereal {
                     .when(self.settings_tab == tab, |row| {
                         row.child(glide.probe(("settings", tab)))
                     })
-                    .child(icon(tab.icon(), 16., t.secondary))
+                    .child(icon(tab.icon(), 18., t.muted))
                     .child(div().flex_1().min_w_0().truncate().child(tab.label()))
                     .reach().on_click(cx.listener(move |this, _, _, cx| {
                         this.settings_tab = tab;
@@ -794,22 +791,7 @@ impl Cereal {
                             )),
                     )
                     .child(section_label("Appearance", t))
-                    .child(settings_card(t).child(self.setting_toggle(
-                        "setting-dark-mode",
-                        "sun",
-                        "Dark mode",
-                        "A softer look for late-night notes.",
-                        self.workspace.settings.dark_mode,
-                        SettingToggle::DarkMode,
-                        cx,
-                    )))
-                    .child(section_label("App icon", t))
-                    .child(settings_card(t).child(div().p(px(16.)).flex().flex_col().gap(px(12.))
-                        .child(small("Choose a Cereal Dock icon. Finder uses the packaged default icon.", t))
-                        .child(div().flex().gap(px(12.)).children(crate::desktop_preferences::AppIcon::ALL.into_iter().map(|choice| self.app_icon_choice(choice, cx))))
-                        .when_some(crate::desktop_preferences::preference_error(), |d, error| d.child(small(error, t)))
-                        .when(!crate::desktop_preferences::icon_supported(), |d| d.child(small("Dock icon selection is available on macOS.", t)))
-                    ))
+                    .child(self.appearance_card(cx))
                     .child(section_label("Notes & meetings", t))
                     .child(
                         settings_card(t)
@@ -1122,36 +1104,126 @@ impl Cereal {
         })
     }
 
+    /// Appearance, as in the reference: the theme with its pop-up button,
+    /// a dashed line, then the Dock icons in a strip under their heading.
+    fn appearance_card(&self, cx: &mut Context<Self>) -> Div {
+        let t = self.theme();
+        let anchor = self.theme_anchor.clone();
+        let theme = settings_row("sun", "Theme", "Choose your interface color scheme", t).child(
+            div()
+                .id("setting-theme")
+                .relative()
+                .flex_shrink_0()
+                .h(px(28.))
+                .pl(px(10.))
+                .pr(px(6.))
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .rounded(px(8.))
+                .reach()
+                .border_1()
+                .border_color(t.hairline)
+                .text_size(px(13.))
+                .text_color(t.text)
+                .cursor_default()
+                .child(row_feedback(t, 8.))
+                // The menu opens from wherever this button is painted.
+                .child(
+                    canvas(move |bounds, _, _| anchor.set(bounds), |_, _, _, _| ())
+                        .absolute()
+                        .inset_0(),
+                )
+                .child(self.workspace.settings.theme.label())
+                .child(icon("chevrons", 14., t.muted))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.focus.focus(window);
+                    this.open_menu(Menu::Theme);
+                    cx.notify();
+                })),
+        );
+        let icons = div()
+            // The strip starts a little left of the text above it and sits
+            // 13 px under the row's tile.
+            .mt(px(-3.))
+            .pl(px(56.))
+            .pr(px(16.))
+            .pb(px(16.))
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap(px(8.))
+            .child(
+                div()
+                    .px(px(11.))
+                    .pt(px(11.))
+                    .flex()
+                    .gap(px(11.))
+                    .rounded(px(20.))
+                    .border(px(hairline(0.5)))
+                    .border_color(card_edge(t))
+                    .bg(t.hover)
+                    .children(
+                        crate::desktop_preferences::AppIcon::ALL
+                            .into_iter()
+                            .map(|choice| self.app_icon_choice(choice, cx)),
+                    ),
+            )
+            .when_some(crate::desktop_preferences::preference_error(), |d, error| {
+                d.child(small(error, t))
+            })
+            .when(!crate::desktop_preferences::icon_supported(), |d| {
+                d.child(small("Dock icon selection is available on macOS.", t))
+            });
+        settings_card(t)
+            .child(theme)
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .px(px(16.))
+                    .h(px(hairline(0.5)))
+                    .child(crate::calendar::dashed_rule(t.hairline).size_full()),
+            )
+            .child(settings_row(
+                "edit",
+                "App icon",
+                "Choose the Cereal icon in your Dock",
+                t,
+            ))
+            .child(icons)
+    }
+
+    /// One Dock icon in the strip: a 45 px rounded square with a dot under
+    /// the one in use. The picture carries an app icon's own margin, so it
+    /// is drawn larger than its square.
     fn app_icon_choice(
         &self,
         choice: crate::desktop_preferences::AppIcon,
         cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
+    ) -> Div {
         let t = self.theme();
         let selected = crate::desktop_preferences::selected_icon() == choice;
-        div()
+        let supported = crate::desktop_preferences::icon_supported();
+        let thumb = div()
             .id(SharedString::from(format!(
                 "app-icon-{}",
                 choice.name().to_lowercase()
             )))
-            .w(px(92.))
-            .p(px(9.))
-            .rounded(px(12.))
-            .border_1()
-            .border_color(if selected { t.accent } else { t.border })
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(7.))
-            .when(crate::desktop_preferences::icon_supported(), |d| {
-                d.child(crate::motion::tactile(t.hover).radius(12.))
-            })
-            .child(img(SharedString::from(choice.asset())).size(px(58.)))
-            .child(div().text_size(px(12.)).child(choice.name()))
-            .when(selected, |d| d.child(icon("check", 12., t.accent)))
-            .when(crate::desktop_preferences::icon_supported(), |d| {
+            .relative()
+            .size(px(45.))
+            .rounded(px(11.))
+            .child(
+                img(SharedString::from(choice.asset()))
+                    .absolute()
+                    .top(px(-4.5))
+                    .left(px(-4.5))
+                    .size(px(54.)),
+            )
+            .when(supported, |d| {
                 d.cursor_default()
-                    .reach().on_click(cx.listener(move |this, _, _, cx| {
+                    .child(row_feedback(t, 11.))
+                    .reach()
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         match crate::desktop_preferences::select_icon(choice) {
                             Ok(()) => {
                                 this.show_toast(&format!("Dock icon set to {}", choice.name()), cx)
@@ -1160,7 +1232,23 @@ impl Cereal {
                         }
                         cx.notify();
                     }))
-            })
+            });
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(thumb)
+            .child(
+                div()
+                    .h(px(12.))
+                    .pt(px(1.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(selected, |d| {
+                        d.child(div().size(px(4.)).rounded_full().bg(t.muted))
+                    }),
+            )
     }
 
     fn setting_toggle(
@@ -1179,10 +1267,6 @@ impl Cereal {
             .child(self.switch(id, enabled))
             .reach().on_click(cx.listener(move |this, _, _, cx| {
                 match setting {
-                    SettingToggle::DarkMode => {
-                        this.workspace.settings.dark_mode = !this.workspace.settings.dark_mode;
-                        this.workspace.settings_changed();
-                    }
                     SettingToggle::MenuBarEvents => this.set_menu_bar_events(!enabled, cx),
                     SettingToggle::EventsWithoutParticipants => {
                         this.set_meeting_preference(
@@ -1700,6 +1784,8 @@ impl Cereal {
         if let Some(note) = self.workspace.note_mut(id) {
             note.trashed = false;
         }
+        // The people it is shared with can read it again.
+        self.share_note_trashed(id, false, cx);
         if self.persist(cx) {
             self.show_toast("Note restored", cx);
         }
@@ -2060,7 +2146,7 @@ impl Cereal {
     /// page: the bottom padding first, then the last rows, could not be
     /// scrolled into view.
     pub(crate) fn page_column_width(&self, window: &Window) -> f32 {
-        (f32::from(window.viewport_size().width) - 192. * self.sidebar_level - 10.)
+        (f32::from(window.viewport_size().width) - self.sidebar_inset() - 10.)
             .clamp(240., 674.)
     }
 }

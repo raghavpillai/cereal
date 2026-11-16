@@ -749,7 +749,9 @@ impl Cereal {
         let mut rows = div()
             .id("connected-calendar-events")
             .track_scroll(&self.calendars.scroll)
-            .max_h(px(302.))
+            // The card is as tall as today and the next three days with
+            // events; it only scrolls on an unusually crowded stretch.
+            .max_h(px(520.))
             .flex_shrink_0()
             .overflow_y_scroll()
             .w_full()
@@ -814,6 +816,7 @@ impl Cereal {
                 // card's edge or the day line), and a dashed hairline that
                 // takes no space marks where one day ends and the next begins.
                 let mut groups = 0;
+                let mut ahead = 0;
                 for delta in 0..i64::from(self.calendars.look_ahead_days) {
                     let date = day + Duration::days(delta);
                     let events = events_on_day(
@@ -825,6 +828,14 @@ impl Cereal {
                     );
                     if events.is_empty() && delta != 0 {
                         continue;
+                    }
+                    // Today, then the next three days that have events, as
+                    // the reference shows.
+                    if delta != 0 {
+                        if ahead == 3 {
+                            break;
+                        }
+                        ahead += 1;
                     }
                     let today = date == crate::menubar::now().date_naive();
                     let mut group = div().relative().flex_shrink_0().py(px(6.)).flex().flex_col();
@@ -849,14 +860,19 @@ impl Cereal {
                                 .child(
                                     event_cell()
                                         .child(event_bar(t.muted))
-                                        .child(small(
-                                            if self.calendar_page == 0 {
-                                                "No events today"
-                                            } else {
-                                                "No events on this day"
-                                            },
-                                            t,
-                                        )),
+                                        // The reference's words, at an
+                                        // event title's size in the muted ink.
+                                        .child(
+                                            div()
+                                                .text_size(px(14.))
+                                                .line_height(px(18.))
+                                                .text_color(t.muted)
+                                                .child(if self.calendar_page == 0 {
+                                                    "No more events today"
+                                                } else {
+                                                    "No events on this day"
+                                                }),
+                                        ),
                                 ),
                         );
                     }

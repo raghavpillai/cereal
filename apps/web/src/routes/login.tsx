@@ -5,6 +5,7 @@ import { readSession, rememberSetup } from '../lib/session-probe'
 import { AppHandoffError, appCallbackURL, appSignInPath, appSignInRequest, authClient, fetchAuthMethods, googleStartURL, requestAppHandoff, safeReturnPath, signInErrorMessage, signInProblem, type AppSignInRequest, type AuthMethods } from '../lib/auth-client'
 import { setupLanding } from '../lib/onboarding'
 import { Loading, Notice } from '../components/admin/shared'
+import { AccountPicture } from '../components/account/account-picture'
 import { TransportWarning } from '../components/kit/transport-notice'
 import appIcon from '../assets/app-icon.svg?url'
 import '../styles/login.css'
@@ -116,7 +117,7 @@ function SignInPage() {
   if (query.wantsApp && !app) return <Shell title="This sign-in link is not valid." lead="Go back to the Cereal app and start signing in again." />
 
   if (stage.kind === 'confirm') return <Shell eyebrow="Cereal app" title="Continue to the Cereal app?" lead="The app on this device will be signed in to your account.">
-    <div className="sign-in-account"><span className="sign-in-avatar" aria-hidden="true">{(stage.session.user.name.trim() || stage.session.user.email).slice(0, 1).toUpperCase()}</span><span><strong>{stage.session.user.name}</strong><span>{stage.session.user.email}</span></span></div>
+    <div className="sign-in-account"><span className="sign-in-avatar" aria-hidden="true"><AccountPicture image={stage.session.user.image} name={stage.session.user.name.trim() || stage.session.user.email} /></span><span><strong>{stage.session.user.name}</strong><span>{stage.session.user.email}</span></span></div>
     {problem && <Notice error>{problem}</Notice>}
     <button type="button" className="button is-large" disabled={busy} onClick={() => void openApp(app!, stage.session)}>Continue as {stage.session.user.name.trim() || stage.session.user.email}</button>
     <button type="button" className="sign-in-secondary" disabled={busy} onClick={() => void useAnotherAccount(stage.methods)}>Use a different account</button>

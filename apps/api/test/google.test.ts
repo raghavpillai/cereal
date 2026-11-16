@@ -153,6 +153,24 @@ describe('personal Google OAuth and context', () => {
     const day = normalizeGoogleEvent({ id: 'all-day', start: { date: '2026-11-13' }, end: { date: '2026-11-14' } }, calendar)!
     expect(day.allDay).toBe(true); expect(day.startDate).toBe('2026-11-13'); expect(day.endDate).toBe('2026-11-14')
   })
+  test('connecting a calendar reports the picture Google has for that identity, and a failure to save it changes nothing', async () => {
+    for (const fails of [false, true]) {
+      const notes = makeMemoryRepository(), store = makeMemoryGoogleStore(notes), told: unknown[][] = []
+      const transport = Object.assign(async (...[input, init]: Parameters<typeof fetch>) => {
+        const url = new URL(new Request(input, init).url)
+        if (url.pathname === '/token') return Response.json({ access_token: 'fixture-access', refresh_token: 'fixture-refresh', expires_in: 3600, scope: scopes })
+        if (url.pathname.endsWith('/userinfo')) return Response.json({ sub: 'fixture-subject', email: 'fixture@example.test', email_verified: true, picture: 'https://pictures.example.test/fixture=s96-c' })
+        return Response.json({ items: [] })
+      }, { preconnect: () => {} }) as typeof fetch
+      const service = makeGoogleService(store, secretBoxFromKey(randomBytes(32)), { clientId: 'fixture-client', clientSecret: 'fixture-secret', baseURL: 'http://localhost:3000', fetch: transport,
+        picture: async (...call) => { told.push(call); if (fails) throw new Error('database away') } })
+      cleanup.push(service.dispose)
+      const begin = new URL((await Effect.runPromise(service.beginConnect(alice.id, sha(alice.sessionId)))).authorizationUrl)
+      const answer = await service.callback(new Request(`http://localhost:3000/api/integrations/google/callback?state=${begin.searchParams.get('state')}&code=fixture`), alice)
+      expect(answer.headers.get('location')).toBe('/account?google=connected')
+      expect(told).toEqual([[alice.id, 'fixture-subject', 'https://pictures.example.test/fixture=s96-c']])
+    }
+  })
   test('provider body streaming and repeated calendar pagination stop at finite limits', async () => {
     for (const mode of ['stream', 'pages'] as const) {
       let canceled = false, pages = 0

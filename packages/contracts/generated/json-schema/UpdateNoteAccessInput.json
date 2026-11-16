@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/UpdateNoteAccessInput",
+  "$defs": {
+    "NoteAccessLevel": {
+      "type": "string",
+      "enum": [
+        "invited",
+        "organization"
+      ]
+    },
+    "UpdateNoteAccessInput": {
+      "type": "object",
+      "properties": {
+        "level": {
+          "$ref": "#/$defs/NoteAccessLevel"
+        },
+        "suspended": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

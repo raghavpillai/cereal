@@ -83,6 +83,7 @@ fn main() {
             "-emit-object",
             "native/MeetingAudio.swift",
             "native/AudioWatchdog.swift",
+            "native/AudioDevices.swift",
             "native/MenuBar.swift",
             "native/Notifications.swift",
             "native/VoiceIsolation.swift",

@@ -79,6 +79,10 @@ describe('a note read a line at a time, as the desktop app reads it', () => {
     expect(html).toContain('<hr/>')
     expect(html).toContain(`<a class="note-link" href="${address}" target="_blank" rel="noopener noreferrer">${address}</a>`)
     expect(html.replace(/<[^>]+>/g, '')).toContain(`Chat with meeting transcript: ${address} I CAN TYPE HERE`)
+    // The line as generated, with nothing typed after it, is a short quiet link to the same address.
+    const bare = renderToStaticMarkup(<NoteText value={`# Notes\n- One\n\n---\n\nChat with meeting transcript: ${address}`} />)
+    expect(bare).toContain(`<p class="note-line note-transcript-link"><a class="note-link" href="${address}" target="_blank" rel="noopener noreferrer">Chat with meeting transcript ↗</a></p>`)
+    expect(bare).not.toContain(`>${address}<`)
   })
 
   test('the addresses that become links are the same on every client (testdata/web-addresses.json)', async () => {

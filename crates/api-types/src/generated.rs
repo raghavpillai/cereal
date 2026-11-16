@@ -725,6 +725,9 @@ pub struct UserDTO {
 
     pub id: String,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+
     pub name: String,
 
     pub role: UserDtoRole,
@@ -1302,6 +1305,8 @@ pub enum ChatStreamEventDtoType {
 
     Error,
 
+    Reasoning,
+
     Tool,
 }
 
@@ -1638,6 +1643,29 @@ pub struct GenerationProgressDTO {
     pub state: GenerationState,
 
     pub transcript_revision: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GenerationStreamEventDTO {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<NoteDTO>,
+
+    pub text: String,
+
+    #[serde(rename = "type")]
+    pub generation_stream_event_dto_type: GenerationStreamEventDtoType,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationStreamEventDtoType {
+    Delta,
+
+    Done,
+
+    Error,
+
+    Title,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2262,6 +2290,8 @@ pub struct ChatThreadMessageDTO {
 
     pub model: Option<String>,
 
+    pub reasoning: Vec<ChatReasoningDTO>,
+
     pub role: ChatMessageDtoRole,
 
     pub status: ChatThreadMessageStatus,
@@ -2271,6 +2301,14 @@ pub struct ChatThreadMessageDTO {
     pub turn: i64,
 
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatReasoningDTO {
+    pub after_tools: i64,
+
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2365,6 +2403,9 @@ pub struct ChatTurnAnswerInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Vec<ChatReasoningDTO>>,
+
     pub status: ChatTurnAnswerStatus,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2404,4 +2445,272 @@ pub struct ChatThreadStreamInput {
     pub time_zone: Option<String>,
 
     pub turn: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamSpaceDTO {
+    pub members: Vec<TeamSpaceMemberDTO>,
+
+    pub notes: Vec<TeamSpaceNoteDTO>,
+
+    pub organization: Organization,
+
+    pub people: Vec<TeamSpacePersonDTO>,
+
+    pub people_source: PeopleSource,
+
+    pub role: OrganizationDtoRole,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamSpaceMemberDTO {
+    pub email: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+
+    pub name: String,
+
+    pub user_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamSpaceNoteDTO {
+    pub added_at: String,
+
+    pub attendees: NoteAttendeesDTO,
+
+    pub can_remove: bool,
+
+    pub created_at: String,
+
+    pub date: String,
+
+    pub id: String,
+
+    pub meeting: Option<NoteMeetingTimeDTO>,
+
+    pub mine: bool,
+
+    pub owner: TeamSpaceMemberDTO,
+
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Organization {
+    pub id: String,
+
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamSpacePersonDTO {
+    pub email: Option<String>,
+
+    pub initials: String,
+
+    pub last_note_date: String,
+
+    pub name: String,
+
+    pub note_ids: Vec<String>,
+
+    pub notes: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeopleSource {
+    Own,
+
+    Team,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamSpaceNoteContentDTO {
+    pub added_at: String,
+
+    pub body: String,
+
+    pub date: String,
+
+    pub duration: String,
+
+    pub enhanced: String,
+
+    pub id: String,
+
+    pub mine: bool,
+
+    pub owner: TeamSpaceMemberDTO,
+
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddTeamSpaceNotesInput {
+    pub note_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteAccessDTO {
+    pub attendees: Vec<NoteAccessAttendeeDTO>,
+
+    pub level: NoteAccessLevel,
+
+    pub note_id: String,
+
+    pub organization: Option<NoteAccessOrganizationDTO>,
+
+    pub owner: NoteAccessPersonDTO,
+
+    pub people: Vec<NoteAccessGrantDTO>,
+
+    pub suspended: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteAccessAttendeeDTO {
+    pub email: String,
+
+    pub has_access: bool,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+
+    pub name: String,
+
+    pub user_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoteAccessLevel {
+    Invited,
+
+    Organization,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NoteAccessOrganizationDTO {
+    pub domain: Option<String>,
+
+    pub id: String,
+
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteAccessPersonDTO {
+    pub email: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+
+    pub name: String,
+
+    pub user_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteAccessGrantDTO {
+    pub added_at: String,
+
+    pub email: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+
+    pub name: String,
+
+    pub user_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddNoteAccessInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emails: Option<Vec<String>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateNoteAccessInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<NoteAccessLevel>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suspended: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NoteAccessCandidatesDTO {
+    pub people: Vec<NoteAccessCandidateDTO>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteAccessCandidateDTO {
+    pub attendee: bool,
+
+    pub email: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+
+    pub name: String,
+
+    pub user_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SharedWithMeDTO {
+    pub notes: Vec<SharedWithMeEntryDTO>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedWithMeEntryDTO {
+    pub date: String,
+
+    pub id: String,
+
+    pub owner: NoteAccessPersonDTO,
+
+    pub shared_at: String,
+
+    pub title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedWithMeNoteDTO {
+    pub body: String,
+
+    pub date: String,
+
+    pub duration: String,
+
+    pub enhanced: String,
+
+    pub id: String,
+
+    pub owner: NoteAccessPersonDTO,
+
+    pub shared_at: String,
+
+    pub title: String,
 }

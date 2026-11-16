@@ -359,6 +359,8 @@ fn note_update_payload(note: &Note) -> Value {
 #[derive(Debug, PartialEq)]
 pub enum ChatStreamEvent {
     Delta(String),
+    /// The next piece of the model's own reasoning (`ChatReasoningDTO`).
+    Reasoning(String),
     Tool(meeting_notes_api_types::ChatToolProgressDTO),
     Citations(Vec<meeting_notes_api_types::ChatCitationDTO>),
     Done,
@@ -373,6 +375,10 @@ fn decode_chat_frame(data: &str) -> Option<ChatStreamEvent> {
     match value.chat_stream_event_dto_type {
         Type::Delta if value.text.len() <= 1_048_576 => Some(ChatStreamEvent::Delta(value.text)),
         Type::Done => Some(ChatStreamEvent::Done),
+        Type::Reasoning if value.text.len() <= 1_048_576 => {
+            Some(ChatStreamEvent::Reasoning(value.text))
+        }
+        Type::Reasoning => None,
         Type::Error => Some(ChatStreamEvent::Error(
             value.text.chars().take(1000).collect(),
         )),
@@ -579,6 +585,44 @@ fn stream_chat_with_client(
     receiver
 }
 
+/// How a generation is coming along, for the window to show as it happens.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GenerateProgress {
+    /// The notes have been asked for: the note is saved and stopped.
+    Began,
+    /// The name the server gave a note nobody had named.
+    Title(String),
+    /// The next piece of the notes' Markdown.
+    Delta(String),
+    /// This server does not stream: what was shown is dropped, and the
+    /// notes arrive whole.
+    Buffered,
+}
+
+const GENERATION_FAILED: &str = "Notes could not be generated. Try again.";
+
+enum GenerationFrame {
+    Progress(GenerateProgress),
+    Done(Box<NoteDTO>),
+    Error(String),
+}
+
+fn decode_generation_frame(data: &str) -> Option<GenerationFrame> {
+    use meeting_notes_api_types::{GenerationStreamEventDTO, GenerationStreamEventDtoType as Type};
+    let value: GenerationStreamEventDTO = serde_json::from_str(data).ok()?;
+    match value.generation_stream_event_dto_type {
+        Type::Delta if value.text.len() <= 1_048_576 => {
+            Some(GenerationFrame::Progress(GenerateProgress::Delta(value.text)))
+        }
+        Type::Delta => None,
+        Type::Title => Some(GenerationFrame::Progress(GenerateProgress::Title(
+            value.text.chars().take(200).collect(),
+        ))),
+        Type::Done => value.note.map(|note| GenerationFrame::Done(Box::new(note))),
+        Type::Error => Some(GenerationFrame::Error(value.text.chars().take(1000).collect())),
+    }
+}
+
 #[derive(Clone)]
 pub enum Action {
     Save,
@@ -595,6 +639,9 @@ pub enum Action {
         history: Vec<Value>,
     },
     Share,
+    // Kept for a caller that turns every link of a note off at once; the Share popover narrows what links
+    // reach instead ("Only people invited").
+    #[allow(dead_code)]
     RevokeShares,
 }
 pub struct Reply {
@@ -610,6 +657,8 @@ struct Job {
     note: Note,
     action: Action,
     reply: mpsc::Sender<Result<Reply, String>>,
+    /// Who hears how a generation is coming along, if anyone.
+    progress: Option<mpsc::Sender<GenerateProgress>>,
 }
 /// What an account's serial worker is asked to do: an [`Action`] on a note,
 /// or deleting a note on the server for good (Delete forever in Trash). They
@@ -669,7 +718,9 @@ impl Bridge {
                 let client = client.as_mut().expect("the client was just made");
                 match work {
                     Work::Run(job) => {
-                        let _ = job.reply.send(client.run(&job.note, job.action));
+                        let _ = job
+                            .reply
+                            .send(client.run_with(&job.note, job.action, job.progress.as_ref()));
                     }
                     Work::Delete { note, force, conditional, reply } => {
                         let _ = reply.send(client.delete(&note, force, conditional));
@@ -679,12 +730,18 @@ impl Bridge {
         });
         Self { sender }
     }
-    fn send(&self, note: Note, action: Action) -> mpsc::Receiver<Result<Reply, String>> {
+    fn send(
+        &self,
+        note: Note,
+        action: Action,
+        progress: Option<mpsc::Sender<GenerateProgress>>,
+    ) -> mpsc::Receiver<Result<Reply, String>> {
         let (reply, receiver) = mpsc::channel();
         let _ = self.sender.send(Work::Run(Job {
             note,
             action,
             reply,
+            progress,
         }));
         receiver
     }
@@ -849,10 +906,22 @@ impl Client {
         forget(self, Some(&id));
         Ok(())
     }
+    #[cfg(test)]
     fn run(&mut self, note: &Note, action: Action) -> Result<Reply, String> {
+        self.run_with(note, action, None)
+    }
+
+    /// [`Client::run`], telling `progress` how a generation is coming
+    /// along (see [`GenerateProgress`]).
+    fn run_with(
+        &mut self,
+        note: &Note,
+        action: Action,
+        progress: Option<&mpsc::Sender<GenerateProgress>>,
+    ) -> Result<Reply, String> {
         let id = self.ensure(note)?;
         let base = format!("/api/v1/notes/{id}");
-        let _: NoteDTO = self.request("PATCH", &base, Some(note_update_payload(note)))?;
+        let saved: NoteDTO = self.request("PATCH", &base, Some(note_update_payload(note)))?;
         let mut answer = None;
         let mut share_url = None;
         let mut untranscribed = false;
@@ -872,12 +941,17 @@ impl Client {
                 }
             }
             Action::Generate => {
-                // The recording is stopped first (Stop sends this action, and
-                // a note still recording elsewhere has no final transcript):
-                // once the server answers, the live session has stored its
-                // last finals, and the notes are written from those.
-                self.stop(note, &base)?;
-                let current: NoteDTO = self.request("GET", &base, None)?;
+                // A note still recording is stopped first: once the server
+                // answers, the live session has stored its last finals, and
+                // the notes are written from those. One that is already
+                // stopped (Generate pressed after Stop) is what the save
+                // above returned: nothing more is asked before the notes.
+                let current = if saved.recording_state == meeting_notes_api_types::RecordingState::Stopped {
+                    saved
+                } else {
+                    self.stop(note, &base)?;
+                    self.request("GET", &base, None)?
+                };
                 if current
                     .transcript_segments
                     .iter()
@@ -886,12 +960,16 @@ impl Client {
                     stop_trace("there is no transcript to write notes from");
                     untranscribed = true;
                 } else {
-                    let _: NoteDTO = self.request(
-                        "POST",
-                        &format!("{base}/generate"),
-                        Some(json!({"expectedTranscriptRevision":current.transcript_revision})),
-                    )?;
+                    let written = self.generate(&base, current.transcript_revision, progress)?;
                     stop_trace("the notes are written");
+                    // The note as the generation saved it: nothing to read again.
+                    return Ok(Reply {
+                        note: written,
+                        url: self.url.clone(),
+                        answer,
+                        share_url,
+                        untranscribed,
+                    });
                 }
             }
             Action::Chat { message, history } => {
@@ -927,6 +1005,87 @@ impl Client {
             share_url,
             untranscribed,
         })
+    }
+
+    /// Have the notes of the note at `base` written from transcript
+    /// `revision`, and return the note as saved. The notes are streamed
+    /// (`/generate/stream`): `progress` hears the title and each piece of
+    /// text as the model writes it. The server finishes and saves the notes
+    /// whether or not this connection lasts.
+    ///
+    /// A stream that says nothing at all (a server older than the endpoint,
+    /// or a refusal, whose reason the transport does not pass on) is asked
+    /// again the buffered way, which answers with the notes or the reason.
+    fn generate(
+        &self,
+        base: &str,
+        revision: i64,
+        progress: Option<&mpsc::Sender<GenerateProgress>>,
+    ) -> Result<NoteDTO, String> {
+        let payload = json!({"expectedTranscriptRevision": revision});
+        let tell = |event: GenerateProgress| {
+            if let Some(progress) = progress {
+                let _ = progress.send(event);
+            }
+        };
+        let mut child = self.event_stream_with_status(&format!("{base}/generate/stream"), &payload)?;
+        let finish = |child: &mut std::process::Child| {
+            let _ = child.kill();
+            let _ = child.wait();
+        };
+        let Some(output) = child.stdout.take() else {
+            finish(&mut child);
+            return Err(GENERATION_FAILED.into());
+        };
+        tell(GenerateProgress::Began);
+        let mut heard = false;
+        let mut input = BufReader::new(output);
+        let (mut line, mut data, mut bytes) = (String::new(), Vec::<String>::new(), 0);
+        loop {
+            line.clear();
+            match input.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => bytes += count,
+            }
+            if bytes > 8 * 1024 * 1024 {
+                finish(&mut child);
+                return Err(GENERATION_FAILED.into());
+            }
+            let text = line.trim_end_matches(['\r', '\n']);
+            if let Some(value) = text.strip_prefix("data:") {
+                data.push(value.strip_prefix(' ').unwrap_or(value).to_string());
+                continue;
+            }
+            if !text.is_empty() || data.is_empty() {
+                continue;
+            }
+            let frame = data.join("\n");
+            data.clear();
+            heard = true;
+            match decode_generation_frame(&frame) {
+                Some(GenerationFrame::Progress(event)) => tell(event),
+                Some(GenerationFrame::Done(note)) => {
+                    finish(&mut child);
+                    return Ok(*note);
+                }
+                Some(GenerationFrame::Error(message)) => {
+                    finish(&mut child);
+                    return Err(message);
+                }
+                None => {
+                    finish(&mut child);
+                    return Err(GENERATION_FAILED.into());
+                }
+            }
+        }
+        finish(&mut child);
+        if heard {
+            // The server carries on and saves them; the next refresh of the
+            // note brings them here.
+            return Err("The connection was lost while the notes were being written. They will appear here once the server has finished them.".into());
+        }
+        tell(GenerateProgress::Buffered);
+        self.request("POST", &format!("{base}/generate"), Some(payload))
     }
 
     /// Tell the server the recording of `note` has stopped. The window
@@ -1257,6 +1416,7 @@ pub fn live_target(note: &Note, capture_id: &str) -> crate::live::Resolved {
             endpoint: client.live(id),
             capture_id: capture_id.to_owned(),
             base_ms,
+            language: crate::transcript_panel::stream_language(),
         }),
         // The server did not answer, or an earlier capture is not final yet.
         Err(_) => Resolved::Later,
@@ -2090,22 +2250,44 @@ impl Cereal {
         let submitted_enhanced_dirty = note.enhanced_dirty;
         let submitted_title = note.title.clone();
         let submitted_body = note.body.clone();
+        // A generation says how it is coming along: its notes are shown as
+        // they are written (`generation_draft`).
+        let (progress_sender, progress) = if let Some(epoch) = epoch {
+            self.generation_draft.begin(id, epoch);
+            let (sender, receiver) = mpsc::channel();
+            (Some(sender), Some(receiver))
+        } else {
+            (None, None)
+        };
+        let progress_title = submitted_title.clone();
         let receiver = self
             .bridges
             .entry(account_id.clone())
             .or_insert_with(|| Bridge::new(account_id.clone()))
-            .send(note, action);
+            .send(note, action, progress_sender);
         self.server_pending += 1;
-        // Saves, Start and Stop go by without a word.
-        self.server_status = if generating {
-            Some("Generating notes on server…".into())
-        } else if chat {
+        // Saves, Start and Stop go by without a word, and a generation is
+        // on the page itself (the chip, then the notes as they are written).
+        self.server_status = if chat {
             Some("Thinking…".into())
         } else {
             None
         };
         cx.notify();
         cx.spawn(async move |this, cx| {
+            // What the generation has said since the last look, onto the page.
+            let heard = |this: &WeakEntity<Self>, cx: &mut AsyncApp| {
+                let (Some(progress), Some(epoch)) = (progress.as_ref(), epoch) else {
+                    return;
+                };
+                let events: Vec<GenerateProgress> = progress.try_iter().collect();
+                let _ = this.update(cx, |this, cx| {
+                    for event in events {
+                        this.generation_progress(id, epoch, &progress_title, event, cx);
+                    }
+                    this.generation_draft_step(epoch, cx);
+                });
+            };
             let result = loop {
                 match receiver.try_recv() {
                     Ok(result) => break result,
@@ -2113,12 +2295,17 @@ impl Cereal {
                         break Err("Server worker stopped. Local audio is preserved.".into());
                     }
                     Err(mpsc::TryRecvError::Empty) => {
+                        // A generation is followed frame by frame; anything
+                        // else is looked at ten times a second, as before.
+                        let wait = if progress.is_some() { 16 } else { 100 };
                         cx.background_executor()
-                            .timer(Duration::from_millis(100))
-                            .await
+                            .timer(Duration::from_millis(wait))
+                            .await;
+                        heard(&this, cx);
                     }
                 }
             };
+            heard(&this, cx);
             let _ = this.update(cx, |this, cx| {
                 this.server_pending = this.server_pending.saturating_sub(1);
                 if stops {
@@ -2135,6 +2322,7 @@ impl Cereal {
                     }
                     if generating && epoch == Some(this.generation.epoch) {
                         this.generation.cancel();
+                        this.generation_draft.clear();
                     }
                     cx.notify();
                     return;
@@ -2235,9 +2423,20 @@ impl Cereal {
                                 // Nothing to write notes from: say so, and
                                 // leave the note as it is.
                                 this.generation.cancel();
+                                this.generation_draft.clear();
                             } else {
                                 this.generation.writing(epoch);
                                 this.generation.phase = crate::recording::GenerationPhase::Ready;
+                                // What is on the page stays; the rest of the
+                                // saved notes is written out after it.
+                                if this.generation_draft.of(epoch) {
+                                    let saved = this
+                                        .workspace
+                                        .note(id)
+                                        .map(|note| note.enhanced.clone())
+                                        .unwrap_or_default();
+                                    this.generation_draft.finish(&saved);
+                                }
                                 this.notify_notes(id, None);
                             }
                         }
@@ -2256,6 +2455,7 @@ impl Cereal {
                     Err(error) => {
                         if generating && epoch == Some(this.generation.epoch) {
                             this.generation.cancel();
+                            this.generation_draft.clear();
                             this.notify_notes(id, Some(&error));
                         }
                         if chat
@@ -2271,6 +2471,18 @@ impl Cereal {
                 }
                 cx.notify();
             });
+            // The end of the notes is still being written out.
+            if let Some(epoch) = epoch {
+                loop {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(16))
+                        .await;
+                    match this.update(cx, |this, cx| this.generation_draft_step(epoch, cx)) {
+                        Ok(true) => {}
+                        _ => break,
+                    }
+                }
+            }
         })
         .detach();
         true
@@ -2646,6 +2858,11 @@ mod tests {
         assert_eq!(
             decode_chat_frame(r#"{"type":"done","text":""}"#),
             Some(ChatStreamEvent::Done)
+        );
+        // The model's reasoning, piece by piece, whitespace kept.
+        assert_eq!(
+            decode_chat_frame(r#"{"type":"reasoning","text":"\n\n**Searching** café"}"#),
+            Some(ChatStreamEvent::Reasoning("\n\n**Searching** café".into()))
         );
         assert_eq!(
             decode_chat_frame(r#"{"type":"secret","text":"ignored"}"#),
@@ -3916,6 +4133,53 @@ mod account_tests {
         let _ = fs::remove_dir_all(directory);
     }
 
+    #[test]
+    fn a_streamed_generation_is_heard_in_order_and_ends_with_the_saved_note() {
+        let saved = serde_json::json!({
+            "id": A, "title": "Launch date", "body": "", "enhanced": "# Launch\n- Monday", "date": "2026-11-16",
+            "duration": "", "createdAt": "2026-11-16T10:00:00Z", "updatedAt": "2026-11-16T10:00:00Z",
+            "recordingState": "stopped", "generationState": "ready", "transcriptRevision": 3,
+            "generatedRevision": 3, "transcriptSegments": []
+        });
+        let frames = [
+            serde_json::json!({"type": "title", "text": "Launch date"}),
+            serde_json::json!({"type": "delta", "text": "# Launch\n"}),
+            serde_json::json!({"type": "delta", "text": "- Monday"}),
+            serde_json::json!({"type": "done", "text": "", "note": saved}),
+        ];
+        let stream: String = frames.iter().map(|frame| format!("data: {frame}\n\n")).collect();
+        let server = Fake::start(move |request| match request.path.as_str() {
+            path if path.ends_with("/generate/stream") => (200, "text/event-stream", stream.clone(), Vec::new()),
+            _ => json(500, "{}"),
+        });
+        let root = scratch("generate-stream");
+        let client = Client::for_test(&server.url, TOKEN, Some(&root));
+        let (sender, heard) = mpsc::channel();
+        let note = client
+            .generate(&format!("/api/v1/notes/{A}"), 3, Some(&sender))
+            .unwrap();
+        assert_eq!(note.enhanced, "# Launch\n- Monday");
+        assert_eq!(
+            heard.try_iter().collect::<Vec<_>>(),
+            [
+                GenerateProgress::Began,
+                GenerateProgress::Title("Launch date".into()),
+                GenerateProgress::Delta("# Launch\n".into()),
+                GenerateProgress::Delta("- Monday".into()),
+            ]
+        );
+        // An error frame ends it with the server's words.
+        let failing = Fake::start(|_| {
+            (200, "text/event-stream", "data: {\"type\":\"delta\",\"text\":\"# A\"}\n\ndata: {\"type\":\"error\",\"text\":\"Notes could not be generated. Try again.\"}\n\n".into(), Vec::new())
+        });
+        let client = Client::for_test(&failing.url, TOKEN, Some(&root));
+        assert_eq!(
+            client.generate(&format!("/api/v1/notes/{A}"), 3, None).unwrap_err(),
+            "Notes could not be generated. Try again."
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     /// Stop goes straight on to the notes: the server is told the recording
     /// stopped (once the stream has handed over), and the notes are written
     /// from the transcript it then has. No audio is uploaded, and nothing
@@ -3958,16 +4222,20 @@ mod account_tests {
                 format!("PATCH /api/v1/notes/{A}"),
                 format!("POST /api/v1/notes/{A}/recording"),
                 format!("GET /api/v1/notes/{A}"),
+                // The streamed endpoint first; this fake answers it without
+                // a stream, so the notes are asked for the buffered way.
+                format!("POST /api/v1/notes/{A}/generate/stream"),
                 format!("POST /api/v1/notes/{A}/generate"),
-                format!("GET /api/v1/notes/{A}"),
             ]
         );
         let bodies: Vec<String> = server.seen.lock().unwrap().iter().map(|seen| seen.body.clone()).collect();
         assert_eq!(serde_json::from_str::<serde_json::Value>(&bodies[1]).unwrap(), serde_json::json!({"command": "stop"}));
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&bodies[3]).unwrap(),
-            serde_json::json!({"expectedTranscriptRevision": 3})
-        );
+        for body in &bodies[3..5] {
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(body).unwrap(),
+                serde_json::json!({"expectedTranscriptRevision": 3})
+            );
+        }
         // Nothing was said: the note is left as it is, and says so.
         server.seen.lock().unwrap().clear();
         let reply = client.run(&note(2, B), Action::Generate).unwrap();

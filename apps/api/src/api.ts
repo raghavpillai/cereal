@@ -20,6 +20,8 @@ import type {StorageService} from "./storage"
 import {MAX_IMPORT_BYTES,importDigest,importedSegmentId,parseNoteStamp} from "./note-import"
 import {makeChatsService,makeMemoryChatStore,type ChatsService} from "./chats"
 import {withoutTranscriptLink} from "./transcript-link"
+import type {TeamSpaceService} from "./team-space"
+import type {NoteAccessService} from "./note-access"
 import {InvalidPageRequest,parseListInput,parseSearchInput,selectNoteSearch,selectNoteSummaries,withMeeting} from "./note-summaries"
 
 const unavailable = { error: "unavailable", message: "The note service is temporarily unavailable" } as const
@@ -58,7 +60,7 @@ function createShare(noteId: string, input: CreateShareInput, clock: () => Date)
 }
 
 /** The caller owns repository lifetime; dispose releases only the API runtime. */
-export function makeApiHandler(repository: NotesRepositoryService, adminToken: string, options: { clock?: () => Date; processing?: ProcessingService; administration?: AdministrationService; authentication?: AuthenticationService; google?: GoogleIntegration; noteParticipants?:NoteParticipantsService; mcpStore?:McpStore; downloads?:DownloadsService; storage?:StorageService; chats?:ChatsService; principalResolver?: (headers: Headers) => Promise<PrincipalData|null> } = {}) {
+export function makeApiHandler(repository: NotesRepositoryService, adminToken: string, options: { clock?: () => Date; processing?: ProcessingService; administration?: AdministrationService; authentication?: AuthenticationService; google?: GoogleIntegration; noteParticipants?:NoteParticipantsService; mcpStore?:McpStore; downloads?:DownloadsService; storage?:StorageService; chats?:ChatsService; teamSpace?:TeamSpaceService; noteAccess?:NoteAccessService; principalResolver?: (headers: Headers) => Promise<PrincipalData|null> } = {}) {
   if (adminToken.length < 32) throw new Error("ADMIN_TOKEN must contain at least 32 characters")
   const processing = options.processing ?? makeProcessingService(repository)
   const administration = options.administration ?? makeAdministrationService(makeMemoryCalendarStore(repository), undefined, { clock: options.clock })
@@ -170,9 +172,14 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
       if (!share || share.metadata.revokedAt || (share.metadata.expiresAt && Date.parse(share.metadata.expiresAt) <= clock().getTime())) {
         return yield* Effect.fail(missingShare)
       }
+      // The link alone opens nothing: the reader must be someone the note's sharing reaches right now (note-access.ts).
+      // Without that service there are no workspaces to share inside, and a link is its owner's alone.
+      const principal = yield* AuthPrincipal
+      const allowed = options.noteAccess ? yield* options.noteAccess.mayReadLink(principal, share.metadata.noteId) : (yield* persist(repository.forUser(principal.id).getNote(share.metadata.noteId))) !== null
+      if (!allowed) return yield* Effect.fail(missingShare)
       return share.snapshot
     }))
-    .handle("getSession", () => Effect.map(AuthPrincipal, ({source,...principal})=>({user:{id:principal.id,name:principal.name,email:principal.email,role:principal.role,createdAt:principal.createdAt},expiresAt:principal.expiresAt})))
+    .handle("getSession", () => Effect.map(AuthPrincipal, ({source,...principal})=>({user:{id:principal.id,name:principal.name,email:principal.email,role:principal.role,createdAt:principal.createdAt,...(principal.image?{image:principal.image}:{})},expiresAt:principal.expiresAt})))
     // Only a browser session can hand its account to an app: never the bootstrap token, never another bearer token.
     .handle("createAppHandoff", ({payload}) => Effect.gen(function*(){
       const principal=yield* AuthPrincipal,request=yield* HttpServerRequest.HttpServerRequest,authentication=options.authentication
@@ -223,7 +230,8 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
     .handle("updateChatThread", ({params,payload}) => Effect.flatMap(AuthPrincipal,p=>chats.rename(p.id,params.id,payload.title)))
     .handle("deleteChatThread", ({params}) => Effect.flatMap(AuthPrincipal,p=>chats.delete(p.id,params.id)))
     .handle("appendChatTurn", ({params,payload}) => Effect.flatMap(AuthPrincipal,p=>chats.append(p.id,params.id,payload)))
-    .handle("streamChatThread", ({params,payload}) => Effect.flatMap(AuthPrincipal,p=>chats.stream(p.id,params.id,payload,(noteId,input)=>useProcessing(service=>service.chatStream(noteId,input)))))
+    // A model that is not enabled is refused before the question is stored.
+    .handle("streamChatThread", ({params,payload}) => Effect.flatMap(AuthPrincipal,p=>Effect.flatMap(useProcessing(service=>service.checkChatModel(payload.model)),()=>chats.stream(p.id,params.id,payload,(noteId,input)=>useProcessing(service=>service.chatStream(noteId,input))))))
     .handle("getAgentBrief",()=>mcpSupport(async(store,scope)=>({...await store.agentBrief(scope),source:"explicit_user_profile" as const,automaticallyInferred:false as const})))
     .handle("updateAgentBrief",({payload})=>mcpSupport(async(store,scope)=>({...await store.updateAgentBrief(scope,payload.body),workspaceId:scope.workspaceId,source:"explicit_user_profile" as const,automaticallyInferred:false as const})))
     .handle("uploadNoteAttachment",({params,payload})=>mcpSupport(async(store,scope)=>{
@@ -231,8 +239,14 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
       const saved=await store.storeAttachment(scope,params.id,payload.name,payload.mimeType,image)
       return {...saved,mimeType:payload.mimeType,createdAt:saved.createdAt.toISOString()}
     }))
+    // The team space: every rule is in team-space.ts. Without one configured there is no space to find.
+    .handle("getTeamSpace", () => Effect.flatMap(AuthPrincipal,p=>options.teamSpace?options.teamSpace.get(p):Effect.fail({error:"not_found",message:"Team space not found"} as const)))
+    .handle("addTeamSpaceNotes", ({payload}) => Effect.flatMap(AuthPrincipal,p=>options.teamSpace?options.teamSpace.add(p,payload):Effect.fail({error:"not_found",message:"Team space not found"} as const)))
+    .handle("getTeamSpaceNote", ({params}) => Effect.flatMap(AuthPrincipal,p=>options.teamSpace?options.teamSpace.note(p,params.id):Effect.fail({error:"not_found",message:"Team space not found"} as const)))
+    .handle("removeTeamSpaceNote", ({params}) => Effect.flatMap(AuthPrincipal,p=>options.teamSpace?options.teamSpace.remove(p,params.id):Effect.fail({error:"not_found",message:"Team space not found"} as const)))
     .handle("recording", ({params,payload}) => useProcessing(service => service.recording(params.id,payload.command)))
     .handle("generateNotes", ({params,payload}) => useProcessing(service => service.generate(params.id,payload.expectedTranscriptRevision)))
+    .handle("generateNotesStream", ({params,payload}) => useProcessing(service => service.generateStream(params.id,payload.expectedTranscriptRevision)))
     .handle("chat", ({params,payload}) => useProcessing(service => service.chat(params.id,payload)))
     .handle("chatStream", ({params,payload}) => useProcessing(service => service.chatStream(params.id,payload)))
     .handle("evidence", ({params,payload}) => useProcessing(service => service.evidence(params.id,payload)))
@@ -285,7 +299,15 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
       const repo = yield* NotesRepository
       const share = yield* persist(repo.revokeShare(params.id, clock().toISOString()))
       return share ?? (yield* Effect.fail(missingShare))
-    })))
+    }))
+    // Who a note is shared with: every rule is in note-access.ts. Without it configured nothing can be shared.
+    .handle("getNoteAccess", ({params}) => Effect.flatMap(AuthPrincipal,p=>options.noteAccess?options.noteAccess.get(p,params.id):Effect.fail(missingNote)))
+    .handle("updateNoteAccess", ({params,payload}) => Effect.flatMap(AuthPrincipal,p=>options.noteAccess?options.noteAccess.update(p,params.id,payload):Effect.fail(missingNote)))
+    .handle("addNoteAccess", ({params,payload}) => Effect.flatMap(AuthPrincipal,p=>options.noteAccess?options.noteAccess.add(p,params.id,payload):Effect.fail(missingNote)))
+    .handle("removeNoteAccess", ({params}) => Effect.flatMap(AuthPrincipal,p=>options.noteAccess?options.noteAccess.remove(p,params.id,params.userId):Effect.fail(missingNote)))
+    .handle("searchNoteAccessCandidates", ({params,query}) => Effect.flatMap(AuthPrincipal,p=>options.noteAccess?options.noteAccess.candidates(p,params.id,query.q):Effect.fail(missingNote)))
+    .handle("listSharedWithMe", () => Effect.flatMap(AuthPrincipal,p=>options.noteAccess?options.noteAccess.sharedWithMe(p):Effect.succeed({notes:[]})))
+    .handle("getSharedWithMeNote", ({params}) => Effect.flatMap(AuthPrincipal,p=>options.noteAccess?options.noteAccess.read(p,params.id):Effect.fail(missingNote))))
   const handlers = Layer.mergeAll(publicHandlers, ownerHandlers)
   const app = HttpApiBuilder.layer(MeetingsApi, { openapiPath: "/api/openapi.json" }).pipe(
     Layer.provide(handlers), Layer.provide(auth),

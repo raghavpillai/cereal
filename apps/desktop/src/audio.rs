@@ -698,6 +698,122 @@ impl NativeCapture {
     }
 }
 
+/// A microphone the person can choose in the transcript panel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputDevice {
+    /// Core Audio's device UID: the same device across launches and ports.
+    pub uid: String,
+    pub name: String,
+    /// The Mac's default input right now.
+    pub is_default: bool,
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn mn_audio_input_devices(output: *mut std::ffi::c_char, capacity: usize) -> usize;
+    fn mn_audio_set_input_device(uid: *const std::ffi::c_char);
+    fn mn_preferred_language(output: *mut std::ffi::c_char, capacity: usize) -> usize;
+}
+
+/// A string from one of the native calls that fill a buffer and return the
+/// bytes they need (with the NUL).
+#[cfg(target_os = "macos")]
+fn native_string(call: unsafe extern "C" fn(*mut std::ffi::c_char, usize) -> usize) -> Option<String> {
+    let mut output = vec![0u8; 16_384];
+    for _ in 0..3 {
+        let required = unsafe { call(output.as_mut_ptr().cast(), output.len()) };
+        if required == 0 || required > 1_048_576 {
+            return None;
+        }
+        if required > output.len() {
+            output.resize(required, 0);
+            continue;
+        }
+        return String::from_utf8(output[..required - 1].to_vec()).ok();
+    }
+    None
+}
+
+/// The native layer's device list (`{"default": uid, "devices": [...]}`) as
+/// the panel shows it: in the Mac's own order, nameless devices left out.
+pub fn parse_input_devices(json: &str) -> Vec<InputDevice> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let standard = value["default"].as_str();
+    value["devices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|device| {
+            let uid = device["uid"].as_str().filter(|uid| !uid.is_empty())?;
+            let name = device["name"].as_str().map(str::trim).filter(|name| !name.is_empty())?;
+            Some(InputDevice {
+                uid: uid.to_owned(),
+                name: name.to_owned(),
+                is_default: standard == Some(uid),
+            })
+        })
+        .collect()
+}
+
+/// The microphones plugged in right now. Asking opens no device and needs
+/// no permission. Tests and review fixtures get a made-up list.
+pub fn input_devices() -> Vec<InputDevice> {
+    if preview_mode() {
+        return parse_input_devices(
+            r#"{"default":"preview:built-in","devices":[
+                {"uid":"preview:built-in","name":"MacBook Pro Microphone"},
+                {"uid":"preview:airpods","name":"AirPods Pro"},
+                {"uid":"preview:usb","name":"Studio Display Microphone"}]}"#,
+        );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        native_string(mn_audio_input_devices)
+            .map(|json| parse_input_devices(&json))
+            .unwrap_or_default()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Vec::new()
+    }
+}
+
+/// The microphone of the captures that start from now on: a device UID, or
+/// `None` to follow the Mac's default input. A capture that is running
+/// keeps the device it started with.
+pub fn set_input_device(uid: Option<&str>) {
+    if preview_mode() {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let uid = uid.and_then(|uid| std::ffi::CString::new(uid).ok());
+        unsafe { mn_audio_set_input_device(uid.as_ref().map_or(std::ptr::null(), |uid| uid.as_ptr())) };
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = uid;
+    }
+}
+
+/// The person's first preferred language as macOS spells it ("en-US").
+/// `None` in tests and review fixtures, which are the same on every Mac.
+pub fn system_language() -> Option<String> {
+    if preview_mode() {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        native_string(mn_preferred_language).filter(|language| !language.is_empty())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 /// What a listening check hears on one channel.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CheckChannel {

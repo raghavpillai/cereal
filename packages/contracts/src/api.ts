@@ -6,10 +6,12 @@ import {AuthMethodsDTO,AppHandoffInput,AppHandoffDTO,AppHandoffExchangeInput,App
 import {DownloadsDTO} from "./index"
 import {ChatThreadsPageDTO,ChatThreadDTO,CreateChatThreadInput,AppendChatTurnInput,UpdateChatThreadInput,ChatThreadStreamInput} from "./chats"
 import {ImportNoteInput,ImportedNoteDTO} from "./index"
+import {TeamSpaceDTO,TeamSpaceNoteContentDTO,AddTeamSpaceNotesInput} from "./team-space"
+import {NoteAccessDTO,AddNoteAccessInput,UpdateNoteAccessInput,NoteAccessCandidatesDTO,SharedWithMeDTO,SharedWithMeNoteDTO} from "./note-access"
 import {StorageTestInput,StorageTestDTO} from "./index"
 import {OnboardingStepInput,GoogleVerificationInput,GoogleVerificationStartDTO,GoogleVerificationStatusDTO,SwitchToPasswordInput} from "./index"
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, HttpApiSecurity, OpenApi } from "effect/http-api"
-import { OrganizationDTO, OrganizationsDTO, OrganizationMemberDTO, OrganizationInvitationDTO, OrganizationDetailsDTO, OrganizationInvitationsDTO, CreateOrganizationInput, UpdateOrganizationInput, SetActiveOrganizationInput, InviteOrganizationMemberInput, UpdateOrganizationMemberRoleInput, ManualParticipantInput, GoogleStatusDTO, GoogleConnectInput, GoogleConnectDTO, GoogleCalendarsDTO, GoogleCalendarDTO, UpdateGoogleCalendarInput, NoteContextDTO, UpdateNoteContextInput, AuthSessionDTO, UsersDTO, UserDTO, CreateUserInput, UpdateUserRoleInput, CalendarPreferencesDTO, CalendarEventsDTO, CalendarsDTO, CalendarDTO, CreateCalendarInput, UpdateCalendarInput, AdminSettingsDTO, UpdateAdminSettingsInput, Timestamp, ChatStreamEventDTO, EvidenceRequestDTO, EvidenceDTO, EvidenceStreamEventDTO, RecordingCommandDTO, GenerateNotesCommandDTO, ChatInput, ChatAnswerDTO, CreateNoteInput, CreateShareInput, CreatedShareDTO, DeletedDTO, HealthDTO, NoteDTO, NotesDTO, SharedNoteDTO, ShareDTO, SharesDTO, UUID, UpdateNoteInput } from "./index"
+import { OrganizationDTO, OrganizationsDTO, OrganizationMemberDTO, OrganizationInvitationDTO, OrganizationDetailsDTO, OrganizationInvitationsDTO, CreateOrganizationInput, UpdateOrganizationInput, SetActiveOrganizationInput, InviteOrganizationMemberInput, UpdateOrganizationMemberRoleInput, ManualParticipantInput, GoogleStatusDTO, GoogleConnectInput, GoogleConnectDTO, GoogleCalendarsDTO, GoogleCalendarDTO, UpdateGoogleCalendarInput, NoteContextDTO, UpdateNoteContextInput, AuthSessionDTO, UsersDTO, UserDTO, CreateUserInput, UpdateUserRoleInput, CalendarPreferencesDTO, CalendarEventsDTO, CalendarsDTO, CalendarDTO, CreateCalendarInput, UpdateCalendarInput, AdminSettingsDTO, UpdateAdminSettingsInput, Timestamp, ChatStreamEventDTO, EvidenceRequestDTO, EvidenceDTO, EvidenceStreamEventDTO, RecordingCommandDTO, GenerateNotesCommandDTO, GenerationStreamEventDTO, ChatInput, ChatAnswerDTO, CreateNoteInput, CreateShareInput, CreatedShareDTO, DeletedDTO, HealthDTO, NoteDTO, NotesDTO, SharedNoteDTO, ShareDTO, SharesDTO, UUID, UpdateNoteInput } from "./index"
 
 export const Unauthorized = Schema.Struct({ error: Schema.Literal("unauthorized"), message: Schema.String }).pipe(HttpApiSchema.status(401))
 export const Forbidden = Schema.Struct({ error: Schema.Literal("forbidden"), message: Schema.String }).pipe(HttpApiSchema.status(403))
@@ -31,7 +33,7 @@ const PageLimit = Schema.String.check(Schema.isPattern(/^[1-9][0-9]{0,2}$/))
 const NoteStamp = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128))
 const PageCursor = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512), Schema.isPattern(/^[A-Za-z0-9_-]+$/))
 
-export interface PrincipalData {id:string;name:string;email:string;role:"owner"|"admin"|"user";source:"bootstrap"|"session";expiresAt:string|null;createdAt:string;sessionId?:string}
+export interface PrincipalData {id:string;name:string;email:string;image?:string;role:"owner"|"admin"|"user";source:"bootstrap"|"session";expiresAt:string|null;createdAt:string;sessionId?:string}
 export class AuthPrincipal extends Context.Service<AuthPrincipal,PrincipalData>()("MeetingNotesAuthPrincipal") {}
 
 /** Authenticated session or operator bootstrap credential. */
@@ -77,7 +79,9 @@ export const MeetingsApi = HttpApi.make("MeetingNotesApi")
     .add(HttpApiEndpoint.post("acceptOrganizationInvitation", "/api/v1/organization-invitations/:id/accept", {params:{id:UUID},success:OrganizationDTO,error:errors}))
     .add(HttpApiEndpoint.post("rejectOrganizationInvitation", "/api/v1/organization-invitations/:id/reject", {params:{id:UUID},success:DeletedDTO,error:errors}))
     .add(HttpApiEndpoint.get("getSession", "/api/v1/session", {success:AuthSessionDTO,error:errors}))
-    // A shared link is read by anyone signed in to this server who holds it; the token is still required. Not signed in: 401, before the token is looked at.
+    // A shared link is read by a signed-in member of the note's workspace who holds it, and only while the note's
+    // sharing lets them (src/note-access.ts): its owner, people it is shared with, and, at level "organization",
+    // every member. Anyone else is told 404, as for a link that does not exist. Not signed in: 401, before the token is looked at.
     .add(HttpApiEndpoint.get("getSharedNote", "/api/v1/shared/:token", {params:{token:Schema.String},success:SharedNoteDTO,error:errors}))
     .add(HttpApiEndpoint.post("createAppHandoff", "/api/v1/auth/app-handoff", {payload:AppHandoffInput,success:AppHandoffDTO,error:errors}))
     .add(HttpApiEndpoint.get("getAgentBrief", "/api/v1/profile/agent-brief", {success:AgentBriefDTO,error:errors}))
@@ -143,8 +147,25 @@ export const MeetingsApi = HttpApi.make("MeetingNotesApi")
     .add(HttpApiEndpoint.get("listShares", "/api/v1/notes/:id/shares", { params: { id: UUID }, success: SharesDTO, error: errors }))
     .add(HttpApiEndpoint.post("createShare", "/api/v1/notes/:id/shares", { params: { id: UUID }, payload: CreateShareInput, success: CreatedShareDTO, error: errors }))
     .add(HttpApiEndpoint.delete("revokeShare", "/api/v1/shares/:id", { params: { id: UUID }, success: ShareDTO, error: errors }))
+    // Who a note is shared with (src/note-access.ts). The owner's alone to read and change: anyone else is told
+    // 404. People and candidates are members of the note's workspace, never anyone outside it (400 when asked).
+    .add(HttpApiEndpoint.get("getNoteAccess", "/api/v1/notes/:id/access", { params: { id: UUID }, success: NoteAccessDTO, error: errors }))
+    .add(HttpApiEndpoint.patch("updateNoteAccess", "/api/v1/notes/:id/access", { params: { id: UUID }, payload: UpdateNoteAccessInput, success: NoteAccessDTO, error: errors }))
+    .add(HttpApiEndpoint.post("addNoteAccess", "/api/v1/notes/:id/access/people", { params: { id: UUID }, payload: AddNoteAccessInput, success: NoteAccessDTO, error: errors }))
+    .add(HttpApiEndpoint.delete("removeNoteAccess", "/api/v1/notes/:id/access/people/:userId", { params: { id: UUID, userId: UUID }, success: NoteAccessDTO, error: errors }))
+    .add(HttpApiEndpoint.get("searchNoteAccessCandidates", "/api/v1/notes/:id/access/candidates", { params: { id: UUID }, query: { q: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(200))) }, success: NoteAccessCandidatesDTO, error: errors }))
+    // Notes other members shared with the reader by name, and one of them as it is now. Anything else is 404.
+    .add(HttpApiEndpoint.get("listSharedWithMe", "/api/v1/shared-with-me", { success: SharedWithMeDTO, error: errors }))
+    .add(HttpApiEndpoint.get("getSharedWithMeNote", "/api/v1/shared-with-me/:id", { params: { id: UUID }, success: SharedWithMeNoteDTO, error: errors }))
+    // The team space (src/team-space.ts): notes their owners show to the whole workspace. Members only: anyone
+    // else is told 404, for the space and for each note. Nothing here changes a note.
+    .add(HttpApiEndpoint.get("getTeamSpace", "/api/v1/team-space", { success: TeamSpaceDTO, error: errors }))
+    .add(HttpApiEndpoint.post("addTeamSpaceNotes", "/api/v1/team-space/notes", { payload: AddTeamSpaceNotesInput, success: TeamSpaceDTO, error: errors }))
+    .add(HttpApiEndpoint.get("getTeamSpaceNote", "/api/v1/team-space/notes/:id", { params: { id: UUID }, success: TeamSpaceNoteContentDTO, error: errors }))
+    .add(HttpApiEndpoint.delete("removeTeamSpaceNote", "/api/v1/team-space/notes/:id", { params: { id: UUID }, success: DeletedDTO, error: errors }))
     .add(HttpApiEndpoint.post("recording", "/api/v1/notes/:id/recording", { params: { id: UUID }, payload: RecordingCommandDTO, success: NoteDTO, error: errors }))
     .add(HttpApiEndpoint.post("generateNotes", "/api/v1/notes/:id/generate", { params: { id: UUID }, payload: GenerateNotesCommandDTO, success: NoteDTO, error: errors }))
+    .add(HttpApiEndpoint.post("generateNotesStream", "/api/v1/notes/:id/generate/stream", { params: { id: UUID }, payload: GenerateNotesCommandDTO, success: HttpApiSchema.StreamSse({ data: GenerationStreamEventDTO, keepAlive: "10 seconds" }), error: errors }))
     .add(HttpApiEndpoint.post("chat", "/api/v1/notes/:id/chat", { params: { id: UUID }, payload: ChatInput, success: ChatAnswerDTO, error: errors }))
     .add(HttpApiEndpoint.post("chatStream", "/api/v1/notes/:id/chat/stream", { params: { id: UUID }, payload: ChatInput, success: HttpApiSchema.StreamSse({ data: ChatStreamEventDTO, keepAlive: "10 seconds" }), error: errors }))
     .add(HttpApiEndpoint.post("evidence", "/api/v1/notes/:id/evidence", { params: { id: UUID }, payload: EvidenceRequestDTO, success: EvidenceDTO, error: errors }))

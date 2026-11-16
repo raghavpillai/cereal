@@ -875,6 +875,24 @@ pub struct Target {
     pub capture_id: String,
     /// Note-timeline position of the capture's first sample.
     pub base_ms: u64,
+    /// The language the person chose for live transcription (ISO 639), or
+    /// `None` to let the provider detect it.
+    pub language: Option<String>,
+}
+
+/// The first frame of a connection: which capture this is and what each
+/// channel sends. `language` is only present when the person chose one.
+fn hello_message(target: &Target, streams: Vec<serde_json::Value>) -> serde_json::Value {
+    let mut hello = serde_json::json!({
+        "type": "hello",
+        "protocol": PROTOCOL,
+        "captureId": target.capture_id,
+        "streams": streams,
+    });
+    if let Some(language) = target.language.as_deref().filter(|language| !language.is_empty()) {
+        hello["language"] = language.into();
+    }
+    hello
 }
 
 /// What looking up the target came to.
@@ -1527,12 +1545,7 @@ impl Worker {
                         })
                     })
                     .collect();
-                let hello = serde_json::json!({
-                    "type": "hello",
-                    "protocol": PROTOCOL,
-                    "captureId": target.capture_id,
-                    "streams": streams,
-                });
+                let hello = hello_message(&target, streams);
                 if Self::send(&mut connection, Message::text(hello.to_string())).is_err() {
                     return self.back_off();
                 }
@@ -2732,7 +2745,27 @@ pub(crate) mod tests {
             ),
             capture_id: fixture.manifest.capture_id.clone(),
             base_ms: 754_000,
+            language: None,
         }
+    }
+
+    #[test]
+    fn the_hello_names_a_language_only_when_one_was_chosen() {
+        let endpoint = || crate::accounts::client::LiveEndpoint::for_test(String::from("http://127.0.0.1:9"), &"t".repeat(40));
+        let target = |language: Option<&str>| Target {
+            endpoint: endpoint(),
+            capture_id: "capture-language".into(),
+            base_ms: 0,
+            language: language.map(str::to_owned),
+        };
+        // Detection: the frame is exactly what it was before there was a choice.
+        let detected = hello_message(&target(None), vec![]);
+        assert_eq!(
+            detected,
+            serde_json::json!({"type": "hello", "protocol": PROTOCOL, "captureId": "capture-language", "streams": []})
+        );
+        assert!(hello_message(&target(Some("")), vec![]).get("language").is_none());
+        assert_eq!(hello_message(&target(Some("en")), vec![])["language"], "en");
     }
 
     /// A handover key of the fixture's own, as a note's ID is in the app.

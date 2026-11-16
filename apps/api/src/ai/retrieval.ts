@@ -28,6 +28,10 @@ export interface PreparedChat {note:ProviderNote;citations:ReadonlyArray<ChatCit
 export interface MeetingChatOptions {
   noteId:string|null;input:ChatInput;repository:NotesRepositoryService;providers:ProviderServices;
   enrich:(note:NoteDTO)=>Promise<ProviderNote>;signal:AbortSignal;emit:(event:ChatStreamEventDTO)=>void;now?:Date;
+  /** A chat about one note with a source label on every line and instructions to cite them. No endpoint sets
+   * this: such a chat shows no sources. The form is kept, and tested, because thread layout, label stability
+   * and the citation checks it exercises are shared with the form that is sent. */
+  labelledLines?:boolean;
   /** Internal resource-limit seam; callers may lower but never raise the cap. */
   readCharacterBudget?:number;
   /** Chat during a recording: where threads are remembered (default: the process-wide store) and whose they are. */
@@ -144,12 +148,14 @@ export function createRetrievalSession(options:MeetingChatOptions,select:Context
       progress(callId,name,"completed",`Looked deeper into ${notes.length} note${notes.length===1?"":"s"}`,notes)
       return (notes as ReadonlyArray<ProviderNote>).map(note=>({noteId:note.id,title:note.title,date:note.date,body:note.body,summary:note.enhanced,transcript:note.transcriptSegments,retrievalCoverage:note.retrievalCoverage,sources:issued.filter(c=>c.noteId===note.id)}))
     } catch(error){
-      progress(callId,name,"failed","Could not complete meeting lookup")
+      progress(callId,name,"failed","Couldn't finish this lookup")
       signal.throwIfAborted()
       return {error:"Meeting lookup could not be completed. Only account-owned discovered meeting IDs are readable."}
     }
   }
   return {input,providers,signal,now,timeZone,today,issued,read,discovered,progress,execute,
+    /** The next piece of the model's own reasoning, as the provider gave it. Sent whether or not sources were asked for. */
+    reasoning:(text:string)=>{if(text&&!signal.aborted)options.emit({type:"reasoning",text})},
     /** Tool operations executed so far, against the limit of 8 per request. */
     callCount:()=>calls,
     /** The caller's scoped repository, note enrichment, event sink and read

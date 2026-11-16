@@ -7,13 +7,13 @@ import type {
   TranscriptSegmentDTO,
   ChatCitationDTO,
 } from "@meeting-notes/contracts";
-import { completionSettings, DEFAULT_LANGUAGE_PARAMETERS, type LanguageRequestParameters } from "./ai/shared";
+import { completionSettings, DEFAULT_LANGUAGE_PARAMETERS, reasoningCapable, type LanguageRequestParameters } from "./ai/shared";
 import { chatAnswerMessages, chatAnswerParameters, chatFeature, chatLayout } from "./ai";
 import { cachedRequest, logLanguageUsage, readUsage, type LanguageUsage, type LanguageUsageEvent } from "./ai/prompt-cache";
 import { generationMessages, GENERATION_PARAMETERS } from "./ai/notes-generation";
 import { titleMessages, TITLE_PARAMETERS, TITLE_TIMEOUT_MS } from "./ai/note-title";
 import { evidenceMessages, EVIDENCE_PARAMETERS, readEvidence } from "./ai/evidence";
-import { PLANNER_PARAMETERS } from "./ai/workspace-chat";
+import { PLANNER_PARAMETERS, PLANNER_REASONING_TOKENS } from "./ai/workspace-chat";
 import { streamCompletion } from "./ai/completion-stream";
 
 export class ProviderFailure extends Error {
@@ -37,6 +37,8 @@ export interface ChatToolDefinition {type:"function";function:{name:string;descr
 
 export interface ProviderServices {
   readonly generate: (note: ProviderNote) => Effect.Effect<string, ProviderFailure>;
+  /** The same answer as `generate`, as it is written (`processing.ts`, `generateStream`). A provider without it is asked the buffered way. */
+  readonly generateStream?: (note: ProviderNote, signal: AbortSignal) => AsyncIterable<string>;
   /** What to call a meeting nobody named, from its finished notes (`ai/note-title.ts`): the model's answer as
    * it came, cleaned and judged by the caller. A provider without it leaves untitled notes untitled. */
   readonly title?: (note: ProviderNote, notes: string) => Effect.Effect<string, ProviderFailure>;
@@ -44,18 +46,32 @@ export interface ProviderServices {
     note: ProviderNote,
     input: ChatInput,
   ) => Effect.Effect<string, ProviderFailure>;
-  readonly chatStream?: (note: ProviderNote, input: ChatInput, signal: AbortSignal) => AsyncIterable<string>;
+  /** The answer as it is written. `onReasoning` is handed each piece of the model's own reasoning as the provider
+   * sends it (a reasoning summary or thinking text), before the answer text it led to; a provider that sends none
+   * never calls it. Nothing here writes reasoning itself. */
+  readonly chatStream?: (note: ProviderNote, input: ChatInput, signal: AbortSignal, onReasoning?: ReasoningSink) => AsyncIterable<string>;
   readonly evidence?: (note: ProviderNote, paragraph: string) => Effect.Effect<{ summary: string; segmentIds: ReadonlyArray<string> }, ProviderFailure>;
   /** The same request as `evidence`, streamed: the model's JSON answer as it is written, unchecked (`evidence-stream.ts` reads and validates it). */
   readonly evidenceStream?: (note: ProviderNote, paragraph: string, signal: AbortSignal) => AsyncIterable<string>;
-  readonly chatToolStep?: (messages:ReadonlyArray<ChatToolMessage>,tools:ReadonlyArray<ChatToolDefinition>,signal:AbortSignal,model?:string)=>Promise<ReadonlyArray<ChatToolCall>>;
+  /** One research round. `onReasoning` is called once, before this returns, with the reasoning the provider gave for the round, when it gave any. */
+  readonly chatToolStep?: (messages:ReadonlyArray<ChatToolMessage>,tools:ReadonlyArray<ChatToolDefinition>,signal:AbortSignal,model?:string,onReasoning?:ReasoningSink)=>Promise<ReadonlyArray<ChatToolCall>>;
+  /** Whether a question may name this chat model (`provider:model`). Absent: there is no choice of models, and any name is ignored. */
+  readonly chatModelEnabled?: (model:string)=>Promise<boolean>;
 }
+export type ReasoningSink=(text:string)=>void
 export class Providers extends Context.Service<Providers, ProviderServices>()(
   "MeetingNotesProviders",
 ) {}
 
 const object = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
+/** The reasoning text of a chat completions message or streamed delta: `reasoning` (OpenRouter, and what
+ * `language-transport.ts` builds for OpenAI and Anthropic) or `reasoning_content` (many OpenAI-compatible servers). */
+const reasoningText = (part: unknown): string => {
+  if (!object(part)) return "";
+  const text = typeof part.reasoning === "string" && part.reasoning ? part.reasoning : part.reasoning_content;
+  return typeof text === "string" ? text : "";
+};
 /** The most of a language provider's answer that is read: the same 1 MB a streamed answer and the model test request
  * are held to. A provider an administrator points at (an OpenAI-compatible server) cannot make the server buffer more. */
 export const LANGUAGE_RESPONSE_LIMIT = 1_000_000;
@@ -105,6 +121,8 @@ export function makeProviderServices(
   const languageKey=languageProvider==="openai_compatible"?options.openAiCompatibleKey??"":languageProvider==="openai"?openAiKey:languageProvider==="anthropic"?options.anthropicKey??process.env.ANTHROPIC_API_KEY:options.openRouterKey??process.env.OPENROUTER_API_KEY;
   const compatibleBase=options.openAiCompatibleBaseUrl??"";
   const transport = languageTransport(rawTransport,languageProvider,languageKey??"",compatibleBase);
+  /** The same, for the two chat requests whose reasoning is shown: the transport then asks the provider for it where it has to be asked for. */
+  const reasoningTransport = languageTransport(rawTransport,languageProvider,languageKey??"",compatibleBase,{reasoning:true});
   const routerKey = languageKey;
   // A language provider is ready with its key; an OpenAI-compatible server with its address (the key is optional).
   const languageReady = languageProvider==="openai_compatible" ? !!compatibleBase : !!routerKey;
@@ -159,20 +177,25 @@ export function makeProviderServices(
         e instanceof ProviderFailure ? e : new ProviderFailure("language"),
     });
   return {
-    async chatToolStep(messages,tools,signal) {
+    async chatToolStep(messages,tools,signal,_model,onReasoning) {
       if(!languageReady)throw new ProviderFailure("language","not_configured")
       const model=options.toolModel??options.languageModel??process.env.OPENROUTER_TOOL_MODEL??"openai/gpt-6-sol"
       // The research loop only appends, so each round can read the one before it from the provider's cache.
       const wire=cachedRequest(languageProvider,model,messages,PLANNER_PARAMETERS.cache)
-      const response=await transport("https://openrouter.ai/api/v1/chat/completions",{
+      // A model that reasons is asked to reason a little here, so the research has reasoning to show.
+      const reasons=reasoningCapable(model)
+      const response=await reasoningTransport("https://openrouter.ai/api/v1/chat/completions",{
         method:"POST",headers:{...authorization,"Content-Type":"application/json"},
-        body:JSON.stringify({model,messages:wire.messages,tools,tool_choice:"auto",parallel_tool_calls:false,...completionSettings(model,PLANNER_PARAMETERS.maxTokens,PLANNER_PARAMETERS.temperature),...wire.extra}),
+        body:JSON.stringify({model,messages:wire.messages,tools,tool_choice:"auto",parallel_tool_calls:false,...completionSettings(model,reasons?PLANNER_REASONING_TOKENS:PLANNER_PARAMETERS.maxTokens,PLANNER_PARAMETERS.temperature,reasons?"low":undefined),...wire.extra}),
         signal:AbortSignal.any([signal,AbortSignal.timeout(30_000)]),redirect:"error",
       })
       if(!response.ok)throw new ProviderFailure("language")
       const raw:unknown=await readJsonCapped(response)
       if(!object(raw)||!Array.isArray(raw.choices)||!object(raw.choices[0])||!object(raw.choices[0].message))throw new ProviderFailure("language","invalid_response")
-      const calls=raw.choices[0].message.tool_calls
+      const calls=raw.choices[0].message.tool_calls,reasoning=reasoningText(raw.choices[0].message).trim()
+      // A round cut off at its output budget before it called anything did not decide to retrieve nothing.
+      if(raw.choices[0].finish_reason==="length"&&!(Array.isArray(calls)&&calls.length))throw new ProviderFailure("language","invalid_response")
+      if(reasoning)onReasoning?.(reasoning)
       // A server without tool calling answers in prose with no calls (or `null`): nothing more to look up.
       if(calls===undefined||calls===null)return[]
       if(!Array.isArray(calls)||calls.length>4)throw new ProviderFailure("language","invalid_response")
@@ -183,14 +206,14 @@ export function makeProviderServices(
         return{id:call.id,name:fn.name,arguments:fn.arguments}
       })
     },
-    async *chatStream(note, input, signal) {
+    async *chatStream(note, input, signal, onReasoning) {
       if (!languageReady) throw new ProviderFailure("language", "not_configured");
       const model = options.languageModel ?? process.env.OPENROUTER_MODEL ?? "openai/gpt-6-sol", parameters = chatAnswerParameters(note);
       // Cache hints from the feature become this provider's request fields; without hints the request is unchanged.
       const wire = cachedRequest(languageProvider, model, chatAnswerMessages(note, input), parameters.cache);
       const started = performance.now();
       let usage: LanguageUsage | null = null, firstTokenMs: number | null = null;
-      const response = await transport("https://openrouter.ai/api/v1/chat/completions", {
+      const response = await reasoningTransport("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST", headers: { ...authorization, "Content-Type": "application/json" },
         body: JSON.stringify({ model, stream: true, ...completionSettings(model,parameters.maxTokens,parameters.temperature),
           messages: wire.messages, ...wire.extra }),
@@ -219,7 +242,8 @@ export function makeProviderServices(
             if (!Array.isArray(raw.choices) || raw.choices.length === 0) continue; // Usage-only final frame.
             const choice = raw.choices[0];
             if (!object(choice) || choice.finish_reason === "length") throw new ProviderFailure("language", "invalid_response");
-            const text = object(choice.delta) ? choice.delta.content : undefined;
+            const text = object(choice.delta) ? choice.delta.content : undefined, reasoning = reasoningText(choice.delta);
+            if (reasoning) onReasoning?.(reasoning);
             if (typeof text === "string" && text) {
               characters += text.length; if (characters > 1_000_000) throw new ProviderFailure("language", "invalid_response");
               firstTokenMs ??= Math.round(performance.now() - started);
@@ -244,6 +268,8 @@ export function makeProviderServices(
     evidenceStream: (note, paragraph, signal) => streamCompletion({ transport, ready: !!routerKey, headers: { Authorization: `Bearer ${routerKey}` }, provider: languageProvider, model: options.languageModel ?? process.env.OPENROUTER_MODEL ?? "openai/gpt-6-sol", onUsage: options.onLanguageUsage ?? logLanguageUsage }, evidenceMessages(note, paragraph), EVIDENCE_PARAMETERS, { feature: "evidence", json: true, signal }),
     generate: (note) =>
       complete(generationMessages(note), false, GENERATION_PARAMETERS),
+    // The same request with `stream: true`, so both share one cached prefix (`ai/completion-stream.ts`).
+    generateStream: (note, signal) => streamCompletion({ transport, ready: languageReady, headers: authorization, provider: languageProvider, model: options.languageModel ?? process.env.OPENROUTER_MODEL ?? "openai/gpt-6-sol", onUsage: options.onLanguageUsage ?? logLanguageUsage }, generationMessages(note), GENERATION_PARAMETERS, { feature: "generation", signal }),
     title: (note, notes) =>
       complete(titleMessages(note, notes), false, TITLE_PARAMETERS, TITLE_TIMEOUT_MS),
     chat: (note, input) =>

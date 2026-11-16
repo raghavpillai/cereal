@@ -191,6 +191,35 @@
       ],
       "additionalProperties": true
     },
+    "ChatReasoningDTO": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "afterTools": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        }
+      },
+      "required": [
+        "text",
+        "afterTools"
+      ],
+      "additionalProperties": true
+    },
     "ChatThreadMessageDTO": {
       "type": "object",
       "properties": {
@@ -261,6 +290,13 @@
           },
           "maxItems": 40
         },
+        "reasoning": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChatReasoningDTO"
+          },
+          "maxItems": 40
+        },
         "elapsedMs": {
           "anyOf": [
             {
@@ -299,6 +335,7 @@
         "model",
         "citations",
         "tools",
+        "reasoning",
         "elapsedMs",
         "createdAt",
         "updatedAt"

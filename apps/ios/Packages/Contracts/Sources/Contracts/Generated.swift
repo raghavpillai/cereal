@@ -73,6 +73,7 @@
 //   let chatCitationDTO = try? JSONDecoder().decode(ChatCitationDTO.self, from: jsonData)
 //   let chatToolMeetingDTO = try? JSONDecoder().decode(ChatToolMeetingDTO.self, from: jsonData)
 //   let chatToolProgressDTO = try? JSONDecoder().decode(ChatToolProgressDTO.self, from: jsonData)
+//   let chatReasoningDTO = try? JSONDecoder().decode(ChatReasoningDTO.self, from: jsonData)
 //   let chatStreamEventDTO = try? JSONDecoder().decode(ChatStreamEventDTO.self, from: jsonData)
 //   let evidenceRequestDTO = try? JSONDecoder().decode(EvidenceRequestDTO.self, from: jsonData)
 //   let evidenceQuoteDTO = try? JSONDecoder().decode(EvidenceQuoteDTO.self, from: jsonData)
@@ -89,6 +90,7 @@
 //   let recordingCommandDTO = try? JSONDecoder().decode(RecordingCommandDTO.self, from: jsonData)
 //   let generateNotesCommandDTO = try? JSONDecoder().decode(GenerateNotesCommandDTO.self, from: jsonData)
 //   let generationProgressDTO = try? JSONDecoder().decode(GenerationProgressDTO.self, from: jsonData)
+//   let generationStreamEventDTO = try? JSONDecoder().decode(GenerationStreamEventDTO.self, from: jsonData)
 //   let sharedNoteDTO = try? JSONDecoder().decode(SharedNoteDTO.self, from: jsonData)
 //   let createShareInput = try? JSONDecoder().decode(CreateShareInput.self, from: jsonData)
 //   let shareDTO = try? JSONDecoder().decode(ShareDTO.self, from: jsonData)
@@ -135,6 +137,25 @@
 //   let appendChatTurnInput = try? JSONDecoder().decode(AppendChatTurnInput.self, from: jsonData)
 //   let updateChatThreadInput = try? JSONDecoder().decode(UpdateChatThreadInput.self, from: jsonData)
 //   let chatThreadStreamInput = try? JSONDecoder().decode(ChatThreadStreamInput.self, from: jsonData)
+//   let teamSpaceMemberDTO = try? JSONDecoder().decode(TeamSpaceMemberDTO.self, from: jsonData)
+//   let teamSpaceNoteDTO = try? JSONDecoder().decode(TeamSpaceNoteDTO.self, from: jsonData)
+//   let teamSpacePersonDTO = try? JSONDecoder().decode(TeamSpacePersonDTO.self, from: jsonData)
+//   let teamSpaceDTO = try? JSONDecoder().decode(TeamSpaceDTO.self, from: jsonData)
+//   let teamSpaceNoteContentDTO = try? JSONDecoder().decode(TeamSpaceNoteContentDTO.self, from: jsonData)
+//   let addTeamSpaceNotesInput = try? JSONDecoder().decode(AddTeamSpaceNotesInput.self, from: jsonData)
+//   let noteAccessLevel = try? JSONDecoder().decode(NoteAccessLevel.self, from: jsonData)
+//   let noteAccessPersonDTO = try? JSONDecoder().decode(NoteAccessPersonDTO.self, from: jsonData)
+//   let noteAccessGrantDTO = try? JSONDecoder().decode(NoteAccessGrantDTO.self, from: jsonData)
+//   let noteAccessAttendeeDTO = try? JSONDecoder().decode(NoteAccessAttendeeDTO.self, from: jsonData)
+//   let noteAccessOrganizationDTO = try? JSONDecoder().decode(NoteAccessOrganizationDTO.self, from: jsonData)
+//   let noteAccessDTO = try? JSONDecoder().decode(NoteAccessDTO.self, from: jsonData)
+//   let addNoteAccessInput = try? JSONDecoder().decode(AddNoteAccessInput.self, from: jsonData)
+//   let updateNoteAccessInput = try? JSONDecoder().decode(UpdateNoteAccessInput.self, from: jsonData)
+//   let noteAccessCandidateDTO = try? JSONDecoder().decode(NoteAccessCandidateDTO.self, from: jsonData)
+//   let noteAccessCandidatesDTO = try? JSONDecoder().decode(NoteAccessCandidatesDTO.self, from: jsonData)
+//   let sharedWithMeEntryDTO = try? JSONDecoder().decode(SharedWithMeEntryDTO.self, from: jsonData)
+//   let sharedWithMeDTO = try? JSONDecoder().decode(SharedWithMeDTO.self, from: jsonData)
+//   let sharedWithMeNoteDTO = try? JSONDecoder().decode(SharedWithMeNoteDTO.self, from: jsonData)
 
 import Foundation
 
@@ -1224,6 +1245,7 @@ public struct UserDTO: Codable, Sendable {
     public let createdAt: String
     public let email: String
     public let id: String
+    public let image: String?
     public let name: String
     public let role: UserDTORole
 
@@ -1231,14 +1253,16 @@ public struct UserDTO: Codable, Sendable {
         case createdAt = "createdAt"
         case email = "email"
         case id = "id"
+        case image = "image"
         case name = "name"
         case role = "role"
     }
 
-    public init(createdAt: String, email: String, id: String, name: String, role: UserDTORole) {
+    public init(createdAt: String, email: String, id: String, image: String? = nil, name: String, role: UserDTORole) {
         self.createdAt = createdAt
         self.email = email
         self.id = id
+        self.image = image
         self.name = name
         self.role = role
     }
@@ -2168,6 +2192,7 @@ public enum ChatStreamEventDTOType: String, Codable, Sendable {
     case delta = "delta"
     case done = "done"
     case error = "error"
+    case reasoning = "reasoning"
     case tool = "tool"
 }
 
@@ -2551,6 +2576,32 @@ public struct GenerationProgressDTO: Codable, Sendable {
         self.state = state
         self.transcriptRevision = transcriptRevision
     }
+}
+
+// MARK: - GenerationStreamEventDTO
+public struct GenerationStreamEventDTO: Codable, Sendable {
+    public let note: NoteDTO?
+    public let text: String
+    public let type: GenerationStreamEventDTOType
+
+    public enum CodingKeys: String, CodingKey {
+        case note = "note"
+        case text = "text"
+        case type = "type"
+    }
+
+    public init(note: NoteDTO? = nil, text: String, type: GenerationStreamEventDTOType) {
+        self.note = note
+        self.text = text
+        self.type = type
+    }
+}
+
+public enum GenerationStreamEventDTOType: String, Codable, Sendable {
+    case delta = "delta"
+    case done = "done"
+    case error = "error"
+    case title = "title"
 }
 
 // MARK: - SharedNoteDTO
@@ -3392,6 +3443,7 @@ public struct ChatThreadMessageDTO: Codable, Sendable {
     public let error: String?
     public let id: String
     public let model: String?
+    public let reasoning: [ChatReasoningDTO]
     public let role: ChatMessageDTORole
     public let status: ChatThreadMessageStatus
     public let tools: [ChatToolProgressDTO]
@@ -3406,6 +3458,7 @@ public struct ChatThreadMessageDTO: Codable, Sendable {
         case error = "error"
         case id = "id"
         case model = "model"
+        case reasoning = "reasoning"
         case role = "role"
         case status = "status"
         case tools = "tools"
@@ -3413,7 +3466,7 @@ public struct ChatThreadMessageDTO: Codable, Sendable {
         case updatedAt = "updatedAt"
     }
 
-    public init(citations: [ChatCitationDTO], content: String, createdAt: String, elapsedMs: Int?, error: String?, id: String, model: String?, role: ChatMessageDTORole, status: ChatThreadMessageStatus, tools: [ChatToolProgressDTO], turn: Int, updatedAt: String) {
+    public init(citations: [ChatCitationDTO], content: String, createdAt: String, elapsedMs: Int?, error: String?, id: String, model: String?, reasoning: [ChatReasoningDTO], role: ChatMessageDTORole, status: ChatThreadMessageStatus, tools: [ChatToolProgressDTO], turn: Int, updatedAt: String) {
         self.citations = citations
         self.content = content
         self.createdAt = createdAt
@@ -3421,11 +3474,28 @@ public struct ChatThreadMessageDTO: Codable, Sendable {
         self.error = error
         self.id = id
         self.model = model
+        self.reasoning = reasoning
         self.role = role
         self.status = status
         self.tools = tools
         self.turn = turn
         self.updatedAt = updatedAt
+    }
+}
+
+// MARK: - ChatReasoningDTO
+public struct ChatReasoningDTO: Codable, Sendable {
+    public let afterTools: Int
+    public let text: String
+
+    public enum CodingKeys: String, CodingKey {
+        case afterTools = "afterTools"
+        case text = "text"
+    }
+
+    public init(afterTools: Int, text: String) {
+        self.afterTools = afterTools
+        self.text = text
     }
 }
 
@@ -3540,6 +3610,7 @@ public struct ChatTurnAnswerInput: Codable, Sendable {
     public let elapsedMs: Int?
     public let error: String?
     public let model: String?
+    public let reasoning: [ChatReasoningDTO]?
     public let status: ChatTurnAnswerStatus
     public let tools: [ChatToolProgressDTO]?
 
@@ -3549,16 +3620,18 @@ public struct ChatTurnAnswerInput: Codable, Sendable {
         case elapsedMs = "elapsedMs"
         case error = "error"
         case model = "model"
+        case reasoning = "reasoning"
         case status = "status"
         case tools = "tools"
     }
 
-    public init(citations: [ChatCitationDTO]? = nil, content: String, elapsedMs: Int? = nil, error: String? = nil, model: String? = nil, status: ChatTurnAnswerStatus, tools: [ChatToolProgressDTO]? = nil) {
+    public init(citations: [ChatCitationDTO]? = nil, content: String, elapsedMs: Int? = nil, error: String? = nil, model: String? = nil, reasoning: [ChatReasoningDTO]? = nil, status: ChatTurnAnswerStatus, tools: [ChatToolProgressDTO]? = nil) {
         self.citations = citations
         self.content = content
         self.elapsedMs = elapsedMs
         self.error = error
         self.model = model
+        self.reasoning = reasoning
         self.status = status
         self.tools = tools
     }
@@ -3608,6 +3681,464 @@ public struct ChatThreadStreamInput: Codable, Sendable {
         self.replace = replace
         self.timeZone = timeZone
         self.turn = turn
+    }
+}
+
+// MARK: - TeamSpaceDTO
+public struct TeamSpaceDTO: Codable, Sendable {
+    public let members: [TeamSpaceMemberDTO]
+    public let notes: [TeamSpaceNoteDTO]
+    public let organization: Organization
+    public let people: [TeamSpacePersonDTO]
+    public let peopleSource: PeopleSource
+    public let role: OrganizationDTORole
+
+    public enum CodingKeys: String, CodingKey {
+        case members = "members"
+        case notes = "notes"
+        case organization = "organization"
+        case people = "people"
+        case peopleSource = "peopleSource"
+        case role = "role"
+    }
+
+    public init(members: [TeamSpaceMemberDTO], notes: [TeamSpaceNoteDTO], organization: Organization, people: [TeamSpacePersonDTO], peopleSource: PeopleSource, role: OrganizationDTORole) {
+        self.members = members
+        self.notes = notes
+        self.organization = organization
+        self.people = people
+        self.peopleSource = peopleSource
+        self.role = role
+    }
+}
+
+// MARK: - TeamSpaceMemberDTO
+public struct TeamSpaceMemberDTO: Codable, Sendable {
+    public let email: String
+    public let image: String?
+    public let name: String
+    public let userId: String
+
+    public enum CodingKeys: String, CodingKey {
+        case email = "email"
+        case image = "image"
+        case name = "name"
+        case userId = "userId"
+    }
+
+    public init(email: String, image: String? = nil, name: String, userId: String) {
+        self.email = email
+        self.image = image
+        self.name = name
+        self.userId = userId
+    }
+}
+
+// MARK: - TeamSpaceNoteDTO
+public struct TeamSpaceNoteDTO: Codable, Sendable {
+    public let addedAt: String
+    public let attendees: NoteAttendeesDTO
+    public let canRemove: Bool
+    public let createdAt: String
+    public let date: String
+    public let id: String
+    public let meeting: NoteMeetingTimeDTO?
+    public let mine: Bool
+    public let owner: TeamSpaceMemberDTO
+    public let title: String
+
+    public enum CodingKeys: String, CodingKey {
+        case addedAt = "addedAt"
+        case attendees = "attendees"
+        case canRemove = "canRemove"
+        case createdAt = "createdAt"
+        case date = "date"
+        case id = "id"
+        case meeting = "meeting"
+        case mine = "mine"
+        case owner = "owner"
+        case title = "title"
+    }
+
+    public init(addedAt: String, attendees: NoteAttendeesDTO, canRemove: Bool, createdAt: String, date: String, id: String, meeting: NoteMeetingTimeDTO?, mine: Bool, owner: TeamSpaceMemberDTO, title: String) {
+        self.addedAt = addedAt
+        self.attendees = attendees
+        self.canRemove = canRemove
+        self.createdAt = createdAt
+        self.date = date
+        self.id = id
+        self.meeting = meeting
+        self.mine = mine
+        self.owner = owner
+        self.title = title
+    }
+}
+
+// MARK: - Organization
+public struct Organization: Codable, Sendable {
+    public let id: String
+    public let name: String
+
+    public enum CodingKeys: String, CodingKey {
+        case id = "id"
+        case name = "name"
+    }
+
+    public init(id: String, name: String) {
+        self.id = id
+        self.name = name
+    }
+}
+
+// MARK: - TeamSpacePersonDTO
+public struct TeamSpacePersonDTO: Codable, Sendable {
+    public let email: String?
+    public let initials: String
+    public let lastNoteDate: String
+    public let name: String
+    public let noteIds: [String]
+    public let notes: Int
+
+    public enum CodingKeys: String, CodingKey {
+        case email = "email"
+        case initials = "initials"
+        case lastNoteDate = "lastNoteDate"
+        case name = "name"
+        case noteIds = "noteIds"
+        case notes = "notes"
+    }
+
+    public init(email: String?, initials: String, lastNoteDate: String, name: String, noteIds: [String], notes: Int) {
+        self.email = email
+        self.initials = initials
+        self.lastNoteDate = lastNoteDate
+        self.name = name
+        self.noteIds = noteIds
+        self.notes = notes
+    }
+}
+
+public enum PeopleSource: String, Codable, Sendable {
+    case own = "own"
+    case team = "team"
+}
+
+// MARK: - TeamSpaceNoteContentDTO
+public struct TeamSpaceNoteContentDTO: Codable, Sendable {
+    public let addedAt: String
+    public let body: String
+    public let date: String
+    public let duration: String
+    public let enhanced: String
+    public let id: String
+    public let mine: Bool
+    public let owner: TeamSpaceMemberDTO
+    public let title: String
+
+    public enum CodingKeys: String, CodingKey {
+        case addedAt = "addedAt"
+        case body = "body"
+        case date = "date"
+        case duration = "duration"
+        case enhanced = "enhanced"
+        case id = "id"
+        case mine = "mine"
+        case owner = "owner"
+        case title = "title"
+    }
+
+    public init(addedAt: String, body: String, date: String, duration: String, enhanced: String, id: String, mine: Bool, owner: TeamSpaceMemberDTO, title: String) {
+        self.addedAt = addedAt
+        self.body = body
+        self.date = date
+        self.duration = duration
+        self.enhanced = enhanced
+        self.id = id
+        self.mine = mine
+        self.owner = owner
+        self.title = title
+    }
+}
+
+// MARK: - AddTeamSpaceNotesInput
+public struct AddTeamSpaceNotesInput: Codable, Sendable {
+    public let noteIds: [String]
+
+    public enum CodingKeys: String, CodingKey {
+        case noteIds = "noteIds"
+    }
+
+    public init(noteIds: [String]) {
+        self.noteIds = noteIds
+    }
+}
+
+// MARK: - NoteAccessDTO
+public struct NoteAccessDTO: Codable, Sendable {
+    public let attendees: [NoteAccessAttendeeDTO]
+    public let level: NoteAccessLevel
+    public let noteId: String
+    public let organization: NoteAccessOrganizationDTO?
+    public let owner: NoteAccessPersonDTO
+    public let people: [NoteAccessGrantDTO]
+    public let suspended: Bool
+
+    public enum CodingKeys: String, CodingKey {
+        case attendees = "attendees"
+        case level = "level"
+        case noteId = "noteId"
+        case organization = "organization"
+        case owner = "owner"
+        case people = "people"
+        case suspended = "suspended"
+    }
+
+    public init(attendees: [NoteAccessAttendeeDTO], level: NoteAccessLevel, noteId: String, organization: NoteAccessOrganizationDTO?, owner: NoteAccessPersonDTO, people: [NoteAccessGrantDTO], suspended: Bool) {
+        self.attendees = attendees
+        self.level = level
+        self.noteId = noteId
+        self.organization = organization
+        self.owner = owner
+        self.people = people
+        self.suspended = suspended
+    }
+}
+
+// MARK: - NoteAccessAttendeeDTO
+public struct NoteAccessAttendeeDTO: Codable, Sendable {
+    public let email: String
+    public let hasAccess: Bool
+    public let image: String?
+    public let name: String
+    public let userId: String
+
+    public enum CodingKeys: String, CodingKey {
+        case email = "email"
+        case hasAccess = "hasAccess"
+        case image = "image"
+        case name = "name"
+        case userId = "userId"
+    }
+
+    public init(email: String, hasAccess: Bool, image: String? = nil, name: String, userId: String) {
+        self.email = email
+        self.hasAccess = hasAccess
+        self.image = image
+        self.name = name
+        self.userId = userId
+    }
+}
+
+public enum NoteAccessLevel: String, Codable, Sendable {
+    case invited = "invited"
+    case organization = "organization"
+}
+
+// MARK: - NoteAccessOrganizationDTO
+public struct NoteAccessOrganizationDTO: Codable, Sendable {
+    public let domain: String?
+    public let id: String
+    public let name: String
+
+    public enum CodingKeys: String, CodingKey {
+        case domain = "domain"
+        case id = "id"
+        case name = "name"
+    }
+
+    public init(domain: String?, id: String, name: String) {
+        self.domain = domain
+        self.id = id
+        self.name = name
+    }
+}
+
+// MARK: - NoteAccessPersonDTO
+public struct NoteAccessPersonDTO: Codable, Sendable {
+    public let email: String
+    public let image: String?
+    public let name: String
+    public let userId: String
+
+    public enum CodingKeys: String, CodingKey {
+        case email = "email"
+        case image = "image"
+        case name = "name"
+        case userId = "userId"
+    }
+
+    public init(email: String, image: String? = nil, name: String, userId: String) {
+        self.email = email
+        self.image = image
+        self.name = name
+        self.userId = userId
+    }
+}
+
+// MARK: - NoteAccessGrantDTO
+public struct NoteAccessGrantDTO: Codable, Sendable {
+    public let addedAt: String
+    public let email: String
+    public let image: String?
+    public let name: String
+    public let userId: String
+
+    public enum CodingKeys: String, CodingKey {
+        case addedAt = "addedAt"
+        case email = "email"
+        case image = "image"
+        case name = "name"
+        case userId = "userId"
+    }
+
+    public init(addedAt: String, email: String, image: String? = nil, name: String, userId: String) {
+        self.addedAt = addedAt
+        self.email = email
+        self.image = image
+        self.name = name
+        self.userId = userId
+    }
+}
+
+// MARK: - AddNoteAccessInput
+public struct AddNoteAccessInput: Codable, Sendable {
+    public let emails: [String]?
+    public let userIds: [String]?
+
+    public enum CodingKeys: String, CodingKey {
+        case emails = "emails"
+        case userIds = "userIds"
+    }
+
+    public init(emails: [String]? = nil, userIds: [String]? = nil) {
+        self.emails = emails
+        self.userIds = userIds
+    }
+}
+
+// MARK: - UpdateNoteAccessInput
+public struct UpdateNoteAccessInput: Codable, Sendable {
+    public let level: NoteAccessLevel?
+    public let suspended: Bool?
+
+    public enum CodingKeys: String, CodingKey {
+        case level = "level"
+        case suspended = "suspended"
+    }
+
+    public init(level: NoteAccessLevel? = nil, suspended: Bool? = nil) {
+        self.level = level
+        self.suspended = suspended
+    }
+}
+
+// MARK: - NoteAccessCandidatesDTO
+public struct NoteAccessCandidatesDTO: Codable, Sendable {
+    public let people: [NoteAccessCandidateDTO]
+
+    public enum CodingKeys: String, CodingKey {
+        case people = "people"
+    }
+
+    public init(people: [NoteAccessCandidateDTO]) {
+        self.people = people
+    }
+}
+
+// MARK: - NoteAccessCandidateDTO
+public struct NoteAccessCandidateDTO: Codable, Sendable {
+    public let attendee: Bool
+    public let email: String
+    public let image: String?
+    public let name: String
+    public let userId: String
+
+    public enum CodingKeys: String, CodingKey {
+        case attendee = "attendee"
+        case email = "email"
+        case image = "image"
+        case name = "name"
+        case userId = "userId"
+    }
+
+    public init(attendee: Bool, email: String, image: String? = nil, name: String, userId: String) {
+        self.attendee = attendee
+        self.email = email
+        self.image = image
+        self.name = name
+        self.userId = userId
+    }
+}
+
+// MARK: - SharedWithMeDTO
+public struct SharedWithMeDTO: Codable, Sendable {
+    public let notes: [SharedWithMeEntryDTO]
+
+    public enum CodingKeys: String, CodingKey {
+        case notes = "notes"
+    }
+
+    public init(notes: [SharedWithMeEntryDTO]) {
+        self.notes = notes
+    }
+}
+
+// MARK: - SharedWithMeEntryDTO
+public struct SharedWithMeEntryDTO: Codable, Sendable {
+    public let date: String
+    public let id: String
+    public let owner: NoteAccessPersonDTO
+    public let sharedAt: String
+    public let title: String
+
+    public enum CodingKeys: String, CodingKey {
+        case date = "date"
+        case id = "id"
+        case owner = "owner"
+        case sharedAt = "sharedAt"
+        case title = "title"
+    }
+
+    public init(date: String, id: String, owner: NoteAccessPersonDTO, sharedAt: String, title: String) {
+        self.date = date
+        self.id = id
+        self.owner = owner
+        self.sharedAt = sharedAt
+        self.title = title
+    }
+}
+
+// MARK: - SharedWithMeNoteDTO
+public struct SharedWithMeNoteDTO: Codable, Sendable {
+    public let body: String
+    public let date: String
+    public let duration: String
+    public let enhanced: String
+    public let id: String
+    public let owner: NoteAccessPersonDTO
+    public let sharedAt: String
+    public let title: String
+
+    public enum CodingKeys: String, CodingKey {
+        case body = "body"
+        case date = "date"
+        case duration = "duration"
+        case enhanced = "enhanced"
+        case id = "id"
+        case owner = "owner"
+        case sharedAt = "sharedAt"
+        case title = "title"
+    }
+
+    public init(body: String, date: String, duration: String, enhanced: String, id: String, owner: NoteAccessPersonDTO, sharedAt: String, title: String) {
+        self.body = body
+        self.date = date
+        self.duration = duration
+        self.enhanced = enhanced
+        self.id = id
+        self.owner = owner
+        self.sharedAt = sharedAt
+        self.title = title
     }
 }
 
@@ -4412,6 +4943,7 @@ extension ChatThreadMessageDTO {
         case model
         case citations
         case tools
+        case reasoning
         case elapsedMs
         case createdAt
         case updatedAt
@@ -4427,6 +4959,7 @@ extension ChatThreadMessageDTO {
         try container.encode(model, forKey: .model)
         try container.encode(citations, forKey: .citations)
         try container.encode(tools, forKey: .tools)
+        try container.encode(reasoning, forKey: .reasoning)
         try container.encode(elapsedMs, forKey: .elapsedMs)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(updatedAt, forKey: .updatedAt)
@@ -4493,5 +5026,93 @@ extension ChatThreadsPageDTO {
         try container.encode(threads, forKey: .threads)
         try container.encode(nextCursor, forKey: .nextCursor)
         try container.encode(total, forKey: .total)
+    }
+}
+
+
+extension TeamSpaceNoteDTO {
+    private enum ContractWireKeys: String, CodingKey {
+        case id
+        case title
+        case date
+        case createdAt
+        case meeting
+        case attendees
+        case owner
+        case addedAt
+        case mine
+        case canRemove
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: ContractWireKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(title, forKey: .title)
+        try container.encode(date, forKey: .date)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(meeting, forKey: .meeting)
+        try container.encode(attendees, forKey: .attendees)
+        try container.encode(owner, forKey: .owner)
+        try container.encode(addedAt, forKey: .addedAt)
+        try container.encode(mine, forKey: .mine)
+        try container.encode(canRemove, forKey: .canRemove)
+    }
+}
+
+
+extension TeamSpacePersonDTO {
+    private enum ContractWireKeys: String, CodingKey {
+        case name
+        case email
+        case initials
+        case notes
+        case lastNoteDate
+        case noteIds
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: ContractWireKeys.self)
+        try container.encode(name, forKey: .name)
+        try container.encode(email, forKey: .email)
+        try container.encode(initials, forKey: .initials)
+        try container.encode(notes, forKey: .notes)
+        try container.encode(lastNoteDate, forKey: .lastNoteDate)
+        try container.encode(noteIds, forKey: .noteIds)
+    }
+}
+
+
+extension NoteAccessOrganizationDTO {
+    private enum ContractWireKeys: String, CodingKey {
+        case id
+        case name
+        case domain
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: ContractWireKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(domain, forKey: .domain)
+    }
+}
+
+
+extension NoteAccessDTO {
+    private enum ContractWireKeys: String, CodingKey {
+        case noteId
+        case level
+        case suspended
+        case organization
+        case owner
+        case people
+        case attendees
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: ContractWireKeys.self)
+        try container.encode(noteId, forKey: .noteId)
+        try container.encode(level, forKey: .level)
+        try container.encode(suspended, forKey: .suspended)
+        try container.encode(organization, forKey: .organization)
+        try container.encode(owner, forKey: .owner)
+        try container.encode(people, forKey: .people)
+        try container.encode(attendees, forKey: .attendees)
     }
 }

@@ -68,6 +68,18 @@ impl Request<'_> {
     }
 }
 
+/// The bytes at `url`, for something that is drawn rather than read (a
+/// person's picture): a plain GET that says nothing about who asks. No
+/// session, no cookie, no referrer and no redirect; at most `limit` bytes.
+/// The caller decides which addresses may be asked at all.
+pub fn bytes(url: &str, limit: usize) -> Result<Reply, Failure> {
+    let quoted = url.replace('\\', "\\\\").replace('"', "\\\"");
+    if url.chars().any(char::is_control) {
+        return Err(Failure::Transport);
+    }
+    exchange(&format!("url = \"{quoted}\"\nrequest = \"GET\"\n"), limit)
+}
+
 /// One curl exchange for a request written as a curl config: no redirect is
 /// followed, nothing but HTTP(S) is spoken, and nothing in the address is
 /// expanded. The config travels over stdin, never argv or a file.

@@ -11,6 +11,7 @@ import {makePrismaGoogleStore} from "../src/google-store"
 import {makeNoteParticipantsService} from "../src/note-participants"
 import {DEFAULT_ORGANIZATION_ID} from "../src/organizations"
 import {makeApiHandler} from "../src/api"
+import {makeNoteAccessService,makePrismaNoteAccessStore} from "../src/note-access"
 const enabled=process.env.RUN_AUTH_PG_TESTS==="1"&&!!process.env.DATABASE_URL
 /** Run only in a dedicated throwaway database: initializes the bootstrap owner. */
 describe.skipIf(!enabled)("real Better Auth / PostgreSQL sessions, roles and private notes",()=>{
@@ -20,7 +21,7 @@ describe.skipIf(!enabled)("real Better Auth / PostgreSQL sessions, roles and pri
  const box=secretBoxFromKey(randomBytes(32)),store=db?makePrismaCalendarStore(db,"auth-test"):null
  const administration=store?makeAdministrationService(store,box,{clock:()=>new Date("2026-11-12T00:00:00Z"),fetchFeed:async()=>"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:auth-test-meeting\r\nDTSTART:20261113T120000Z\r\nDTEND:20261113T130000Z\r\nSUMMARY:Shared calendar private notes\r\nEND:VEVENT\r\nEND:VCALENDAR"}):null
  const google=db?makeGoogleService(makePrismaGoogleStore(db),box,{baseURL}):null
- const api=resources?makeApiHandler(resources.repository,ownerToken,{authentication:authentication!,administration:administration!,google:google!,noteParticipants:makeNoteParticipantsService(db!)}):null
+ const api=resources?makeApiHandler(resources.repository,ownerToken,{authentication:authentication!,administration:administration!,google:google!,noteParticipants:makeNoteParticipantsService(db!),noteAccess:makeNoteAccessService(makePrismaNoteAccessStore(db!))}):null
  const password="test-only-password-"+randomBytes(12).toString("hex")
  let aliceMeetingNoteId="",bobMeetingNoteId="",aliceId="",aliceToken="",bobId="",bobToken="",ownerSession="",cookie="",calendarId=""
  const request=(path:string,method="GET",body?:unknown,credential=ownerToken,extra:Record<string,string>={})=>api!.handler(new Request(baseURL+path,{method,headers:{...(credential?{Authorization:"Bearer "+credential}:{}),...(body===undefined?{}:{"Content-Type":"application/json"}),...extra},...(body===undefined?{}:{body:JSON.stringify(body)})}))
@@ -85,8 +86,12 @@ describe.skipIf(!enabled)("real Better Auth / PostgreSQL sessions, roles and pri
   // Admin role does not grant access to another user's content.
   expect((await request("/api/v1/notes/"+note.id,"GET",undefined,ownerSession)).status).toBe(404)
   const share=await(await request("/api/v1/notes/"+note.id+"/shares","POST",{includeBody:true,includeEnhanced:false},aliceToken)).json();
-  // A shared link needs an account on this server: nobody anonymous, and any signed-in holder of the link, including one who cannot see the note itself.
+  // A shared link needs an account on this server and the note's sharing to reach its reader: nobody anonymous, nobody at all while the
+  // note is shared with no one, and, once the owner opens it to the workspace, any member who holds the link, including one who cannot see the note itself.
   const sharedPath="/api/v1/shared/"+share.token
+  expect((await request(sharedPath,"GET",undefined,bobToken)).status).toBe(404)
+  expect((await request("/api/v1/notes/"+note.id+"/access","PATCH",{level:"organization"},bobToken)).status).toBe(404)
+  expect((await request("/api/v1/notes/"+note.id+"/access","PATCH",{level:"organization"},aliceToken)).status).toBe(200)
   for(const path of[sharedPath,"/api/v1/shared/"+"a".repeat(43),"/api/v1/shared/not-a-token"]){const anonymous=await request(path,"GET",undefined,"");expect(anonymous.status).toBe(401);expect((await anonymous.json()).error).toBe("unauthorized")}
   expect((await request(sharedPath,"GET",undefined,"not-a-real-session-token")).status).toBe(401)
   expect((await request("/api/v1/notes/"+note.id,"GET",undefined,bobToken)).status).toBe(404)

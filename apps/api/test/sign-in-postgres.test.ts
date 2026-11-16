@@ -24,7 +24,7 @@ describe.skipIf(!enabled)("sign-in settings, Google sign-in and the app handoff 
   const clock = () => new Date(Date.now() + skew)
 
   // The stand-in for Google: codes it has issued, and what its token endpoint was sent.
-  interface Identity { sub: string; email: string; email_verified: boolean; name?: string; hd?: string }
+  interface Identity { sub: string; email: string; email_verified: boolean; name?: string; hd?: string; picture?: unknown }
   const issued = new Map<string, { identity: Identity; challenge: string }>(), tokens = new Map<string, Identity>()
   const tokenRequests: URLSearchParams[] = []
   const fakeGoogle = Object.assign(async (...[input, init]: Parameters<typeof fetch>) => {
@@ -171,10 +171,10 @@ describe.skipIf(!enabled)("sign-in settings, Google sign-in and the app handoff 
     expect(cookiesOf(stranger)).toBe("")
     expect(await db!.user.findUnique({ where: { email: "stranger@elsewhere.test" } })).toBeNull()
 
-    const carol = await googleSignIn({ sub: "g-carol", email: "Carol@SignIn.Test", email_verified: true, name: "Carol Example" }, "/notes/abc?tab=notes")
+    const carol = await googleSignIn({ sub: "g-carol", email: "Carol@SignIn.Test", email_verified: true, name: "Carol Example", picture: "https://pictures.example.test/a/carol=s96-c" }, "/notes/abc?tab=notes")
     expect(carol.status).toBe(303); expect(carol.headers.get("location")).toBe("/notes/abc?tab=notes")
     const carolUser = await db!.user.findUniqueOrThrow({ where: { email: "carol@signin.test" }, include: { accounts: true, memberships: true } })
-    expect(carolUser).toMatchObject({ name: "Carol Example", role: "user", emailVerified: true })
+    expect(carolUser).toMatchObject({ name: "Carol Example", role: "user", emailVerified: true, image: "https://pictures.example.test/a/carol=s96-c" })
     expect(carolUser.accounts.map(account => [account.providerId, account.accountId, account.password])).toEqual([["google", "g-carol", null]])
     expect(carolUser.memberships.map(member => [member.organizationId, member.role])).toEqual([[DEFAULT_ORGANIZATION_ID, "member"]])
     // The cookie is a normal session: HttpOnly, SameSite=Lax, and accepted by the API.
@@ -224,6 +224,33 @@ describe.skipIf(!enabled)("sign-in settings, Google sign-in and the app handoff 
     const unverified = await googleSignIn({ sub: "g-impostor", email: "bob@signin.test", email_verified: false })
     expect(unverified.headers.get("location")).toBe("/login?error=failed"); expect(cookiesOf(unverified)).toBe("")
     expect(await db!.account.count({ where: { userId: bobId, providerId: "google" } })).toBe(0)
+  })
+
+  test("the picture Google has is saved at every sign-in and given with the session; one that is not a plain https address is no picture", async () => {
+    const picture = "https://pictures.example.test/a/dana=s96-c"
+    const session = async (response: Response) => (await (await request("/api/v1/session", "GET", undefined, { Cookie: cookiesOf(response) })).json()).user as { id: string; image?: string }
+    // Carol's account was made by a Google sign-in that came with a picture (above).
+    const dana = await session(await googleSignIn({ sub: "g-carol", email: "carol@signin.test", email_verified: true }))
+    expect("image" in dana).toBe(false) // Google has none now, so neither does the account
+    await googleSignIn({ sub: "g-carol", email: "carol@signin.test", email_verified: true, picture })
+    expect((await db!.user.findUniqueOrThrow({ where: { id: dana.id } })).image).toBe(picture)
+    // A later sign-in brings the picture Google has then.
+    const changed = await session(await googleSignIn({ sub: "g-carol", email: "carol@signin.test", email_verified: true, picture: picture.replace("dana", "dana-2") }))
+    expect(changed).toMatchObject({ id: dana.id, image: "https://pictures.example.test/a/dana-2=s96-c" })
+    // Anything else is no picture: the field is left out, not sent as something a client would have to check.
+    for (const bad of ["http://pictures.example.test/a.png", "javascript:alert(1)", "https://pictures.example.test/" + "a".repeat(3000), 7, undefined]) {
+      const none = await session(await googleSignIn({ sub: "g-carol", email: "carol@signin.test", email_verified: true, picture: bad }))
+      expect(none.id).toBe(dana.id); expect("image" in none).toBe(false)
+      expect((await db!.user.findUniqueOrThrow({ where: { id: dana.id } })).image).toBeNull()
+      await db!.user.update({ where: { id: dana.id }, data: { image: picture } })
+    }
+    // An account that existed before gets its picture the first time it signs in with Google, and keeps its name.
+    const alice = await session(await googleSignIn({ sub: "g-alice", email: "alice@signin.test", email_verified: true, name: "Someone Else", picture }))
+    expect(alice).toMatchObject({ id: aliceId, image: picture, name: "Alice" })
+    // The administrators' list of people carries it too, and leaves it out for people without one.
+    const people = (await (await request("/api/v1/admin/users", "GET", undefined, asOwner)).json()).users as { id: string; image?: string }[]
+    expect(people.find(person => person.id === aliceId)?.image).toBe(picture)
+    expect("image" in people.find(person => person.id === bobId)!).toBe(false)
   })
 
   test("a Google sign-in cannot be replayed, moved to another browser, redirected off-site, or finished after Google is turned off", async () => {

@@ -6,4 +6,4 @@
  */
 export {MEETING_CHAT_TOOLS} from "./ai/workspace-chat"
 export {prepareMeetingChat,type PreparedChat} from "./ai"
-export {checkChatCitations,validateChatCitations,CitationStreamFilter} from "./ai/citations"
+export {checkChatCitations,validateChatCitations,CitationStreamFilter,withoutSourceMarkers} from "./ai/citations"

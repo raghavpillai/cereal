@@ -2,6 +2,7 @@ mod account;
 mod accounts;
 mod app;
 mod audio;
+mod authorship;
 mod calendar;
 mod chat;
 mod chat_sync;
@@ -28,16 +29,20 @@ mod onboarding;
 mod onboarding_scene;
 mod onboarding_view;
 mod pill;
+mod portrait;
 mod recording;
 mod recording_view;
 mod screens;
 mod server;
+mod share_popover;
 mod shared;
 mod shared_view;
 mod smoke;
 mod store;
 mod summary;
+mod team_space;
 mod tour;
+mod transcript_panel;
 mod trash;
 mod ui;
 mod update;
@@ -134,8 +139,9 @@ fn main() {
                     window.focus(&entity.focus_handle(cx));
                     entity.update(cx, |view, cx| {
                         view.connect_server(cx);
-                        view.workspace.settings.dark_mode = std::env::args().any(|a| a == "--dark")
-                            || view.workspace.settings.dark_mode;
+                        if std::env::args().any(|a| a == "--dark") {
+                            view.workspace.settings.force_dark(true);
+                        }
                         let mode = crate::audio::review_view();
                         match mode.as_str() {
                             "login" => view.navigate(app::Screen::Login, cx),
@@ -167,7 +173,7 @@ fn main() {
                             "summary" | "summary-loading" => {
                                 view.open_note(1, cx);
                                 view.active_tab = app::NoteTab::Enhanced;
-                                view.workspace.settings.dark_mode = true;
+                                view.workspace.settings.force_dark(true);
                                 let paragraph = view
                                     .workspace
                                     .note(1)

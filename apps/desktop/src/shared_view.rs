@@ -80,6 +80,13 @@ pub enum LinkPage {
     Shared { link: SharedNoteLink, phase: Phase },
     /// A note of one's own on a server the app is not signed in to.
     Note(NoteLink),
+    /// A note somebody shared with this account by name: read by its id,
+    /// as it is now, from "Shared with me" on its server.
+    Granted {
+        origin: ServerOrigin,
+        note_id: String,
+        phase: Phase,
+    },
 }
 
 impl LinkPage {
@@ -87,8 +94,26 @@ impl LinkPage {
         match self {
             LinkPage::Shared { link, .. } => AppLink::Shared(link.clone()),
             LinkPage::Note(link) => AppLink::Note(link.clone()),
+            LinkPage::Granted { origin, note_id, .. } => AppLink::Note(NoteLink {
+                origin: origin.clone(),
+                note_id: note_id.clone(),
+            }),
         }
     }
+
+    fn phase_mut(&mut self) -> Option<&mut Phase> {
+        match self {
+            LinkPage::Shared { phase, .. } | LinkPage::Granted { phase, .. } => Some(phase),
+            LinkPage::Note(_) => None,
+        }
+    }
+}
+
+/// Where the shared note on the page is read from.
+#[derive(Clone)]
+enum Source {
+    Link(SharedNoteLink),
+    Granted(ServerOrigin, String),
 }
 
 pub struct Links {
@@ -270,29 +295,41 @@ impl Cereal {
     /// Read the shared note on the page, when the app is signed in to its
     /// server. Without such a session nothing is asked of anyone.
     fn load_shared_note(&mut self, cx: &mut Context<Self>) {
-        let Some(LinkPage::Shared { link, .. }) = &self.links.page else {
-            return;
+        let source = match &self.links.page {
+            Some(LinkPage::Shared { link, .. }) => Source::Link(link.clone()),
+            Some(LinkPage::Granted { origin, note_id, .. }) => {
+                Source::Granted(origin.clone(), note_id.clone())
+            }
+            _ => return,
         };
-        let link = link.clone();
-        if self.link_access(&link.origin) != Access::Read {
+        let origin = match &source {
+            Source::Link(link) => link.origin.clone(),
+            Source::Granted(origin, _) => origin.clone(),
+        };
+        if self.link_access(&origin) != Access::Read {
             return;
         }
-        if let Some(LinkPage::Shared { phase, .. }) = &mut self.links.page {
+        if let Some(phase) = self.links.page.as_mut().and_then(LinkPage::phase_mut) {
             *phase = Phase::Loading;
         }
         let epoch = self.links.epoch;
-        let Some(reader) = self.link_reader(&link.origin) else {
+        let Some(reader) = self.link_reader(&origin) else {
             return;
         };
         let account = reader.epoch();
         cx.spawn(async move |this, cx| {
-            let asked = link.clone();
+            let asked = source.clone();
             let with = reader.id.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
                     let client = crate::accounts::client(&with).ok();
-                    crate::shared::fetch(&asked, client.as_ref())
+                    match &asked {
+                        Source::Link(link) => crate::shared::fetch(link, client.as_ref()),
+                        Source::Granted(origin, note_id) => {
+                            crate::shared::fetch_granted(origin, note_id, client.as_ref())
+                        }
+                    }
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -303,11 +340,15 @@ impl Cereal {
                 }
                 let phase = match result {
                     Ok(note) => {
-                        this.links
-                            .history
-                            .record(&link, &note.display_title(), chrono::Utc::now());
-                        if let Err(error) = this.links.history.save() {
-                            eprintln!("{error}");
+                        // A link that was opened is kept in the list; a note
+                        // shared by name is listed by its server already.
+                        if let Source::Link(link) = &source {
+                            this.links
+                                .history
+                                .record(link, &note.display_title(), chrono::Utc::now());
+                            if let Err(error) = this.links.history.save() {
+                                eprintln!("{error}");
+                            }
                         }
                         let body = shown(&note.body).0.to_owned();
                         this.links
@@ -322,13 +363,42 @@ impl Cereal {
                     }
                     Err(error) => Phase::Failed(error),
                 };
-                if let Some(LinkPage::Shared { phase: current, .. }) = &mut this.links.page {
+                if let Some(current) = this.links.page.as_mut().and_then(LinkPage::phase_mut) {
                     *current = phase;
                 }
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Put a note that was read some other way (the team space) on the
+    /// read-only page: its text in the page's own field, its first document
+    /// in front.
+    pub(crate) fn show_read_only_note(&mut self, note: &SharedNote, cx: &mut Context<Self>) {
+        let body = shown(&note.body).0.to_owned();
+        self.links.body.update(cx, |input, cx| input.set_content(body, cx));
+        self.links.tab = if note.enhanced.trim().is_empty() {
+            NoteTab::Notes
+        } else {
+            NoteTab::Enhanced
+        };
+    }
+
+    /// Open a note somebody shared with this account by name: the read-only
+    /// page a shared link opens, read from the note as it is now.
+    pub(crate) fn open_granted_note(&mut self, origin: ServerOrigin, note_id: String, cx: &mut Context<Self>) {
+        self.navigate(Screen::Link, cx);
+        self.links.epoch = self.links.epoch.wrapping_add(1);
+        self.links.tab = NoteTab::Enhanced;
+        self.links.page = Some(LinkPage::Granted {
+            origin,
+            note_id,
+            phase: Phase::Loading,
+        });
+        self.note_scroll.set_offset(point(px(0.), px(0.)));
+        self.load_shared_note(cx);
+        cx.notify();
     }
 
     fn retry_shared_note(&mut self, cx: &mut Context<Self>) {
@@ -461,6 +531,7 @@ impl Cereal {
         };
         let (origin, shared) = match page {
             LinkPage::Shared { link, phase } => (&link.origin, Some(phase)),
+            LinkPage::Granted { origin, phase, .. } => (origin, Some(phase)),
             LinkPage::Note(link) => (&link.origin, None),
         };
         let host = origin.display_host();
@@ -574,7 +645,7 @@ impl Cereal {
         )
     }
 
-    fn render_shared_loading(&self, window: &Window) -> AnyElement {
+    pub(crate) fn render_shared_loading(&self, window: &Window) -> AnyElement {
         let t = self.theme();
         div()
             .flex_1()
@@ -604,7 +675,7 @@ impl Cereal {
     /// A shared note, laid out as the note page lays out a note of one's
     /// own: the same title, the same row of capsules, the same documents in
     /// the same faces. Nothing on it edits, asks or records.
-    fn render_shared_note(
+    pub(crate) fn render_shared_note(
         &self,
         note: &SharedNote,
         host: &str,

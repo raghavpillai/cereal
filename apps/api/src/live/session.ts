@@ -88,6 +88,8 @@ export const DEFAULT_LIVE_CONFIG: LiveConfig = {
  * or a long pause) is told that language, so a short, quiet stretch is not taken for another one. Punctuation
  * the detection gets wrong is put right in text.ts. */
 const LANGUAGE_LOCK_MS = 30_000, LANGUAGE_LOCK_SHARE = 0.8
+/** After this much speech in one language, a stretch shorter than `STRAY_LANGUAGE_MS` detected as another is dropped. */
+const MAIN_LANGUAGE_MS = 3_000, STRAY_LANGUAGE_MS = 4_000
 /** The close that hands a recording back to its client after its provider session was lost: the client
  * reconnects at once and replays its backlog from what is stored (1012, "service restart", which every
  * client already retries). */
@@ -441,6 +443,13 @@ export class LiveSession {
     return top && total >= LANGUAGE_LOCK_MS && top[1] / total >= LANGUAGE_LOCK_SHARE ? top[0] : undefined
   }
 
+  /** The language this recording is plainly in so far: a few seconds of speech, nearly all of it one language. */
+  private mainLanguage(): string | undefined {
+    const total = [...this.languages.values()].reduce((sum, ms) => sum + ms, 0)
+    const top = [...this.languages.entries()].sort((a, b) => b[1] - a[1])[0]
+    return top && total >= MAIN_LANGUAGE_MS && top[1] / total >= LANGUAGE_LOCK_SHARE ? top[0] : undefined
+  }
+
   private async open(channel: Channel) {
     const abort = new AbortController()
     const opening = (async () => {
@@ -532,7 +541,11 @@ export class LiveSession {
     }
     else if (event.text.trim() && event.endSec * rate > upstream.origin) heard.push(word(normaliseText(event.text.trim()), event.startSec, event.endSec))
     this.mapPrimerVoices(upstream)
-    const spokenMs = heard.length ? heard.at(-1)!.endMs - heard[0]!.startMs : 0
+    let spokenMs = heard.length ? heard.at(-1)!.endMs - heard[0]!.startMs : 0
+    // A mumble or a filler in a recording that is plainly in one language is sometimes detected as another and
+    // written in its script ("uh… hey hey hey" as Chinese). A short stretch like that is dropped; a long one is kept.
+    const main = this.mainLanguage()
+    if (event.language && main && event.language !== main && spokenMs < STRAY_LANGUAGE_MS) { heard.length = 0; spokenMs = 0 }
     if (event.language && spokenMs > 0) this.languages.set(event.language, (this.languages.get(event.language) ?? 0) + spokenMs)
     heard.splice(0, heard.length, ...normaliseWords(heard))
     const speakers = { ...upstream.speakers }

@@ -8,7 +8,7 @@ import { makeGoogleService } from "../src/google"
 import { makeMemoryGoogleStore } from "../src/google-store"
 import { secretBoxFromKey } from "../src/admin-secrets"
 import { makeApiHandler } from "../src/api"
-import { emailAllowed, normalizeAllowedEmail, safeReturnPath } from "../src/sign-in"
+import { emailAllowed, normalizeAllowedEmail, pictureAddress, safeReturnPath } from "../src/sign-in"
 
 const run = Effect.runPromise
 const failure = <A>(effect: Effect.Effect<A, unknown>) => run(Effect.flip(effect)) as Promise<{ error: string; message: string }>
@@ -174,4 +174,11 @@ test("the public sign-in methods need no credentials and say nothing about the G
     expect((await api.handler(new Request("http://localhost/api/v1/auth/google/start"))).headers.get("location")).toBe("/login?error=google_unavailable")
     expect((await api.handler(new Request("http://localhost/api/v1/auth/app-handoff/exchange", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: "a".repeat(43), verifier: "b".repeat(43) }) }))).status).toBe(503)
   } finally { await api.dispose() }
+})
+
+test("a picture is kept only as a plain https address of ordinary length", () => {
+  for (const address of ["https://lh3.googleusercontent.com/a/ACg8ocFixture=s96-c", "https://pictures.example.test/people/1.png?size=96"]) expect(pictureAddress(address)).toBe(address)
+  for (const value of [null, undefined, 7, "", "lh3.googleusercontent.com/a/x", "http://lh3.googleusercontent.com/a/x", "//lh3.googleusercontent.com/a/x", "javascript:alert(1)", "data:image/png;base64,AAAA",
+    "https://user:secret@pictures.example.test/a.png", "https://localhost/a.png", "https://pictures.example.test/a b.png", "https://pictures.example.test/a.png\nSet-Cookie: x=1", "https://pictures.example.test/\"onerror=\"x", " https://pictures.example.test/a.png",
+    "https://pictures.example.test/" + "a".repeat(2048)]) expect(pictureAddress(value)).toBeNull()
 })

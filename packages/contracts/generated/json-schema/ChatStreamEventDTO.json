@@ -181,7 +181,8 @@
             "done",
             "error",
             "tool",
-            "citations"
+            "citations",
+            "reasoning"
           ]
         },
         "text": {

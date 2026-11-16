@@ -143,6 +143,7 @@ pub fn archive_of(thread: &ChatThreadDTO, account: &AccountId, note_id: u64) -> 
         let mut notes = ChatTurnAnnotations::default();
         notes.citations = answer.citations.clone();
         notes.tools = answer.tools.clone();
+        notes.reasoning = answer.reasoning.clone();
         notes.elapsed_ms = answer.elapsed_ms.and_then(|ms| u64::try_from(ms).ok());
         let text = match answer.status {
             ChatThreadMessageStatus::Complete => answer.content.clone(),
@@ -166,7 +167,7 @@ pub fn archive_of(thread: &ChatThreadDTO, account: &AccountId, note_id: u64) -> 
         if answer.status != ChatThreadMessageStatus::Complete {
             interrupted.push(turn);
         }
-        if !notes.citations.is_empty() || !notes.tools.is_empty() || notes.elapsed_ms.is_some() || notes.error.is_some() {
+        if !notes.citations.is_empty() || !notes.tools.is_empty() || !notes.reasoning.is_empty() || notes.elapsed_ms.is_some() || notes.error.is_some() {
             annotations.insert(turn, notes);
         }
         messages.push((question, text));
@@ -731,7 +732,7 @@ mod tests {
         for key in ["error", "model", "elapsedMs"] {
             row[key] = extra.get(key).cloned().unwrap_or(Value::Null);
         }
-        for key in ["citations", "tools"] {
+        for key in ["citations", "tools", "reasoning"] {
             row[key] = extra.get(key).cloned().unwrap_or(json!([]));
         }
         row["createdAt"] = json!("2026-10-02T10:00:00.000Z");
@@ -751,7 +752,7 @@ mod tests {
     fn a_thread_from_the_server_reads_as_the_conversation_with_every_kind_of_answer() {
         let v = |text: &str| -> Value { serde_json::from_str(text).unwrap() };
         let first = format!(
-            r#"{{"citations":[{}],"tools":[{{"callId":"52000000-0000-4000-8000-000000000001","name":"search_meetings","status":"completed","label":"Searched","resultCount":1}}],"elapsedMs":1500}}"#,
+            r#"{{"citations":[{}],"tools":[{{"callId":"52000000-0000-4000-8000-000000000001","name":"search_meetings","status":"completed","label":"Searched","resultCount":1}}],"reasoning":[{{"afterTools":0,"text":"**Finding the release**\n\nSearch first."}},{{"afterTools":1,"text":"Enough to answer."}}],"elapsedMs":1500}}"#,
             citation()
         );
         let script: [(&str, &str, &str, &str); 12] = [
@@ -784,6 +785,15 @@ mod tests {
         assert_eq!(chat.annotations[&0].citations[0].id, "S1");
         assert_eq!(chat.annotations[&0].tools.len(), 1);
         assert_eq!(chat.annotations[&0].elapsed_ms, Some(1500));
+        // The thoughts read back in the order they happened.
+        assert_eq!(
+            chat.annotations[&0].thoughts(),
+            [
+                crate::chat::Thought::Reasoning { heading: Some("Finding the release"), body: "Search first." },
+                crate::chat::Thought::Step(0),
+                crate::chat::Thought::Reasoning { heading: None, body: "Enough to answer." },
+            ]
+        );
         assert_eq!(chat.annotations[&4].error.as_deref(), Some("A source changed while answering."));
         assert_eq!(chat.title, UNTITLED);
         assert_eq!(chat.account, Some(account()));

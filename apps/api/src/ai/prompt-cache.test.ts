@@ -158,8 +158,9 @@ test("Anthropic directly: cache markers reach the Messages API, and its usage co
   expect(events[0]).toMatchObject({provider:"anthropic",usage:{promptTokens:4020,cachedTokens:3600,cacheWriteTokens:380,outputTokens:6}})
 })
 
+// A model that does not reason: its chat answer is a chat completion (a reasoning model's goes through the Responses API, `test/chat-reasoning.test.ts`).
 test("OpenAI directly: a streamed answer asks for usage; a short thread has nothing to mark, so it carries no cache field",async()=>{
-  const {sent,events}=await answer({languageProvider:"openai",openAiKey:"fixture-key",languageModel:"gpt-6-sol"},()=>sse([
+  const {sent,events}=await answer({languageProvider:"openai",openAiKey:"fixture-key",languageModel:"gpt-4.1"},()=>sse([
     {choices:[{delta:{content:"Eleven percent."}}]},{choices:[],usage:{prompt_tokens:4000,completion_tokens:5,prompt_tokens_details:{cached_tokens:3584}}}]))
   expect(sent[0]!.url).toBe("https://api.openai.com/v1/chat/completions")
   expect(sent[0]!.body.stream_options).toEqual({include_usage:true})

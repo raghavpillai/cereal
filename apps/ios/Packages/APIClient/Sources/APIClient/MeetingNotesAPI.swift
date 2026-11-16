@@ -346,6 +346,8 @@ public struct MeetingNotesAPI: Sendable {
                             guard let citations = event.citations, citations.count <= 40, Set(citations.map(\.id)).count == citations.count,
                                   citations.allSatisfy({ $0.id.range(of: "^S[1-9][0-9]{0,2}$", options: .regularExpression) != nil && UUID(uuidString: $0.noteId) != nil && $0.transcriptRevision >= 0 && ($0.startMs ?? 0) >= 0 && $0.title.count <= 500 && ($0.segmentId.map { UUID(uuidString: $0) != nil } ?? true) && !$0.quote.isEmpty && $0.quote.count <= 20_000 }) else { throw APIClientError.invalidJSON }
                             metadataBytes += payload.utf8.count
+                        // The model's reasoning is not shown here yet: the event is read and passed over.
+                        case .reasoning: continue
                         case .done: completed = true
                         case .error: throw APIClientError.unavailable
                         }

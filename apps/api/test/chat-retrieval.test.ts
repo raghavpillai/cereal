@@ -18,7 +18,7 @@ async function fixture(extra:Partial<ProviderServices>={}){
   const note=await Effect.runPromise(owned.createNote({title:"Cedar launch review",date:"2026-11-13",enhanced:"# Next Steps\n- Alex: send checklist Thursday.",transcriptSegments:[segment]}))
   const privateNote=await Effect.runPromise(foreign.createNote({title:"Bob private account",body:"FOREIGN_ACCOUNT_SENTINEL",date:"2026-11-13"}))
   const providers:ProviderServices={generate:()=>Effect.succeed("Notes"),chat:()=>Effect.succeed("Answer"),...extra}
-  const processing=makeProcessingService(root,{providers})
+  const processing=makeProcessingService(root,{labelledNoteChat:true,providers})
   const api=makeApiHandler(root,"unused-retrieval-operator-at-least-32-characters",{processing,principalResolver:async headers=>headers.get("authorization")==="Bearer alice"?alice:headers.get("authorization")==="Bearer bob"?bob:null})
   cleanup.push(api.dispose)
   const request=(id:string|null,includeSources=true)=>api.handler(new Request("http://localhost/api/v1/"+(id?"notes/"+id+"/chat/stream":"chat/stream"),{method:"POST",headers:{Authorization:"Bearer alice","Content-Type":"application/json"},body:JSON.stringify({message:"Find recent Cedar to-dos",history:[],includeSources,timeZone:"America/New_York"})}))
@@ -120,7 +120,8 @@ test("planner model is explicit, six-series model parameters omit unsupported te
   await providers.chatToolStep!([{role:"user",content:"Find meetings"}],MEETING_CHAT_TOOLS,new AbortController().signal)
   await Effect.runPromise(providers.generate(f.note))
   expect(requests[0]!.model).toBe("openai/gpt-6-luna")
-  expect(requests[0]!.reasoning_effort).toBe("none")
+  // The research step asks a reasoning model to reason a little, so there is reasoning to show; other requests keep their effort.
+  expect(requests[0]!.reasoning_effort).toBe("low")
   expect(requests[1]!.model).toBe("openai/gpt-6-sol")
   for(const request of requests){expect(request.temperature).toBeUndefined();expect(request.max_completion_tokens).toBeGreaterThan(0)}
   // On GPT-5.6 and later the system prompt of a generation is sent as text parts, the first with a cache breakpoint.
@@ -140,7 +141,7 @@ test("nonstream completion rejects explicit length truncation rather than saving
 test("planner transport failure falls back to actual scoped retrieval without leaking provider diagnostics",async()=>{
   const f=await fixture({async chatToolStep(){throw new Error("private upstream provider diagnostic")},async *chatStream(note){expect(note.body).toContain("Cedar");yield"Checklist [[S1]]"}})
   const stream=events(await(await f.request(null)).text())
-  expect(stream.some(event=>event.tool?.status==="failed"&&event.tool.label.includes("planning unavailable"))).toBe(true)
+  expect(stream.some(event=>event.tool?.status==="failed"&&event.tool.label==="Couldn't plan the search")).toBe(true)
   expect(stream.some(event=>event.tool?.name==="get_meetings"&&event.tool.status==="completed")).toBe(true)
   expect(JSON.stringify(stream)).not.toContain("private upstream")
   expect(stream.at(-1)!.type).toBe("done")
@@ -149,7 +150,7 @@ test("planner transport failure falls back to actual scoped retrieval without le
 test("late matching facts survive bounded notes, summaries and long transcript segments as exact source windows",async()=>{
   const f=await fixture(),prefix="Cedar routine status remained unchanged. ".repeat(600),fact="Zephyr access code is VIOLET-314."
   const note=await Effect.runPromise(f.owned.updateNote(f.note.id,{body:prefix+fact,enhanced:prefix+fact,transcriptSegments:[{...f.segment,text:prefix+fact}]}))
-  const prepared=await prepareMeetingChat({noteId:f.note.id,input:{message:"What is the Zephyr access code?",history:[],includeSources:true},repository:f.owned,providers:{generate:()=>Effect.succeed(""),chat:()=>Effect.succeed("")},enrich:async note=>note,signal:new AbortController().signal,emit:()=>{}})
+  const prepared=await prepareMeetingChat({labelledLines:true,noteId:f.note.id,input:{message:"What is the Zephyr access code?",history:[],includeSources:true},repository:f.owned,providers:{generate:()=>Effect.succeed(""),chat:()=>Effect.succeed("")},enrich:async note=>note,signal:new AbortController().signal,emit:()=>{}})
   expect(prepared.note.body).toContain(fact);expect(prepared.note.enhanced).toContain(fact)
   expect(prepared.note.transcriptSegments[0]!.text).toContain(fact)
   // A document is shown from its beginning (up to 24,000 characters, the same for every question) plus the

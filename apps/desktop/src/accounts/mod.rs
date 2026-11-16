@@ -281,6 +281,12 @@ impl Paths {
         Some(Self { meta, data })
     }
 
+    /// Pictures of the people signed in here, kept between launches
+    /// (`crate::portrait`).
+    pub fn portraits(&self) -> PathBuf {
+        self.data.join("portraits")
+    }
+
     pub fn registry(&self) -> PathBuf {
         self.meta.join("accounts.json")
     }
@@ -571,7 +577,10 @@ mod tests {
     fn t7_nothing_the_app_draws_is_fetched_from_a_server() {
         // A note's text is drawn as text: no image element is ever given an
         // address, no network image source or HTTP client is used, and the
-        // asset source serves only what is embedded in the app.
+        // asset source serves only what is embedded in the app. The one
+        // exception is the signed-in person's own picture, which
+        // `portrait.rs` fetches itself from Google's picture host, decodes,
+        // and hands over as pixels (its own tests say which addresses).
         for (name, text) in shipped_sources() {
             for needle in ["ImageSource::Uri", "Resource::Uri", "http_client", "reqwest", "img(format!", "img(url", "img(link"] {
                 assert!(!text.contains(needle), "{name} uses {needle}");
@@ -579,10 +588,16 @@ mod tests {
             for (at, _) in text.match_indices("img(") {
                 let argument = &text[at + 4..(at + 64).min(text.len())];
                 assert!(
-                    argument.starts_with("\"icons/") || argument.starts_with("SharedString::from(choice.asset())"),
+                    argument.starts_with("\"icons/")
+                        || argument.starts_with("SharedString::from(choice.asset())")
+                        || (name == "portrait.rs" && argument.starts_with("picture)")),
                     "{name}: img({argument}"
                 );
             }
+        }
+        // Nothing but that module asks for bytes to draw.
+        for (name, text) in shipped_sources() {
+            assert!(name == "portrait.rs" || name == "fetch.rs" || !text.contains("fetch::bytes("), "{name} fetches something to draw");
         }
         let ui = shipped_sources().into_iter().find(|(name, _)| name == "ui.rs").unwrap().1;
         assert!(ui.contains("Ok(Self::get(path).map(|f| f.data))"), "assets are the embedded ones");

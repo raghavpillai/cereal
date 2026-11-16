@@ -33,6 +33,10 @@
         },
         "createdAt": {
           "$ref": "#/$defs/Timestamp"
+        },
+        "image": {
+          "type": "string",
+          "maxLength": 2048
         }
       },
       "required": [

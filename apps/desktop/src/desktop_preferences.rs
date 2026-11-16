@@ -218,6 +218,14 @@ pub struct MeetingPreferences {
     /// Apple's voice isolation on the microphone of every recording (see
     /// `audio::CaptureOptions`); system audio is never processed.
     pub voice_isolation: bool,
+    /// The microphone recordings use, by Core Audio device UID. `None`
+    /// follows the Mac's default input (see `audio::set_input_device`).
+    pub microphone: Option<String>,
+    /// The language live transcription is told to expect: an ISO 639 code,
+    /// or `"auto"` to let the provider detect it. `None` until the person
+    /// chooses: English on a Mac set to English, detection otherwise (see
+    /// `transcript_panel::Language`).
+    pub transcript_language: Option<String>,
 }
 impl Default for MeetingPreferences {
     fn default() -> Self {
@@ -232,6 +240,8 @@ impl Default for MeetingPreferences {
             hidden_calendars: Vec::new(),
             reminder_scheme: 0,
             voice_isolation: true,
+            microphone: None,
+            transcript_language: None,
         }
     }
 }
@@ -288,6 +298,104 @@ pub fn update_meeting(change: impl FnOnce(&mut MeetingPreferences)) -> Result<()
     meeting_path().and_then(|path| write_as(&path, "meeting-preferences", &next))?;
     *state = next;
     MEETING_REVISION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    Ok(())
+}
+
+/// The sidebar's narrowest, default and widest widths in points. Dragging its
+/// edge moves between the limits; a double-click on the edge returns to the
+/// default.
+pub const SIDEBAR_MIN: f32 = 168.;
+pub const SIDEBAR_DEFAULT: f32 = 192.;
+pub const SIDEBAR_MAX: f32 = 320.;
+/// The least room the page beside the sidebar keeps: the narrowest window
+/// (760 pt) less the default sidebar. A wide sidebar gives way to it in a
+/// narrow window, so the page is never crushed.
+pub const SIDEBAR_PAGE_MIN: f32 = 568.;
+
+/// A width the sidebar may be given: within its limits, and the default for
+/// anything that is not a number.
+pub fn clamp_sidebar_width(width: f32) -> f32 {
+    if width.is_finite() {
+        width.clamp(SIDEBAR_MIN, SIDEBAR_MAX).round()
+    } else {
+        SIDEBAR_DEFAULT
+    }
+}
+/// The width the sidebar is drawn at in a window `viewport` points wide: the
+/// chosen width, less whatever the page beside it needs, never under the
+/// minimum.
+pub fn sidebar_width_in(chosen: f32, viewport: f32) -> f32 {
+    let chosen = clamp_sidebar_width(chosen);
+    if !viewport.is_finite() {
+        return chosen;
+    }
+    chosen.min((viewport - SIDEBAR_PAGE_MIN).max(SIDEBAR_MIN))
+}
+
+/// How this Mac lays the window out. In a file of its own, like the meeting
+/// preferences, so `desktop-preferences.json` keeps the fields older
+/// versions know.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LayoutPreferences {
+    /// The sidebar's width in points, as last dragged.
+    pub sidebar_width: f32,
+}
+impl Default for LayoutPreferences {
+    fn default() -> Self {
+        Self {
+            sidebar_width: SIDEBAR_DEFAULT,
+        }
+    }
+}
+impl LayoutPreferences {
+    /// What was read from disk, made safe to use: a width outside the limits
+    /// (an edited file, limits that have since changed) is brought inside.
+    fn sanitized(mut self) -> Self {
+        self.sidebar_width = clamp_sidebar_width(self.sidebar_width);
+        self
+    }
+}
+static LAYOUT: OnceLock<Mutex<LayoutPreferences>> = OnceLock::new();
+fn layout_path() -> Result<PathBuf, String> {
+    Ok(root()?.join("layout-preferences.json"))
+}
+fn read_layout(path: &Path) -> LayoutPreferences {
+    read_as::<LayoutPreferences>(path)
+        .unwrap_or_default()
+        .sanitized()
+}
+fn write_layout(path: &Path, layout: &LayoutPreferences) -> Result<(), String> {
+    write_as(path, "layout-preferences", &layout.clone().sanitized())
+}
+fn layout_state() -> &'static Mutex<LayoutPreferences> {
+    LAYOUT.get_or_init(|| {
+        // Tests start from the defaults, never from the user's own file.
+        if cfg!(test) {
+            return Mutex::new(LayoutPreferences::default());
+        }
+        Mutex::new(layout_path().map(|path| read_layout(&path)).unwrap_or_default())
+    })
+}
+/// The sidebar's saved width, within its limits.
+pub fn sidebar_width() -> f32 {
+    layout_state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .sidebar_width
+}
+/// Save the sidebar's width (clamped). What is in memory changes even if the
+/// file cannot be written: the width in use is the one on screen.
+pub fn set_sidebar_width(width: f32) -> Result<(), String> {
+    let mut state = layout_state().lock().unwrap_or_else(|e| e.into_inner());
+    let width = clamp_sidebar_width(width);
+    if state.sidebar_width == width {
+        return Ok(());
+    }
+    state.sidebar_width = width;
+    // Tests never write the user's own preferences.
+    #[cfg(not(test))]
+    layout_path().and_then(|path| write_layout(&path, &state))?;
     Ok(())
 }
 
@@ -425,6 +533,75 @@ mod tests {
         assert!(older.voice_isolation);
         fs::write(&path, br#"{"voice_isolation":false}"#).unwrap();
         assert!(!read_as::<MeetingPreferences>(&path).unwrap().voice_isolation);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn sidebar_width_is_clamped_to_its_limits_and_rounded() {
+        assert_eq!(clamp_sidebar_width(SIDEBAR_DEFAULT), SIDEBAR_DEFAULT);
+        assert_eq!(clamp_sidebar_width(0.), SIDEBAR_MIN);
+        assert_eq!(clamp_sidebar_width(-40.), SIDEBAR_MIN);
+        assert_eq!(clamp_sidebar_width(SIDEBAR_MIN - 0.4), SIDEBAR_MIN);
+        assert_eq!(clamp_sidebar_width(10_000.), SIDEBAR_MAX);
+        assert_eq!(clamp_sidebar_width(f32::INFINITY), SIDEBAR_DEFAULT);
+        assert_eq!(clamp_sidebar_width(f32::NAN), SIDEBAR_DEFAULT);
+        // Whole points: the edge never rests between two pixels.
+        assert_eq!(clamp_sidebar_width(240.4), 240.);
+        assert_eq!(clamp_sidebar_width(240.6), 241.);
+        assert!(SIDEBAR_MIN < SIDEBAR_DEFAULT && SIDEBAR_DEFAULT < SIDEBAR_MAX);
+    }
+    #[test]
+    fn a_wide_sidebar_gives_way_to_the_page_in_a_narrow_window() {
+        // A wide window shows the chosen width.
+        assert_eq!(sidebar_width_in(SIDEBAR_MAX, 1440.), SIDEBAR_MAX);
+        assert_eq!(sidebar_width_in(SIDEBAR_MIN, 1440.), SIDEBAR_MIN);
+        // The narrowest window (760) keeps the page its 568 pt: the widest
+        // sidebar is drawn at the default width there, and the default and
+        // anything narrower are untouched.
+        assert_eq!(sidebar_width_in(SIDEBAR_MAX, 760.), SIDEBAR_DEFAULT);
+        assert_eq!(sidebar_width_in(SIDEBAR_DEFAULT, 760.), SIDEBAR_DEFAULT);
+        assert_eq!(sidebar_width_in(SIDEBAR_MIN, 760.), SIDEBAR_MIN);
+        // In between, the page keeps exactly its minimum.
+        assert_eq!(sidebar_width_in(SIDEBAR_MAX, 820.), 820. - SIDEBAR_PAGE_MIN);
+        // It is never drawn narrower than its minimum, whatever the window.
+        assert_eq!(sidebar_width_in(SIDEBAR_MAX, 300.), SIDEBAR_MIN);
+        assert_eq!(sidebar_width_in(SIDEBAR_MAX, f32::NAN), SIDEBAR_MAX);
+        for viewport in [760., 800., 900., 1200., 2000.] {
+            for chosen in [0., SIDEBAR_MIN, SIDEBAR_DEFAULT, 250., SIDEBAR_MAX, 900.] {
+                let width = sidebar_width_in(chosen, viewport);
+                assert!((SIDEBAR_MIN..=SIDEBAR_MAX).contains(&width));
+                assert!(viewport - width >= SIDEBAR_PAGE_MIN);
+            }
+        }
+    }
+    #[test]
+    fn layout_preferences_default_roundtrip_and_survive_bad_files() {
+        let dir = directory();
+        let path = dir.join("layout-preferences.json");
+        // Nothing saved: the default width.
+        assert_eq!(read_layout(&path).sidebar_width, SIDEBAR_DEFAULT);
+        write_layout(&path, &LayoutPreferences { sidebar_width: 264. }).unwrap();
+        assert_eq!(read_layout(&path).sidebar_width, 264.);
+        // A width outside the limits is saved, and read, inside them.
+        write_layout(&path, &LayoutPreferences { sidebar_width: 4000. }).unwrap();
+        assert_eq!(read_layout(&path).sidebar_width, SIDEBAR_MAX);
+        fs::write(&path, br#"{"sidebar_width":12}"#).unwrap();
+        assert_eq!(read_layout(&path).sidebar_width, SIDEBAR_MIN);
+        // A file from a later version, with a field this one does not know.
+        fs::write(&path, br#"{"sidebar_width":210,"later":true}"#).unwrap();
+        assert_eq!(read_layout(&path).sidebar_width, 210.);
+        // One without the width, or that cannot be read at all: the default,
+        // and the unreadable file is kept aside when the next width is saved.
+        fs::write(&path, br#"{}"#).unwrap();
+        assert_eq!(read_layout(&path).sidebar_width, SIDEBAR_DEFAULT);
+        fs::write(&path, b"not json").unwrap();
+        assert_eq!(read_layout(&path).sidebar_width, SIDEBAR_DEFAULT);
+        write_layout(&path, &LayoutPreferences { sidebar_width: 200. }).unwrap();
+        assert_eq!(read_layout(&path).sidebar_width, 200.);
+        assert!(fs::read_dir(&dir).unwrap().flatten().any(|p| {
+            p.file_name()
+                .to_string_lossy()
+                .starts_with("layout-preferences.invalid-")
+        }));
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]

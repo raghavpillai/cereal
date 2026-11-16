@@ -418,7 +418,8 @@ struct ServerNoteMarkdown: View {
                 case .list(let marker, let value, let depth):
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
                         // A number keeps its own width, so the text of a wrapped item hangs clear of it.
-                        Text(marker).foregroundStyle(Theme.textTertiary).monospacedDigit()
+                        // A sub-bullet is a hollow circle, as on the desktop and web.
+                        Text(marker == "•" && depth % 2 == 1 ? "◦" : marker).foregroundStyle(Theme.textTertiary).monospacedDigit()
                         Text(inline(value)).frame(maxWidth: .infinity, alignment: .leading)
                     }.padding(.leading, CGFloat(min(4, depth) * 14))
                 // A Markdown rule (the one above the chat link at the foot of generated notes) is a hairline, as on the desktop and web.

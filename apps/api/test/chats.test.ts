@@ -328,7 +328,7 @@ test("deleting a note deletes the threads about it and leaves the others", async
 test("the history sent with a question is the newest fifteen answered exchanges", () => {
   const at = new Date()
   const message = (position: number, content: string) => ({ id: crypto.randomUUID(), position, role: position % 2 ? "assistant" as const : "user" as const, content, status: "complete" as const,
-    error: null, model: null, citations: [], tools: [], elapsedMs: null, createdAt: at, updatedAt: at })
+    error: null, model: null, citations: [], tools: [], reasoning: [], elapsedMs: null, createdAt: at, updatedAt: at })
   const messages = Array.from({ length: 40 }, (_, i) => message(i, i === 5 ? "" : `m${i}`))
   const history = chatHistory(messages)
   expect(history.length).toBe(30)

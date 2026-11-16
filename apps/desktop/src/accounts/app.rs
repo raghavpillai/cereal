@@ -316,7 +316,7 @@ impl Cereal {
             });
         }
         if std::env::args().any(|argument| argument == "--dark") {
-            self.workspace.settings.dark_mode = true;
+            self.workspace.settings.force_dark(true);
         }
         // A sign-in made in the welcome carries on there: its next step.
         if self.screen == Screen::Welcome && self.onboarding.flow.is_some() {

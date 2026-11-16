@@ -6,6 +6,7 @@ import { makeApiHandler } from "../src/api"
 import { BOOTSTRAP_OWNER_ID, makeMemoryRepository, type NotesRepositoryService } from "../src/repository"
 import { makePrismaRepository } from "../src/prisma-repository"
 import { makeProcessingService } from "../src/processing"
+import { makeMemoryNoteAccessStore, makeNoteAccessService } from "../src/note-access"
 import type { ProviderServices } from "../src/providers"
 import { TRANSCRIPT_LINK_LABEL, rehomedTranscriptLink, transcriptChatURL, transcriptLinkLine, withTranscriptLink, withoutTranscriptLink } from "../src/transcript-link"
 import { generationContext } from "../src/ai/notes-generation"
@@ -89,6 +90,7 @@ for (const kind of ["memory", "postgres"] as const) {
       const processing = makeProcessingService(repository, { providers })
       const api = makeApiHandler(repository, "transcript-link-test-token-at-least-32-characters", {
         processing,
+        noteAccess: makeNoteAccessService(makeMemoryNoteAccessStore(repository, { organization: { id: "40000000-0000-4000-8000-0000000000aa", name: "Acme" }, members: (Object.keys(ids) as Account[]).map(account => ({ userId: ids[account], name: account, email: `${account}@example.test` })) })),
         principalResolver: async headers => {
           const account = (headers.get("authorization") ?? "").replace("Bearer ", "") as Account
           if (!(account in ids)) return null
@@ -198,6 +200,7 @@ for (const kind of ["memory", "postgres"] as const) {
       }
       // A shared snapshot leaves the line out (Bob could not use it), and sharing never made the transcript Bob's.
       const share = await (await f.call("alice", `/notes/${note.id}/shares`, "POST", { includeBody: false, includeEnhanced: true })).json() as { token: string }
+      expect((await f.call("alice", `/notes/${note.id}/access`, "PATCH", { level: "organization" })).status).toBe(200)
       const snapshot = await (await f.call("bob", `/shared/${share.token}`)).json() as { enhanced: string }
       expect(snapshot.enhanced).toBe("# Pricing")
       expect(snapshot.enhanced).not.toContain(note.id)

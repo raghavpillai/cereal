@@ -101,7 +101,7 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
                     5=>{
                         view.workspace.note_mut(id).unwrap().trashed=false;
                         assert_eq!(view.workspace.visible_notes(false,"Native test").len(),1);
-                        view.workspace.settings.dark_mode=true;view.navigate(Screen::Settings,cx);
+                        view.workspace.settings.force_dark(true);view.navigate(Screen::Settings,cx);
                     },
                     6=>{view.navigate(Screen::Chat,cx);},
                     7=>{

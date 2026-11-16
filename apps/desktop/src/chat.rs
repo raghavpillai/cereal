@@ -2,7 +2,9 @@
 //! Markdown remains data: raw HTML and unknown links are never executed.
 use crate::ui::{Reach, Theme, icon, pill, round_tool, small, tool_tip};
 use gpui::{prelude::*, *};
-use meeting_notes_api_types::{ChatCitationDTO, ChatToolProgressDTO, ChatToolProgressDtoStatus};
+use meeting_notes_api_types::{
+    ChatCitationDTO, ChatReasoningDTO, ChatToolProgressDTO, ChatToolProgressDtoStatus,
+};
 use std::ops::Range;
 use std::sync::{Arc, atomic::AtomicBool};
 
@@ -10,19 +12,159 @@ use std::sync::{Arc, atomic::AtomicBool};
 pub struct ChatTurnAnnotations {
     #[serde(default)]
     pub tools: Vec<ChatToolProgressDTO>,
+    /// The model's own reasoning, in order; each stretch says how many of
+    /// `tools` had started before it. Empty when the provider gave none.
+    #[serde(default)]
+    pub reasoning: Vec<ChatReasoningDTO>,
     #[serde(default)]
     pub citations: Vec<ChatCitationDTO>,
     #[serde(default)]
     pub elapsed_ms: Option<u64>,
     #[serde(default)]
     pub error: Option<String>,
+    /// Whether the person opened or closed the thoughts themselves. Left
+    /// alone they are open while the answer is thought about and closed
+    /// once it starts.
     #[serde(skip)]
-    expanded: bool,
+    expanded: Option<bool>,
     #[serde(skip)]
     expanded_tools: std::collections::HashSet<String>,
 }
 
+/// One thing in an answer's thoughts, in the order it happened.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Thought<'a> {
+    /// A part of the model's reasoning: its heading, when it gave one, and
+    /// the text under it.
+    Reasoning {
+        heading: Option<&'a str>,
+        body: &'a str,
+    },
+    /// A meeting lookup: its place in `ChatTurnAnnotations::tools`.
+    Step(usize),
+}
+
+/// A stretch of reasoning as its parts. Providers that summarise reasoning
+/// open each part with a line that is only `**Heading**`; anything before
+/// the first such line, or all of it when there is none, has no heading.
+pub(crate) fn reasoning_sections(text: &str) -> Vec<(Option<&str>, &str)> {
+    let mut sections = Vec::new();
+    let (mut heading, mut start, mut offset) = (None, 0, 0);
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        let title = trimmed
+            .strip_prefix("**")
+            .and_then(|rest| rest.strip_suffix("**"))
+            .map(str::trim)
+            .filter(|title| !title.is_empty() && !title.contains("**"));
+        if let Some(title) = title {
+            let body = text[start..offset].trim();
+            if heading.is_some() || !body.is_empty() {
+                sections.push((heading, body));
+            }
+            heading = Some(title);
+            start = offset + line.len();
+        }
+        offset += line.len();
+    }
+    let body = text[start..].trim();
+    if heading.is_some() || !body.is_empty() {
+        sections.push((heading, body));
+    }
+    sections
+}
+
 impl ChatTurnAnnotations {
+    /// The next piece of reasoning. Pieces join into one stretch until a
+    /// lookup that was not there before starts (the server keeps them by the
+    /// same rule, so a reopened thread reads as it did live).
+    fn add_reasoning(&mut self, text: &str) {
+        const STRETCH: usize = 20_000;
+        let after = self.tools.len() as i64;
+        let stretch = match self.reasoning.last_mut() {
+            Some(last) if last.after_tools == after => last,
+            _ => {
+                let text = text.trim_start();
+                if text.is_empty() || self.reasoning.len() >= 40 {
+                    return;
+                }
+                self.reasoning.push(ChatReasoningDTO {
+                    after_tools: after,
+                    text: String::new(),
+                });
+                let stretch = self.reasoning.last_mut().expect("just pushed");
+                stretch.text.extend(text.chars().take(STRETCH));
+                return;
+            }
+        };
+        let room = STRETCH.saturating_sub(stretch.text.chars().count());
+        stretch.text.extend(text.chars().take(room));
+    }
+
+    /// Reasoning and lookups in the order they happened.
+    pub(crate) fn thoughts(&self) -> Vec<Thought<'_>> {
+        let mut thoughts = Vec::new();
+        let mut reasoning = self.reasoning.iter().peekable();
+        for step in 0..=self.tools.len() {
+            while let Some(stretch) = reasoning.next_if(|stretch| {
+                step == self.tools.len() || stretch.after_tools <= step as i64
+            }) {
+                thoughts.extend(
+                    reasoning_sections(&stretch.text)
+                        .into_iter()
+                        .map(|(heading, body)| Thought::Reasoning { heading, body }),
+                );
+            }
+            if step < self.tools.len() {
+                thoughts.push(Thought::Step(step));
+            }
+        }
+        thoughts
+    }
+
+    /// What the answer is doing right now, for the line that says so while
+    /// it is thought about: the lookup under way, else the heading the
+    /// model's reasoning last gave. `None`: nothing more telling than
+    /// "Thinking…".
+    pub(crate) fn live_heading(&self) -> Option<String> {
+        let trail = |label: &str| format!("{}…", label.trim_end_matches(['.', '…']));
+        if let Some(running) = self
+            .tools
+            .iter()
+            .rev()
+            .find(|tool| tool.status == ChatToolProgressDtoStatus::Running)
+        {
+            return Some(trail(&running.label));
+        }
+        let last = self.reasoning.last()?;
+        // A heading is only shown once its line is whole.
+        let whole = &last.text[..last.text.rfind('\n').map_or(0, |end| end + 1)];
+        reasoning_sections(whole)
+            .into_iter()
+            .rev()
+            .find_map(|(heading, _)| heading)
+            .map(trail)
+    }
+
+    /// Open or close the thoughts as the person would from their line
+    /// (`None`: leave it to the answer, open only while it is thought about).
+    #[cfg(debug_assertions)]
+    pub(crate) fn set_thoughts_open(&mut self, open: Option<bool>) {
+        self.expanded = open;
+    }
+
+    /// Open or close one lookup's meetings, as a click on its row would.
+    #[cfg(debug_assertions)]
+    pub(crate) fn toggle_step(&mut self, call_id: &str) {
+        if !self.expanded_tools.remove(call_id) {
+            self.expanded_tools.insert(call_id.to_owned());
+        }
+    }
+
+    fn has_thoughts(&self) -> bool {
+        !self.tools.is_empty() || self.reasoning.iter().any(|item| !item.text.trim().is_empty())
+    }
+
     fn update_tool(&mut self, tool: ChatToolProgressDTO) {
         if let Some(existing) = self
             .tools
@@ -124,6 +266,209 @@ fn citation_passage_intact(note: &crate::model::Note, citation: &ChatCitationDTO
                 .is_none_or(|start| start == segment.start_ms)
             && segment.text.contains(&citation.quote)
     })
+}
+
+/// A disclosure's chevron: pointing along the line while closed, turning
+/// down as `pose` opens.
+fn disclosure_chevron(size: f32, color: Hsla, pose: crate::motion::Pose) -> Svg {
+    let level = if pose.visible { pose.value.clamp(0., 1.) } else { 0. };
+    icon("chevron-down", size, color)
+        .flex_shrink_0()
+        .with_transformation(Transformation::rotate(radians(
+            -std::f32::consts::FRAC_PI_2 * (1. - level),
+        )))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum StepState {
+    Running,
+    Done,
+    /// It failed, or was still running when the answer stopped.
+    Failed,
+}
+
+/// How a meeting lookup is drawn: its glyph, its words and its state.
+#[derive(Debug, PartialEq)]
+pub(crate) struct StepLook {
+    pub glyph: &'static str,
+    pub label: String,
+    pub state: StepState,
+}
+
+/// A glyph for what the lookup did (notes for meetings found or read, bars
+/// for transcript, a calendar for a listing by date) and its words in plain
+/// language. A failed lookup is quiet: a struck circle and a short sentence,
+/// never the server's diagnostic.
+pub(crate) fn step_look(tool: &ChatToolProgressDTO, active: bool) -> StepLook {
+    use meeting_notes_api_types::Name;
+    let state = match tool.status {
+        ChatToolProgressDtoStatus::Completed => StepState::Done,
+        ChatToolProgressDtoStatus::Running if active => StepState::Running,
+        ChatToolProgressDtoStatus::Running | ChatToolProgressDtoStatus::Failed => StepState::Failed,
+    };
+    let label = tool.label.trim();
+    if state == StepState::Failed {
+        let lower = label.to_lowercase();
+        let label = if tool.status == ChatToolProgressDtoStatus::Running {
+            "Stopped before this finished"
+        } else if lower.contains("plan") {
+            "Couldn't plan the search"
+        } else if label.is_empty() || label.chars().count() > 40 || label.contains(';') {
+            "Couldn't finish this lookup"
+        } else {
+            label
+        };
+        return StepLook {
+            glyph: "step-failed",
+            label: label.to_owned(),
+            state,
+        };
+    }
+    let glyph = match tool.name {
+        Name::SearchMeetings | Name::GetMeetings => "step-notes",
+        Name::ListMeetings => "calendar",
+        Name::SearchTranscripts | Name::GetMeetingTranscript => "footer-transcript",
+    };
+    let label = if state == StepState::Running {
+        format!("{}…", label.trim_end_matches(['.', '…']))
+    } else {
+        label.to_owned()
+    };
+    StepLook { glyph, label, state }
+}
+
+/// A meeting's day as a list prints it beside the meeting: "Today",
+/// "Yesterday", "Nov 13", and the year only when it is not this one
+/// ("Dec 30, 2025"). A date that cannot be read is printed as it came.
+pub(crate) fn relative_day(date: &str, today: chrono::NaiveDate) -> String {
+    use chrono::Datelike;
+    let day = date.get(..10).unwrap_or(date);
+    let Ok(day) = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d") else {
+        return date.to_owned();
+    };
+    match today.signed_duration_since(day).num_days() {
+        0 => "Today".into(),
+        1 => "Yesterday".into(),
+        _ if day.year() == today.year() => day.format("%b %-d").to_string(),
+        _ => day.format("%b %-d, %Y").to_string(),
+    }
+}
+
+/// A model's name as people say it, from the id a provider knows it by:
+/// "openai/gpt-6-luna" is "GPT-6 Luna", "claude-sonnet-5-5" is "Sonnet 5.5",
+/// "gemini-4-carbon" is "Gemini 4 Carbon". The route in front of the name
+/// and a trailing release date are left out, version digits are joined with
+/// a point, and known initialisms are capitalised.
+pub(crate) fn model_display_name(id: &str) -> String {
+    let name = id.rsplit('/').next().unwrap_or(id);
+    let name = name.strip_prefix("claude-").unwrap_or(name);
+    let mut words: Vec<String> = Vec::new();
+    let mut version = false;
+    for token in name.split(['-', '_', ':', ' ']).filter(|token| !token.is_empty()) {
+        let digits = token.chars().all(|c| c.is_ascii_digit());
+        // A release date, or the alias for the newest release.
+        if (digits && token.len() == 8) || token == "latest" {
+            continue;
+        }
+        let short_number = digits && token.len() <= 2;
+        if short_number && version {
+            // "5", "5" is version 5.5.
+            if let Some(last) = words.last_mut() {
+                last.push('.');
+                last.push_str(token);
+            }
+            continue;
+        }
+        let numeric = token.chars().next().is_some_and(|c| c.is_ascii_digit());
+        if numeric && words.last().is_some_and(|last| last == "GPT") {
+            // "GPT-6", as its maker writes it.
+            if let Some(last) = words.last_mut() {
+                last.push('-');
+                last.push_str(token);
+            }
+            version = short_number;
+            continue;
+        }
+        version = short_number;
+        let lower = token.to_ascii_lowercase();
+        words.push(match lower.as_str() {
+            "gpt" | "oss" | "ai" | "xl" | "hd" | "tts" | "it" | "r1" => lower.to_ascii_uppercase(),
+            // "o3", "o4": written small.
+            _ if lower.len() == 2 && lower.starts_with('o') && lower.ends_with(|c: char| c.is_ascii_digit()) => lower,
+            // A size: "70b", "8k".
+            _ if numeric && lower.ends_with(['b', 'k', 'm']) && lower[..lower.len() - 1].chars().all(|c| c.is_ascii_digit() || c == '.') => {
+                lower.to_ascii_uppercase()
+            }
+            _ => {
+                let mut letters = token.chars();
+                letters
+                    .next()
+                    .map(|first| first.to_uppercase().chain(letters).collect())
+                    .unwrap_or_default()
+            }
+        });
+    }
+    if words.is_empty() {
+        id.to_owned()
+    } else {
+        words.join(" ")
+    }
+}
+
+/// The glyph beside a model in the menu, for who makes it: read from the
+/// route in its id ("anthropic/…", "google/…") or its name, else from the
+/// provider it is reached through. These are plain marks of our own, not
+/// the makers' logos.
+pub(crate) fn model_glyph(choice: &meeting_notes_api_types::LanguageModelSelection) -> &'static str {
+    use meeting_notes_api_types::LanguageModelSelectionProvider as Provider;
+    let id = choice.model.to_ascii_lowercase();
+    let made_by = |names: &[&str]| names.iter().any(|name| id.contains(name));
+    if made_by(&["anthropic/", "claude"]) {
+        "provider-anthropic"
+    } else if made_by(&["google/", "gemini", "gemma"]) {
+        "google"
+    } else if made_by(&["x-ai/", "xai/", "grok"]) {
+        "provider-xai"
+    } else if made_by(&["openai/", "gpt-"]) || id.starts_with("o1") || id.starts_with("o3") || id.starts_with("o4") {
+        "provider-openai"
+    } else {
+        match choice.provider {
+            Provider::Anthropic => "provider-anthropic",
+            Provider::Openai => "provider-openai",
+            Provider::Openrouter | Provider::OpenaiCompatible => "provider-other",
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum ModelMenuKey {
+    Move(usize),
+    Choose(usize),
+    Close,
+}
+
+/// What a key does in the open model menu of `count` rows with `current`
+/// highlighted: the arrows move the highlight and wrap, Return chooses it,
+/// Escape closes the menu. `None`: the key is not the menu's.
+pub(crate) fn model_menu_key(
+    key: &str,
+    modified: bool,
+    current: Option<usize>,
+    count: usize,
+) -> Option<ModelMenuKey> {
+    if modified {
+        return None;
+    }
+    let current = current.filter(|index| *index < count);
+    match key {
+        "escape" => Some(ModelMenuKey::Close),
+        "down" if count > 0 => Some(ModelMenuKey::Move(current.map_or(0, |index| (index + 1) % count))),
+        "up" if count > 0 => Some(ModelMenuKey::Move(
+            current.map_or(count - 1, |index| (index + count - 1) % count),
+        )),
+        "enter" | "return" => current.map(ModelMenuKey::Choose),
+        _ => None,
+    }
 }
 
 pub(crate) fn floating_workspace_chat(screen: crate::app::Screen) -> bool {
@@ -237,6 +582,12 @@ fn apply_stream_event(
             answer.push_str(&text)
         }
         ChatStreamEvent::Done => {}
+        ChatStreamEvent::Reasoning(text) => {
+            // Reasoning that trails in after the answer began is not shown.
+            if answer.is_empty() {
+                annotations.entry(index).or_default().add_reasoning(&text)
+            }
+        }
         ChatStreamEvent::Tool(tool) => annotations.entry(index).or_default().update_tool(tool),
         ChatStreamEvent::Citations(citations) => {
             annotations.entry(index).or_default().citations = citations;
@@ -531,7 +882,7 @@ pub struct EditingChat {
 fn follow_up_prompt(index: usize, turns: &[(String, String)]) -> Option<String> {
     let (question, answer) = turns.get(index)?;
     if index + 1 == turns.len() {
-        Some("Say more about that.".into())
+        Some("Can you provide more details".into())
     } else {
         // Explicitly identify the selected answer; sending an unqualified
         // follow-up here would otherwise refer to the newest answer instead.
@@ -872,12 +1223,20 @@ impl crate::app::Cereal {
         }
     }
 
-    /// The one line above an answer that says how it is coming along:
-    /// "Thinking…" with the mark while nothing of the answer has arrived,
-    /// then "Thought for Ns" once it starts, "Stopped" if it was stopped.
-    /// With the meeting searches it ran, the line also opens the list of
-    /// them. `None` when there is nothing to say (an old answer with no
-    /// timing and no searches).
+    /// The line above an answer that says how it is coming along, and the
+    /// thoughts behind it.
+    ///
+    /// While nothing of the answer has arrived the line is the mark, turning,
+    /// and what is being done with a sheen across it: "Thinking…", then the
+    /// lookup under way or the heading the model's reasoning last gave. Once
+    /// the answer starts it settles into "Thought for Ns" ("Stopped" if it
+    /// was stopped).
+    ///
+    /// Under it, the thoughts: the model's reasoning and the meeting lookups
+    /// in the order they happened, on one rail. They are open while the
+    /// answer is thought about, fold away when it starts, and open and close
+    /// from the line after that. `None` when there is nothing to say (an old
+    /// answer with no timing and no thoughts).
     fn render_chat_status(
         &self,
         index: usize,
@@ -887,181 +1246,300 @@ impl crate::app::Cereal {
     ) -> Option<Div> {
         let t = self.theme();
         let annotations = self.chat_annotations.get(&index);
-        let has_tools = annotations.is_some_and(|item| !item.tools.is_empty());
-        let expanded =
-            has_tools && !thinking && annotations.is_some_and(|item| item.expanded);
+        let has_thoughts = annotations.is_some_and(ChatTurnAnnotations::has_thoughts);
+        let open =
+            has_thoughts && annotations.and_then(|item| item.expanded).unwrap_or(thinking);
         let elapsed = annotations.and_then(|item| item.elapsed_ms);
         let stopped = !active && self.chat_interrupted.contains(&index);
-        // Which of the three lines it is: the change from one to the next
-        // settles in rather than jumping.
+        // Which line it is: the change from one to the next settles in
+        // rather than jumping.
         let (state, heading) = if thinking {
-            (0, None)
+            let live = annotations.and_then(ChatTurnAnnotations::live_heading);
+            let state = live.as_ref().map_or(0, |live| crate::lazy::key(live) | 8);
+            (state, live.unwrap_or_else(|| "Thinking…".to_owned()))
         } else if stopped {
-            (1, Some("Stopped".to_owned()))
+            (1, "Stopped".to_owned())
         } else if let Some(elapsed) = elapsed {
-            (2, Some(format!("Thought for {}s", (elapsed / 1000).max(1))))
-        } else if has_tools {
-            (3, Some("Meeting sources".to_owned()))
+            (2, format!("Thought for {}s", (elapsed / 1000).max(1)))
+        } else if has_thoughts {
+            (3, "Meeting sources".to_owned())
         } else {
             return None;
         };
-        let swap = self.stage.swap(("chat-status", index as u64), state);
+        let turn = index as u64;
+        let swap = self.stage.swap(("chat-status", turn), state);
+        let mark = self
+            .stage
+            .presence(("chat-thinking-mark", turn), thinking, crate::motion::SNAPPY);
+        let body = self
+            .stage
+            .presence(("chat-thoughts", turn), open, crate::motion::SETTLE);
+        let hover = crate::motion::reveal_key(("chat-tool-disclosure", index));
+        let ink = crate::motion::mix(t.muted, t.text, crate::motion::revealed(hover));
+        let label = div()
+            .min_w_0()
+            .truncate()
+            .text_color(if has_thoughts { ink } else { t.muted })
+            .map(|label| {
+                if thinking {
+                    label.child(crate::motion::sheen_label(
+                        ("chat-thinking", self.chat_epoch),
+                        heading,
+                        13.,
+                        t.muted,
+                        t.text,
+                        cx,
+                    ))
+                } else {
+                    label.child(heading)
+                }
+            });
         let line = div()
             .id(("chat-tool-disclosure", index))
             .flex()
             .items_center()
-            .gap(px(6.))
-            .text_size(px(12.))
-            .line_height(px(16.))
-            .text_color(t.muted)
-            .map(|line| match heading {
-                None => line.child(crate::motion::thinking_status(
-                    ("chat-thinking", self.chat_epoch),
-                    t,
-                    cx,
-                )),
-                // 3 px lower than its 16 px line, without moving the answer.
-                Some(heading) => line.pt(px(3.)).mb(px(-3.)).child(heading),
+            .h(px(20.))
+            .text_size(px(13.))
+            .line_height(px(18.))
+            // The mark leaves by closing up, so the words slide to the edge.
+            .when(mark.visible, |line| {
+                let level = mark.value.clamp(0., 1.);
+                // Room for its corners as it turns: 20 px square, the
+                // mark centred in it.
+                line.child(
+                    div()
+                        .flex_shrink_0()
+                        .w(px(24. * level))
+                        .h(px(20.))
+                        .overflow_hidden()
+                        .opacity(mark.fade)
+                        .child(
+                            div()
+                                .size(px(20.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(crate::motion::thinking_mark(15., t.text)),
+                        ),
+                )
             })
-            // While it thinks the line only says so; the searches open from
-            // it once the answer has begun.
-            .when(has_tools && !thinking, |line| {
-                line.cursor_default()
-                    .map(|link| {
-                        crate::motion::warms(
-                            link,
-                            crate::motion::reveal_key(("chat-tool-disclosure", index)),
-                            t.muted,
-                            t.text,
-                        )
-                    })
-                    .child(icon("chevron-down", 12., t.muted).with_transformation(
-                        Transformation::rotate(radians(if expanded {
-                            0.
-                        } else {
-                            -std::f32::consts::FRAC_PI_2
-                        })),
-                    ))
+            .child(crate::motion::swapped(label, swap))
+            .when(has_thoughts, |line| {
+                line.child(crate::motion::hover_probe(hover))
+                    .cursor_default()
+                    .child(disclosure_chevron(12., ink, body).ml(px(4.)))
                     .reach()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(item) = this.chat_annotations.get_mut(&index) {
-                            item.expanded = !item.expanded;
+                            item.expanded = Some(!open);
                         }
                         cx.notify();
                     }))
             });
-        let mut result = div()
+        let mut result = div().min_w_0().flex().flex_col().child(line);
+        let Some(annotations) = annotations.filter(|_| body.visible) else {
+            return Some(result);
+        };
+        // One rail down the leading edge, as far as the thoughts go.
+        let mut rail = div()
+            .min_w_0()
+            .mt(px(8.))
+            .mb(px(2.))
+            .pl(px(12.))
+            .border_l_1()
+            .border_color(t.border)
+            .flex()
+            .flex_col()
+            .gap(px(10.));
+        let today = chrono::Local::now().date_naive();
+        for (position, thought) in annotations.thoughts().into_iter().enumerate() {
+            rail = rail.child(match thought {
+                Thought::Reasoning { heading, body } => {
+                    self.render_chat_reasoning(index, position, heading, body)
+                }
+                Thought::Step(step) => {
+                    self.render_chat_step(index, &annotations.tools[step], annotations, active, today, cx)
+                }
+            });
+        }
+        result = result.children(crate::motion::fold(
+            &self.stage,
+            ("chat-thoughts", turn),
+            body,
+            rail,
+        ));
+        Some(result)
+    }
+
+    /// A part of the model's reasoning: its heading in fuller ink, then its
+    /// paragraphs in the quiet ink of a caption.
+    fn render_chat_reasoning(
+        &self,
+        index: usize,
+        position: usize,
+        heading: Option<&str>,
+        body: &str,
+    ) -> AnyElement {
+        let t = self.theme();
+        div()
+            .id(("chat-reasoning", index * 1000 + position))
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(px(8.))
-            .child(crate::motion::swapped(line, swap));
-        let Some(annotations) = annotations.filter(|_| expanded) else {
-            return Some(result);
-        };
-        {
-            for tool in &annotations.tools {
-                let call_id = tool.call_id.clone();
-                let results_open = annotations.expanded_tools.contains(&call_id);
-                let has_results = tool
-                    .results
-                    .as_ref()
-                    .is_some_and(|results| !results.is_empty());
-                let symbol = match tool.status {
-                    ChatToolProgressDtoStatus::Completed => "check",
-                    ChatToolProgressDtoStatus::Failed => "close",
-                    ChatToolProgressDtoStatus::Running if active => "search",
-                    ChatToolProgressDtoStatus::Running => "close",
-                };
-                let mut step = div()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .pl(px(8.))
-                    .border_l_1()
-                    .border_color(t.border)
-                    .child(
+            .gap(px(6.))
+            .text_size(px(13.))
+            .line_height(px(19.))
+            .when_some(heading, |part, heading| {
+                part.child(
+                    div()
+                        .text_color(crate::motion::mix(t.muted, t.text, 0.7))
+                        .child(inline_text(heading, t)),
+                )
+            })
+            .children(
+                body.split("\n\n")
+                    .map(str::trim)
+                    .filter(|paragraph| !paragraph.is_empty())
+                    .map(|paragraph| {
                         div()
-                            .id(SharedString::from(format!("chat-tool-{index}-{call_id}")))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .text_size(px(12.))
+                            .min_w_0()
                             .text_color(t.muted)
-                            .child(icon(symbol, 12., t.muted))
-                            .child(tool.label.clone())
-                            .when(tool.result_count.is_some() && !has_results, |row| {
-                                row.child(format!(" ({})", tool.result_count.unwrap_or(0)))
-                            })
-                            .when(has_results, |row| {
-                                row.cursor_default().child(
-                                    icon("chevron-down", 11., t.muted).with_transformation(
-                                        Transformation::rotate(radians(if results_open {
-                                            0.
-                                        } else {
-                                            -std::f32::consts::FRAC_PI_2
-                                        })),
-                                    ),
-                                )
-                            })
-                            .reach().on_click(cx.listener(move |this, _, _, cx| {
-                                if has_results
-                                    && let Some(item) = this.chat_annotations.get_mut(&index)
-                                {
-                                    if !item.expanded_tools.remove(&call_id) {
-                                        item.expanded_tools.insert(call_id.clone());
-                                    }
-                                }
-                                cx.notify();
-                            })),
-                    );
-                if results_open && let Some(results) = &tool.results {
-                    for meeting in results {
-                        let source_id = meeting.note_id.clone();
-                        step = step.child(
-                            div()
-                                .id(SharedString::from(format!(
-                                    "chat-tool-meeting-{index}-{}-{}",
-                                    tool.call_id, source_id
-                                )))
-                                .ml(px(20.))
-                                .px(px(8.))
-                                .py(px(5.))
-                                .rounded(px(6.))
-                                .cursor_default()
-                                .child(crate::motion::tactile(t.hover).radius(6.))
-                                .flex()
-                                .items_center()
-                                .gap(px(12.))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_size(px(12.))
-                                        .child(if meeting.title.trim().is_empty() {
-                                            "New note".into()
-                                        } else {
-                                            meeting.title.clone()
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(t.muted)
-                                        .child(meeting.date.clone()),
-                                )
-                                .reach().on_click(cx.listener(move |this, _, _, cx| {
-                                    this.open_chat_source_note(&source_id, cx)
-                                })),
-                        );
-                    }
+                            .child(inline_text(paragraph, t))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// One meeting lookup: a glyph for what it did, what it found, and (when
+    /// it found meetings) a chevron that opens them, one to a row with its
+    /// day at the trailing edge. A row opens its note.
+    fn render_chat_step(
+        &self,
+        index: usize,
+        tool: &ChatToolProgressDTO,
+        annotations: &ChatTurnAnnotations,
+        active: bool,
+        today: chrono::NaiveDate,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.theme();
+        let call_id = tool.call_id.clone();
+        let results = tool.results.as_deref().unwrap_or(&[]);
+        let has_results = !results.is_empty();
+        let look = step_look(tool, active);
+        let key = crate::lazy::key((index, &call_id));
+        let pose = self.stage.presence(
+            ("chat-step", key),
+            has_results && annotations.expanded_tools.contains(&call_id),
+            crate::motion::SETTLE,
+        );
+        let hover = crate::motion::reveal_key(("chat-step", key));
+        let quiet = look.state == StepState::Failed;
+        let rest = if quiet { crate::motion::mix(t.muted, t.bg, 0.3) } else { t.muted };
+        let ink = if has_results {
+            crate::motion::mix(rest, t.text, crate::motion::revealed(hover))
+        } else {
+            rest
+        };
+        let row = div()
+            .id(SharedString::from(format!("chat-tool-{index}-{call_id}")))
+            .flex()
+            .items_center()
+            .gap(px(7.))
+            .h(px(20.))
+            .text_size(px(13.))
+            .line_height(px(18.))
+            .text_color(ink)
+            .child(icon(look.glyph, 14., ink).flex_shrink_0())
+            .child(div().min_w_0().truncate().map(|label| {
+                if look.state == StepState::Running {
+                    label.child(crate::motion::sheen_label(
+                        SharedString::from(format!("chat-step-sheen-{index}-{call_id}")),
+                        look.label.clone(),
+                        13.,
+                        t.muted,
+                        t.text,
+                        cx,
+                    ))
+                } else {
+                    label.child(look.label.clone())
                 }
-                result = result.child(step);
+            }))
+            .when(has_results, |row| {
+                row.cursor_default()
+                    .child(crate::motion::hover_probe(hover))
+                    .child(disclosure_chevron(11., ink, pose).ml(px(-2.)))
+                    .reach()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(item) = this.chat_annotations.get_mut(&index)
+                            && !item.expanded_tools.remove(&call_id)
+                        {
+                            item.expanded_tools.insert(call_id.clone());
+                        }
+                        cx.notify();
+                    }))
+            });
+        let mut step = div().min_w_0().flex().flex_col().child(row);
+        if pose.visible {
+            // Their own rail, under the middle of the glyph.
+            let mut list = div()
+                .min_w_0()
+                .mt(px(6.))
+                .ml(px(6.5))
+                .pl(px(6.))
+                .border_l_1()
+                .border_color(t.border)
+                .flex()
+                .flex_col();
+            for meeting in results {
+                let source_id = meeting.note_id.clone();
+                let row_hover = crate::motion::reveal_key(("chat-step-meeting", key, &source_id));
+                let warmth = crate::motion::revealed(row_hover);
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "chat-tool-meeting-{index}-{}-{source_id}",
+                            tool.call_id
+                        )))
+                        .relative()
+                        .h(px(26.))
+                        .px(px(8.))
+                        .rounded(px(6.))
+                        .cursor_default()
+                        .child(crate::motion::tactile(t.hover).radius(6.).reveals(row_hover))
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
+                        .text_size(px(13.))
+                        .line_height(px(18.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(crate::motion::mix(t.muted, t.text, warmth))
+                                .child(if meeting.title.trim().is_empty() {
+                                    "New note".into()
+                                } else {
+                                    meeting.title.clone()
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(12.))
+                                .text_color(t.muted)
+                                .child(relative_day(&meeting.date, today)),
+                        )
+                        .reach()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_chat_source_note(&source_id, cx)
+                        })),
+                );
             }
+            step = step.children(crate::motion::fold(&self.stage, ("chat-step", key), pose, list));
         }
-        Some(result)
+        step.into_any_element()
     }
 
     fn chat_markdown(
@@ -1071,9 +1549,13 @@ impl crate::app::Cereal {
         compact: bool,
         cx: &mut Context<Self>,
     ) -> Div {
+        // A conversation about one note shows no source marks: everything
+        // in it comes from that note. Across notes a mark says which meeting
+        // a statement came from.
         let citations = self
             .chat_annotations
             .get(&index)
+            .filter(|_| self.current_note.is_none())
             .map(|item| item.citations.clone())
             .unwrap_or_default();
         self.sourced_chat_markdown(answer, compact, citations, cx)
@@ -1750,7 +2232,7 @@ impl crate::app::Cereal {
             // sidebar) is at most 682 px wide and 16 px inside the window
             // on each side; its turns have 16 px of padding.
             let beside = if self.current_note.is_none() {
-                192. * self.sidebar_level
+                self.sidebar_inset()
             } else {
                 0.
             };
@@ -1767,7 +2249,7 @@ impl crate::app::Cereal {
     /// The width of a conversation's column on a page of its own: the page
     /// beside the sidebar, up to 672 px.
     pub(crate) fn chat_column_width(&self, window: &Window) -> f32 {
-        (f32::from(window.viewport_size().width) - 192. * self.sidebar_level).clamp(240., 672.)
+        (f32::from(window.viewport_size().width) - self.sidebar_inset()).clamp(240., 672.)
     }
 
     /// Show the newest end of the conversation.
@@ -1807,8 +2289,7 @@ impl crate::app::Cereal {
                     .child(
                         div()
                             .max_w(px(widest_question))
-                            .rounded(px(12.))
-                            .rounded_br(px(3.))
+                            .rounded(px(if compact { 10. } else { 12. }))
                             .px(px(if compact { 11. } else { 14. }))
                             .py(px(if compact { 6. } else { 9. }))
                             .bg(t.hover)
@@ -1824,17 +2305,6 @@ impl crate::app::Cereal {
                     .gap(px(4.))
                     .h(px(22.))
                     .child(
-                        tool_tip(
-                            ("retry-chat-question", index),
-                            "chat-retry",
-                            "Resend question",
-                            t,
-                        )
-                        .size(px(24.))
-                        .opacity(shown)
-                        .on_click(cx.listener(move |this, _, _, cx| this.retry_chat(index, cx))),
-                    )
-                    .child(
                         tool_tip(("copy-chat-question", index), "copy", "Copy text", t)
                             .size(px(24.))
                             .opacity(shown)
@@ -1845,6 +2315,7 @@ impl crate::app::Cereal {
                                 };
                                 cx.write_to_clipboard(ClipboardItem::new_string(question.clone()));
                                 crate::ui::confirm(("copy-chat-question", index), cx);
+                                this.show_toast("Copied to clipboard", cx);
                             })),
                     )
                     .child(
@@ -1905,7 +2376,8 @@ impl crate::app::Cereal {
                         .child(
                             pill(("chat-say-more", index), "Say more", "", t)
                                 .h(px(28.))
-                                .text_size(px(12.))
+                                .text_size(px(13.))
+                                .text_color(t.secondary)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     let Some(prompt) = follow_up_prompt(index, &this.chat_messages)
                                     else {
@@ -1931,16 +2403,11 @@ impl crate::app::Cereal {
                                     let Some((_, answer)) = this.chat_messages.get(index) else {
                                         return;
                                     };
-                                    let copy = rewrite_citation_tokens(
-                                        answer,
-                                        this.chat_annotations
-                                            .get(&index)
-                                            .map(|item| item.citations.as_slice())
-                                            .unwrap_or(&[]),
-                                        |id| format!("[{}]", &id[1..]),
-                                    );
+                                    // Copied text carries no source marks.
+                                    let copy = rewrite_citation_tokens(answer, &[], |_| String::new());
                                     cx.write_to_clipboard(ClipboardItem::new_string(copy));
                                     crate::ui::confirm(("copy-chat-response", index), cx);
+                                    this.show_toast("Copied to clipboard", cx);
                                 })),
                         )
                         .child(
@@ -1972,47 +2439,111 @@ impl crate::app::Cereal {
         self.render_chat_composer(focused, false, cx)
     }
 
-    /// The model the next question goes to, as its picker button shows it.
-    fn chat_model_label(&self) -> String {
+    /// The model the next question goes to: the one the person picked, else
+    /// the instance default, which the server lists first. `None` until the
+    /// server's models are known.
+    pub(crate) fn chat_model_choice(&self) -> Option<&meeting_notes_api_types::LanguageModelSelection> {
         self.chat_models
             .iter()
             .find(|choice| Some(crate::server::chat_model_key(choice)) == self.selected_chat_model)
-            .map(|choice| choice.model.clone())
+            .or_else(|| self.chat_models.first())
+    }
+
+    /// That model's name, as its picker button shows it. Without a server's
+    /// list there is no name to show, only that the server chooses.
+    fn chat_model_label(&self) -> String {
+        self.chat_model_choice()
+            .map(|choice| model_display_name(&choice.model))
             .unwrap_or_else(|| "Auto".into())
     }
 
     /// The model picker's button: the model the next question goes to and
-    /// a chevron. The list of the server's models opens from it; without a
-    /// server there is only the instance default ("Auto").
+    /// a small chevron. The list of the server's models opens from it.
     pub(crate) fn render_chat_model_button(
         &self,
         id: &'static str,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let t = self.theme();
+        let hover = crate::motion::reveal_key(("chat-model-button", id));
+        let warmth = crate::motion::revealed(hover).max(if self.chat_model_picker_open { 1. } else { 0. });
+        let ink = crate::motion::mix(t.muted, t.text, warmth);
         div()
             .id(id)
+            .relative()
             .flex()
             .items_center()
-            .gap(px(4.))
+            .gap(px(3.))
+            .h(px(28.))
+            .px(px(8.))
+            .rounded(px(8.))
             .text_size(px(13.))
             .line_height(px(18.))
-            .text_color(t.muted)
+            .text_color(ink)
+            .child(crate::motion::tactile(t.hover).radius(8.).reveals(hover))
             .child(self.chat_model_label())
-            .child(icon("chevron-down", 12., t.muted))
+            .child(icon("chevron-down", 11., ink))
             .cursor_default()
             .reach()
             .on_click(cx.listener(|this, _, _, cx| {
-                if crate::server::enabled() {
-                    this.chat_model_picker_open = !this.chat_model_picker_open;
-                    cx.notify();
+                if crate::server::enabled() || !this.chat_models.is_empty() {
+                    this.toggle_chat_model_picker(cx);
                 }
             }))
     }
 
+    /// Choose row `index` of the model menu and close it. The first row is
+    /// the instance default: choosing it names no model, so the question
+    /// follows the default if an administrator changes it.
+    fn choose_chat_model(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(choice) = self.chat_models.get(index) {
+            self.selected_chat_model = (index > 0).then(|| crate::server::chat_model_key(choice));
+        }
+        self.chat_model_picker_open = false;
+        self.chat_model_cursor = None;
+        cx.notify();
+    }
+
+    /// The model menu's keys while it is open: the arrows move the
+    /// highlight, Return chooses it, Escape closes the menu. True when the
+    /// key was the menu's.
+    pub(crate) fn handle_chat_model_key(
+        &mut self,
+        event: &KeystrokeEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.chat_model_picker_open {
+            return false;
+        }
+        let modifiers = event.keystroke.modifiers;
+        let modified = modifiers.control || modifiers.alt || modifiers.shift || modifiers.platform;
+        let count = self.chat_models.len();
+        let current = self.chat_model_cursor.or_else(|| {
+            let chosen = self.chat_model_choice()?;
+            self.chat_models.iter().position(|choice| choice == chosen)
+        });
+        match model_menu_key(&event.keystroke.key, modified, current, count) {
+            Some(ModelMenuKey::Move(index)) => {
+                self.chat_model_cursor = Some(index);
+                cx.notify();
+            }
+            Some(ModelMenuKey::Choose(index)) => self.choose_chat_model(index, cx),
+            Some(ModelMenuKey::Close) => {
+                self.chat_model_picker_open = false;
+                self.chat_model_cursor = None;
+                cx.notify();
+            }
+            None => return false,
+        }
+        cx.stop_propagation();
+        true
+    }
+
     /// The list of models, growing out of the model button and folding back
-    /// into it: above the composer's trailing end, or (`below`) under the
-    /// leading end of the Chat page's composer.
+    /// into it: above the button and ending where it ends, or (`below`)
+    /// under the leading end of the Chat page's composer. A quiet "Models"
+    /// heading, then a row a model: a glyph for who makes it, its name, a
+    /// "Default" tag on the instance default, and a check on the one in use.
     pub(crate) fn render_chat_model_picker(
         &self,
         shown: bool,
@@ -2028,18 +2559,10 @@ impl crate::app::Cereal {
         if !picker.visible {
             return None;
         }
-        let option = |id: ElementId, label: String| {
-            div()
-                .id(id)
-                .px(px(10.))
-                .py(px(9.))
-                .rounded(px(6.))
-                .cursor_default()
-                .text_size(px(12.))
-                .text_color(t.text)
-                .child(crate::motion::tactile(t.hover).radius(6.))
-                .child(label)
-        };
+        let chosen = self
+            .chat_model_choice()
+            .and_then(|chosen| self.chat_models.iter().position(|choice| choice == chosen));
+        let cursor = self.chat_model_cursor;
         let list = div()
             .id("chat-model-options")
             .absolute()
@@ -2047,37 +2570,101 @@ impl crate::app::Cereal {
                 if below {
                     list.top(px(84.)).left(px(8.))
                 } else {
-                    list.bottom(px(68.)).right(px(8.))
+                    // Clear of the pill's top edge, ending where the button ends.
+                    list.bottom(px(64.)).right(px(46.))
                 }
             })
-            .w(px(290.))
-            .max_h(px(280.))
+            .w(px(232.))
+            .max_h(px(320.))
             .overflow_y_scroll()
-            .p(px(6.))
-            .rounded(px(12.))
+            .p(px(4.))
+            .rounded(px(10.))
             .border_1()
             .border_color(t.border)
             .bg(t.card)
-            .shadow_lg()
+            .shadow(vec![
+                BoxShadow {
+                    color: hsla(0., 0., 0., 0.16),
+                    offset: point(px(0.), px(8.)),
+                    blur_radius: px(24.),
+                    spread_radius: px(0.),
+                },
+                BoxShadow {
+                    color: hsla(0., 0., 0., 0.08),
+                    offset: point(px(0.), px(1.)),
+                    blur_radius: px(3.),
+                    spread_radius: px(0.),
+                },
+            ])
             .occlude()
+            .cursor_default()
+            // A press anywhere else closes the menu, and only the menu.
+            .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                // The press closes the menu and nothing else: the field
+                // keeps the keyboard, so the bar stays open until the next.
+                if this.chat_model_picker_open {
+                    window.prevent_default();
+                }
+                this.dismiss_chat_model_picker(cx)
+            }))
             .child(
-                option("chat-model-auto".into(), "Auto · Instance default".into())
-                    .reach()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.selected_chat_model = None;
-                        this.chat_model_picker_open = false;
-                        cx.notify();
-                    })),
+                div()
+                    .h(px(26.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .text_size(px(12.))
+                    .text_color(t.muted)
+                    .child("Models"),
             )
             .children(self.chat_models.iter().enumerate().map(|(index, choice)| {
-                let key = crate::server::chat_model_key(choice);
-                option(("chat-model-option", index).into(), choice.model.clone())
+                let selected = chosen == Some(index);
+                // The row the arrows are on, else the one in use.
+                let lit = cursor.map_or(selected, |cursor| cursor == index);
+                div()
+                    .id(("chat-model-option", index))
+                    .relative()
+                    .h(px(28.))
+                    .px(px(8.))
+                    .rounded(px(6.))
+                    .cursor_default()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .text_size(px(13.5))
+                    .line_height(px(18.))
+                    .text_color(t.text)
+                    .when(lit, |row| row.bg(t.hover))
+                    .child(crate::motion::tactile(t.hover).radius(6.))
+                    .child(icon(model_glyph(choice), 14., t.secondary).flex_shrink_0())
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(model_display_name(&choice.model)),
+                    )
+                    .when(index == 0, |row| {
+                        row.child(
+                            div()
+                                .flex_shrink_0()
+                                .h(px(16.))
+                                .px(px(5.))
+                                .rounded(px(4.))
+                                .bg(t.hover)
+                                .flex()
+                                .items_center()
+                                .text_size(px(10.))
+                                .line_height(px(12.))
+                                .text_color(t.muted)
+                                .child("Default"),
+                        )
+                    })
+                    .child(div().flex_1())
+                    .when(selected, |row| {
+                        row.child(icon("check", 13., t.muted).flex_shrink_0())
+                    })
                     .reach()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.selected_chat_model = Some(key.clone());
-                        this.chat_model_picker_open = false;
-                        cx.notify();
-                    }))
+                    .on_click(cx.listener(move |this, _, _, cx| this.choose_chat_model(index, cx)))
             }));
         Some(crate::motion::pop(
             list,
@@ -2087,12 +2674,38 @@ impl crate::app::Cereal {
     }
 
     /// The composer pill. `folded` is Home's bar at rest (not focused,
-    /// nothing typed): only the field shows, and the model, attachment and
-    /// voice controls grow in at its trailing end when it is focused.
+    /// nothing typed): only the field shows, and the model and send controls
+    /// come in at its trailing end when it is focused.
     pub fn render_chat_composer(
         &self,
         focused: bool,
         folded: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        self.render_chat_composer_ringed(focused, folded, false, cx)
+    }
+
+    /// The composer as Home's Ask bar has it: its focus halo is drawn inside
+    /// the pill's outline, so the pill fills the same box focused and not
+    /// and stands evenly inside its tray.
+    pub fn render_chat_composer_in_tray(
+        &self,
+        focused: bool,
+        folded: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        self.render_chat_composer_ringed(focused, folded, true, cx)
+    }
+
+    /// Nothing about the pill's layout depends on the focus: the same box,
+    /// the same padding, the same text position. The gold line and its halo
+    /// are painted over it (`ask_ring_overlay`) and swell in with the ring's
+    /// track, so taking the focus cannot move the text or the caret line.
+    fn render_chat_composer_ringed(
+        &self,
+        focused: bool,
+        folded: bool,
+        inset: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let t = self.theme();
@@ -2104,6 +2717,17 @@ impl crate::app::Cereal {
             !folded,
             crate::motion::SNAPPY,
         );
+        let ring = crate::motion::ask_shape(self.stage.presence(
+            ("chat-composer-ring", 0),
+            focused,
+            crate::motion::ASK_TRAY,
+        ));
+        let (line, halo) = crate::ui::ask_ring();
+        let edge = crate::motion::mix(
+            t.border,
+            t.accent.opacity(0.33),
+            crate::motion::revealed(composer_hover),
+        );
         let cluster = div()
             .flex()
             .items_center()
@@ -2112,16 +2736,6 @@ impl crate::app::Cereal {
             .when(self.chat_editing.is_none(), |d| {
                 d.child(self.render_chat_model_button("chat-configured-model", cx).mr(px(2.)))
             })
-            .child(
-                tool_tip(
-                    "chat-attachment",
-                    "paperclip",
-                    "Attachments are not available yet",
-                    t,
-                )
-                .size(px(32.))
-                .opacity(crate::ui::DISABLED),
-            )
             .child(if active {
                 // A quiet round button with a dark square, as in the
                 // reference: the answer arriving is what holds the eye.
@@ -2147,12 +2761,8 @@ impl crate::app::Cereal {
                     })
                     .on_click(cx.listener(|this, _, _, cx| this.submit_chat(cx)))
             } else {
-                round_tool(
-                    "chat-voice-input",
-                    "mic",
-                    "Voice input is not configured",
-                    t,
-                )
+                // Nothing typed yet: the send arrow, dimmed.
+                round_tool("send-chat-stream-idle", "arrow-up", "Type a question to send", t)
                 .size(px(32.))
                 .rounded_full()
                 .bg(t.hover)
@@ -2166,38 +2776,36 @@ impl crate::app::Cereal {
             // 58 px tall at rest, the field 21 px in from the leading edge
             // and the round button 10 px from the trailing one (measured
             // against the reference at 1.25 px per point).
-            .min_h(px(58.))
+            .min_h(px(crate::motion::ASK_PILL))
             .max_h(px(170.))
             .pl(px(21.))
             .pr(px(10.))
             .py(px(12.))
             .rounded_full()
             .border_1()
-            .border_color(if focused {
-                crate::ui::ask_ring().0
+            // The resting edge gives way to the gold line as it arrives. In
+            // a tray the line is drawn further in, and the edge it leaves
+            // dissolves into the tray, which is the pill's own colour.
+            .border_color(if inset {
+                edge.opacity(edge.a * (1. - ring.ring_fade))
             } else {
-                crate::motion::mix(
-                    t.border,
-                    t.accent.opacity(0.33),
-                    crate::motion::revealed(composer_hover),
-                )
+                crate::motion::mix(edge, line, ring.ring_fade)
             })
             .bg(t.card)
             .child(crate::motion::hover_probe(composer_hover))
-            .shadow(if focused {
-                vec![BoxShadow {
-                    color: crate::ui::ask_ring().1,
-                    offset: point(px(0.), px(0.)),
-                    blur_radius: px(0.),
-                    spread_radius: px(3.),
-                }]
-            } else {
-                vec![BoxShadow {
-                    color: rgba(0x2929290a).into(),
-                    offset: point(px(0.), px(2.)),
-                    blur_radius: px(5.),
-                    spread_radius: px(0.),
-                }]
+            .shadow(vec![BoxShadow {
+                color: hsla(0., 0., 0.16, 0.04 * (1. - ring.ring_fade)),
+                offset: point(px(0.), px(2.)),
+                blur_radius: px(5.),
+                spread_radius: px(0.),
+            }])
+            .when(ring.ring_fade > 0., |pill| {
+                pill.child(ask_ring_overlay(
+                    ring.ring,
+                    line.opacity(line.a * ring.ring_fade),
+                    halo.opacity(halo.a * ring.ring_fade),
+                    inset,
+                ))
             })
             .flex()
             .items_center()
@@ -2213,8 +2821,9 @@ impl crate::app::Cereal {
                     .line_height(px(22.))
                     .child(self.ask.clone()),
             )
-            // Focused, the controls grow in from the trailing edge; they
-            // leave the same way when the bar folds.
+            // Focused, the controls come in from the trailing edge; they
+            // leave the same way when the bar folds. They are laid out past
+            // the placeholder, which stays where it is.
             .when(controls.visible, |d| {
                 d.child(crate::motion::pop(
                     cluster,
@@ -2264,6 +2873,45 @@ impl crate::app::Cereal {
             self.chat_history_open = !self.chat_history_open;
         }
         cx.notify();
+    }
+
+    /// The model button: open the menu, or close it. A press outside the
+    /// open menu closes it; when that press was on the button, the click it
+    /// completes must not open the menu again (as `toggle_chat_history`).
+    pub(crate) fn toggle_chat_model_picker(&mut self, cx: &mut Context<Self>) {
+        let just_closed = self
+            .chat_model_picker_closed_at
+            .take()
+            .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(500));
+        if !just_closed {
+            self.chat_model_picker_open = !self.chat_model_picker_open;
+        }
+        self.chat_model_cursor = None;
+        cx.notify();
+    }
+
+    /// Whether a popover of the composer (the model menu, the recent chats)
+    /// is open, or was closed by the press being handled now. A press
+    /// outside the composer that closes one of them does only that, as
+    /// Escape does; the next one folds the bar.
+    pub(crate) fn chat_popover_open(&self) -> bool {
+        let now = |at: Option<std::time::Instant>| {
+            at.is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(80))
+        };
+        self.chat_model_picker_open
+            || self.chat_history_open
+            || now(self.chat_model_picker_closed_at)
+            || now(self.chat_history_closed_at)
+    }
+
+    /// A press outside the model menu: close it.
+    pub(crate) fn dismiss_chat_model_picker(&mut self, cx: &mut Context<Self>) {
+        if self.chat_model_picker_open {
+            self.chat_model_picker_open = false;
+            self.chat_model_cursor = None;
+            self.chat_model_picker_closed_at = Some(std::time::Instant::now());
+            cx.notify();
+        }
     }
 
     /// A press outside the recent-chats list: close it.
@@ -2365,6 +3013,9 @@ impl crate::app::Cereal {
         // way.
         self.chat_scroll.max_offset().height + self.chat_scroll.offset().y > px(44.)
     }
+    /// Scroll to latest: a filled capsule with a down arrow, centred and
+    /// floating just above the composer on a soft shadow. Only there while
+    /// the end of the conversation is out of sight (`chat_can_scroll_down`).
     pub fn render_chat_scroll_down(&self, cx: &mut Context<Self>) -> Div {
         let t = self.theme();
         div()
@@ -2372,20 +3023,25 @@ impl crate::app::Cereal {
             .left_0()
             .right_0()
             .bottom(px(if self.chat_editing.is_some() {
-                123.
+                118.
             } else {
-                79.
+                74.
             }))
             .flex()
             .justify_center()
             .child(
                 round_tool("chat-scroll-down", "arrow-down", "Scroll to latest", t)
-                    .size(px(28.))
+                    .w(px(36.))
+                    .h(px(26.))
                     .rounded_full()
-                    .border_1()
-                    .border_color(t.border)
-                    .bg(t.card)
-                    .shadow_sm()
+                    .bg(crate::motion::mix(t.card, t.text, 0.12))
+                    .text_color(t.text)
+                    .shadow(vec![BoxShadow {
+                        color: hsla(0., 0., 0., 0.16),
+                        offset: point(px(0.), px(3.)),
+                        blur_radius: px(10.),
+                        spread_radius: px(0.),
+                    }])
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.chat_to_bottom();
                         cx.notify();
@@ -2742,24 +3398,26 @@ fn linked_inline(source: &str, theme: Theme) -> LinkedInline {
     linked_inline_with_citations(source, theme, &[])
 }
 
-/// The mark a citation is shown as: its number in a circle. Unicode has
-/// those up to 50 in three runs (① to ⑳, ㉑ to ㉟, ㊱ to ㊿). A long meeting
-/// goes past that; from 51 the number is written out in brackets, so that
-/// two marks side by side do not read as one number.
+/// The mark a citation is shown as: its number in small raised digits
+/// (¹³), quiet beside the sentence it supports. Any number can be written
+/// this way, so a long meeting's sixtieth source reads like its first.
 fn citation_mark(number: u32) -> String {
-    let circled = match number {
-        1..=20 => char::from_u32(0x2460 + number - 1),
-        21..=35 => char::from_u32(0x3251 + number - 21),
-        36..=50 => char::from_u32(0x32b1 + number - 36),
-        _ => None,
-    };
-    circled.map_or_else(|| format!("({number})"), String::from)
+    const RAISED: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+    number
+        .to_string()
+        .bytes()
+        .map(|digit| RAISED[usize::from(digit - b'0')])
+        .collect()
 }
 
+/// Each mark is a small chip: its raised number padded by a thin space on
+/// either side (the chip's fill covers them), set a hair apart from the
+/// words and from the next mark, so two side by side never read as one
+/// number.
 fn citation_tokens(source: &str, citations: &[ChatCitationDTO]) -> String {
     rewrite_citation_tokens(source, citations, |id| {
         let label = citation_mark(id[1..].parse::<u32>().unwrap_or(0));
-        format!("[{label}](minutes-source:{id})")
+        format!("\u{200a}[\u{2009}{label}\u{2009}](minutes-source:{id})")
     })
 }
 
@@ -2786,6 +3444,11 @@ fn rewrite_citation_tokens(
             == 1;
         let in_code = source[..start].bytes().filter(|byte| *byte == b'`').count() % 2 == 1;
         if !escaped && !in_code && valid_citation_id(id) {
+            // The space the model put before a marker goes with it: a mark
+            // is set against its sentence, and a withdrawn one leaves no gap.
+            if output.ends_with(' ') && !output.ends_with("  ") {
+                output.pop();
+            }
             if citations.iter().any(|citation| citation.id == id) {
                 output.push_str(&render(id));
             }
@@ -2859,35 +3522,63 @@ fn linked_inline_with_citations(
             .into_iter()
             .map(|(range, style)| ((range.start + offset)..(range.end + offset), style)),
     );
-    for (range, _) in &links {
+    // In an answer's softer running text, bold is full ink.
+    for (_, style) in &mut highlights {
+        if style.font_weight.is_some() && style.color.is_none() {
+            style.color = Some(theme.text);
+        }
+    }
+    for (range, url) in &links {
+        // A source mark is a quiet chip; a web link is the accent.
+        let source = url.starts_with("minutes-source:");
         highlights.push((
             range.clone(),
             HighlightStyle {
-                color: Some(theme.accent),
+                color: Some(if source { theme.muted } else { theme.accent }),
+                background_color: source.then_some(theme.hover),
                 ..Default::default()
             },
         ));
     }
     (output, highlights, links)
 }
+/// Distance between an answer's blocks, and between the items of one list.
+const ANSWER_GAP: f32 = 15.;
+const ITEM_GAP: f32 = 4.;
+
+/// The ink an answer's running text is set in: a shade softer than full ink,
+/// which is kept for what is bold.
+pub(crate) fn answer_ink(theme: Theme) -> Hsla {
+    crate::motion::mix(theme.text, theme.muted, 0.22)
+}
+
 fn markdown_with_inline(
     source: &str,
     theme: Theme,
     compact: bool,
     render_inline: impl Fn(&str, usize) -> InteractiveText,
 ) -> Div {
+    // Body text is a shade softer than full ink; what is bold (a lead-in,
+    // a heading) is full ink, so it carries the eye down the answer.
     let mut result = div()
         .min_w_0()
         .flex()
         .flex_col()
-        .gap(px(12.))
-        .text_color(theme.text)
+        .gap(px(ANSWER_GAP))
+        .text_color(answer_ink(theme))
         .text_size(px(if compact { 14. } else { 16. }))
         .line_height(px(if compact { 22. } else { 24. }));
+    let mut after_item = false;
     for (index, block) in parsed_blocks(source).iter().cloned().enumerate() {
+        let item = matches!(block, Block::Item(..));
+        // Items of one list sit close together: 4 px apart, not a
+        // paragraph's distance.
+        let close = item && after_item;
+        after_item = item;
         result = result.child(match block {
             Block::Heading(level, text) => div()
                 .mt(px(if level < 3 { 8. } else { 2. }))
+                .text_color(theme.text)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_size(px(if compact {
                     16.
@@ -2900,16 +3591,33 @@ fn markdown_with_inline(
             Block::Paragraph(text) => div().child(render_inline(&text, index)),
             Block::Item(indent, marker, text) => div()
                 .ml(px(indent.min(5) as f32 * 16.))
+                .when(close, |item| item.mt(px(ITEM_GAP - ANSWER_GAP)))
                 .flex()
                 .items_start()
                 .gap(px(8.))
-                .child(
+                .child(if marker == "•" {
+                    // A small quiet dot, centred on the first line.
+                    div()
+                        .w(px(14.))
+                        .h(px(if compact { 22. } else { 24. }))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .size(px(4.))
+                                .rounded_full()
+                                .bg(crate::motion::mix(theme.muted, theme.bg, 0.25)),
+                        )
+                } else {
                     div()
                         .w(px((marker.chars().count() as f32 * 8.).max(14.)))
                         .whitespace_nowrap()
                         .flex_shrink_0()
-                        .child(marker),
-                )
+                        .text_color(theme.muted)
+                        .child(marker)
+                })
                 .child(div().flex_1().min_w_0().child(render_inline(&text, index))),
             Block::Quote(text) => div()
                 .pl(px(12.))
@@ -2969,6 +3677,52 @@ fn markdown_with_inline(
     result
 }
 
+/// The focused composer's gold line and the hard-edged halo round it,
+/// painted over the pill without taking part in its layout. `width` is how
+/// far the halo has swelled. Outside the pill by default; `inset`, both are
+/// drawn inside the pill's outline (the halo fills its outer `width`, the
+/// line runs along the halo's inner edge), so the pill's box is the same
+/// with and without them.
+fn ask_ring_overlay(width: f32, line: Hsla, halo: Hsla, inset: bool) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let width = px(width.max(0.));
+            let (band, edge) = if inset {
+                (bounds, bounds.inset(width))
+            } else {
+                (bounds.dilate(width), bounds)
+            };
+            let round = |rect: Bounds<Pixels>| Corners::all(rect.size.height / 2.);
+            if width > px(0.) {
+                window.paint_quad(quad(
+                    band,
+                    round(band),
+                    transparent_black(),
+                    Edges::all(width),
+                    halo,
+                    BorderStyle::default(),
+                ));
+            }
+            window.paint_quad(quad(
+                edge,
+                round(edge),
+                transparent_black(),
+                Edges::all(px(1.)),
+                line,
+                BorderStyle::default(),
+            ));
+        },
+    )
+    // Over the pill's whole box, border included: an absolute child is
+    // placed inside its parent's 1 px border.
+    .absolute()
+    .top(px(-1.))
+    .left(px(-1.))
+    .right(px(-1.))
+    .bottom(px(-1.))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2978,6 +3732,11 @@ mod tests {
     use super::{
         ChatTurnAnnotations, chat_source_note, citation_tokens, linked_inline_with_citations,
         valid_citation_id,
+    };
+    use super::{
+        ChatToolProgressDTO, ModelMenuKey, StepLook, StepState, Thought, model_display_name,
+        model_glyph, model_menu_key, reasoning_sections, relative_day, rewrite_citation_tokens,
+        step_look,
     };
     use crate::ui::Theme;
     #[test]
@@ -3017,7 +3776,7 @@ mod tests {
         assert!(
             linked_inline_with_citations(partial, Theme::new(true), &[citation("S1")])
                 .0
-                .contains('①')
+                .contains('¹')
         );
         let mut annotations = ChatTurnAnnotations::default();
         annotations.error = Some(
@@ -3027,7 +3786,8 @@ mod tests {
             linked_inline_with_citations(partial, Theme::new(true), &annotations.citations);
         assert_eq!(
             rendered.0,
-            "Café launches Friday . Keep this partial response."
+            // The space before a withdrawn mark goes with it.
+            "Café launches Friday. Keep this partial response."
         );
         assert!(rendered.2.is_empty());
         let copied = super::rewrite_citation_tokens(partial, &annotations.citations, |id| {
@@ -3082,9 +3842,9 @@ mod tests {
             Theme::new(true),
             &citations,
         );
-        assert_eq!(text, "Café 🦊 ① and  docs.");
+        assert_eq!(text, "Café 🦊\u{200a}\u{2009}¹\u{2009} and docs.");
         assert_eq!(links.len(), 2);
-        assert_eq!(&text[links[0].0.clone()], "①");
+        assert_eq!(&text[links[0].0.clone()], "\u{2009}¹\u{2009}");
         assert_eq!(links[0].1, "minutes-source:S1");
         assert_eq!(&text[links[1].0.clone()], "docs");
         assert_eq!(links[1].1, "https://example.test");
@@ -3101,26 +3861,181 @@ mod tests {
             .2
             .is_empty()
         );
-        // Every mark is one glyph up to 50, so neighbours cannot run
-        // together ("[[S25]][[S26]]" used to read "2526"); beyond that the
-        // number is in brackets.
-        assert_eq!(
-            [1, 20, 21, 35, 36, 50].map(super::citation_mark).concat(),
-            "①⑳㉑㉟㊱㊿"
-        );
+        // Any number is written the same way, in raised digits; a hair
+        // space before each keeps neighbours from running together
+        // ("[[S25]][[S26]]" must not read "2526"), and none is ever
+        // written out in brackets.
+        assert_eq!([1, 20, 57, 999].map(super::citation_mark), ["¹", "²⁰", "⁵⁷", "⁹⁹⁹"]);
         let later = vec![citation("S25"), citation("S26"), citation("S51"), citation("S52")];
         let (text, _, links) = linked_inline_with_citations(
             "Moved. [[S25]][[S26]] Later. [[S51]][[S52]]",
             Theme::new(true),
             &later,
         );
-        assert_eq!(text, "Moved. ㉕㉖ Later. (51)(52)");
+        assert_eq!(text, "Moved.\u{200a}\u{2009}²⁵\u{2009}\u{200a}\u{2009}²⁶\u{2009} Later.\u{200a}\u{2009}⁵¹\u{2009}\u{200a}\u{2009}⁵²\u{2009}");
+        assert!(!text.contains('('));
+        // With no sources (a conversation about one note) the markers and
+        // the space before them go, and nothing is left in their place.
+        let (bare, _, none) = linked_inline_with_citations("Moved. [[S25]][[S26]] Later. [[S51]]", Theme::new(true), &[]);
+        assert_eq!(bare, "Moved. Later.");
+        assert!(none.is_empty());
+        assert_eq!(rewrite_citation_tokens("Done. [[S57]][[S58]]", &[], |_| String::new()), "Done.");
         assert_eq!(links.len(), 4);
         for id in ["S0", "S01", "S1000", "S-1", "S1/other", "s1", "S"] {
             assert!(!valid_citation_id(id));
         }
         assert!(valid_citation_id("S999"));
     }
+    fn step(call: &str, name: &str, status: &str, label: &str) -> ChatToolProgressDTO {
+        serde_json::from_value(serde_json::json!({"callId": call, "name": name, "status": status, "label": label})).unwrap()
+    }
+
+    #[test]
+    fn reasoning_and_lookups_are_kept_in_the_order_they_happened() {
+        let mut notes = ChatTurnAnnotations::default();
+        // Pieces join into one stretch until a new lookup starts.
+        notes.add_reasoning("  **Finding the meeting**\n\nI will search");
+        notes.add_reasoning(" for it first.");
+        notes.update_tool(step("a", "search_meetings", "running", "Searching meetings"));
+        // The same lookup finishing is not a new one.
+        notes.update_tool(step("a", "search_meetings", "completed", "Found 2 meetings"));
+        notes.add_reasoning("\n\nNow read both.");
+        notes.update_tool(step("b", "get_meetings", "completed", "Looked deeper into 2 notes"));
+        assert_eq!(
+            notes.reasoning.iter().map(|item| (item.after_tools, item.text.as_str())).collect::<Vec<_>>(),
+            [(0, "**Finding the meeting**\n\nI will search for it first."), (1, "Now read both.")]
+        );
+        assert_eq!(
+            notes.thoughts(),
+            [
+                Thought::Reasoning { heading: Some("Finding the meeting"), body: "I will search for it first." },
+                Thought::Step(0),
+                Thought::Reasoning { heading: None, body: "Now read both." },
+                Thought::Step(1),
+            ]
+        );
+        // As the server stores it, so a reopened thread reads the same.
+        let stored = serde_json::to_value(&notes).unwrap();
+        assert_eq!(stored["reasoning"][1], serde_json::json!({"afterTools": 1, "text": "Now read both."}));
+        let restored: ChatTurnAnnotations = serde_json::from_value(stored).unwrap();
+        assert_eq!(restored.thoughts(), notes.thoughts());
+        // Reasoning after the last lookup comes last; none at all is just
+        // the lookups, and nothing is made up.
+        notes.add_reasoning("**Answering**\n\nEnough to answer.");
+        assert_eq!(notes.thoughts().last(), Some(&Thought::Reasoning { heading: Some("Answering"), body: "Enough to answer." }));
+        let mut plain = ChatTurnAnnotations::default();
+        plain.update_tool(step("a", "list_meetings", "completed", "Found 3 meetings"));
+        assert_eq!(plain.thoughts(), [Thought::Step(0)]);
+        assert!(plain.has_thoughts() && !ChatTurnAnnotations::default().has_thoughts());
+        // A stretch is bounded, as the server bounds it.
+        let mut long = ChatTurnAnnotations::default();
+        long.add_reasoning(&"é".repeat(30_000));
+        assert_eq!(long.reasoning[0].text.chars().count(), 20_000);
+    }
+
+    #[test]
+    fn a_stretch_of_reasoning_splits_at_its_bold_heading_lines() {
+        assert_eq!(
+            reasoning_sections("Before any heading.\n**One**\n\nFirst body with **bold** inside.\n\nSecond paragraph.\n\n**Two**\nBody two."),
+            [
+                (None, "Before any heading."),
+                (Some("One"), "First body with **bold** inside.\n\nSecond paragraph."),
+                (Some("Two"), "Body two."),
+            ]
+        );
+        assert_eq!(reasoning_sections("Just thinking aloud."), [(None, "Just thinking aloud.")]);
+        assert_eq!(reasoning_sections("**Only a heading**"), [(Some("Only a heading"), "")]);
+        assert!(reasoning_sections(" \n ").is_empty());
+    }
+
+    #[test]
+    fn the_thinking_line_names_what_is_being_done() {
+        let mut notes = ChatTurnAnnotations::default();
+        assert_eq!(notes.live_heading(), None);
+        // A heading shows once its line is whole, not letter by letter.
+        notes.add_reasoning("**Searching for rec");
+        assert_eq!(notes.live_heading(), None);
+        notes.add_reasoning("ent dates**\n\nI need");
+        assert_eq!(notes.live_heading().as_deref(), Some("Searching for recent dates…"));
+        // A lookup under way is more telling than the last heading.
+        notes.update_tool(step("a", "search_meetings", "running", "Searching meetings"));
+        assert_eq!(notes.live_heading().as_deref(), Some("Searching meetings…"));
+        notes.update_tool(step("a", "search_meetings", "completed", "Found 2 meetings"));
+        assert_eq!(notes.live_heading().as_deref(), Some("Searching for recent dates…"));
+    }
+
+    #[test]
+    fn a_lookup_has_a_fitting_glyph_and_a_failure_is_quiet_plain_language() {
+        let look = |name, status, label, active| step_look(&step("a", name, status, label), active);
+        assert_eq!(look("search_meetings", "completed", "Found 2 meetings", false), StepLook { glyph: "step-notes", label: "Found 2 meetings".into(), state: StepState::Done });
+        assert_eq!(look("get_meeting_transcript", "completed", "Read 2 transcripts", false).glyph, "footer-transcript");
+        assert_eq!(look("list_meetings", "completed", "Found 4 meetings", false).glyph, "calendar");
+        assert_eq!(look("search_meetings", "running", "Searching meetings", true), StepLook { glyph: "step-notes", label: "Searching meetings…".into(), state: StepState::Running });
+        // The server's diagnostic is never printed as it came.
+        let failed = look("search_meetings", "failed", "Search planning unavailable; using direct meeting lookup", false);
+        assert_eq!(failed, StepLook { glyph: "step-failed", label: "Couldn't plan the search".into(), state: StepState::Failed });
+        assert_eq!(look("get_meetings", "failed", "Couldn't finish this lookup", false).label, "Couldn't finish this lookup");
+        assert_eq!(look("get_meetings", "failed", "", false).label, "Couldn't finish this lookup");
+        // Still running when the answer was stopped.
+        assert_eq!(look("get_meetings", "running", "Reading meeting notes", false).label, "Stopped before this finished");
+    }
+
+    #[test]
+    fn a_meetings_day_is_relative_and_names_the_year_only_when_it_differs() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 16).unwrap();
+        assert_eq!(relative_day("2026-11-16", today), "Today");
+        assert_eq!(relative_day("2026-11-15", today), "Yesterday");
+        assert_eq!(relative_day("2026-11-13", today), "Nov 13");
+        assert_eq!(relative_day("2026-01-02", today), "Jan 2");
+        assert_eq!(relative_day("2025-12-30", today), "Dec 30, 2025");
+        assert_eq!(relative_day("2026-11-17", today), "Nov 17");
+        assert_eq!(relative_day("2026-11-16T09:00:00Z", today), "Today");
+        assert_eq!(relative_day("soon", today), "soon");
+    }
+
+    #[test]
+    fn a_model_is_shown_by_its_name_not_its_id() {
+        for (id, name) in [
+            ("gpt-6-luna", "GPT-6 Luna"),
+            ("openai/gpt-6-sol", "GPT-6 Sol"),
+            ("gpt-6.1-sol", "GPT-6.1 Sol"),
+            ("anthropic/claude-sonnet-5-5", "Sonnet 5.5"),
+            ("claude-fable-5-2", "Fable 5.2"),
+            ("claude-opus-5-5-20270115", "Opus 5.5"),
+            ("google/gemini-4-carbon", "Gemini 4 Carbon"),
+            ("x-ai/grok-4.7", "Grok 4.7"),
+            ("o3-mini", "o3 Mini"),
+            ("llama3.2:3b", "Llama3.2 3B"),
+            ("mistral-large-latest", "Mistral Large"),
+        ] {
+            assert_eq!(model_display_name(id), name, "{id}");
+        }
+        let choice = |provider: &str, model: &str| -> meeting_notes_api_types::LanguageModelSelection {
+            serde_json::from_value(serde_json::json!({"provider": provider, "model": model})).unwrap()
+        };
+        assert_eq!(model_glyph(&choice("openrouter", "anthropic/claude-sonnet-5-5")), "provider-anthropic");
+        assert_eq!(model_glyph(&choice("openai", "gpt-6-luna")), "provider-openai");
+        assert_eq!(model_glyph(&choice("openrouter", "google/gemini-4-carbon")), "google");
+        assert_eq!(model_glyph(&choice("openrouter", "x-ai/grok-4.7")), "provider-xai");
+        assert_eq!(model_glyph(&choice("openai_compatible", "llama3.2:3b")), "provider-other");
+        assert_eq!(model_glyph(&choice("anthropic", "fable-next")), "provider-anthropic");
+    }
+
+    #[test]
+    fn the_model_menu_answers_the_arrows_return_and_escape() {
+        use ModelMenuKey::{Choose, Close, Move};
+        assert_eq!(model_menu_key("down", false, Some(0), 3), Some(Move(1)));
+        assert_eq!(model_menu_key("down", false, Some(2), 3), Some(Move(0)));
+        assert_eq!(model_menu_key("up", false, Some(0), 3), Some(Move(2)));
+        assert_eq!(model_menu_key("down", false, None, 3), Some(Move(0)));
+        assert_eq!(model_menu_key("enter", false, Some(1), 3), Some(Choose(1)));
+        assert_eq!(model_menu_key("enter", false, None, 3), None);
+        assert_eq!(model_menu_key("escape", false, Some(1), 3), Some(Close));
+        assert_eq!(model_menu_key("down", true, Some(1), 3), None);
+        assert_eq!(model_menu_key("down", false, None, 0), None);
+        assert_eq!(model_menu_key("a", false, Some(1), 3), None);
+    }
+
     #[test]
     fn tool_updates_are_monotonic_and_history_keeps_sources_without_open_disclosures() {
         use meeting_notes_api_types::{
@@ -3150,7 +4065,7 @@ mod tests {
         assert_eq!(annotations.tools[0].name, Name::SearchMeetings);
         annotations.citations = vec![citation("S1")];
         annotations.elapsed_ms = Some(3123);
-        annotations.expanded = true;
+        annotations.expanded = Some(true);
         annotations.expanded_tools.insert("runtime-only".into());
         let json = serde_json::to_value(&annotations).unwrap();
         assert!(json.get("expanded").is_none());
@@ -3158,7 +4073,7 @@ mod tests {
         let restored: ChatTurnAnnotations = serde_json::from_value(json).unwrap();
         assert_eq!(restored.citations[0].quote, "Mira owns café 🦊.");
         assert_eq!(restored.elapsed_ms, Some(3123));
-        assert!(!restored.expanded);
+        assert!(restored.expanded.is_none());
         assert!(restored.expanded_tools.is_empty());
     }
     #[test]
@@ -3289,7 +4204,7 @@ mod tests {
         assert!(!prompt.contains("Friday"));
         assert_eq!(
             follow_up_prompt(1, &turns).as_deref(),
-            Some("Say more about that.")
+            Some("Can you provide more details")
         );
         assert!(follow_up_prompt(2, &turns).is_none());
     }

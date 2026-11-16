@@ -119,6 +119,28 @@ pub fn fetch(link: &SharedNoteLink, client: Option<&AccountClient>) -> Result<Sh
     read(&reply)
 }
 
+/// Read a note somebody shared with this account by name, as it is now,
+/// from the server it is on. As with a link: the client builds the address
+/// from its own base, and without a client of that server nothing is asked.
+pub fn fetch_granted(
+    origin: &crate::link::ServerOrigin,
+    note_id: &str,
+    client: Option<&AccountClient>,
+) -> Result<SharedNote, SharedNoteError> {
+    let Some(client) = client.filter(|client| origin.is_server(&client.url)) else {
+        return Err(SharedNoteError::SignInRequired);
+    };
+    let id = crate::accounts::client::path_id(note_id).map_err(|_| SharedNoteError::Unavailable)?;
+    let reply = client
+        .fetch(&format!("/api/v1/shared-with-me/{id}"), MAXIMUM_BYTES)
+        .map_err(|failure| match failure {
+            Failure::TooLarge => SharedNoteError::TooLarge,
+            Failure::TimedOut => SharedNoteError::TimedOut,
+            Failure::Unreachable | Failure::Transport => SharedNoteError::Unreachable,
+        })?;
+    read(&reply)
+}
+
 /// What the server's answer means.
 pub fn read(reply: &Reply) -> Result<SharedNote, SharedNoteError> {
     /// Only the fields this app shows. A server of another version may send

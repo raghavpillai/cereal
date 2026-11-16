@@ -1,5 +1,8 @@
 import { makeNoteParticipantsService } from "./note-participants"
+import { makeTeamSpaceService, makePrismaTeamSpaceStore } from "./team-space"
+import { makeNoteAccessService, makePrismaNoteAccessStore } from "./note-access"
 import { makeGoogleService } from "./google"
+import { refreshGooglePicture } from "./sign-in"
 import { makePrismaGoogleStore } from "./google-store"
 import { loadAuthenticationSecret, makeAuthenticationService } from "./auth"
 import { loadSecretBox } from "./admin-secrets"
@@ -71,7 +74,7 @@ function testGoogleEndpoints(raw:string|undefined){
 // Sign-in methods, the allow list and the Google client are read from the database on every use, so a change on the admin panel applies at once.
 const authentication=makeAuthenticationService(database,adminToken,{secret:authSecret,baseURL:publicBaseURL,trustedOrigins:process.env.AUTH_TRUSTED_ORIGINS?.split(",").map(origin=>origin.trim()).filter(Boolean),signIn:()=>administration.signInPolicy(),useGoogle:client=>administration.useGoogle(client),google:testGoogleEndpoints(process.env.GOOGLE_OAUTH_TEST_ORIGIN)})
 // The Google client saved on the admin panel, else GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET from the environment.
-const google=makeGoogleService(makePrismaGoogleStore(database),secretBox,{credentials:()=>administration.googleCredentials(),baseURL:publicBaseURL,worker:true})
+const google=makeGoogleService(makePrismaGoogleStore(database),secretBox,{credentials:()=>administration.googleCredentials(),baseURL:publicBaseURL,worker:true,picture:(userId,subject,picture)=>refreshGooglePicture(database,userId,subject,picture)})
 const mcpStore=createMcpStore(database)
 const mcpExecutor=createMcpToolExecutor({store:mcpStore,
   processingForUser:(userId,workspaceId,signal)=>processing.forRepository(repository.forUser(userId,workspaceId),{requestSignal:signal,meetingContext:id=>Effect.map(google.getNoteContext(userId,id),context=>context.meeting)}),
@@ -86,7 +89,7 @@ const appStoreId = async () => (await administration.apps()).iosAppStoreId
 const downloads = makeDownloads({ directory: process.env.DOWNLOADS_DIR || "/data/downloads", version: appVersion, iosAppStoreId: appStoreId, storage: storage.downloads })
 // Saved conversations, per person; a thread is named by the same model request that names an untitled meeting.
 const chats = makeChatsService(makePrismaChatStore(database), { title: chatTitler(providers.title) })
-const api = makeApiHandler(repository, adminToken, { processing, administration, authentication, google, mcpStore, noteParticipants:makeNoteParticipantsService(database), downloads, storage, chats })
+const api = makeApiHandler(repository, adminToken, { processing, administration, authentication, google, mcpStore, noteParticipants:makeNoteParticipantsService(database), downloads, storage, chats, teamSpace:makeTeamSpaceService(makePrismaTeamSpaceStore(database)), noteAccess:makeNoteAccessService(makePrismaNoteAccessStore(database,{signInDomains:async()=>(await administration.signInPolicy()).allowedEmails})) })
 const web = makeWebHandler(process.env.WEB_DIST ?? resolve(import.meta.dir, "../../web/dist/client"), { head: makeLinkPreviews({ origin: new URL(publicBaseURL).origin, iosAppStoreId: appStoreId }) })
 const live = makeLiveEndpoint({ repository, hub: liveHub, resolvePrincipal: headers => authentication.resolve(headers), isTrustedOrigin: origin => authentication.isTrustedOrigin(origin), transcriber: makeLiveTranscriberResolver(administration) })
 const server = Bun.serve<LiveConnection>({

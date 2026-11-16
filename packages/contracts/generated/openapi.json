@@ -14192,6 +14192,2123 @@
         }
       }
     },
+    "/api/v1/notes/{id}/access": {
+      "get": {
+        "tags": [
+          "owner"
+        ],
+        "operationId": "owner.getNoteAccess",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/UUID"
+            },
+            "required": true
+          }
+        ],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "NoteAccessDTO",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NoteAccessDTO"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "invalid_request"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unauthorized"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "forbidden"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "not_found"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "conflict"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unavailable"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "owner"
+        ],
+        "operationId": "owner.updateNoteAccess",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/UUID"
+            },
+            "required": true
+          }
+        ],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "NoteAccessDTO",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NoteAccessDTO"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "invalid_request"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unauthorized"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "forbidden"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "not_found"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "conflict"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unavailable"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateNoteAccessInput"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/v1/notes/{id}/access/people": {
+      "post": {
+        "tags": [
+          "owner"
+        ],
+        "operationId": "owner.addNoteAccess",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/UUID"
+            },
+            "required": true
+          }
+        ],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "NoteAccessDTO",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NoteAccessDTO"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "invalid_request"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unauthorized"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "forbidden"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "not_found"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "conflict"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unavailable"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddNoteAccessInput"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/v1/notes/{id}/access/people/{userId}": {
+      "delete": {
+        "tags": [
+          "owner"
+        ],
+        "operationId": "owner.removeNoteAccess",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/UUID"
+            },
+            "required": true
+          },
+          {
+            "name": "userId",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/UUID"
+            },
+            "required": true
+          }
+        ],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "NoteAccessDTO",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NoteAccessDTO"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "invalid_request"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unauthorized"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "forbidden"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "not_found"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "conflict"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unavailable"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/notes/{id}/access/candidates": {
+      "get": {
+        "tags": [
+          "owner"
+        ],
+        "operationId": "owner.searchNoteAccessCandidates",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/UUID"
+            },
+            "required": true
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "required": false
+          }
+        ],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "NoteAccessCandidatesDTO",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NoteAccessCandidatesDTO"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "invalid_request"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unauthorized"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "forbidden"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "not_found"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "conflict"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unavailable"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/shared-with-me": {
+      "get": {
+        "tags": [
+          "owner"
+        ],
+        "operationId": "owner.listSharedWithMe",
+        "parameters": [],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SharedWithMeDTO",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SharedWithMeDTO"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "invalid_request"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unauthorized"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "forbidden"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "not_found"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "conflict"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unavailable"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/shared-with-me/{id}": {
+      "get": {
+        "tags": [
+          "owner"
+        ],
+        "operationId": "owner.getSharedWithMeNote",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/UUID"
+            },
+            "required": true
+          }
+        ],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SharedWithMeNoteDTO",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SharedWithMeNoteDTO"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "invalid_request"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unauthorized"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "forbidden"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "not_found"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "conflict"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unavailable"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/team-space": {
+      "get": {
+        "tags": [
+          "owner"
+        ],
+        "operationId": "owner.getTeamSpace",
+        "parameters": [],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "TeamSpaceDTO",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamSpaceDTO"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "invalid_request"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unauthorized"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "forbidden"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "not_found"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "conflict"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unavailable"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/team-space/notes": {
+      "post": {
+        "tags": [
+          "owner"
+        ],
+        "operationId": "owner.addTeamSpaceNotes",
+        "parameters": [],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "TeamSpaceDTO",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamSpaceDTO"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "invalid_request"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unauthorized"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "forbidden"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "not_found"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "conflict"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unavailable"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddTeamSpaceNotesInput"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/v1/team-space/notes/{id}": {
+      "get": {
+        "tags": [
+          "owner"
+        ],
+        "operationId": "owner.getTeamSpaceNote",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/UUID"
+            },
+            "required": true
+          }
+        ],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "TeamSpaceNoteContentDTO",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamSpaceNoteContentDTO"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "invalid_request"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unauthorized"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "forbidden"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "not_found"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "conflict"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unavailable"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "owner"
+        ],
+        "operationId": "owner.removeTeamSpaceNote",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/UUID"
+            },
+            "required": true
+          }
+        ],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "DeletedDTO",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedDTO"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "invalid_request"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unauthorized"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "forbidden"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "not_found"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "conflict"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unavailable"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/notes/{id}/recording": {
       "post": {
         "tags": [
@@ -14421,6 +16538,306 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/NoteDTO"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "invalid_request"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unauthorized"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "forbidden"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "not_found"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "conflict"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unavailable"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error",
+                    "message"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateNotesCommandDTO"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/v1/notes/{id}/generate/stream": {
+      "post": {
+        "tags": [
+          "owner"
+        ],
+        "operationId": "owner.generateNotesStream",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/UUID"
+            },
+            "required": true
+          }
+        ],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "event": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/GenerationStreamEventDTOEncoded"
+                    }
+                  },
+                  "required": [
+                    "event",
+                    "data"
+                  ],
+                  "additionalProperties": false
+                },
+                "x-effect-stream": {
+                  "encoding": "sse",
+                  "causeSchema": {
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "_tag": {
+                              "type": "string",
+                              "enum": [
+                                "Fail"
+                              ]
+                            },
+                            "error": {
+                              "not": {}
+                            }
+                          },
+                          "required": [
+                            "_tag",
+                            "error"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "_tag": {
+                              "type": "string",
+                              "enum": [
+                                "Die"
+                              ]
+                            },
+                            "defect": {}
+                          },
+                          "required": [
+                            "_tag",
+                            "defect"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "_tag": {
+                              "type": "string",
+                              "enum": [
+                                "Interrupt"
+                              ]
+                            },
+                            "fiberId": {
+                              "anyOf": [
+                                {
+                                  "type": "number"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            }
+                          },
+                          "required": [
+                            "_tag",
+                            "fiberId"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  },
+                  "errorSchema": {
+                    "not": {}
+                  },
+                  "failureEvent": "effect/http-api/stream/failure"
                 }
               }
             }
@@ -15762,7 +18179,8 @@
               "done",
               "error",
               "tool",
-              "citations"
+              "citations",
+              "reasoning"
             ]
           },
           "text": {
@@ -16015,6 +18433,39 @@
         },
         "required": [
           "answer"
+        ],
+        "additionalProperties": false
+      },
+      "GenerationStreamEventDTOEncoded": {
+        "type": "string",
+        "contentMediaType": "application/json",
+        "contentSchema": {
+          "$ref": "#/components/schemas/GenerationStreamEventDTO"
+        }
+      },
+      "GenerationStreamEventDTO": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "title",
+              "delta",
+              "done",
+              "error"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 1000000
+          },
+          "note": {
+            "$ref": "#/components/schemas/NoteDTO"
+          }
+        },
+        "required": [
+          "type",
+          "text"
         ],
         "additionalProperties": false
       },
@@ -16321,6 +18772,699 @@
         ],
         "additionalProperties": false
       },
+      "DeletedDTO": {
+        "type": "object",
+        "properties": {
+          "deleted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "deleted"
+        ],
+        "additionalProperties": false
+      },
+      "TeamSpaceNoteContentDTO": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/UUID"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 1000000
+          },
+          "enhanced": {
+            "type": "string",
+            "maxLength": 1000000
+          },
+          "date": {
+            "type": "string"
+          },
+          "duration": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "owner": {
+            "$ref": "#/components/schemas/TeamSpaceMemberDTO"
+          },
+          "addedAt": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "mine": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "body",
+          "enhanced",
+          "date",
+          "duration",
+          "owner",
+          "addedAt",
+          "mine"
+        ],
+        "additionalProperties": false
+      },
+      "TeamSpaceMemberDTO": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "$ref": "#/components/schemas/UUID"
+          },
+          "name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "image": {
+            "type": "string",
+            "maxLength": 2048
+          }
+        },
+        "required": [
+          "userId",
+          "name",
+          "email"
+        ],
+        "additionalProperties": false
+      },
+      "TeamSpaceDTO": {
+        "type": "object",
+        "properties": {
+          "organization": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/UUID"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name"
+            ],
+            "additionalProperties": false
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "owner",
+              "admin",
+              "member"
+            ]
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TeamSpaceMemberDTO"
+            }
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TeamSpaceNoteDTO"
+            }
+          },
+          "people": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TeamSpacePersonDTO"
+            }
+          },
+          "peopleSource": {
+            "type": "string",
+            "enum": [
+              "team",
+              "own"
+            ]
+          }
+        },
+        "required": [
+          "organization",
+          "role",
+          "members",
+          "notes",
+          "people",
+          "peopleSource"
+        ],
+        "additionalProperties": false
+      },
+      "TeamSpacePersonDTO": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 254
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 254
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "initials": {
+            "type": "string",
+            "maxLength": 8
+          },
+          "notes": {
+            "type": "integer",
+            "allOf": [
+              {
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "minimum": -2147483648,
+                "maximum": 2147483647
+              }
+            ],
+            "minimum": 0
+          },
+          "lastNoteDate": {
+            "type": "string"
+          },
+          "noteIds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UUID"
+            }
+          }
+        },
+        "required": [
+          "name",
+          "email",
+          "initials",
+          "notes",
+          "lastNoteDate",
+          "noteIds"
+        ],
+        "additionalProperties": false
+      },
+      "TeamSpaceNoteDTO": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/UUID"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "date": {
+            "type": "string"
+          },
+          "createdAt": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "meeting": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NoteMeetingTimeDTO"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "attendees": {
+            "$ref": "#/components/schemas/NoteAttendeesDTO"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/TeamSpaceMemberDTO"
+          },
+          "addedAt": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "mine": {
+            "type": "boolean"
+          },
+          "canRemove": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "date",
+          "createdAt",
+          "meeting",
+          "attendees",
+          "owner",
+          "addedAt",
+          "mine",
+          "canRemove"
+        ],
+        "additionalProperties": false
+      },
+      "NoteAttendeesDTO": {
+        "type": "object",
+        "properties": {
+          "people": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NoteAttendeeDTO"
+            },
+            "maxItems": 4
+          },
+          "others": {
+            "type": "integer",
+            "allOf": [
+              {
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "minimum": -2147483648,
+                "maximum": 2147483647
+              }
+            ],
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "allOf": [
+              {
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "minimum": -2147483648,
+                "maximum": 2147483647
+              }
+            ],
+            "minimum": 0
+          }
+        },
+        "required": [
+          "people",
+          "others",
+          "total"
+        ],
+        "additionalProperties": false
+      },
+      "NoteAttendeeDTO": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 254
+          },
+          "shortName": {
+            "type": "string",
+            "maxLength": 254
+          },
+          "initials": {
+            "type": "string",
+            "maxLength": 8
+          }
+        },
+        "required": [
+          "name",
+          "shortName",
+          "initials"
+        ],
+        "additionalProperties": false
+      },
+      "NoteMeetingTimeDTO": {
+        "type": "object",
+        "properties": {
+          "startAt": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "endAt": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "allDay": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "startAt",
+          "endAt",
+          "allDay"
+        ],
+        "additionalProperties": false
+      },
+      "AddTeamSpaceNotesInput": {
+        "type": "object",
+        "properties": {
+          "noteIds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UUID"
+            },
+            "minItems": 1,
+            "maxItems": 100
+          }
+        },
+        "required": [
+          "noteIds"
+        ],
+        "additionalProperties": false
+      },
+      "SharedWithMeNoteDTO": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/UUID"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 1000000
+          },
+          "enhanced": {
+            "type": "string",
+            "maxLength": 1000000
+          },
+          "date": {
+            "type": "string"
+          },
+          "duration": {
+            "type": "string",
+            "maxLength": 32
+          },
+          "owner": {
+            "$ref": "#/components/schemas/NoteAccessPersonDTO"
+          },
+          "sharedAt": {
+            "$ref": "#/components/schemas/Timestamp"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "body",
+          "enhanced",
+          "date",
+          "duration",
+          "owner",
+          "sharedAt"
+        ],
+        "additionalProperties": false
+      },
+      "NoteAccessPersonDTO": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "$ref": "#/components/schemas/UUID"
+          },
+          "name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "image": {
+            "type": "string",
+            "maxLength": 2048
+          }
+        },
+        "required": [
+          "userId",
+          "name",
+          "email"
+        ],
+        "additionalProperties": false
+      },
+      "SharedWithMeDTO": {
+        "type": "object",
+        "properties": {
+          "notes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SharedWithMeEntryDTO"
+            }
+          }
+        },
+        "required": [
+          "notes"
+        ],
+        "additionalProperties": false
+      },
+      "SharedWithMeEntryDTO": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/UUID"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "date": {
+            "type": "string"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/NoteAccessPersonDTO"
+          },
+          "sharedAt": {
+            "$ref": "#/components/schemas/Timestamp"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "date",
+          "owner",
+          "sharedAt"
+        ],
+        "additionalProperties": false
+      },
+      "NoteAccessCandidatesDTO": {
+        "type": "object",
+        "properties": {
+          "people": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NoteAccessCandidateDTO"
+            }
+          }
+        },
+        "required": [
+          "people"
+        ],
+        "additionalProperties": false
+      },
+      "NoteAccessCandidateDTO": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "$ref": "#/components/schemas/UUID"
+          },
+          "name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "image": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "attendee": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "userId",
+          "name",
+          "email",
+          "attendee"
+        ],
+        "additionalProperties": false
+      },
+      "NoteAccessDTO": {
+        "type": "object",
+        "properties": {
+          "noteId": {
+            "$ref": "#/components/schemas/UUID"
+          },
+          "level": {
+            "$ref": "#/components/schemas/NoteAccessLevel"
+          },
+          "suspended": {
+            "type": "boolean"
+          },
+          "organization": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NoteAccessOrganizationDTO"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "owner": {
+            "$ref": "#/components/schemas/NoteAccessPersonDTO"
+          },
+          "people": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NoteAccessGrantDTO"
+            }
+          },
+          "attendees": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NoteAccessAttendeeDTO"
+            }
+          }
+        },
+        "required": [
+          "noteId",
+          "level",
+          "suspended",
+          "organization",
+          "owner",
+          "people",
+          "attendees"
+        ],
+        "additionalProperties": false
+      },
+      "NoteAccessAttendeeDTO": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "$ref": "#/components/schemas/UUID"
+          },
+          "name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "image": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "hasAccess": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "userId",
+          "name",
+          "email",
+          "hasAccess"
+        ],
+        "additionalProperties": false
+      },
+      "NoteAccessGrantDTO": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "$ref": "#/components/schemas/UUID"
+          },
+          "name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "image": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "addedAt": {
+            "$ref": "#/components/schemas/Timestamp"
+          }
+        },
+        "required": [
+          "userId",
+          "name",
+          "email",
+          "addedAt"
+        ],
+        "additionalProperties": false
+      },
+      "NoteAccessOrganizationDTO": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/UUID"
+          },
+          "name": {
+            "type": "string"
+          },
+          "domain": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 253
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "domain"
+        ],
+        "additionalProperties": false
+      },
+      "NoteAccessLevel": {
+        "type": "string",
+        "enum": [
+          "invited",
+          "organization"
+        ]
+      },
+      "AddNoteAccessInput": {
+        "type": "object",
+        "properties": {
+          "userIds": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UUID"
+            },
+            "maxItems": 100
+          },
+          "emails": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 254
+            },
+            "maxItems": 100
+          }
+        },
+        "additionalProperties": false
+      },
+      "UpdateNoteAccessInput": {
+        "type": "object",
+        "properties": {
+          "level": {
+            "$ref": "#/components/schemas/NoteAccessLevel"
+          },
+          "suspended": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
       "ShareDTO": {
         "type": "object",
         "properties": {
@@ -16410,18 +19554,6 @@
         ],
         "additionalProperties": false,
         "description": "Explicit fields to publish as an immutable snapshot. Transcript is never publishable."
-      },
-      "DeletedDTO": {
-        "type": "object",
-        "properties": {
-          "deleted": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "deleted"
-        ],
-        "additionalProperties": false
       },
       "ImportedNoteDTO": {
         "type": "object",
@@ -17101,95 +20233,6 @@
         ],
         "additionalProperties": false
       },
-      "NoteAttendeesDTO": {
-        "type": "object",
-        "properties": {
-          "people": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/NoteAttendeeDTO"
-            },
-            "maxItems": 4
-          },
-          "others": {
-            "type": "integer",
-            "allOf": [
-              {
-                "minimum": -9007199254740991,
-                "maximum": 9007199254740991
-              },
-              {
-                "minimum": -2147483648,
-                "maximum": 2147483647
-              }
-            ],
-            "minimum": 0
-          },
-          "total": {
-            "type": "integer",
-            "allOf": [
-              {
-                "minimum": -9007199254740991,
-                "maximum": 9007199254740991
-              },
-              {
-                "minimum": -2147483648,
-                "maximum": 2147483647
-              }
-            ],
-            "minimum": 0
-          }
-        },
-        "required": [
-          "people",
-          "others",
-          "total"
-        ],
-        "additionalProperties": false
-      },
-      "NoteAttendeeDTO": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "string",
-            "maxLength": 254
-          },
-          "shortName": {
-            "type": "string",
-            "maxLength": 254
-          },
-          "initials": {
-            "type": "string",
-            "maxLength": 8
-          }
-        },
-        "required": [
-          "name",
-          "shortName",
-          "initials"
-        ],
-        "additionalProperties": false
-      },
-      "NoteMeetingTimeDTO": {
-        "type": "object",
-        "properties": {
-          "startAt": {
-            "$ref": "#/components/schemas/Timestamp"
-          },
-          "endAt": {
-            "$ref": "#/components/schemas/Timestamp"
-          },
-          "allDay": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "startAt",
-          "endAt",
-          "allDay"
-        ],
-        "additionalProperties": false
-      },
       "NoteListFilter": {
         "type": "string",
         "enum": [
@@ -17434,6 +20477,13 @@
             },
             "maxItems": 40
           },
+          "reasoning": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatReasoningDTO"
+            },
+            "maxItems": 40
+          },
           "elapsedMs": {
             "anyOf": [
               {
@@ -17472,9 +20522,39 @@
           "model",
           "citations",
           "tools",
+          "reasoning",
           "elapsedMs",
           "createdAt",
           "updatedAt"
+        ],
+        "additionalProperties": false
+      },
+      "ChatReasoningDTO": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000
+          },
+          "afterTools": {
+            "type": "integer",
+            "allOf": [
+              {
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              {
+                "minimum": -2147483648,
+                "maximum": 2147483647
+              }
+            ],
+            "minimum": 0
+          }
+        },
+        "required": [
+          "text",
+          "afterTools"
         ],
         "additionalProperties": false
       },
@@ -17575,6 +20655,13 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ChatToolProgressDTO"
+            },
+            "maxItems": 40
+          },
+          "reasoning": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatReasoningDTO"
             },
             "maxItems": 40
           },
@@ -19229,6 +22316,10 @@
           },
           "createdAt": {
             "$ref": "#/components/schemas/Timestamp"
+          },
+          "image": {
+            "type": "string",
+            "maxLength": 2048
           }
         },
         "required": [

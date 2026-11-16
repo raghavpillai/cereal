@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/TeamSpaceNoteContentDTO",
+  "$defs": {
+    "UUID": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|[fF]{8}-[fF]{4}-[fF]{4}-[fF]{4}-[fF]{12})$",
+      "format": "uuid",
+      "description": "UUID encoded as a string"
+    },
+    "TeamSpaceMemberDTO": {
+      "type": "object",
+      "properties": {
+        "userId": {
+          "$ref": "#/$defs/UUID"
+        },
+        "name": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        },
+        "image": {
+          "type": "string",
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "userId",
+        "name",
+        "email"
+      ],
+      "additionalProperties": true
+    },
+    "Timestamp": {
+      "type": "string"
+    },
+    "TeamSpaceNoteContentDTO": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/UUID"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "body": {
+          "type": "string",
+          "maxLength": 1000000
+        },
+        "enhanced": {
+          "type": "string",
+          "maxLength": 1000000
+        },
+        "date": {
+          "type": "string"
+        },
+        "duration": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "owner": {
+          "$ref": "#/$defs/TeamSpaceMemberDTO"
+        },
+        "addedAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "mine": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "body",
+        "enhanced",
+        "date",
+        "duration",
+        "owner",
+        "addedAt",
+        "mine"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

@@ -30,6 +30,8 @@ pub struct MeetingState {
     picker_cancel: Option<Arc<AtomicBool>>,
     participants_scroll: ScrollHandle,
     events_scroll: ScrollHandle,
+    /// A name entered while the note had no calendar event to keep it with.
+    pending_attendee: Option<String>,
 }
 impl Drop for MeetingState {
     fn drop(&mut self) {
@@ -142,6 +144,109 @@ pub fn start_label(meeting: &MeetingContextDTO, now: DateTime<Local>) -> Option<
     (now < end).then(|| format!("Started {time}"))
 }
 
+/// A person in the details card under a note's date chip.
+pub(crate) struct DetailsPerson {
+    pub name: String,
+    /// What follows the name in the secondary ink: "(me)", "· Organizer".
+    pub aside: &'static str,
+    pub picture: Option<Arc<RenderImage>>,
+    /// Typed in by hand on a note kept here: its row can take it off again.
+    pub removable: bool,
+}
+
+/// What the details card shows; see `Cereal::render_details_card`.
+pub(crate) struct DetailsCard {
+    /// The chosen calendar event's title; none reads "Select calendar event".
+    pub title: Option<String>,
+    pub when: String,
+    /// The chosen event's Join and Calendar buttons.
+    pub links: Option<Div>,
+    pub status: Vec<String>,
+    pub people: Vec<DetailsPerson>,
+    /// What the list says when it has nobody.
+    pub empty: Option<&'static str>,
+}
+
+/// When a note without a calendar event is from, as the details card says
+/// it: "Mon, Nov 16 · 8:51 PM". The server's creation time when there is
+/// one, else the note's own day and time; never the day as it is stored
+/// ("2026-11-16").
+pub fn note_when(created: Option<DateTime<Local>>, date: &str, time: &str) -> String {
+    if let Some(created) = created {
+        return created.format("%a, %b %-d · %-I:%M %p").to_string();
+    }
+    let day = chrono::NaiveDate::parse_from_str(date.trim(), "%Y-%m-%d")
+        .map(|day| day.format("%a, %b %-d").to_string())
+        .unwrap_or_else(|_| date.trim().to_owned());
+    match (day.is_empty(), time.trim().is_empty()) {
+        (false, false) => format!("{day} · {}", time.trim()),
+        (false, true) => day,
+        (true, _) => time.trim().to_owned(),
+    }
+}
+
+/// The card's time line in 12 pt secondary ink, its AM/PM set as the small
+/// capitals every other time in the app has.
+fn when_line(when: &str, t: Theme) -> Div {
+    let (digits, meridiem) = time_parts(when);
+    div()
+        .flex()
+        .items_baseline()
+        .gap(px(3.))
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .text_size(px(12.))
+        .line_height(px(16.))
+        .text_color(t.muted)
+        .child(digits.to_string())
+        .when_some(meridiem, |line, meridiem| {
+            line.child(
+                div()
+                    .text_size(px(7.5))
+                    .line_height(px(16.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(meridiem.to_uppercase()),
+            )
+        })
+}
+
+/// Whether a person is one the "Add attendees" field is asking for: every
+/// word typed is in their name, whatever the case. Nothing typed asks for
+/// everyone.
+pub fn matches_person(name: &str, query: &str) -> bool {
+    let name = name.to_lowercase();
+    query
+        .split_whitespace()
+        .all(|word| name.contains(&word.to_lowercase()))
+}
+
+/// The known people the field offers to add: those it asks for who are not
+/// on the note already, each once, in the order they are known, at most
+/// `limit`. Nothing typed offers nobody.
+pub fn attendee_suggestions(
+    query: &str,
+    known: &[String],
+    present: &[String],
+    limit: usize,
+) -> Vec<String> {
+    if query.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut offered: Vec<String> = Vec::new();
+    for name in known {
+        let name = name.trim();
+        let listed = |names: &[String]| names.iter().any(|other| other.trim().eq_ignore_ascii_case(name));
+        if name.is_empty() || !matches_person(name, query) || listed(present) || listed(&offered) {
+            continue;
+        }
+        offered.push(name.to_owned());
+        if offered.len() == limit {
+            break;
+        }
+    }
+    offered
+}
+
 fn safe_url(value: Option<&String>) -> Option<String> {
     value
         .filter(|s| crate::calendar::safe_meeting_url(s))
@@ -176,6 +281,7 @@ impl Cereal {
         let manual = matches!(&command, MeetingCommand::UpsertParticipant(_));
         let selected = matches!(&command, MeetingCommand::SetEvent(_));
         if self.meeting.note_id != Some(id) {
+            self.meeting.pending_attendee = None;
             self.attendee_input
                 .update(cx, |input, cx| input.set_content("", cx));
             self.meeting
@@ -242,6 +348,16 @@ impl Cereal {
                             this.menu = Some(Menu::NoteDetails);
                         }
                         this.persist(cx);
+                        // A name typed before the note had an event is added to it now,
+                        // if it is still what the field says.
+                        let waiting = this.meeting.pending_attendee.take().filter(|name| {
+                            selected && this.attendee_input.read(cx).content().trim() == name.as_str()
+                        });
+                        if let Some(name) = waiting {
+                            cx.notify();
+                            this.add_meeting_attendee(name, cx);
+                            return;
+                        }
                     }
                     Err(error) => this.meeting.error = Some(error),
                 }
@@ -252,6 +368,14 @@ impl Cereal {
         cx.notify();
     }
     pub fn open_connected_event_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.current_note.is_none() {
+            return;
+        }
+        self.show_connected_event_picker(cx);
+        self.search.read(cx).focus_handle.focus(window);
+    }
+    /// The picker and its events, with the keyboard left where it is.
+    fn show_connected_event_picker(&mut self, cx: &mut Context<Self>) {
         // The picker lists the events of the note's own account.
         let Some(note_id) = self.current_note else {
             return;
@@ -261,7 +385,6 @@ impl Cereal {
             i.set_placeholder("Search event", cx)
         });
         self.menu = Some(Menu::CalendarEvent);
-        self.search.read(cx).focus_handle.focus(window);
         if let Some(c) = self.meeting.picker_cancel.take() {
             c.store(true, Ordering::Release);
         }
@@ -334,8 +457,12 @@ impl Cereal {
             return;
         };
         if note.meeting_context.is_none() {
-            self.meeting.error = Some("Choose a calendar event before adding attendees".into());
-            cx.notify();
+            // Attendees are kept with the note's calendar event. Without one
+            // the name waits in the field while the event is chosen, and is
+            // added as soon as it is.
+            self.meeting.error = Some("Choose the calendar event to add attendees to".into());
+            self.meeting.pending_attendee = Some(label.to_owned());
+            self.show_connected_event_picker(cx);
             return;
         }
         if label.chars().count() > 200 {
@@ -360,88 +487,22 @@ impl Cereal {
     }
     pub fn render_connected_note_details(&self, cx: &mut Context<Self>) -> Div {
         let t = self.theme();
-        let context = self
-            .current_note
-            .and_then(|id| self.workspace.note(id))
-            .and_then(|n| n.meeting_context.as_ref());
-        let mut body = div()
-            .w(px(280.))
-            .rounded(px(12.))
-            .bg(t.card)
-            .border_1()
-            .border_color(t.border)
-            .shadow_lg()
-            .overflow_hidden()
-            .flex()
-            .flex_col();
-        body = body.child(
-            div()
-                .id("connected-select-calendar-event")
-                .px(px(12.))
-                .py(px(10.))
-                .flex()
-                .flex_col()
-                .gap(px(3.))
-                .cursor_default()
-                .child(crate::motion::tactile(t.hover).radius(0.))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(div().size(px(9.)).rounded(px(3.)).bg(rgb(0x87e5e8)))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(13.))
-                                .child(
-                                    context
-                                        .map(|m| m.title.clone())
-                                        .unwrap_or_else(|| "Select calendar event".into()),
-                                ),
-                        )
-                        .child(icon("chevron-down", 12., t.muted)),
-                )
-                .when_some(context, |d, m| {
-                    d.child(
-                        div()
-                            .pl(px(17.))
-                            .text_size(px(11.))
-                            .text_color(t.muted)
-                            .child(meeting_time(m)),
-                    )
+        let note = self.current_note.and_then(|id| self.workspace.note(id));
+        let context = note.and_then(|n| n.meeting_context.as_ref());
+        let when = match context {
+            Some(meeting) => meeting_time(meeting),
+            None => note
+                .map(|note| {
+                    let created = note
+                        .server_created_at
+                        .as_deref()
+                        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                        .map(|time| time.with_timezone(&Local));
+                    note_when(created, &note.date, &note.time)
                 })
-                .when(context.is_none(), |d| {
-                    let timestamp = self
-                        .current_note
-                        .and_then(|id| self.workspace.note(id))
-                        .map(|note| {
-                            note.server_created_at
-                                .as_deref()
-                                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-                                .map(|time| {
-                                    time.with_timezone(&Local)
-                                        .format("%a, %b %-d · %-I:%M %p")
-                                        .to_string()
-                                })
-                                .unwrap_or_else(|| format!("{} · {}", note.date, note.time))
-                        })
-                        .unwrap_or_default();
-                    d.child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(t.muted)
-                            .child(timestamp),
-                    )
-                })
-                .reach()
-                .on_click(
-                    cx.listener(|this, _, window, cx| this.open_connected_event_picker(window, cx)),
-                ),
-        );
-        if let Some(context) = context {
+                .unwrap_or_default(),
+        };
+        let links = context.map(|context| {
             let mut links = div().px(px(11.)).pb(px(12.)).flex().gap(px(8.));
             for (key, label, url) in [
                 (
@@ -455,161 +516,325 @@ impl Cereal {
                     safe_url(context.event_url.as_ref()),
                 ),
             ] {
-                if let Some(url) = url {
-                    links = links.child(
-                        pill(
-                            key,
-                            label,
-                            if label == "Join" { "video" } else { "calendar" },
-                            t,
-                        )
-                        .flex_1()
-                        .h(px(32.))
-                        .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))),
-                    );
-                } else {
-                    links = links.child(
-                        pill(
-                            key,
-                            label,
-                            if label == "Join" { "video" } else { "calendar" },
-                            t,
-                        )
-                        .flex_1()
-                        .h(px(32.))
-                        .opacity(0.4),
-                    );
-                }
+                let symbol = if label == "Join" { "video" } else { "calendar" };
+                let link = pill(key, label, symbol, t).flex_1().h(px(32.));
+                links = links.child(match url {
+                    Some(url) => link.on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))),
+                    None => link.opacity(0.4),
+                });
             }
-            body = body.child(links).child(separator(t));
-        }
+            links
+        });
+        let mut status = Vec::new();
         if self.meeting.loading {
-            body = body.child(
-                div()
-                    .px(px(12.))
-                    .py(px(7.))
-                    .child(small("Updating meeting…", t)),
-            );
+            status.push("Updating meeting…".to_string());
         }
-        if let Some(error) = &self.meeting.error {
-            body = body.child(div().px(px(12.)).py(px(8.)).child(small(error.clone(), t)));
+        status.extend(self.meeting.error.clone());
+        let session = self
+            .current_note
+            .and_then(crate::accounts::session_of_note);
+        let picture = session
+            .as_ref()
+            .and_then(|session| crate::portrait::of(session, cx));
+        let mut people: Vec<DetailsPerson> = context
+            .map(participants)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|person| DetailsPerson {
+                name: participant_name(person),
+                aside: if person.is_self {
+                    "(me)"
+                } else if person.is_organizer {
+                    "· Organizer"
+                } else {
+                    ""
+                },
+                picture: picture.clone().filter(|_| person.is_self),
+                removable: false,
+            })
+            .collect();
+        // Without an event the note still has the person who wrote it.
+        if context.is_none() {
+            people.push(DetailsPerson {
+                name: session
+                    .map(|session| session.user.name)
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| "Me".into()),
+                aside: "(me)",
+                picture,
+                removable: false,
+            });
+        }
+        self.render_details_card(
+            DetailsCard {
+                title: context.map(|meeting| meeting.title.clone()),
+                when,
+                links,
+                status,
+                people,
+                empty: context.map(|_| "No attendee details available"),
+            },
+            cx,
+        )
+    }
+
+    /// The organization the people of a note belong to, as the details card
+    /// heads its list: the team space's name once it is known, else nothing.
+    fn details_group(&self) -> String {
+        let name = match &self.team.page {
+            Some(page) => page.organization.name.trim(),
+            None => self.workspace.settings.team_space_name.trim(),
+        };
+        if name.is_empty() {
+            "Attendees".into()
+        } else {
+            name.to_owned()
+        }
+    }
+
+    /// Everyone this app has a name for besides the note's own attendees:
+    /// the members of the team space and the people its meetings were with.
+    fn known_people(&self) -> Vec<String> {
+        let Some(page) = &self.team.page else {
+            return Vec::new();
+        };
+        page.members
+            .iter()
+            .map(|member| member.name.clone())
+            .chain(page.people.iter().map(|person| person.name.clone()))
+            .collect()
+    }
+
+    /// The event picker, from the details card's first row.
+    fn open_event_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if crate::server::enabled() {
+            return self.open_connected_event_picker(window, cx);
+        }
+        self.search.update(cx, |input, cx| {
+            input.set_content("", cx);
+            input.set_placeholder("Search event...", cx);
+        });
+        self.open_menu(Menu::CalendarEvent);
+        self.search.read(cx).focus_handle.focus(window);
+        cx.notify();
+    }
+
+    /// The card under a note's date chip: the calendar event (or the row
+    /// that chooses one) over the time, the field that adds an attendee,
+    /// and who was there. One card for a note kept here and one kept on a
+    /// server; only where its rows come from differs.
+    pub(crate) fn render_details_card(&self, card: DetailsCard, cx: &mut Context<Self>) -> Div {
+        let t = self.theme();
+        let query = self.attendee_input.read(cx).content().to_string();
+        let typing = !query.trim().is_empty();
+        let mut body = div()
+            .w(px(280.))
+            .rounded(px(POPOVER_RADIUS))
+            .bg(t.card)
+            .border_1()
+            .border_color(t.border)
+            .shadow_lg()
+            .overflow_hidden()
+            .flex()
+            .flex_col();
+        body = body.child(
+            div()
+                .id("note-select-calendar-event")
+                .h(px(58.))
+                .flex_shrink_0()
+                .pl(px(12.))
+                .pr(px(14.))
+                .pt(px(10.))
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .cursor_default()
+                .child(crate::motion::tactile(t.bg).radius(0.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .text_size(px(14.))
+                        .line_height(px(18.))
+                        .child(
+                            div().flex_1().min_w_0().truncate().child(
+                                card.title
+                                    .unwrap_or_else(|| "Select calendar event".into()),
+                            ),
+                        )
+                        .child(icon("chevron-down", 12., t.muted)),
+                )
+                .child(when_line(&card.when, t))
+                .reach()
+                .on_click(cx.listener(|this, _, window, cx| this.open_event_picker(window, cx))),
+        );
+        if let Some(links) = card.links {
+            body = body.child(links);
+        }
+        body = body.child(separator(t));
+        for status in card.status {
+            body = body.child(div().px(px(12.)).py(px(7.)).child(small(status, t)));
         }
         body = body
             .child(
                 div()
                     .h(px(40.))
+                    .flex_shrink_0()
                     .px(px(12.))
                     .flex()
                     .items_center()
-                    .text_size(px(13.))
-                    .when(context.is_some(), |d| d.child(self.attendee_input.clone()))
-                    .when(context.is_none(), |d| {
-                        d.child(small("Choose an event to add attendees", t))
-                    }),
+                    .text_size(px(14.))
+                    // The placeholder is a step quieter than a typed name.
+                    .when(!typing, |row| row.opacity(0.8))
+                    .child(self.attendee_input.clone()),
             )
             .child(separator(t));
-        let mut list = div()
+        let present: Vec<String> = card.people.iter().map(|person| person.name.clone()).collect();
+        let suggestions = attendee_suggestions(&query, &self.known_people(), &present, 5);
+        let list = div()
             .id("meeting-participants")
             .track_scroll(&self.meeting.participants_scroll)
             .max_h(px(260.))
             .overflow_y_scroll()
+            .pt(px(8.))
+            .pb(px(5.))
             .flex()
             .flex_col()
-            .py(px(5.));
-        let people = context.map(participants).unwrap_or_default();
-        list = list.child(
-            div().px(px(8.)).py(px(4.)).child(small(
-                context
-                    .map(|m| m.calendar_name.clone())
-                    .unwrap_or_else(|| "Attendees".into()),
-                t,
-            )),
-        );
-        if people.is_empty() && context.is_none() {
-            let name = self
-                .current_note
-                .and_then(crate::accounts::session_of_note)
-                .map(|session| session.user.name)
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or_else(|| "Me".into());
-            let initial = name
-                .chars()
-                .next()
-                .map(|character| character.to_uppercase().collect::<String>())
-                .unwrap_or_else(|| "M".into());
-            list = list.child(
+            .gap(px(4.))
+            .child(
                 div()
                     .px(px(8.))
-                    .py(px(5.))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .size(px(20.))
-                            .rounded_full()
-                            .bg(t.fill)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_size(px(10.))
-                            .child(initial),
-                    )
-                    .child(div().text_size(px(13.)).child(format!("{name} (me)"))),
+                    .text_size(px(12.))
+                    .line_height(px(16.))
+                    .text_color(t.muted)
+                    .child(self.details_group()),
             );
-        } else if people.is_empty() {
-            list = list.child(div().px(px(12.)).py(px(8.)).child(small(
-                if context.is_some() {
-                    "No attendee details available"
-                } else {
-                    "No calendar event selected"
-                },
-                t,
-            )));
-        }
-        for person in people {
-            let name = participant_name(person);
+        let avatar = |name: &str, picture: Option<Arc<RenderImage>>| {
             let initial = name
                 .chars()
                 .next()
                 .map(|c| c.to_uppercase().collect::<String>())
                 .unwrap_or_else(|| "?".into());
-            let subtitle = if person.is_self {
-                " (me)"
-            } else if person.is_organizer {
-                " · Organizer"
-            } else {
-                ""
-            };
-            list = list.child(
+            crate::portrait::avatar(
+                picture,
+                20.,
                 div()
+                    .size(px(20.))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .bg(t.fill)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(10.))
+                    .text_color(t.muted)
+                    .child(initial),
+            )
+        };
+        let mut rows = div().flex().flex_col().gap(px(3.));
+        let mut shown = 0;
+        for (index, person) in card.people.into_iter().enumerate() {
+            if !matches_person(&person.name, &query) {
+                continue;
+            }
+            shown += 1;
+            // "Name (me)": the aside in the secondary ink, on the name's line.
+            let label = if person.aside.is_empty() {
+                person.name.clone()
+            } else {
+                format!("{} {}", person.name, person.aside)
+            };
+            let aside = person.name.len()..label.len();
+            let label = StyledText::new(label).with_highlights([(
+                aside,
+                HighlightStyle {
+                    color: Some(t.muted),
+                    ..Default::default()
+                },
+            )]);
+            let remove = person.name.clone();
+            rows = rows.child(
+                div()
+                    .id(("note-attendee", index))
+                    .h(px(30.))
                     .px(px(8.))
-                    .py(px(5.))
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(
-                        div()
-                            .size(px(21.))
-                            .rounded_full()
-                            .bg(t.fill)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_size(px(11.))
-                            .child(initial),
-                    )
+                    .rounded(px(5.))
+                    .when(person.removable, |row| {
+                        row.child(crate::motion::tactile(t.hover).radius(5.))
+                    })
+                    .child(avatar(&person.name, person.picture))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(12.))
-                            .child(format!("{name}{subtitle}")),
-                    ),
+                            .text_size(px(13.))
+                            .child(label),
+                    )
+                    .when(person.removable, |row| {
+                        row.child(
+                            tool_tip(("remove-note-attendee", index), "close", "Remove attendee", t)
+                                .size(px(22.))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(note) =
+                                        this.current_note.and_then(|id| this.workspace.note_mut(id))
+                                    {
+                                        note.participants.retain(|name| name != &remove);
+                                    }
+                                    this.persist(cx);
+                                })),
+                        )
+                    }),
             );
         }
-        body.child(list)
+        // Someone known who is not on the note yet: the row adds them.
+        for (index, name) in suggestions.into_iter().enumerate() {
+            shown += 1;
+            let add = name.clone();
+            rows = rows.child(
+                div()
+                    .id(("suggested-attendee", index))
+                    .h(px(30.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(5.))
+                    .cursor_default()
+                    .child(crate::motion::tactile(t.hover).radius(5.))
+                    .child(avatar(&name, None))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.))
+                            .child(name),
+                    )
+                    .child(icon("plus", 12., t.muted))
+                    .reach()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let content = add.clone();
+                        this.attendee_input.update(cx, |input, cx| {
+                            input.set_content(content.clone(), cx);
+                            cx.emit(crate::input::InputSubmitted { content });
+                        });
+                    })),
+            );
+        }
+        if shown == 0 {
+            let line: SharedString = if typing {
+                format!("Press Return to add “{}”", query.trim()).into()
+            } else {
+                card.empty.unwrap_or("No attendees yet").into()
+            };
+            rows = rows.child(div().h(px(30.)).px(px(8.)).flex().items_center().child(small(line, t)));
+        }
+        body.child(list.child(rows))
     }
     pub fn render_connected_event_picker(&self, cx: &mut Context<Self>) -> Div {
         let t = self.theme();
@@ -724,7 +949,10 @@ impl Cereal {
 
 #[cfg(test)]
 mod tests {
-    use super::{meeting_time, participant_name, participants, start_label};
+    use super::{
+        attendee_suggestions, matches_person, meeting_time, note_when, participant_name,
+        participants, start_label,
+    };
     use chrono::{Duration, Local, TimeZone};
     use meeting_notes_api_types::{MeetingContextDTO, MeetingParticipantDTO};
     use serde_json::json;
@@ -733,6 +961,39 @@ mod tests {
     }
     fn meeting(people: Vec<MeetingParticipantDTO>) -> MeetingContextDTO {
         serde_json::from_value(json!({"eventId":"00000000-0000-4000-8000-000000000002","provider":"ics","title":"Fictional meeting","calendarName":"Work","startAt":"2026-11-26T00:00:00Z","endAt":"2026-11-27T00:00:00Z","allDay":true,"timeZone":null,"location":null,"meetingUrl":null,"eventUrl":null,"organizer":null,"participants":people})).unwrap()
+    }
+    #[test]
+    fn a_note_without_an_event_says_its_day_in_words_never_as_it_is_stored() {
+        let created = Local.with_ymd_and_hms(2026, 11, 16, 20, 51, 0).earliest().unwrap();
+        assert_eq!(note_when(Some(created), "2026-11-16", "8:50 PM"), "Mon, Nov 16 · 8:51 PM");
+        // Not on a server yet: the note's own day and time.
+        assert_eq!(note_when(None, "2026-11-16", "8:50 PM"), "Mon, Nov 16 · 8:50 PM");
+        assert_eq!(note_when(None, "2026-11-16", ""), "Mon, Nov 16");
+        assert_eq!(note_when(None, "", "8:50 PM"), "8:50 PM");
+        // A day that is not a date is said as it is rather than dropped.
+        assert_eq!(note_when(None, "Today", "8:50 PM"), "Today · 8:50 PM");
+        assert_eq!(crate::ui::time_parts("Mon, Nov 16 · 8:51 PM"), ("Mon, Nov 16 · 8:51", Some("PM")));
+        assert_eq!(crate::ui::time_parts("Thu, Nov 26 · All day"), ("Thu, Nov 26 · All day", None));
+    }
+    #[test]
+    fn the_attendee_field_filters_who_is_listed_and_offers_known_people_once() {
+        assert!(matches_person("Maya Example", ""));
+        assert!(matches_person("Maya Example", "  "));
+        assert!(matches_person("Maya Example", "may"));
+        assert!(matches_person("Maya Example", "exam MAYA"));
+        assert!(!matches_person("Maya Example", "maya z"));
+        let known: Vec<String> = ["Maya Example", "Zoë Test", "maya example", "Max Sample", " "]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        // Nothing typed offers nobody.
+        assert!(attendee_suggestions("", &known, &[], 5).is_empty());
+        assert_eq!(attendee_suggestions("ma", &known, &[], 5), ["Maya Example", "Max Sample"]);
+        assert_eq!(attendee_suggestions("ma", &known, &[], 1), ["Maya Example"]);
+        // Someone on the note already is not offered again.
+        assert_eq!(attendee_suggestions("ma", &known, &["MAYA EXAMPLE".into()], 5), ["Max Sample"]);
+        assert_eq!(attendee_suggestions("zoë", &known, &[], 5), ["Zoë Test"]);
+        assert!(attendee_suggestions("nobody", &known, &[], 5).is_empty());
     }
     #[test]
     fn names_are_explicit_data_or_email_fallback_never_email_name_guesses() {

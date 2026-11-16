@@ -119,6 +119,10 @@ pub struct LiveTranscript {
     fresh: Vec<(String, u64)>,
     /// Segments that have just replaced interim text (segment id, stage slot).
     firmed: Vec<(String, u64)>,
+    /// For each of those segments, the interim line it replaced: its
+    /// utterance and the words it showed, so the final settles out of the
+    /// same bubble.
+    replaced: Vec<(String, String, String)>,
     slot: u64,
 }
 
@@ -219,6 +223,15 @@ impl LiveTranscript {
             .map(|(_, slot)| *slot)
     }
 
+    /// The interim line that segment `segment_id` has just replaced: its row
+    /// (as [`LiveTranscript::tail`] identified it) and the words it showed.
+    pub fn replaced(&self, segment_id: &str) -> Option<(u64, &str)> {
+        self.replaced
+            .iter()
+            .find(|(segment, _, _)| segment == segment_id)
+            .map(|(_, utterance, text)| (crate::lazy::key(("interim", utterance)), text.as_str()))
+    }
+
     /// Stage slots of the lines that are arriving or firming up.
     pub fn line_slots(&self) -> impl Iterator<Item = u64> + '_ {
         self.fresh.iter().chain(&self.firmed).map(|(_, slot)| *slot)
@@ -228,6 +241,13 @@ impl LiveTranscript {
     pub fn settle_lines(&mut self, settled: impl Fn(u64) -> bool) {
         self.fresh.retain(|(_, slot)| !settled(*slot));
         self.firmed.retain(|(_, slot)| !settled(*slot));
+        self.forget_replaced();
+    }
+
+    fn forget_replaced(&mut self) {
+        let firmed = &self.firmed;
+        self.replaced
+            .retain(|(segment, _, _)| firmed.iter().any(|(known, _)| known == segment));
     }
 
     /// The last status that was shown for `note`, for its exit.
@@ -307,6 +327,7 @@ impl LiveTranscript {
         let slot = self.slot;
         self.fresh.retain(|(_, used)| *used != slot);
         self.firmed.retain(|(_, used)| *used != slot);
+        self.forget_replaced();
         slot
     }
 
@@ -318,6 +339,7 @@ impl LiveTranscript {
         self.finished.clear();
         self.fresh.clear();
         self.firmed.clear();
+        self.replaced.clear();
         self.phase = Phase::Off;
         self.behind = 0;
         self.phase_since = None;
@@ -338,13 +360,14 @@ impl LiveTranscript {
                 revision,
                 segment,
             } => {
-                let replaced = self
+                let interim = self
                     .interim
                     .iter()
                     .position(|shown| shown.utterance_id == utterance_id)
-                    .map(|at| self.interim.remove(at))
-                    .is_some();
+                    .map(|at| self.interim.remove(at));
+                let replaced = interim.is_some();
                 self.fresh.retain(|(id, _)| *id != utterance_id);
+                let utterance = utterance_id.clone();
                 if !self.finished.contains(&utterance_id) {
                     self.finished.push_back(utterance_id);
                     if self.finished.len() > 32 {
@@ -359,6 +382,9 @@ impl LiveTranscript {
                 let added = add_segment(note, segment, revision);
                 if added && replaced && current {
                     let slot = self.next_slot();
+                    if let Some(interim) = interim {
+                        self.replaced.push((id.clone(), utterance, interim.text));
+                    }
                     self.firmed.push((id, slot));
                     return Applied::Final(Some(slot));
                 }
@@ -1285,6 +1311,11 @@ mod tests {
         assert_eq!(note.transcript, "Speaker 3  01:05\nSo if we move the pilot to May.");
         assert_eq!(note.transcript_revision, 42);
         assert_eq!(live.firmed_slot("s1"), live.firmed.first().map(|(_, slot)| *slot));
+        // The final knows the line it took over from, and what that showed.
+        assert_eq!(
+            live.replaced("s1"),
+            Some((crate::lazy::key(("interim", "u1")), "so if we move the"))
+        );
         // The same segment again (a resend after a reconnect) adds nothing.
         assert_eq!(live.apply(&mut note, true, finalise("u1", 42, stored), now), Applied::Nothing);
         assert_eq!(note.server_transcript_segments.len(), 1);

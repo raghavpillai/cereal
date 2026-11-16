@@ -10,6 +10,8 @@
     "./live": "./src/live.ts",
     "./mail-domains": "./src/mail-domains.ts",
     "./chats": "./src/chats.ts",
+    "./team-space": "./src/team-space.ts",
+    "./note-access": "./src/note-access.ts",
     "./transport": "./src/transport.ts"
   },
   "scripts": {

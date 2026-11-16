@@ -58,12 +58,24 @@ export const validateChatCitations=async(citations:ReadonlyArray<ChatCitationDTO
  * never turned into clickable client references. Ordinary text still streams.
  * Once `limit` distinct IDs have been used, any further new ID is dropped the
  * same way, so the citations event of a long answer always fits the contract. */
+/** A source marker in any form a model writes one: `[[S12]]`, `[[12]]`, `[S12]`, `(S12)`, with the space before it. */
+const ANY_MARKER=/[ \t]*(?:\[\[S?[0-9]{1,6}\]\]|\[S[0-9]{1,6}\]|\(S[0-9]{1,6}\))/g
+/** The same markers out of a whole answer (the non-streamed chat about one note). */
+export const withoutSourceMarkers=(text:string)=>text.replace(ANY_MARKER,"")
 export class CitationStreamFilter {
   private pending=""
   readonly used=new Set<string>()
-  constructor(private readonly allowed:ReadonlySet<string>,private readonly limit=MAX_ANSWER_CITATIONS){}
+  /** `none`: a chat that shows no sources (one note). Every marker is removed, whatever its ID and form, and
+   * `used` stays empty. */
+  constructor(private readonly allowed:ReadonlySet<string>,private readonly limit=MAX_ANSWER_CITATIONS,private readonly none=false){}
   push(delta:string,final=false):string {
     this.pending+=delta
+    if(this.none){
+      // Hold back what may be the start of a marker, with the space in front of it, until the rest arrives.
+      const held=final?null:/[ \t]*(?:\[\[?S?[0-9]{0,6}\]?|\(S?[0-9]{0,6})?$/.exec(this.pending)
+      const cut=held?held.index:this.pending.length,text=this.pending.slice(0,cut);this.pending=this.pending.slice(cut)
+      return withoutSourceMarkers(text)
+    }
     const opening=this.pending.lastIndexOf("[[")
     let cut=this.pending.length
     if(!final&&opening>=0&&this.pending.indexOf("]]",opening)<0&&/^\[\[S?[0-9]{0,6}\]?$/.test(this.pending.slice(opening)))cut=opening

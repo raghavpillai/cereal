@@ -20,6 +20,6 @@ export const NOTE_CHAT_PARAMETERS:LanguageRequestParameters=MEETING_CHAT_PARAMET
 /** `citable` is false when the client did not ask for sources. */
 export const noteChatSystemPrompt=(citable:boolean)=>meetingChatSystemPrompt("finished",citable)
 export const noteChatMessages=(note:ProviderNote,input:ChatInput):LanguageMessage[]=>meetingChatMessages(note,input,"finished")
-/** Context for a chat about one note, live or finished: one read of the note,
- * the whole transcript, and a citation for every line the model can see. */
+/** Context for a chat about one note, live or finished: one read of the note and
+ * the whole transcript. No sources are issued: a chat about one note shows none. */
 export const prepareNoteChat=(options:MeetingChatOptions,noteId:string):Promise<PreparedChat>=>prepareMeetingNoteChat(options,noteId)

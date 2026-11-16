@@ -49,6 +49,9 @@ model Note {
   liveGaps           LiveGap[]
   speakers           NoteSpeaker[]
   chatThreads        ChatThread[]
+  teamSpace          TeamSpaceNote?
+  sharing            NoteSharing?
+  access             NoteAccess[]
 
   @@index([updatedAt(sort: Desc)])
 }
@@ -257,6 +260,7 @@ model User {
  meetingContexts NoteMeetingContext[]
  googleMeetings GoogleMeeting[]
  chatThreads ChatThread[]
+ noteAccess NoteAccess[]
 }
 model Session {
  oauthRefreshTokenSessionIdChildren OauthRefreshToken[] @relation("mcpOauthRefreshTokenSessionId")
@@ -428,6 +432,7 @@ model Organization {
  notes Note[]
  workspaceSelections UserWorkspaceState[]
  agentBriefs AgentBrief[]
+ teamSpaceNotes TeamSpaceNote[]
  id String @id @db.Uuid
  name String @db.VarChar(100)
  slug String @unique @db.VarChar(100)
@@ -471,6 +476,42 @@ model UserWorkspaceState {
  activeOrganizationId String? @db.Uuid
  activeOrganization Organization? @relation(fields:[activeOrganizationId],references:[id],onDelete:SetNull)
  updatedAt DateTime @updatedAt @db.Timestamptz(3)
+}
+/// How far a note's links reach, when that is not the default. No row: "invited", not suspended.
+/// `level` "invited": only the owner and the people in NoteAccess. "organization": every member of the note's
+/// workspace who holds a link. `suspended`: the owner put the note in Trash; nobody else reads it meanwhile.
+/// Kept out of Note so that changing who can read a note never changes the note's own `updatedAt`.
+model NoteSharing {
+ noteId String @id @db.Uuid
+ note Note @relation(fields:[noteId],references:[id],onDelete:Cascade)
+ level String @default("invited") @db.VarChar(16)
+ suspended Boolean @default(false)
+ updatedAt DateTime @updatedAt @db.Timestamptz(3)
+}
+/// One person a note is shared with. They read it only while they are a member of the note's workspace
+/// (Note.organizationId), which is checked at every read; the row goes with the note and with the account.
+model NoteAccess {
+ noteId String @db.Uuid
+ note Note @relation(fields:[noteId],references:[id],onDelete:Cascade)
+ userId String @db.Uuid
+ user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+ addedById String @db.Uuid
+ addedAt DateTime @default(now()) @db.Timestamptz(3)
+ @@id([noteId,userId])
+ @@index([userId, addedAt(sort: Desc)])
+}
+/// A note its owner shows to a whole workspace: the workspace's "team space". The row is the whole grant.
+/// While it exists every member of `organizationId` may read the note's title and documents (never its
+/// transcript or audio, and never to change it); deleting the row, the note, or the membership ends that
+/// at once. A note is in at most one space. `addedById` is the owner who put it there.
+model TeamSpaceNote {
+ noteId String @id @db.Uuid
+ note Note @relation(fields:[noteId],references:[id],onDelete:Cascade)
+ organizationId String @db.Uuid
+ organization Organization @relation(fields:[organizationId],references:[id],onDelete:Cascade)
+ addedById String @db.Uuid
+ addedAt DateTime @default(now()) @db.Timestamptz(3)
+ @@index([organizationId, addedAt(sort: Desc)])
 }
 model NoteAttachment {
  id String @id @default(uuid()) @db.Uuid
@@ -530,6 +571,7 @@ model ChatMessage {
  model String? @db.VarChar(200)
  citations Json @default("[]")
  tools Json @default("[]")
+ reasoning Json @default("[]")
  elapsedMs Int?
  createdAt DateTime @default(now()) @db.Timestamptz(3)
  updatedAt DateTime @db.Timestamptz(3)

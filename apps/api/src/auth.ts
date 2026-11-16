@@ -16,7 +16,7 @@ import type {Database} from "@meeting-notes/database"
 import type {CreateUserInput,UserDTO} from "@meeting-notes/contracts"
 import {AuthPrincipal,type PrincipalData,type ApiError} from "@meeting-notes/contracts/api"
 import {loadSecretBox,secretBoxFromKey} from "./admin-secrets"
-import {makeSignInService,passwordOnly,type GoogleEndpoints,type SignInPolicy} from "./sign-in"
+import {makeSignInService,passwordOnly,pictureAddress,type GoogleEndpoints,type SignInPolicy} from "./sign-in"
 import {withAccountMutation} from "./account-mutations"
 import {makeMcpAuthPlugins,makeMcpAuthentication,MCP_NEEDS_HTTPS} from "./mcp-auth"
 export {AuthPrincipal}
@@ -24,7 +24,7 @@ export const BOOTSTRAP_OWNER_ID="00000000-0000-4000-8000-000000000001"
 export const bootstrapPrincipal:PrincipalData={id:BOOTSTRAP_OWNER_ID,name:"Owner",email:"owner@localhost.invalid",role:"owner",source:"bootstrap",expiresAt:null,createdAt:"2026-01-01T00:00:00.000Z"}
 export function isBootstrapToken(headers:Headers,token:string){const supplied=/^Bearer +(.+)$/i.exec(headers.get("authorization")??"")?.[1];return !!supplied&&timingSafeEqual(createHash("sha256").update(supplied).digest(),createHash("sha256").update(token).digest())}
 export async function loadAuthenticationSecret(path:string){await loadSecretBox(path);return(await readFile(path)).toString("base64url")}
-const userDTO=(u:{id:string;name:string;email:string;role?:string;createdAt:Date}):UserDTO=>({id:u.id,name:u.name,email:u.email,role:u.role==="owner"?"owner":u.role==="admin"?"admin":"user",createdAt:u.createdAt.toISOString()})
+const userDTO=(u:{id:string;name:string;email:string;role?:string;createdAt:Date;image?:string|null}):UserDTO=>{const image=pictureAddress(u.image);return{id:u.id,name:u.name,email:u.email,role:u.role==="owner"?"owner":u.role==="admin"?"admin":"user",createdAt:u.createdAt.toISOString(),...(image?{image}:{})}}
 class AuthFailure extends Error{constructor(readonly payload:ApiError){super(payload.message)}}
 const fail=(error:"invalid_request"|"conflict"|"not_found"|"forbidden",message:string)=>new AuthFailure({error,message})
 const boundary=<A>(f:()=>Promise<A>)=>Effect.tryPromise({try:f,catch:(e):ApiError=>{

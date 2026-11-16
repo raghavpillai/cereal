@@ -25,20 +25,25 @@ async function research(seed:ReadonlyArray<NoteDTO>,input:ChatInput,script:Reado
   return {prepared,events,rounds,repository,steps:events.filter(event=>event.tool).map(event=>event.tool!)}
 }
 
-test("the coverage note is a function of the steps that ran, and says when transcripts were not consulted",()=>{
+test("the coverage note is a function of the steps that ran: nothing when everything was read, one short line when the research was partial",()=>{
+  const step=(name:string,doing:string,label:string,resultCount?:number)=>[{name,status:"running",label:doing},{name,status:"completed",label,...(resultCount===undefined?{}:{resultCount})}]
+  const failed={name:"get_meetings",status:"failed",label:"Couldn't finish this lookup"}
   expect(coverageNote([])).toBe("")
-  expect(coverageNote([{name:"search_meetings",status:"running",label:"Searching meetings for “Windrush”"},{name:"search_meetings",status:"completed",label:"Found 1 meeting",resultCount:1},
-    {name:"get_meetings",status:"running",label:"Looking deeper into 1 note"},{name:"get_meetings",status:"completed",label:"Looked deeper into 1 note",resultCount:1}]))
-    .toBe("Searched your meetings for “Windrush” (1 found); looked deeper into 1 note. Transcripts were not consulted.")
-  expect(coverageNote([{name:"get_meetings",status:"running",label:"Looking deeper into 5 notes from 2026-11-02 to 2026-11-08"},{name:"get_meetings",status:"completed",label:"Looked deeper into 5 notes",resultCount:5},
-    {name:"get_meeting_transcript",status:"running",label:"Reading transcript for “Coffee chat”"},{name:"get_meeting_transcript",status:"completed",label:"Read transcript for “Coffee chat”",resultCount:1}]))
-    .toBe("Looked deeper into 5 notes from 2026-11-02 to 2026-11-08; read transcript for “Coffee chat”.")
-  const many=coverageNote([...Array.from({length:2},()=>[{name:"search_meetings",status:"running",label:"Searching meetings for “a”"},{name:"search_meetings",status:"completed",label:"Found 3 meetings",resultCount:3}]).flat(),
-    {name:"get_meetings",status:"running",label:"Looking deeper into 4 notes"},{name:"get_meetings",status:"completed",label:"Looked deeper into 4 notes",resultCount:4},
-    {name:"search_transcripts",status:"running",label:"Searching transcripts for “a”"},{name:"search_transcripts",status:"completed",label:"Found 0 transcript passages in 0 meetings",resultCount:0},
-    {name:"get_meetings",status:"running",label:"Looking deeper into 1 note"},{name:"get_meetings",status:"failed",label:"Could not complete meeting lookup"}])
-  // A transcript search that found nothing is reported, and does not count as having consulted one.
-  expect(many).toBe("Searched your meetings 2 times; looked deeper into 4 notes; searched transcripts once (0 passages). Transcripts were not consulted. One lookup failed.")
+  // Every lookup ran and read what it found: the answer says nothing about its research, with or without a transcript.
+  expect(coverageNote([...step("search_meetings","Searching meetings for “Windrush”","Found 1 meeting",1),...step("get_meetings","Looking deeper into 1 note","Looked deeper into 1 note",1)])).toBe("")
+  expect(coverageNote([...step("get_meetings","Looking deeper into 5 notes from 2026-11-02 to 2026-11-08","Looked deeper into 5 notes",5),...step("get_meeting_transcript","Reading transcript for “Coffee chat”","Read transcript for “Coffee chat”",1)])).toBe("")
+  expect(coverageNote([...step("search_transcripts","Searching transcripts for “a”","Found 0 transcript passages in 0 meetings",0)])).toBe("")
+  // A lookup failed.
+  expect(coverageNote([...step("search_meetings","Searching meetings for “a”","Found 3 meetings",3),{name:"get_meetings",status:"running",label:"Looking deeper into 1 note"},failed])).toBe("One lookup failed, so this may be incomplete.")
+  expect(coverageNote([...step("search_meetings","Searching meetings for “a”","Found 3 meetings",3),failed,failed])).toBe("2 lookups failed, so this may be incomplete.")
+  expect(coverageNote([{name:"search_meetings",status:"running",label:"Searching meetings"},{name:"search_meetings",status:"failed",label:"Couldn't plan the search"}])).toBe("The meeting lookup failed, so nothing was searched or read.")
+  // Something found did not fit, or a period holds more meetings than were read.
+  expect(coverageNote(step("get_meetings","Looking deeper into 9 notes","Looked deeper into 6 of 9 notes (context limit)",6))).toBe("Some of what was found was too long to read in full.")
+  expect(coverageNote(step("search_transcripts","Searching transcripts for “a”","Read 4 of 9 transcript passages in 2 meetings (context limit)",4))).toBe("Some of what was found was too long to read in full.")
+  expect(coverageNote(step("get_meetings","Looking deeper into 12 notes from 2026-01-01 to 2026-03-31","Looked deeper into 12 notes (more exist in this period)",12))).toBe("More meetings exist in this period than were read.")
+  // Always one line.
+  const all=coverageNote([...step("get_meetings","Looking deeper into 12 notes","Looked deeper into 12 notes (more exist in this period)",12),...step("search_transcripts","Searching transcripts for “a”","Read 4 of 9 transcript passages in 2 meetings (context limit)",4),failed])
+  expect(all).toBe("One lookup failed, so this may be incomplete. Some of what was found was too long to read in full. More meetings exist in this period than were read.");expect(all).not.toContain("\n")
 })
 
 test("search words drop what would match every meeting, and ranking counts only matches at the start of a word",()=>{
@@ -95,8 +100,8 @@ test("notes are read before transcripts; a date range reads exactly the meetings
   expect(r.steps.map(step=>`${step.status}: ${step.label}`)).toEqual([
     "running: Looking deeper into 3 notes from 2026-03-02 to 2026-03-08","completed: Looked deeper into 3 notes",
     "running: Reading transcript for “Hallway chat”","completed: Read transcript for “Hallway chat”"])
-  expect(body).toContain("<coverage_note>Looked deeper into 3 notes from 2026-03-02 to 2026-03-08; read transcript for “Hallway chat”.</coverage_note>")
-  expect(body).toContain(coverageNote(r.steps))
+  // Everything asked for was read, so the answer is given nothing to say about its research.
+  expect(coverageNote(r.steps)).toBe("");expect(body).not.toContain("<coverage_note>")
   // Each passage is written once and carries exactly one source ID.
   expect(body.match(/Ship the importer on the 21st/g)).toHaveLength(1)
   expect(r.prepared.citations.map(citation=>citation.source).sort()).toEqual(["notes","summary","transcript"])
@@ -165,4 +170,7 @@ test("another account's meetings are unreachable by search, alias, forged ID or 
   // The forged ID is named back to the model as not read; nothing else about it is known.
   expect(seen.at(-1)).toContain("not a meeting from this conversation")
   expect(events.filter(event=>event.tool?.status==="failed").length).toBe(2)
+  // Two lookups failed, so the answer is told to say so, in one line; the workspace answer still cites its sources.
+  expect(prepared.note.body.match(/<coverage_note>[^\n]*<\/coverage_note>/g)).toEqual(["<coverage_note>2 lookups failed, so this may be incomplete.</coverage_note>"])
+  expect(prepared.note.body).toMatch(/\[S1\] /)
 })

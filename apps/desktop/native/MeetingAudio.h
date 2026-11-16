@@ -40,6 +40,12 @@ void *mn_audio_start(const char *output_directory, uint32_t channel_flags, char 
 size_t mn_audio_poll(void *handle, char *json, size_t capacity);
 size_t mn_audio_stop(void *handle, char *json, size_t capacity);
 void mn_audio_destroy(void *handle);
+/* Input devices as JSON: {"default": uid|null, "devices": [{"uid", "name"}]}. Opens nothing. */
+size_t mn_audio_input_devices(char *json, size_t capacity);
+/* The microphone of captures that start from now on, by device UID; NULL or "" follows the default input. */
+void mn_audio_set_input_device(const char *uid);
+/* The first preferred language of the person, as macOS spells it ("en-US"). */
+size_t mn_preferred_language(char *output, size_t capacity);
 #ifdef __cplusplus
 }
 #endif

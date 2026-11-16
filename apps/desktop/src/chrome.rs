@@ -12,6 +12,13 @@ type MenuRowAction = Rc<dyn Fn(&mut Cereal, &mut Window, &mut Context<Cereal>)>;
 
 /// The wait before a tooltip shows; the same 500 ms GPUI uses for its own.
 const TOOLTIP_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+/// The sidebar's navigation glyphs, in points.
+const NAV_GLYPH: f32 = 18.;
+/// The window's own controls beside the traffic lights (the sidebar toggle
+/// and search), in points.
+const WINDOW_TOOL: f32 = 18.;
+/// The strip over the sidebar's edge that takes hold of it, in points.
+const SIDEBAR_EDGE: f32 = 6.;
 
 thread_local! {
     /// Bumped by every pointer change over the sidebar footer tools, so a
@@ -246,6 +253,127 @@ impl Cereal {
         cx.stop_propagation();
     }
 
+    /// The sidebar's on-screen width right now: its width as far as it has
+    /// slid out. What the page beside it starts at.
+    pub(crate) fn sidebar_inset(&self) -> f32 {
+        self.sidebar_span * self.sidebar_level
+    }
+
+    /// The sidebar's edge: a 6 pt strip over the hairline that resizes the
+    /// sidebar. Under the pointer, and while it is dragged, a 2 pt line in
+    /// the brand gold fades in and the pointer becomes the left-right
+    /// resize cursor (the only place in the app that changes it). The edge
+    /// follows the pointer exactly, between the limits; a double-click
+    /// returns to the default width. The width is saved when the drag ends.
+    pub(crate) fn render_sidebar_edge(
+        &self,
+        sidebar: crate::motion::Pose,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let dragging = self.sidebar_grab.is_some();
+        // Only beside a sidebar that is out and at rest.
+        let present = sidebar.visible && self.sidebar_open && self.sidebar_level >= 0.999;
+        let lit = self.stage.presence(
+            ("sidebar-edge", 0),
+            present && (dragging || self.sidebar_edge_hovered),
+            crate::motion::SNAPPY,
+        );
+        if !present {
+            return Vec::new();
+        }
+        let t = self.theme();
+        let finish = |this: &mut Self, cx: &mut Context<Self>| {
+            if this.sidebar_grab.take().is_some() {
+                if let Err(error) = crate::desktop_preferences::set_sidebar_width(this.sidebar_width) {
+                    this.show_toast(&error, cx);
+                }
+                cx.notify();
+            }
+        };
+        let strip = div()
+            .id("sidebar-edge")
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(px(self.sidebar_span - SIDEBAR_EDGE / 2.))
+            .w(px(SIDEBAR_EDGE))
+            .cursor(CursorStyle::ResizeLeftRight)
+            .occlude()
+            // Where it is drawn, for scripted runs that press it.
+            .child(crate::onboarding_view::place("sidebar-edge"))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.sidebar_edge_hovered = *hovered;
+                cx.notify();
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    if event.click_count >= 2 {
+                        this.sidebar_grab = None;
+                        this.sidebar_width = crate::desktop_preferences::SIDEBAR_DEFAULT;
+                        if let Err(error) =
+                            crate::desktop_preferences::set_sidebar_width(this.sidebar_width)
+                        {
+                            this.show_toast(&error, cx);
+                        }
+                    } else {
+                        this.sidebar_grab = Some(f32::from(event.position.x) - this.sidebar_span);
+                    }
+                    cx.notify();
+                }),
+            )
+            .when(lit.visible, |strip| {
+                strip.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(px((SIDEBAR_EDGE - 2.) / 2.))
+                        .w(px(2.))
+                        .bg(t.accent.opacity(lit.fade.clamp(0., 1.))),
+                )
+            });
+        let mut layers = vec![strip.into_any_element()];
+        if let Some(grab) = self.sidebar_grab {
+            // While it is held the whole window follows the pointer, so the
+            // drag and its cursor survive the pointer outrunning the strip.
+            layers.push(
+                div()
+                    .id("sidebar-edge-drag")
+                    .absolute()
+                    .inset_0()
+                    .cursor(CursorStyle::ResizeLeftRight)
+                    .occlude()
+                    .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, window, cx| {
+                        if event.pressed_button != Some(MouseButton::Left) {
+                            // The button came up somewhere it was not seen.
+                            finish(this, cx);
+                            return;
+                        }
+                        let width = crate::desktop_preferences::sidebar_width_in(
+                            f32::from(event.position.x) - grab,
+                            f32::from(window.viewport_size().width),
+                        );
+                        if width != this.sidebar_width {
+                            this.sidebar_width = width;
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| finish(this, cx)),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| finish(this, cx)),
+                    )
+                    .into_any_element(),
+            );
+        }
+        layers
+    }
+
     pub fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
         let t = self.theme();
         let glide = self.stage.glide("sidebar");
@@ -256,7 +384,7 @@ impl Cereal {
             self.render_workspace_sidebar(cx)
         };
         div()
-            .w(px(192.))
+            .w(px(self.sidebar_span))
             .h_full()
             .flex_shrink_0()
             .flex()
@@ -274,18 +402,22 @@ impl Cereal {
                     .flex_shrink_0()
                     .flex()
                     .items_center()
+                    // On the traffic lights' centre line (22 pt down), where
+                    // the same two controls sit in the header when the
+                    // sidebar is hidden.
+                    .pb(px(4.))
                     .pl(px(88.))
                     .gap(px(4.))
                     .child(
-                        tool("sidebar-toggle", "sidebar-expanded", t).on_click(cx.listener(
-                            |this, _, _, cx| {
+                        tool_sized("sidebar-toggle", "sidebar-expanded", WINDOW_TOOL, t).on_click(
+                            cx.listener(|this, _, _, cx| {
                                 this.sidebar_open = false;
                                 cx.notify();
-                            },
-                        )),
+                            }),
+                        ),
                     )
                     .child(
-                        tool("sidebar-search", "search", t)
+                        tool_sized("sidebar-search", "search", WINDOW_TOOL, t)
                             .on_click(cx.listener(|this, _, w, cx| this.open_search(w, cx))),
                     ),
             )
@@ -298,7 +430,7 @@ impl Cereal {
     }
 
     /// A 20 px rounded tile holding a space's glyph.
-    fn space_tile(&self, symbol: &str) -> Div {
+    pub(crate) fn space_tile(&self, symbol: &str) -> Div {
         let t = self.theme();
         div()
             .size(px(20.))
@@ -306,33 +438,43 @@ impl Cereal {
             .rounded(px(5.))
             .border_1()
             .border_color(t.hairline)
-            .bg(t.fill)
+            // A step under the resting fill, with a quiet glyph: the tile
+            // marks the row, the label names it.
+            .bg(t.fill.opacity(0.8))
             .flex()
             .items_center()
             .justify_center()
-            .child(icon(symbol, 12., t.secondary))
+            .child(icon(symbol, 12., t.muted))
     }
 
     fn render_workspace_sidebar(&self, cx: &mut Context<Self>) -> Div {
         let t = self.theme();
         let glide = self.stage.glide("sidebar");
+        let (threads, thread_selected) = self.render_sidebar_chat_threads(cx);
         let spaces = div()
             .flex()
             .flex_col()
             .px(px(8.))
-            .mt(px(19.))
+            .mt(px(18.))
+            // Rows 28 pt tall on a 29 pt pitch, as the navigation above.
+            .gap(px(1.))
             .child(
                 div()
                     .h(px(26.))
                     .flex()
                     .items_center()
                     .px(px(4.))
-                    .child(small("Spaces", t)),
+                    // A heading in the labels' own ink, a size down.
+                    .child(
+                        small("Spaces", t)
+                            .text_color(t.secondary)
+                            .font_weight(FontWeight::MEDIUM),
+                    ),
             )
             .child(
                 div()
                     .id("My notes")
-                    .h(px(29.))
+                    .h(px(28.))
                     .px(px(4.))
                     .flex()
                     .items_center()
@@ -348,7 +490,9 @@ impl Cereal {
                     .child(self.space_tile("lock-solid"))
                     .child(div().flex_1().min_w_0().truncate().child("My notes"))
                     .reach().on_click(cx.listener(|this, _, _, cx| this.navigate(Screen::MyNotes, cx))),
-            );
+            )
+            // The team space, under it (see `team_space.rs`).
+            .children(self.team_space_row(cx));
         div()
             .flex_1()
             .min_h_0()
@@ -361,15 +505,19 @@ impl Cereal {
                     .flex()
                     .flex_col()
                     .gap(px(1.))
-                    .child(self.nav_row("Home", "house", Screen::Home, cx))
-                    .child(self.nav_row("Shared with me", "people", Screen::Shared, cx))
-                    .child(self.nav_row("Chat", "speech-bubble", Screen::Chat, cx))
-                    .children(self.render_sidebar_chat_threads(cx)),
+                    .child(self.nav_row("Home", "house", Screen::Home, true, cx))
+                    .child(self.nav_row("Shared with me", "people", Screen::Shared, true, cx))
+                    // The conversation on the page carries the highlight in
+                    // Chat's place while it is listed beneath.
+                    .child(self.nav_row("Chat", "speech-bubble", Screen::Chat, !thread_selected, cx))
+                    .children(threads),
             )
             .child(spaces)
             .child(div().flex_1())
             .child(self.render_sidebar_footer_tools(cx))
-            .child(div().mx(px(12.)).h(px(1.)).bg(t.hairline))
+            // Quieter than the sidebar's own edge: it parts two rows, not
+            // two surfaces.
+            .child(div().mx(px(12.)).h(px(1.)).flex_shrink_0().bg(t.hairline.opacity(0.65)))
             .child(
                 div()
                     .id("workspace-switcher")
@@ -393,7 +541,7 @@ impl Cereal {
                             .font_weight(FontWeight::MEDIUM)
                             .child(self.workspace_name()),
                     )
-                    .child(icon("chevrons", 14., t.muted))
+                    .child(icon("chevrons-switcher", 16., t.muted))
                     .reach().on_click(cx.listener(|this, _, _, cx| {
                         if this.menu == Some(Menu::Workspace) {
                             this.menu = None;
@@ -516,9 +664,14 @@ impl Cereal {
     /// first, each with its age; the eighth faded when more follow, and
     /// "Show N more" to list the rest. They unfold beneath Chat and fold
     /// back into it, 29 px a row, as the folders do.
-    fn render_sidebar_chat_threads(&self, cx: &mut Context<Self>) -> Option<Div> {
+    ///
+    /// Also says whether one of the rows is the conversation on the page:
+    /// that row then has the sidebar's highlight, not Chat.
+    fn render_sidebar_chat_threads(&self, cx: &mut Context<Self>) -> (Option<Div>, bool) {
         const SHOWN: usize = 8;
         let t = self.theme();
+        let glide = self.stage.glide("sidebar");
+        let mut selected = false;
         let open = self.screen == Screen::Chat && self.current_note.is_none();
         let threads = self.chat_threads();
         let pose = self.stage.presence(
@@ -527,7 +680,7 @@ impl Cereal {
             crate::motion::SNAPPY,
         );
         if !pose.visible {
-            return None;
+            return (None, false);
         }
         let listed = if self.chat_threads_expanded {
             threads.len()
@@ -545,6 +698,7 @@ impl Cereal {
             accounts
         });
         let mut rows = div().flex().flex_col().gap(px(1.));
+        let fading = |index: usize| more > 0 && index + 1 == count;
         for (index, thread) in threads.into_iter().take(listed).enumerate() {
             let (id, account) = (thread.id.clone(), thread.account.clone());
             let key = crate::lazy::key(&thread.id);
@@ -560,25 +714,36 @@ impl Cereal {
                     .items_center()
                     .gap(px(8.))
                     .rounded(px(8.))
-                    // The conversation on the page reads darker; Chat keeps
-                    // the sidebar's highlight.
-                    .text_color(if shown { t.text } else { t.secondary })
+                    // The conversation on the page has the sidebar's
+                    // highlight; its title stays in the rows' own ink.
+                    .text_color(t.secondary)
                     .cursor_default()
-                    // The last row fades out when the list goes on.
-                    .when(more > 0 && index + 1 == count, |row| row.opacity(0.45))
                     .child(row_feedback(t, 8.))
+                    .when(shown && open, |row| {
+                        selected = true;
+                        row.child(glide.probe(("chat-thread", key)))
+                    })
+                    // The last row fades out when the list goes on (its
+                    // words, not the highlight under them).
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
+                            .when(fading(index), |title| title.opacity(0.45))
                             .child(thread.display_title().to_owned()),
                     )
+                    // Its age, a step quieter than any label: read after
+                    // the title, never before it.
                     .children(crate::chat::thread_age(&thread.updated_at, now).map(|age| {
                         div()
                             .flex_shrink_0()
                             .text_size(px(12.))
-                            .text_color(t.muted)
+                            // (A point lower: the smaller figures sit on the
+                            // title's baseline, not its centre line.)
+                            .pt(px(1.))
+                            .text_color(t.muted.opacity(0.7))
+                            .when(fading(index), |age| age.opacity(0.45))
                             .child(age)
                     }))
                     .reach()
@@ -593,16 +758,18 @@ impl Cereal {
                     .id("sidebar-chat-threads-more")
                     .h(px(28.))
                     .w_full()
-                    .pl(px(16.))
+                    // The arrow centred 30 pt in, under the navigation
+                    // glyphs' right half; its label 43 pt in.
+                    .pl(px(14.))
                     .flex()
                     .items_center()
-                    .gap(px(7.))
+                    .gap(px(5.))
                     .rounded(px(8.))
-                    .text_color(t.muted)
+                    .text_color(t.secondary)
                     .cursor_default()
                     .child(row_feedback(t, 8.))
-                    .child(icon("arrow-down", 12., t.muted))
-                    .child(format!("Show {more} more"))
+                    .child(icon("arrow-down", 16., t.secondary))
+                    .child(div().flex_1().min_w_0().truncate().child(format!("Show {more} more")))
                     .reach()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         // All of those read, and the next page from each
@@ -622,7 +789,7 @@ impl Cereal {
                 .overflow_hidden()
                 .opacity(pose.fade);
         }
-        Some(rows)
+        (Some(rows), selected)
     }
 
     fn nav_row(
@@ -630,6 +797,9 @@ impl Cereal {
         label: &'static str,
         symbol: &str,
         screen: Screen,
+        // Whether the row may carry the highlight when its page is open
+        // (Chat hands it to the conversation listed beneath).
+        highlight: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let t = self.theme();
@@ -637,18 +807,23 @@ impl Cereal {
             .id(label)
             .h(px(28.))
             .w_full()
-            .px(px(6.))
+            // An 18 pt glyph centred 22 pt in, its label 38 pt in.
+            .pl(px(5.))
+            .pr(px(6.))
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(px(7.))
             .rounded(px(8.))
             .text_color(t.secondary)
             .cursor_default()
             .child(row_feedback(t, 8.))
-            .when(self.screen == screen && self.current_note.is_none(), |s| {
-                s.child(self.stage.glide("sidebar").probe(label))
-            })
-            .child(icon(symbol, 16., t.secondary))
+            .when(
+                highlight && self.screen == screen && self.current_note.is_none(),
+                |s| s.child(self.stage.glide("sidebar").probe(label)),
+            )
+            // A size up from the toolbar glyphs and a step quieter than the
+            // label, so the words lead and the glyphs mark the rows.
+            .child(icon(symbol, NAV_GLYPH, t.muted))
             .child(div().flex_1().min_w_0().truncate().child(label))
             .reach().on_click(cx.listener(move |this, _, _, cx| this.navigate(screen, cx)))
     }
@@ -716,14 +891,14 @@ impl Cereal {
                     .gap(px(5.))
                     .ml(px(80. * (1. - self.sidebar_level)))
                     .when(!self.sidebar_open, |s| {
-                        s.child(tool("open-sidebar", "sidebar-collapsed", t).on_click(
+                        s.child(tool_sized("open-sidebar", "sidebar-collapsed", WINDOW_TOOL, t).on_click(
                             cx.listener(|this, _, _, cx| {
                                 this.sidebar_open = true;
                                 cx.notify();
                             }),
                         ))
                         .child(
-                            tool("collapsed-header-search", "search", t).on_click(
+                            tool_sized("collapsed-header-search", "search", WINDOW_TOOL, t).on_click(
                                 cx.listener(|this, _, window, cx| this.open_search(window, cx)),
                             ),
                         )
@@ -805,7 +980,7 @@ impl Cereal {
                             .absolute()
                             .top(px(6.))
                             .left(relative(0.5))
-                            .ml(px(-width / 2. - 96. * self.sidebar_level))
+                            .ml(px(-width / 2. - self.sidebar_inset() / 2.))
                             .w(px(width))
                             .h(px(32.))
                             .pl(px(10.))
@@ -1172,6 +1347,13 @@ impl Cereal {
                     .child(self.render_trash_popover(pose, window, cx))
                     .into_any_element();
             }
+            // Who the note is shared with, the people picker and the link's
+            // reach: `share_popover.rs`.
+            Menu::Share => {
+                return overlay
+                    .child(self.render_share_popover(pose, window, cx))
+                    .into_any_element();
+            }
             Menu::NoteDetails | Menu::CalendarEvent => {
                 let anchors = self.note_metadata_anchors(window);
                 // The event picker unfolds from the details card and folds
@@ -1214,7 +1396,7 @@ impl Cereal {
                     )
                     .into_any_element();
             }
-            Menu::RecordingSettings => {
+            Menu::RecordingSettings | Menu::RecordingInput | Menu::RecordingLanguage => {
                 let viewport_width = f32::from(window.viewport_size().width);
                 let enhanced = self
                     .current_note
@@ -1224,10 +1406,12 @@ impl Cereal {
                     });
                 let panel_width =
                     (viewport_width.min(if enhanced { 682. } else { 672. }) + 8.).min(682.);
-                let popup_width = 272.;
-                let left = recording_popup_left(viewport_width, panel_width, popup_width);
-                let panel = self.recording_settings(cx);
-                // It grows upwards out of the transcript footer controls.
+                // Each grows upwards out of its own control in the
+                // transcript panel's footer.
+                let (panel, popup_width, inset) = self.recording_popover(&menu, cx);
+                let left = recording_popup_left(viewport_width, panel_width, popup_width)
+                    - (inset - 12.).min(viewport_width);
+                let left = left.clamp(12., (viewport_width - popup_width - 12.).max(12.));
                 return overlay
                     .child(div().absolute().left(px(left)).bottom(px(83.)).child(pop(
                         panel.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
@@ -1346,148 +1530,43 @@ impl Cereal {
                     pose,
                 )));
             }
-            Menu::Note | Menu::Share | Menu::Templates => {
-                content = content.w(px(if menu == Menu::Note || menu == Menu::Templates {
-                    220.
-                } else {
-                    230.
-                }));
-                if menu == Menu::Share {
-                    // The owner of a note is the person signed in to the
-                    // account the note belongs to.
-                    let account = self
-                        .current_note
-                        .and_then(crate::accounts::session_of_note);
-                    let owner = account
-                        .as_ref()
-                        .map(|session| session.user.name.clone())
-                        .filter(|name| !name.trim().is_empty())
-                        .unwrap_or_else(|| "Me".into());
-                    let initial = owner
-                        .chars()
-                        .next()
-                        .map(|character| character.to_uppercase().collect::<String>())
-                        .unwrap_or_else(|| "M".into());
-                    let connected = crate::server::enabled();
-                    content = content
-                        .w(px(400.))
-                        .child(
-                            div()
-                                .px(px(10.))
-                                .py(px(8.))
-                                .text_size(px(12.))
-                                .text_color(t.muted)
-                                .child("People with access"),
-                        )
-                        .child(
-                            div()
-                                .px(px(10.))
-                                .py(px(7.))
-                                .flex()
-                                .items_center()
-                                .gap(px(10.))
-                                .child(
-                                    div()
-                                        .size(px(28.))
-                                        .rounded_full()
-                                        .bg(t.fill)
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .text_size(px(12.))
-                                        .child(initial),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(2.))
-                                        .text_size(px(13.))
-                                        .child(format!("{owner} (you)"))
-                                        .child(small(
-                                            account
-                                                .as_ref()
-                                                .map(|account| account.user.email.clone())
-                                                .unwrap_or_else(|| "Sign in to your server".into()),
-                                            t,
-                                        )),
-                                )
-                                .child(small("Owner", t)),
-                        )
-                        .child(separator(t).my(px(6.)))
-                        // One footer row: who the link reaches, and the action.
-                        .child(
-                            div()
-                                .px(px(10.))
-                                .py(px(6.))
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .child(icon("globe", 15., t.secondary))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_size(px(13.))
-                                        .line_height(px(18.))
-                                        .child(
-                                            "Anyone signed in to this server who has the link can read it.",
-                                        ),
-                                )
-                                .child(if connected {
-                                    pill("share-copy-link", "Copy link", "", t).on_click(
-                                        cx.listener(|this, _, _, cx| {
-                                            this.menu = None;
-                                            if let Some(id) = this.current_note {
-                                                this.server_action(
-                                                    id,
-                                                    crate::server::Action::Share,
-                                                    cx,
-                                                );
-                                            }
-                                        }),
-                                    )
-                                } else {
-                                    // Sharing needs a server; say so instead
-                                    // of offering a button that cannot work.
-                                    pill("share-copy-link", "Copy link", "", t)
-                                        .opacity(DISABLED)
-                                        .cursor(CursorStyle::Arrow)
-                                        .tooltip(move |_, cx| {
-                                            cx.new(|_| crate::ui::ToolTip::new(
-                                                "Connect to your server to share a note",
-                                                t,
-                                            ))
-                                            .into()
-                                        })
-                                }),
-                        )
-                        .child(
-                            div()
-                                .px(px(10.))
-                                .pt(px(2.))
-                                .pb(px(6.))
-                                .text_size(px(12.))
-                                .line_height(px(16.))
-                                .text_color(t.muted)
-                                .child("Copying creates a read-only snapshot. Your transcript stays private."),
-                        );
-                    if connected {
-                        content = content.child(separator(t).my(px(4.))).child(self.menu_row(
-                            "Revoke shared links",
-                            "lock",
-                            cx,
-                            |this, _, cx| {
-                                this.menu = None;
-                                if let Some(id) = this.current_note {
-                                    this.server_action(id, crate::server::Action::RevokeShares, cx);
-                                }
-                            },
-                        ));
-                    }
-                } else if menu == Menu::Note {
+            Menu::Theme => {
+                // 178 px of surface inside the hairline, rows on a 28 px
+                // pitch, a check at the end of the scheme in use.
+                let current = self.workspace.settings.theme;
+                let width = 180.;
+                content = content.w(px(width)).p(px(4.));
+                for mode in crate::model::ThemeMode::ALL {
+                    content = content.child(
+                        self.menu_row(mode.label(), "", cx, move |this, _, cx| {
+                            this.menu = None;
+                            this.workspace.settings.set_theme(mode);
+                            this.workspace.settings_changed();
+                            this.persist(cx);
+                            cx.notify();
+                        })
+                        .px(px(8.))
+                        .child(div().flex_1())
+                        .when(mode == current, |row| row.child(icon("check", 14., t.secondary))),
+                    );
+                }
+                // Over its button, a little proud of it at the top and the
+                // trailing edge, as a pop-up button's menu is.
+                let button = self.theme_anchor.get();
+                let origin = popover_origin(
+                    point(button.right() + px(4.) - px(width), button.top() - px(4.)),
+                    size(px(width), px(crate::model::ThemeMode::ALL.len() as f32 * 28. + 10.)),
+                    window.viewport_size(),
+                );
+                overlay = overlay.child(div().absolute().left(origin.x).top(origin.y).child(pop(
+                    content.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
+                    Pop::menu((0.9, 0.)),
+                    pose,
+                )));
+            }
+            Menu::Note | Menu::Templates => {
+                content = content.w(px(220.));
+                if menu == Menu::Note {
                     if self
                         .current_note
                         .and_then(|id| self.workspace.note(id))
@@ -1657,7 +1736,6 @@ impl Cereal {
                         .when(menu == Menu::Templates, |d| {
                             d.top(px(130.)).left(relative(0.5)).ml(px(-278.))
                         })
-                        .when(menu == Menu::Share, |d| d.top(px(40.)).right(px(8.)))
                         .when(menu == Menu::Note, |d| {
                             let has_share = self
                                 .current_note
@@ -1671,7 +1749,6 @@ impl Cereal {
                             // Each menu grows out of the control that opened it.
                             Pop::menu(match menu {
                                 Menu::Note => (0.92, 0.),
-                                Menu::Share => (0.8, 0.),
                                 _ => (0.15, 0.),
                             }),
                             pose,
@@ -1763,7 +1840,7 @@ impl Cereal {
         overlay.into_any_element()
     }
 
-    fn menu_row(
+    pub(crate) fn menu_row(
         &self,
         label: impl Into<SharedString>,
         symbol: &str,
@@ -2002,6 +2079,7 @@ pub fn header_action(screen: Screen) -> Option<HeaderAction> {
 pub fn screen_icon(screen: Screen) -> &'static str {
     match screen {
         Screen::Shared => "people",
+        Screen::TeamSpace | Screen::TeamNote => "users",
         Screen::Link => "link-chain",
         Screen::Chat => "speech-bubble",
         Screen::MyNotes => "lock-solid",
@@ -2017,7 +2095,7 @@ pub fn screen_icon(screen: Screen) -> &'static str {
 pub fn back_label(screen: Screen, target: Screen) -> Option<BackLabel> {
     match screen {
         Screen::Home | Screen::Login | Screen::Account | Screen::Welcome => None,
-        Screen::MyNotes | Screen::Favorites => Some(BackLabel::Text),
+        Screen::MyNotes | Screen::Favorites | Screen::TeamSpace => Some(BackLabel::Text),
         _ => Some(BackLabel::Icon(screen_icon(target))),
     }
 }
@@ -2168,6 +2246,10 @@ impl Cereal {
             self.transcript_find_open = false;
         }
         let leave = self.current_note == Some(id);
+        // A note in Trash is no longer shown to the team.
+        self.team_space_note_trashed(id, cx);
+        // Nor read by the people it is shared with, until it is restored.
+        self.share_note_trashed(id, true, cx);
         if let Some(note) = self.workspace.note_mut(id) {
             note.trashed = true;
         }

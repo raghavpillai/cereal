@@ -87,6 +87,55 @@ fn scrolling(steps: &mut Vec<Step>, x: f32, y: f32, by: f32) {
     }
 }
 
+/// Notes being generated, `p-fix-gen-…` (run with `CEREAL_TOUR=p-fix-gen`,
+/// `--dark` for the dark theme): a recording just stopped, offering
+/// "Generate notes" and "Resume"; the notes part-way written; the finished
+/// notes with nested bullets and the chat link; the same scrolled so the
+/// text runs under the bar. The notes are scripted; no server or model is
+/// involved.
+#[cfg(debug_assertions)]
+fn notes_generation_steps() -> Vec<Step> {
+    const TITLE: &str = "Tidepool UI critique and design fixes";
+    const NOTES: &str = "# Tidepool UI Comparison\n- Benchmarking Tidepool against Lumen across several interaction patterns\n- Overall: Lumen's polish is noticeably ahead in animation, popover behavior and search\n\n# Popover and Animation Issues\n- Click-outside behavior: Lumen closes the popover; ours stays open\n  - Fix dismiss-on-outside-click\n- Open/close animation needs a full rework\n  - Lumen's popover grows out of the event block and shrinks back\n  - Ours pops in; corner radius looks wrong mid-animation\n- Sync shimmer: Lumen's is significantly better\n  - Unclear how it's done, but worth investigating\n\n# Toolbar and Layout Fixes\n- Time zone picker: Lumen places it beside the week header\n  - Week numbers toggle should follow the same pattern\n- Search field sits 2px low and is worse than Lumen's\n  - Needs a fix to match their expanding layout\n- Duration label on event blocks: purpose unclear, needs review\n- Colored event tabs: unclear what they map to\n\n# Elements to Remove\n- Popover minimize button: not needed\n- Help icon: definitely not needed\n- Toolbar hover tooltips: fine as they are\n\n---\n\nChat with meeting transcript: https://notes.example.com/notes/be954608-a942-4d1f-bb83-a6a252a5106e/chat";
+    vec![
+        step("p-fix-gen-recording", 1500, |view, cx| {
+            view.navigate(Screen::Home, cx);
+            if let Some(note) = view.workspace.note_mut(1) {
+                note.enhanced.clear();
+                note.generated_revision = None;
+                note.title = String::new();
+            }
+            view.open_note(1, cx);
+            view.active_tab = NoteTab::Notes;
+            view.start_recording_preview(1, cx);
+        }),
+        step("p-fix-gen-stopped", 1500, |view, cx| {
+            view.recording_last_click = None;
+            view.recording_changed_at = None;
+            view.stop_recording_preview(cx);
+        }),
+        step("p-fix-gen-streaming", 2500, |view, cx| {
+            view.start_scripted_generation(1, Some(TITLE), NOTES, Some(620), cx);
+        }),
+        step("p-fix-gen-finished", 2500, |view, cx| {
+            view.generation.cancel();
+            view.generation_draft.clear();
+            if let Some(note) = view.workspace.note_mut(1) {
+                note.title = String::new();
+            }
+            view.start_scripted_generation(1, Some(TITLE), NOTES, None, cx);
+        }),
+        step("p-fix-gen-fade", 1500, |view, _| {
+            view.note_scroll.set_offset(point(px(0.), px(-260.)));
+        }),
+    ]
+}
+
+#[cfg(not(debug_assertions))]
+fn notes_generation_steps() -> Vec<Step> {
+    Vec::new()
+}
+
 /// States to sit in while an outside tool samples the process (`i-…`): each
 /// holds still for fourteen seconds and then reports how often it rendered.
 fn idle_steps() -> Vec<Step> {
@@ -464,10 +513,10 @@ fn steps() -> Vec<Step> {
         }),
         // In memory only: the tour never persists a changed preference.
         step("settings-toggle", 700, |view, _| {
-            view.workspace.settings.dark_mode = !view.workspace.settings.dark_mode
+            view.workspace.settings.force_dark(!view.workspace.settings.dark_mode)
         }),
         step("settings-toggle-back", 700, |view, _| {
-            view.workspace.settings.dark_mode = !view.workspace.settings.dark_mode
+            view.workspace.settings.force_dark(!view.workspace.settings.dark_mode)
         }),
         step("note-open", 950, |view, cx| view.open_note(1, cx)),
         step("tab-notes", 750, |view, _| view.active_tab = NoteTab::Notes),
@@ -845,6 +894,200 @@ fn chat_parity_steps() -> Vec<Step> {
     Vec::new()
 }
 
+/// The thoughts above a chat answer, `p-think-…` (stills) and `m-think-…`
+/// (held while they move, for a burst of captures): an answered turn with the
+/// model's reasoning and its meeting lookups, closed, open, with one lookup's
+/// meetings open; an answer being thought about, its reasoning arriving; the
+/// model menu; and an answer's typography across notes and about one note.
+/// Run with `CEREAL_TOUR=p-think,m-think` (add `--dark` for the dark theme).
+/// Everything is seeded or scripted: no server is involved.
+#[cfg(debug_assertions)]
+fn thinking_steps() -> Vec<Step> {
+    const SEARCH: &str = "61000000-0000-4000-8000-000000000001";
+    const READ: &str = "61000000-0000-4000-8000-000000000002";
+    const PLAN: &str = "61000000-0000-4000-8000-000000000003";
+    fn day(back: i64) -> String {
+        (chrono::Local::now().date_naive() - chrono::Duration::days(back)).format("%Y-%m-%d").to_string()
+    }
+    fn tool(call: &str, name: &str, status: &str, label: &str, meetings: &[(&str, i64)]) -> Option<meeting_notes_api_types::ChatToolProgressDTO> {
+        let results: Vec<_> = meetings
+            .iter()
+            .enumerate()
+            .map(|(index, (title, back))| {
+                serde_json::json!({ "noteId": format!("62000000-0000-4000-8000-{index:012}"), "title": title, "date": day(*back) })
+            })
+            .collect();
+        let mut value = serde_json::json!({ "callId": call, "name": name, "status": status, "label": label });
+        if !results.is_empty() {
+            value["resultCount"] = serde_json::json!(results.len());
+            value["results"] = serde_json::json!(results);
+        }
+        serde_json::from_value(value).ok()
+    }
+    const FOUND: [(&str, i64); 6] = [
+        ("Quilfeather outage review", 0),
+        ("Brambling cash rollout", 0),
+        ("Weekly team standup", 1),
+        ("Product & design sync", 3),
+        ("Customer discovery · Northstar", 3),
+        ("Grayweather retrospective", 400),
+    ];
+    const ANSWER: &str = "You have two open follow-ups from this week, both from the outage review.\n\n\
+        - **Alerting:** add an alert at 90 seconds of queue delay before the next rotation. [[S1]][[S2]]\n\
+        - **Rollout:** the Brambling cash rollout stays paused until the certificate rotation is confirmed. [[S3]]\n\
+        - **Owners:** Jules takes the alert; Maya confirms the rotation on Thursday. [[S57]][[S58]]\n\n\
+        Nothing else was assigned to you in the last seven days.";
+    fn seed(view: &mut Cereal, reasoning: bool) {
+        view.chat_messages.clear();
+        view.chat_annotations.clear();
+        view.chat_messages.push(("What do I still owe people this week?".into(), ANSWER.into()));
+        let tools: Vec<_> = [
+            tool(SEARCH, "search_meetings", "completed", "Found 6 meetings", &FOUND),
+            tool(READ, "get_meetings", "completed", "Looked deeper into 2 notes", &FOUND[..2]),
+            tool(PLAN, "search_transcripts", "failed", "Search planning unavailable; using direct meeting lookup", &[]),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let citations: Vec<_> = [1, 2, 3, 57, 58]
+            .iter()
+            .map(|number| {
+                serde_json::json!({
+                    "id": format!("S{number}"), "noteId": "419d65d1-7a2c-44ca-84cc-ad489522d561", "title": "Quilfeather outage review",
+                    "source": "summary", "segmentId": null, "startMs": null,
+                    "quote": "Add an alert at 90 seconds of queue delay.", "transcriptRevision": 7
+                })
+            })
+            .collect();
+        let thoughts = if reasoning {
+            serde_json::json!([
+                { "afterTools": 0, "text": "**Searching for this week's commitments**\n\nI need the meetings from the last seven days and what each one left open. I'll search for follow-ups and action items first, then read the notes of the meetings that look relevant, so the list is complete rather than a sample." },
+                { "afterTools": 1, "text": "**Reading the two that matter**\n\nThe outage review and the rollout meeting both mention open work. The others are status updates with nothing assigned, so I'll read just these two." },
+                { "afterTools": 3, "text": "**Checking owners**\n\nThe notes name an owner for each item. I'll keep the user's own items first and say who has the rest." },
+            ])
+        } else {
+            serde_json::json!([])
+        };
+        if let Ok(notes) = serde_json::from_value(serde_json::json!({ "tools": tools, "reasoning": thoughts, "citations": citations, "elapsed_ms": 5200 })) {
+            view.chat_annotations.insert(0, notes);
+        }
+        view.assistant_open = true;
+    }
+    fn live(slow_start: u64) -> std::sync::mpsc::Receiver<crate::server::ChatStreamEvent> {
+        use crate::server::ChatStreamEvent;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let pause = |ms: u64| std::thread::sleep(slow(Duration::from_millis(ms)));
+            let think = |text: &str| {
+                for word in text.split_inclusive(' ') {
+                    if sender.send(ChatStreamEvent::Reasoning(word.into())).is_err() {
+                        return;
+                    }
+                    std::thread::sleep(slow(Duration::from_millis(45)));
+                }
+            };
+            pause(slow_start);
+            think("**Searching for this week's commitments**\n\nI need the meetings from the last seven days and what each one left open. I'll search for follow-ups first, then read the notes that look relevant.");
+            if let Some(tool) = tool(SEARCH, "search_meetings", "running", "Searching meetings", &[]) {
+                let _ = sender.send(ChatStreamEvent::Tool(tool));
+            }
+            pause(1600);
+            if let Some(tool) = tool(SEARCH, "search_meetings", "completed", "Found 6 meetings", &FOUND) {
+                let _ = sender.send(ChatStreamEvent::Tool(tool));
+            }
+            think("**Reading the two that matter**\n\nThe outage review and the rollout meeting both mention open work, so I'll read just these two.");
+            if let Some(tool) = tool(READ, "get_meetings", "running", "Reading meeting notes", &[]) {
+                let _ = sender.send(ChatStreamEvent::Tool(tool));
+            }
+            pause(1400);
+            if let Some(tool) = tool(READ, "get_meetings", "completed", "Looked deeper into 2 notes", &FOUND[..2]) {
+                let _ = sender.send(ChatStreamEvent::Tool(tool));
+            }
+            pause(500);
+            for word in ANSWER.replace("[[S57]][[S58]]", "").split_inclusive(' ') {
+                if sender.send(ChatStreamEvent::Delta(word.into())).is_err() {
+                    return;
+                }
+                std::thread::sleep(slow(Duration::from_millis(18)));
+            }
+            let _ = sender.send(ChatStreamEvent::Done);
+        });
+        receiver
+    }
+    fn models(view: &mut Cereal) {
+        view.chat_models = serde_json::from_value(serde_json::json!([
+            { "provider": "openai", "model": "gpt-6-luna" },
+            { "provider": "openrouter", "model": "anthropic/claude-sonnet-5-5" },
+            { "provider": "openrouter", "model": "google/gemini-4-carbon" },
+            { "provider": "openrouter", "model": "x-ai/grok-4.7" },
+            { "provider": "openai", "model": "gpt-6.1-sol" },
+            { "provider": "openai_compatible", "model": "llama3.2:3b" },
+        ]))
+        .unwrap_or_default();
+    }
+    let notes = |view: &mut Cereal, change: fn(&mut crate::chat::ChatTurnAnnotations)| {
+        if let Some(notes) = view.chat_annotations.get_mut(&0) {
+            change(notes);
+        }
+    };
+    vec![
+        windowed("p-think-collapsed", 900, move |view, window, cx| {
+            view.navigate(Screen::Home, cx);
+            view.clear_chat(cx);
+            models(view);
+            seed(view, true);
+            view.focus.focus(window);
+        }),
+        step("m-think-opening", 1400, move |view, _| notes(view, |notes| notes.set_thoughts_open(Some(true)))),
+        step("p-think-open", 900, |_, _| {}),
+        step("m-think-step-opening", 1400, move |view, _| notes(view, |notes| notes.toggle_step(SEARCH))),
+        step("p-think-step-open", 900, |_, _| {}),
+        step("m-think-step-closing", 1400, move |view, _| notes(view, |notes| notes.toggle_step(SEARCH))),
+        step("m-think-closing", 1400, move |view, _| notes(view, |notes| notes.set_thoughts_open(Some(false)))),
+        // A provider that gave no reasoning: the lookups alone.
+        step("p-think-steps-only", 900, |view, _| {
+            seed(view, false);
+            if let Some(notes) = view.chat_annotations.get_mut(&0) {
+                notes.set_thoughts_open(Some(true));
+            }
+        }),
+        // Thought about live: waiting, reasoning arriving, a lookup under
+        // way, then the answer starting and the thoughts folding away.
+        windowed("m-think-live", 16_000, |view, window, cx| {
+            view.clear_chat(cx);
+            view.ask.read(cx).focus_handle.focus(window);
+            view.start_scripted_chat("What do I still owe people this week?".into(), live(1800), cx);
+        }),
+        step("p-think-live-done", 900, |view, _| view.chat_scroll.set_offset(Point::default())),
+        // The model button and its menu.
+        step("p-think-model-button", 900, |view, _| seed(view, true)),
+        step("p-think-model-menu", 900, |view, cx| {
+            view.toggle_chat_model_picker(cx);
+        }),
+        input("p-think-model-menu-down", 700, |window, cx| {
+            press_key(window, cx, "down");
+            press_key(window, cx, "down");
+        }),
+        input("p-think-model-menu-chosen", 900, |window, cx| press_key(window, cx, "enter")),
+        // The same answer about one note: no source marks.
+        step("p-think-note-chat", 900, |view, cx| {
+            view.close_chat_surface(cx);
+            view.open_note(1, cx);
+            seed(view, true);
+        }),
+        step("p-think-end", 300, |view, cx| {
+            view.close_chat_surface(cx);
+            view.clear_chat(cx);
+            view.chat_models.clear();
+            view.navigate(Screen::Home, cx);
+        }),
+    ]
+}
+#[cfg(not(debug_assertions))]
+fn thinking_steps() -> Vec<Step> {
+    Vec::new()
+}
+
 /// Surfaces reached from somewhere other than their own button, `p-fix-…`:
 /// the recent chats from Home's focused composer, Trash from another page
 /// and from the command palette, and the line generated notes end with.
@@ -878,6 +1121,22 @@ fn surface_steps() -> Vec<Step> {
             view.menu = None;
             view.open_settings(crate::screens::SettingsTab::Preferences, cx);
         }),
+        // Settings › Appearance: the theme row and the Dock icons, in both
+        // themes, then the theme menu open (`CEREAL_TOUR=p-appearance`).
+        step("p-appearance-light", 900, |view, cx| {
+            view.menu = None;
+            view.workspace.settings.force_dark(false);
+            view.open_settings(crate::screens::SettingsTab::Preferences, cx);
+        }),
+        step("p-appearance-dark", 900, |view, _| view.workspace.settings.force_dark(true)),
+        step("p-appearance-dark-menu", 900, |view, _| view.menu = Some(Menu::Theme)),
+        step("p-appearance-system-menu", 900, |view, _| {
+            view.workspace.settings.set_theme(crate::model::ThemeMode::System)
+        }),
+        step("p-appearance-light-menu", 900, |view, _| {
+            view.workspace.settings.force_dark(false)
+        }),
+        step("p-appearance-end", 300, |view, _| view.menu = None),
         // From a page without the sidebar's footer: Home, with the popover.
         step("p-fix-trash-from-settings", 1200, |view, cx| view.open_trash(cx)),
         // A link to a note that is in the Trash, followed from the note
@@ -894,6 +1153,72 @@ fn surface_steps() -> Vec<Step> {
         }),
         input("p-fix-palette-trash-down", 600, |window, cx| press_key(window, cx, "down")),
         input("p-fix-palette-trash-return", 1200, |window, cx| press_key(window, cx, "enter")),
+        // The team space (`CEREAL_TOUR=p-fix-team`): its notes, its people,
+        // the banner closed, the "Add notes" sheet, and an empty space. The
+        // people and notes are made up (`team_space::tour_page`).
+        step("p-fix-team-notes", 1200, |view, cx| {
+            view.menu = None;
+            view.workspace.settings.team_banner_dismissed = false;
+            view.team.page = Some(crate::team_space::tour_page(false));
+            view.team.tab = crate::team_space::Tab::Notes;
+            view.team.picker = None;
+            view.navigate(Screen::TeamSpace, cx);
+        }),
+        step("p-fix-team-people", 1200, |view, _| {
+            view.team.tab = crate::team_space::Tab::People;
+            view.team.scroll.set_offset(point(px(0.), px(-330.)));
+        }),
+        step("p-fix-team-banner-dismissed", 1500, |view, cx| {
+            view.team.tab = crate::team_space::Tab::Notes;
+            view.team.scroll.set_offset(Point::default());
+            view.dismiss_team_banner(cx);
+        }),
+        step("p-fix-team-picker", 1200, |view, cx| {
+            view.open_team_picker(cx);
+            if let Some(picker) = &mut view.team.picker {
+                picker.selected = vec![1, 3];
+            }
+        }),
+        step("p-fix-team-empty", 1200, |view, _| {
+            view.team.picker = None;
+            view.team.page = Some(crate::team_space::tour_page(true));
+        }),
+        step("p-fix-team-end", 300, |view, cx| {
+            view.team.page = None;
+            view.navigate(Screen::Home, cx);
+        }),
+        // The Share popover (`CEREAL_TOUR=p-fix-share`), from made-up people:
+        // at rest, the picker's suggestions, results for a query, after
+        // sharing with the attendees, and the link's reach.
+        step("p-fix-share", 1200, |view, cx| {
+            view.menu = None;
+            view.open_note(1, cx);
+            let (access, workspace) = crate::share_popover::tour_fixture();
+            view.share.preview(access, workspace);
+            view.menu = Some(Menu::Share);
+        }),
+        step("p-fix-share-suggested", 900, |view, cx| view.share_open_picker(cx)),
+        step("p-fix-share-results", 900, |view, cx| {
+            view.share.field.update(cx, |input, cx| input.set_content("ma", cx));
+            view.share_query_changed(cx);
+        }),
+        input("p-fix-share-results-down", 600, |window, cx| press_key(window, cx, "down")),
+        input("p-fix-share-added", 900, |window, cx| press_key(window, cx, "enter")),
+        step("p-fix-share-shared", 900, |view, cx| view.share_with_attendees(cx)),
+        step("p-fix-share-level", 900, |view, cx| {
+            view.share.level_menu = true;
+            cx.notify();
+        }),
+        input("p-fix-share-level-chosen", 900, |window, cx| {
+            press_key(window, cx, "down");
+            press_key(window, cx, "enter");
+        }),
+        step("p-fix-share-outside", 900, |view, cx| {
+            view.share.field.update(cx, |input, cx| input.set_content("kai@elsewhere.test", cx));
+            view.share_query_changed(cx);
+        }),
+        input("p-fix-share-refused", 900, |window, cx| press_key(window, cx, "enter")),
+        step("p-fix-share-end", 300, |view, _| view.menu = None),
         step("p-fix-transcript-link", 1200, |view, cx| {
             view.menu = None;
             for id in [2, 3] {
@@ -906,6 +1231,555 @@ fn surface_steps() -> Vec<Step> {
             }
             view.open_note(1, cx);
             view.active_tab = NoteTab::Enhanced;
+        }),
+    ]
+}
+
+/// The note page's source card, the ink of edited blocks and the details
+/// card under the date chip, `p-polish-…` (run with `CEREAL_TOUR=p-polish`,
+/// with `--dark` for the dark theme): the source card waiting and with its
+/// summary; a heading edited and a bullet typed into, undone and redone
+/// (each says on stderr which rows are the person's); the details card, and
+/// the same while a name is typed into "Add attendees".
+fn note_polish_steps() -> Vec<Step> {
+    const NOTES: &str = "# Interface comparison\n\n- Benchmarking the reference interface against ours across several interaction patterns\n- Overall: its polish is noticeably ahead in animation, pill behavior, and find UX\n\n# Pill and animation issues\n\n- Click-outside behavior: theirs closes the pill; ours stays open\n  - Fix dismiss-on-outside-click\n- Open/close animation needs a full rework\n  - Their pills merge into each other as they open and close\n    - Ours looks visually rough, especially at the edges\n- Buffering animation: theirs is better\n\n# Next steps\n\n- Improve the pill edges\n- Fix the find control's alignment";
+    const ROW: usize = 9;
+    fn written(view: &Cereal) -> String {
+        let Some(note) = view.workspace.note(1) else {
+            return "no note".into();
+        };
+        let mut rows: Vec<usize> = note
+            .enhanced_authorship
+            .as_ref()
+            .map(|authorship| authorship.written(&note.enhanced))
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        rows.sort();
+        format!(
+            "rows written by the person {rows:?}, line 3 {:?}, editing {}",
+            note.enhanced.lines().nth(3).unwrap_or(""),
+            view.summary.edit.is_some()
+        )
+    }
+    vec![
+        step("p-polish-note", 900, |view, cx| {
+            view.menu = None;
+            if let Some(note) = view.workspace.note_mut(1) {
+                note.enhanced = NOTES.into();
+                note.enhanced_authorship = None;
+                note.generated_revision = Some(note.transcript_revision);
+            }
+            view.open_note(1, cx);
+            view.active_tab = NoteTab::Enhanced;
+        }),
+        // Waiting: the request this would have made is forgotten, so the
+        // card stays as it is while it waits.
+        step("p-polish-summary-loading", 1200, |view, cx| {
+            let paragraph = crate::summary::paragraph_text(NOTES.lines().nth(ROW).unwrap_or(""));
+            let trigger = crate::summary::probe::trigger(1, ROW)
+                .unwrap_or_else(|| Bounds::new(point(px(880.), px(330.)), size(px(24.), px(24.))));
+            view.open_summary(1, ROW, paragraph, trigger, cx);
+            view.summary.epoch = view.summary.epoch.wrapping_add(1);
+        }),
+        step("p-polish-summary-loaded", 1200, |view, _| {
+            let quote = |text: &str, time: &str| crate::summary::TranscriptQuote {
+                segment_id: None,
+                text: text.into(),
+                speaker: Some("Me".into()),
+                timestamp: Some(time.into()),
+            };
+            if let Some(open) = view.summary.open.as_mut() {
+                open.explanation = "This came up while comparing the two interfaces directly, especially around how the control opens, closes, and dismisses. The broader point was that the other interaction feels much more polished and cohesive.".into();
+                open.quotes = vec![
+                    quote("Their opening and closing pill is way better.", "01:19"),
+                    quote("Like, the pills merge into each other whenever they open and close.", "01:19"),
+                    quote("So the open-close thing needs to be way better.", "01:19"),
+                ];
+                open.ready = true;
+            }
+            view.stage.mark("source-quotes");
+        }),
+        step("p-polish-summary-end", 500, |view, _| view.summary.dismiss()),
+        // A heading changed earlier, and a bullet being typed into.
+        windowed("p-polish-edit-typed", 900, |view, window, cx| {
+            if let Some(note) = view.workspace.note_mut(1) {
+                let edited = note.enhanced.replacen("# Interface comparison", "# Interface comparisonfff", 1);
+                crate::authorship::edited(&mut note.enhanced_authorship, &note.enhanced, &edited);
+                note.enhanced = edited;
+            }
+            view.begin_enhanced_edit(1, 3, window, cx);
+            if let Some(edit) = view.summary.edit.as_ref() {
+                let input = edit.input.clone();
+                input.update(cx, |input, cx| input.replace_text_in_range(None, "fff", window, cx));
+            }
+            cx.notify();
+        }),
+        step("p-polish-edit-typed-quiet", 100, |view, _| eprintln!("polish typed: {}", written(view))),
+        windowed("p-polish-edit-focus-quiet", 100, |view, window, cx| {
+            let focused = view
+                .summary
+                .edit
+                .as_ref()
+                .is_some_and(|edit| edit.input.read(cx).focus_handle.is_focused(window));
+            eprintln!("polish focus in the block: {focused}, window active: {}", window.is_window_active());
+        }),
+        input("p-polish-edit-undo", 900, |window, cx| press_key(window, cx, "cmd-z")),
+        step("p-polish-edit-undo-quiet", 100, |view, _| eprintln!("polish undone: {}", written(view))),
+        input("p-polish-edit-redo", 900, |window, cx| press_key(window, cx, "shift-cmd-z")),
+        step("p-polish-edit-redo-quiet", 100, |view, _| eprintln!("polish redone: {}", written(view))),
+        step("p-polish-edited", 900, |view, cx| view.finish_enhanced_edit(cx)),
+        step("p-polish-details", 900, |view, cx| {
+            view.team.page = Some(crate::team_space::tour_page(false));
+            view.attendee_input.update(cx, |input, cx| input.set_content("", cx));
+            view.menu = Some(Menu::NoteDetails);
+        }),
+        // A name being typed: who is listed narrows to it, and the people
+        // the team space knows who match are offered.
+        step("p-polish-details-typing", 900, |view, cx| {
+            view.attendee_input.update(cx, |input, cx| input.set_content("or", cx));
+        }),
+        step("p-polish-end", 300, |view, cx| {
+            view.attendee_input.update(cx, |input, cx| input.set_content("", cx));
+            view.team.page = None;
+            view.menu = None;
+        }),
+    ]
+}
+
+/// Home's Ask bar under stress, `k-ask-…` (run with `CEREAL_TOUR=k-ask`):
+/// the focus transition there and back, then everything that can interrupt
+/// it: a press mid-flight, ten quick focus changes, typing while it opens, a
+/// tall draft, the window and the sidebar changing under it, the recent
+/// chats from the tray, a question handed to the panel, presses outside
+/// with a popover open, while an answer streams and on a note, and the dark
+/// theme. After each part a `k-ask-…-state` step prints what is focused and
+/// open (`askstate …`), so a stuck track or a bar left open shows in the log.
+#[cfg(debug_assertions)]
+fn ask_bar_steps() -> Vec<Step> {
+    fn script(think: u64) -> std::sync::mpsc::Receiver<crate::server::ChatStreamEvent> {
+        use crate::server::ChatStreamEvent;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(slow(Duration::from_millis(think)));
+            for word in "Here is what I found in your notes: the launch moved to Thursday, \
+                Maya owns the prototype and Theo is arranging five usability sessions. "
+                .repeat(3)
+                .split_inclusive(' ')
+            {
+                if sender.send(ChatStreamEvent::Delta(word.into())).is_err() {
+                    return;
+                }
+                std::thread::sleep(slow(Duration::from_millis(12)));
+            }
+            let _ = sender.send(ChatStreamEvent::Done);
+        });
+        receiver
+    }
+    // The pill's text, a point of the page that holds nothing, and the
+    // recent-chats button in the tray.
+    fn pill(window: &Window) -> (f32, f32) {
+        let size = window.viewport_size();
+        (192. + (f32::from(size.width) - 192.) / 2. - 120., f32::from(size.height) - 56.)
+    }
+    fn press_pill(name: &'static str, hold: u64) -> Step {
+        input(name, hold, |window, cx| {
+            let (x, y) = pill(window);
+            click(window, cx, x, y);
+        })
+    }
+    fn press_outside(name: &'static str, hold: u64) -> Step {
+        input(name, hold, |window, cx| {
+            let size = window.viewport_size();
+            click(window, cx, f32::from(size.width) - 30., f32::from(size.height) * 0.45);
+        })
+    }
+    fn state(name: &'static str) -> Step {
+        windowed(name, 30, move |view, window, cx| {
+            eprintln!(
+                "askstate {name} focused={} assistant={} history={} picker={} draft={} stream={} messages={} note={} tray={:?} ring={:?} controls={:?} panel={:?}",
+                view.ask.read(cx).focus_handle.is_focused(window),
+                view.assistant_open,
+                view.chat_history_open,
+                view.chat_model_picker_open,
+                view.ask.read(cx).content().len(),
+                view.chat_stream.is_some(),
+                view.chat_messages.len(),
+                view.current_note.is_some(),
+                view.stage.target(("ask-tray", 0)),
+                view.stage.target(("chat-composer-ring", 0)),
+                view.stage.target(("chat-composer-controls", 0)),
+                view.stage.target(("assistant", 0)),
+            );
+        })
+    }
+    fn focus_ask(name: &'static str, hold: u64) -> Step {
+        windowed(name, hold, |view, window, cx| {
+            view.ask.read(cx).focus_handle.focus(window);
+            cx.notify();
+        })
+    }
+    fn focus_page(name: &'static str, hold: u64) -> Step {
+        windowed(name, hold, |view, window, cx| {
+            view.focus.focus(window);
+            cx.notify();
+        })
+    }
+    vec![
+        // a: there and back.
+        windowed("k-ask-a1-rest", 900, |view, window, cx| {
+            view.navigate(Screen::Home, cx);
+            view.clear_chat(cx);
+            view.focus.focus(window);
+        }),
+        press_pill("k-ask-a2-open", 1000),
+        state("k-ask-a2-state"),
+        press_outside("k-ask-a3-outside", 1000),
+        state("k-ask-a3-state"),
+        focus_page("k-ask-a4-blur", 900),
+        focus_ask("k-ask-a5-keyboard", 900),
+        focus_page("k-ask-a6-keyboard-back", 900),
+        state("k-ask-a6-state"),
+        // b: interrupted. A press 90 ms into the opening, a press outside
+        // 90 ms into that, then ten quick changes of mind.
+        press_pill("k-ask-b1-open", 90),
+        press_pill("k-ask-b2-again", 90),
+        press_outside("k-ask-b3-away", 60),
+        focus_page("k-ask-b3-blur", 60),
+        focus_ask("k-ask-b4-r01", 45),
+        focus_page("k-ask-b4-r02", 45),
+        focus_ask("k-ask-b4-r03", 45),
+        focus_page("k-ask-b4-r04", 45),
+        focus_ask("k-ask-b4-r05", 45),
+        focus_page("k-ask-b4-r06", 45),
+        focus_ask("k-ask-b4-r07", 45),
+        focus_page("k-ask-b4-r08", 45),
+        focus_ask("k-ask-b4-r09", 45),
+        focus_page("k-ask-b4-r10", 45),
+        focus_ask("k-ask-b4-r11", 45),
+        focus_page("k-ask-b4-r12", 45),
+        focus_ask("k-ask-b4-r13", 45),
+        focus_page("k-ask-b4-r14", 45),
+        focus_ask("k-ask-b4-r15", 45),
+        focus_page("k-ask-b4-r16", 45),
+        focus_ask("k-ask-b4-r17", 45),
+        focus_page("k-ask-b4-r18", 45),
+        focus_ask("k-ask-b4-r19", 45),
+        focus_page("k-ask-b4-r20", 1000),
+        state("k-ask-b4-state"),
+        // c: typing while it opens, leaving a draft, a tall draft.
+        press_pill("k-ask-c1-open", 70),
+        step("k-ask-c2-type", 1000, |view, cx| {
+            view.ask.update(cx, |input, cx| input.set_content("What changed", cx));
+        }),
+        press_outside("k-ask-c3-draft-outside", 900),
+        focus_page("k-ask-c3-blur", 600),
+        state("k-ask-c3-state"),
+        press_pill("k-ask-c4-draft-refocus", 900),
+        step("k-ask-c5-tall", 900, |view, cx| {
+            view.ask.update(cx, |input, cx| {
+                input.set_content(
+                    "First line of a long pasted draft\nsecond line\nthird line\nfourth line\nfifth",
+                    cx,
+                )
+            });
+        }),
+        press_outside("k-ask-c6-tall-outside", 900),
+        focus_page("k-ask-c6-blur", 600),
+        press_pill("k-ask-c7-tall-refocus", 900),
+        step("k-ask-c8-emptied", 600, |view, cx| {
+            view.ask.update(cx, |input, cx| input.set_content("", cx));
+        }),
+        press_outside("k-ask-c9-outside", 600),
+        focus_page("k-ask-c9-blur", 900),
+        state("k-ask-c9-state"),
+        // d: the window and the sidebar change under it.
+        press_pill("k-ask-d1-open", 80),
+        windowed("k-ask-d2-resize", 1000, |_, window, _| {
+            window.resize(size(px(820.), px(640.)));
+        }),
+        focus_page("k-ask-d3-blur", 80),
+        windowed("k-ask-d4-resize-back", 1000, |_, window, _| {
+            window.resize(size(px(1100.), px(760.)));
+        }),
+        focus_ask("k-ask-d5-open", 80),
+        step("k-ask-d6-sidebar", 1000, |view, _| view.sidebar_open = false),
+        focus_page("k-ask-d7-blur", 80),
+        step("k-ask-d8-sidebar-back", 1000, |view, _| view.sidebar_open = true),
+        windowed("k-ask-d9-narrow", 900, |view, window, cx| {
+            window.resize(size(px(620.), px(560.)));
+            view.ask.read(cx).focus_handle.focus(window);
+        }),
+        focus_page("k-ask-d10-narrow-blur", 900),
+        windowed("k-ask-d11-wide", 900, |_, window, _| {
+            window.resize(size(px(1100.), px(760.)));
+        }),
+        state("k-ask-d11-state"),
+        // e: the recent chats from the tray, then two presses outside: the
+        // first closes the list, the second folds the panel.
+        press_pill("k-ask-e1-open", 900),
+        input("k-ask-e2-history", 1200, |window, cx| {
+            let size = window.viewport_size();
+            let centre = 192. + (f32::from(size.width) - 192.) / 2.;
+            click(window, cx, centre - 341.5 + 28., f32::from(size.height) - 124. + 20.);
+        }),
+        state("k-ask-e2-state"),
+        press_outside("k-ask-e3-outside", 900),
+        state("k-ask-e3-state"),
+        press_outside("k-ask-e4-outside", 1000),
+        focus_page("k-ask-e4-blur", 900),
+        state("k-ask-e4-state"),
+        // f: the model menu open, then two presses outside.
+        press_pill("k-ask-f1-open", 900),
+        step("k-ask-f2-models", 800, |view, _| view.chat_model_picker_open = true),
+        press_outside("k-ask-f3-outside", 800),
+        state("k-ask-f3-state"),
+        press_outside("k-ask-f4-outside", 900),
+        step("k-ask-f4-close", 300, |view, _| view.chat_model_picker_open = false),
+        focus_page("k-ask-f4-blur", 900),
+        state("k-ask-f4-state"),
+        // g: a question handed to the panel; a press outside while the
+        // answer arrives; the pill pressed again to come back to it.
+        press_pill("k-ask-g1-open", 900),
+        step("k-ask-g2-send", 700, |view, cx| {
+            view.start_scripted_chat("What changed this week?".into(), script(1500), cx);
+        }),
+        state("k-ask-g2-state"),
+        press_outside("k-ask-g3-outside-streaming", 1000),
+        focus_page("k-ask-g3-blur", 500),
+        state("k-ask-g3-state"),
+        press_pill("k-ask-g4-continue", 1200),
+        state("k-ask-g4-state"),
+        step("k-ask-g5-answer", 3000, |_, _| {}),
+        press_outside("k-ask-g6-outside", 70),
+        press_pill("k-ask-g7-back-mid-fold", 1200),
+        state("k-ask-g7-state"),
+        step("k-ask-g8-draft", 500, |view, cx| {
+            view.ask.update(cx, |input, cx| input.set_content("And next week", cx));
+        }),
+        press_outside("k-ask-g9-outside-draft", 1000),
+        focus_page("k-ask-g9-blur", 700),
+        state("k-ask-g9-state"),
+        step("k-ask-g10-clear", 900, |view, cx| view.clear_chat(cx)),
+        // h: the dark theme, there and back.
+        step("k-ask-h1-dark", 900, |view, _| view.workspace.settings.force_dark(true)),
+        press_pill("k-ask-h2-open", 1000),
+        press_outside("k-ask-h3-outside", 600),
+        focus_page("k-ask-h3-blur", 900),
+        step("k-ask-h4-light", 900, |view, _| view.workspace.settings.force_dark(false)),
+        // i: on a note. The bar focused and a press outside; a question, its
+        // panel, and a press outside while it answers.
+        step("k-ask-i1-note", 1200, |view, cx| view.open_note(1, cx)),
+        focus_ask("k-ask-i2-focus", 900),
+        state("k-ask-i2-state"),
+        press_outside("k-ask-i3-outside", 900),
+        state("k-ask-i3-state"),
+        focus_ask("k-ask-i4-focus", 500),
+        step("k-ask-i5-send", 900, |view, cx| {
+            view.start_scripted_chat("Summarise this note".into(), script(1200), cx);
+        }),
+        press_outside("k-ask-i6-outside-streaming", 1200),
+        state("k-ask-i6-state"),
+        focus_ask("k-ask-i7-continue", 1500),
+        state("k-ask-i7-state"),
+        step("k-ask-i8-history", 900, |view, cx| {
+            view.assistant_open = true;
+            view.chat_history_open = true;
+            cx.notify();
+        }),
+        press_outside("k-ask-i9-outside", 900),
+        state("k-ask-i9-state"),
+        press_outside("k-ask-i10-outside", 1200),
+        state("k-ask-i10-state"),
+        // j: the panel over a note in a narrow window, thinking, then
+        // answered: nothing may overlap or be cut.
+        windowed("k-ask-j1-narrow-note", 1200, |view, window, cx| {
+            view.clear_chat(cx);
+            view.open_note(1, cx);
+            window.resize(size(px(600.), px(620.)));
+            view.ask.read(cx).focus_handle.focus(window);
+        }),
+        step("k-ask-j2-send", 1500, |view, cx| {
+            view.start_scripted_chat("What did we discuss".into(), script(4000), cx);
+        }),
+        step("k-ask-j3-answer", 5000, |_, _| {}),
+        windowed("k-ask-j4-wide", 1200, |_, window, _| {
+            window.resize(size(px(1100.), px(760.)));
+        }),
+        windowed("k-ask-z-home", 900, |view, window, cx| {
+            view.clear_chat(cx);
+            view.navigate(Screen::Home, cx);
+            view.focus.focus(window);
+        }),
+        state("k-ask-z-state"),
+    ]
+}
+#[cfg(not(debug_assertions))]
+fn ask_bar_steps() -> Vec<Step> {
+    Vec::new()
+}
+
+/// The sidebar's stills, `p-sidebar-…` (run with `CEREAL_TOUR=p-sidebar`):
+/// Home, Chat with its conversations listed, one of them open, the pointer
+/// on "Show N more" and on the sidebar's edge, the edge dragged, the
+/// narrowest and widest widths, a space and Settings; then the same in the
+/// dark theme.
+fn sidebar_steps() -> Vec<Step> {
+    use crate::desktop_preferences::{SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN};
+    fn seed(view: &mut Cereal) {
+        let now = chrono::Utc::now();
+        let account = crate::accounts::AccountId::of("http://tour.invalid", "tour");
+        let titles = [
+            ("Meeting action items extractor", 1),
+            ("Recent meeting action items", 3),
+            ("Untitled thread", 12 * 60),
+            ("Untitled conversation notes", 12 * 60 + 2),
+            ("Untitled thread", 12 * 60 + 4),
+            ("New conversation", 12 * 60 + 6),
+            ("Zach & Agora YC recap", 20 * 60),
+            ("Prototype codename ideas", 26 * 60),
+        ];
+        let thread = |id: String, title: &str, at: chrono::DateTime<chrono::Utc>| {
+            crate::chat::ArchivedChat {
+                id,
+                note_id: 0,
+                account: Some(account.clone()),
+                title: title.into(),
+                messages: vec![(title.into(), "Here is what I found in your notes.".into())],
+                interrupted: vec![],
+                annotations: Default::default(),
+                updated_at: Some(at.to_rfc3339()),
+            }
+        };
+        view.chat_archives.clear();
+        for index in 0..20 {
+            view.chat_archives.push(thread(
+                format!("older-{index}"),
+                "Older conversation",
+                now - chrono::Duration::days(3 + index),
+            ));
+        }
+        for (index, (title, minutes)) in titles.iter().enumerate() {
+            view.chat_archives.push(thread(
+                format!("recent-{index}"),
+                title,
+                now - chrono::Duration::minutes(*minutes),
+            ));
+        }
+    }
+    fn open_thread(view: &mut Cereal, cx: &mut Context<Cereal>) {
+        view.chat_threads_expanded = false;
+        if let Some(thread) = view.chat_threads().into_iter().find(|thread| thread.id == "recent-0") {
+            view.open_chat_thread(&thread.account, &thread.id, true, cx);
+        }
+    }
+    /// The pointer on the sidebar's edge, 400 pt down.
+    fn on_edge(window: &mut Window, cx: &mut App) {
+        if let Some(edge) = crate::onboarding_view::placed("sidebar-edge") {
+            pointer(window, cx, f32::from(edge.center().x), 400.);
+        }
+    }
+    fn away(window: &mut Window, cx: &mut App) {
+        let size = window.viewport_size();
+        pointer(window, cx, f32::from(size.width) - 40., f32::from(size.height) / 2.);
+    }
+    /// The pointer on "Show 20 more", the ninth row under Chat.
+    fn on_more(window: &mut Window, cx: &mut App) {
+        pointer(window, cx, 96., 48. + 8. + 29. * 3. + 29. * 8. + 14.);
+    }
+    vec![
+        windowed("p-sidebar-home", 900, |view, window, cx| {
+            view.workspace.settings.force_dark(false);
+            view.sidebar_open = true;
+            view.sidebar_width = SIDEBAR_DEFAULT;
+            seed(view);
+            view.clear_chat(cx);
+            view.navigate(Screen::Home, cx);
+            view.focus.focus(window);
+        }),
+        step("p-sidebar-chat", 900, |view, cx| view.navigate(Screen::Chat, cx)),
+        step("p-sidebar-thread", 900, open_thread),
+        input("p-sidebar-more-hover", 900, on_more),
+        input("p-sidebar-edge", 900, on_edge),
+        // The edge taken hold of and drawn 68 pt to the right: it follows
+        // the pointer, and the width is saved when the button comes up.
+        input("p-sidebar-edge-held", 600, |window, cx| {
+            if let Some(edge) = crate::onboarding_view::placed("sidebar-edge") {
+                window.dispatch_event(
+                    PlatformInput::MouseDown(MouseDownEvent {
+                        button: MouseButton::Left,
+                        position: point(edge.center().x, px(400.)),
+                        click_count: 1,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            }
+        }),
+        input("p-sidebar-edge-dragged", 900, |window, cx| {
+            window.dispatch_event(
+                PlatformInput::MouseMove(MouseMoveEvent {
+                    position: point(px(SIDEBAR_DEFAULT + 68.), px(420.)),
+                    pressed_button: Some(MouseButton::Left),
+                    ..Default::default()
+                }),
+                cx,
+            );
+        }),
+        input("p-sidebar-edge-released", 900, |window, cx| {
+            window.dispatch_event(
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: point(px(SIDEBAR_DEFAULT + 68.), px(420.)),
+                    click_count: 1,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            eprintln!(
+                "sidebar check: the dragged width {} saved ({})",
+                if crate::desktop_preferences::sidebar_width() == SIDEBAR_DEFAULT + 68. {
+                    "was"
+                } else {
+                    "was not"
+                },
+                crate::desktop_preferences::sidebar_width()
+            );
+        }),
+        input("p-sidebar-away-quiet", 300, away),
+        step("p-sidebar-min", 900, |view, _| view.sidebar_width = SIDEBAR_MIN),
+        step("p-sidebar-max", 900, |view, _| view.sidebar_width = SIDEBAR_MAX),
+        step("p-sidebar-space", 900, |view, cx| {
+            view.sidebar_width = SIDEBAR_DEFAULT;
+            view.navigate(Screen::MyNotes, cx)
+        }),
+        step("p-sidebar-settings", 900, |view, cx| {
+            view.open_settings(crate::screens::SettingsTab::Preferences, cx)
+        }),
+        step("p-sidebar-settings-max", 900, |view, _| view.sidebar_width = SIDEBAR_MAX),
+        step("p-sidebar-dark-home", 900, |view, cx| {
+            view.workspace.settings.force_dark(true);
+            view.sidebar_width = SIDEBAR_DEFAULT;
+            view.clear_chat(cx);
+            view.navigate(Screen::Home, cx);
+        }),
+        step("p-sidebar-dark-chat", 900, |view, cx| view.navigate(Screen::Chat, cx)),
+        step("p-sidebar-dark-thread", 900, open_thread),
+        input("p-sidebar-dark-more-hover", 900, on_more),
+        input("p-sidebar-dark-edge", 900, on_edge),
+        input("p-sidebar-dark-away-quiet", 300, away),
+        step("p-sidebar-dark-min", 900, |view, _| view.sidebar_width = SIDEBAR_MIN),
+        step("p-sidebar-dark-max", 900, |view, _| view.sidebar_width = SIDEBAR_MAX),
+        step("p-sidebar-dark-space", 900, |view, cx| {
+            view.sidebar_width = SIDEBAR_DEFAULT;
+            view.navigate(Screen::MyNotes, cx)
+        }),
+        step("p-sidebar-dark-settings", 900, |view, cx| {
+            view.open_settings(crate::screens::SettingsTab::Preferences, cx)
+        }),
+        step("p-sidebar-end", 300, |view, cx| {
+            view.workspace.settings.force_dark(false);
+            view.navigate(Screen::Home, cx);
         }),
     ]
 }
@@ -1337,6 +2211,78 @@ fn first_frame_steps() -> Vec<Step> {
         }),
     ]);
     steps
+}
+
+/// The transcript panel while recording, `p-txp-…` (run with
+/// `CEREAL_TOUR=p-txp,f-txp`): lines being spoken, Find empty and with
+/// matches, the sound popover, the microphone and language menus; then
+/// `f-txp-…`, the panel folding into the bar and growing back out of it,
+/// and toggled mid-flight, for a frame-by-frame capture.
+fn transcript_panel_steps() -> Vec<Step> {
+    fn setup(view: &mut Cereal, cx: &mut Context<Cereal>) {
+        view.navigate(Screen::Home, cx);
+        view.open_note(1, cx);
+        view.active_tab = NoteTab::Notes;
+        if let Some(note) = view.workspace.note_mut(1) {
+            note.replace_transcript("");
+        }
+        view.live_preview(1, speech::meeting(7), cx);
+        view.recording_last_click = None;
+        view.recording_changed_at = None;
+        view.start_recording_preview(1, cx);
+        view.transcript_open = true;
+        view.transcript_epoch = view.transcript_epoch.wrapping_add(1);
+        view.live_preview(1, vec![speech::spoken(7, 12), speech::spoken(8, 9)], cx);
+    }
+    fn find(view: &mut Cereal, window: &mut Window, cx: &mut Context<Cereal>, query: &str) {
+        if !view.transcript_find_open {
+            view.transcript_find_begin(window, cx);
+        }
+        view.search.update(cx, |input, cx| input.set_content(query.to_owned(), cx));
+        cx.notify();
+    }
+    fn toggle(view: &mut Cereal, cx: &mut Context<Cereal>, open: bool) {
+        view.menu = None;
+        view.transcript_open = open;
+        view.transcript_epoch = view.transcript_epoch.wrapping_add(1);
+        cx.notify();
+    }
+    vec![
+        step("p-txp-recording", 3000, setup),
+        step("p-txp-growing", 3000, |view, cx| {
+            view.live_preview(1, vec![speech::spoken(7, 16), speech::spoken(8, 13)], cx);
+        }),
+        windowed("p-txp-find", 2000, |view, window, cx| find(view, window, cx, "")),
+        windowed("p-txp-find-query", 2000, |view, window, cx| find(view, window, cx, "the")),
+        step("p-txp-find-next", 2000, |view, cx| {
+            view.transcript_find_index += 3;
+            cx.notify();
+        }),
+        windowed("p-txp-find-closed", 2000, |view, window, cx| view.transcript_find_end(window, cx)),
+        step("p-txp-sound", 2000, |view, cx| {
+            view.refresh_input_devices();
+            view.menu = Some(Menu::RecordingSettings);
+            cx.notify();
+        }),
+        menu("p-txp-microphone", 2000, Some(Menu::RecordingInput)),
+        menu("p-txp-language", 2000, Some(Menu::RecordingLanguage)),
+        step("p-txp-final", 2000, |view, cx| {
+            view.menu = None;
+            view.live_preview(1, vec![speech::stored(7)], cx);
+        }),
+        step("f-txp-close", 5000, |view, cx| toggle(view, cx, false)),
+        step("f-txp-open", 5000, |view, cx| toggle(view, cx, true)),
+        // Interrupted both ways: closed during the open, opened during the close.
+        step("f-txp-flip", 250, |view, cx| toggle(view, cx, false)),
+        step("f-txp-flop", 250, |view, cx| toggle(view, cx, true)),
+        step("f-txp-flip2", 150, |view, cx| toggle(view, cx, false)),
+        step("p-txp-after-flips", 3000, |view, cx| toggle(view, cx, true)),
+        step("p-txp-end", 1200, |view, cx| {
+            view.recording_last_click = None;
+            view.recording_changed_at = None;
+            view.stop_recording_preview(cx);
+        }),
+    ]
 }
 
 /// Still states of the live transcript for review, `p-live-…` (run with
@@ -2277,7 +3223,7 @@ fn transcript_steps() -> Vec<Step> {
         }
     }
     fn open(view: &mut Cereal, cx: &mut Context<Cereal>, dark: bool) {
-        view.workspace.settings.dark_mode = dark;
+        view.workspace.settings.force_dark(dark);
         view.navigate(Screen::Home, cx);
         view.open_note(1, cx);
         view.active_tab = NoteTab::Enhanced;
@@ -2326,7 +3272,7 @@ fn transcript_steps() -> Vec<Step> {
         steps.push(windowed(names[3], 3000, cite));
     }
     steps.push(step("p-tx-end", 600, |view, cx| {
-        view.workspace.settings.dark_mode = false;
+        view.workspace.settings.force_dark(false);
         view.transcript_open = false;
         view.navigate(Screen::Home, cx);
     }));
@@ -2368,6 +3314,7 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
             .into_iter()
             .chain(still_steps())
             .chain(live_still_steps())
+            .chain(transcript_panel_steps())
             .chain(bench_steps())
             .chain(live_bench_steps())
             .chain(first_frame_steps())
@@ -2378,8 +3325,13 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
             .chain(gold_steps())
             .chain(icon_steps())
             .chain(chat_parity_steps())
+            .chain(thinking_steps())
             .chain(surface_steps())
-            .chain(idle_steps());
+            .chain(note_polish_steps())
+            .chain(ask_bar_steps())
+            .chain(sidebar_steps())
+            .chain(idle_steps())
+            .chain(notes_generation_steps());
         // `CEREAL_TOUR_SIZE=760x580` resizes the window first, and
         // `CEREAL_TOUR_SHOTS=<directory>` holds each still (`p-…`, `a-…`)
         // until `<directory>/<name>.png` exists: an outside tool takes the
@@ -2420,7 +3372,7 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
             .chain(transcript_steps())
         {
             if only.is_empty()
-                && ["p-", "b-", "i-", "a-", "c-", "d-", "e-"]
+                && ["p-", "b-", "i-", "a-", "c-", "d-", "e-", "k-", "m-", "f-"]
                     .iter()
                     .any(|kind| name.starts_with(kind))
             {

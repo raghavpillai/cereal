@@ -42,7 +42,7 @@ function meeting(initial:NoteDTO,store:LiveConversationStore=makeLiveConversatio
     speaking(text:string|null,channel:"mic"|"system"="system",speakerId="system:n:1"){tail=text===null?null:[{channel,text,startMs:0,speakerId}]},
     async ask(question:string,options:{history?:Turn[];store?:LiveConversationStore;sources?:boolean}={}) {
       const input:ChatInput={message:question,history:options.history??[...history],...(options.sources===false?{}:{includeSources:true})}
-      const prepared=await prepareMeetingChat({noteId:initial.id,input,repository,providers:silent,signal:new AbortController().signal,emit:()=>{},liveConversations:options.store??store,onLiveThreadRebuilt:event=>{rebuilt.push(event)},
+      const prepared=await prepareMeetingChat({labelledLines:true,noteId:initial.id,input,repository,providers:silent,signal:new AbortController().signal,emit:()=>{},liveConversations:options.store??store,onLiveThreadRebuilt:event=>{rebuilt.push(event)},
         enrich:async source=>(tail?{...source,live:{asOfMs:0,transcribedThroughMs:0,state:"live",tail}}:source) as ProviderNote})
       const context=(prepared.note as MeetingChatNote).meetingChat!
       return {prepared,input,messages:chatAnswerMessages(prepared.note,input),layout:context.layout,reason:context.reason,
@@ -411,7 +411,7 @@ test("through the endpoint: the answer the client received is what the next requ
   const stored=note({transcriptSegments:lines.slice(0,3),transcriptRevision:3}),repository=makeMemoryRepository([stored]),requests:LanguageMessage[][]=[]
   const answers=["Ines asked for a revised quote [[S3]] [[S99]].","Forty [[S4]]."]
   const providers:ProviderServices={...silent,async *chatStream(prepared,input){requests.push(chatAnswerMessages(prepared,input));yield answers[requests.length-1]!}}
-  const processing=makeProcessingService(repository,{providers,liveConversations:makeLiveConversationStore()})
+  const processing=makeProcessingService(repository,{labelledNoteChat:true,providers,liveConversations:makeLiveConversationStore()})
   const run=async(input:ChatInput)=>{const events:ChatStreamEventDTO[]=[];await Effect.runPromise(Stream.runForEach(await Effect.runPromise(processing.chatStream(stored.id,input)),event=>Effect.sync(()=>{events.push(event)})));return events.filter(event=>event.type==="delta").map(event=>event.text).join("")}
   const first=await run({message:"What did Ines ask for?",history:[],includeSources:true})
   // A marker the server did not issue never reaches the client, and so is not in the thread either.

@@ -60,6 +60,15 @@ impl Recording {
         }
     }
 
+    /// The microphone's own level, 0..=1, for the sound popover's meter.
+    pub fn microphone_level(&self) -> f32 {
+        if self.is_active() {
+            self.microphone_level
+        } else {
+            0.
+        }
+    }
+
     pub fn set_audio_levels(&mut self, microphone: f32, system: f32) {
         self.set_audio_levels_at(microphone, system, Instant::now());
     }
@@ -301,6 +310,143 @@ impl Generation {
     }
 }
 
+/// The notes of a generation as the server writes them, and how much of
+/// them is on the page. Text arrives in bursts; it is shown at a steady
+/// pace that speeds up with the backlog, so the notes write themselves out
+/// evenly instead of jumping forward a clause at a time.
+#[derive(Debug, Default)]
+pub struct Draft {
+    /// The note being written, and the generation it belongs to.
+    pub note_id: Option<u64>,
+    pub epoch: u64,
+    /// Everything received so far.
+    text: String,
+    /// How many bytes of it are shown (always at a character boundary).
+    shown: usize,
+    /// Fractions of a character carried between steps.
+    carry: f32,
+    stepped: Option<Instant>,
+    /// Characters a second: set when text arrives, so that what is waiting
+    /// then is shown within `DRAFT_CATCH_UP`, and back to `DRAFT_PACE` once
+    /// it is.
+    pace: f32,
+    /// The server has finished: `text` is the saved notes.
+    pub complete: bool,
+    /// The page follows the text as it grows, until the person scrolls
+    /// away from it. `scrolled_to` is where this last put the page.
+    pub follow: bool,
+    pub scrolled_to: Option<f32>,
+}
+
+/// Characters a second when nothing is waiting.
+const DRAFT_PACE: f32 = 90.;
+/// A backlog is shown within about this long, however much arrived at once.
+const DRAFT_CATCH_UP: f32 = 0.45;
+
+impl Draft {
+    pub fn begin(&mut self, note_id: u64, epoch: u64) {
+        *self = Self {
+            note_id: Some(note_id),
+            epoch,
+            follow: true,
+            ..Self::default()
+        };
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Whether this is the draft of generation `epoch`.
+    pub fn of(&self, epoch: u64) -> bool {
+        self.note_id.is_some() && self.epoch == epoch
+    }
+
+    /// The draft of `note_id`, once it has text to show.
+    pub fn showing(&self, note_id: u64) -> bool {
+        self.note_id == Some(note_id) && !self.text.is_empty()
+    }
+
+    pub fn push(&mut self, piece: &str) {
+        self.text.push_str(piece);
+        self.hurry();
+    }
+
+    fn hurry(&mut self) {
+        let waiting = self.text[self.shown..].chars().count() as f32;
+        self.pace = self.pace.max(DRAFT_PACE).max(waiting / DRAFT_CATCH_UP);
+    }
+
+    /// What was streamed is dropped (the server answers without a stream).
+    pub fn restart(&mut self) {
+        self.text.clear();
+        self.shown = 0;
+        self.carry = 0.;
+    }
+
+    /// The server has saved `saved`. What is on the page stays there and the
+    /// rest (the closing link line, say) is written out after it; notes that
+    /// do not continue what was shown replace it at once.
+    pub fn finish(&mut self, saved: &str) {
+        self.complete = true;
+        if saved.starts_with(&self.text[..self.shown]) {
+            self.text = saved.to_owned();
+        } else {
+            self.text = saved.to_owned();
+            self.shown = self.text.len();
+        }
+        self.hurry();
+    }
+
+    /// Everything received is on the page.
+    pub fn caught_up(&self) -> bool {
+        self.shown >= self.text.len()
+    }
+
+    /// Show what the time since the last step allows. True if more is on
+    /// the page than before.
+    pub fn step(&mut self, now: Instant) -> bool {
+        let elapsed = self
+            .stepped
+            .replace(now)
+            .map_or(1. / 60., |before| now.saturating_duration_since(before).as_secs_f32())
+            .min(0.1);
+        if self.caught_up() {
+            self.carry = 0.;
+            self.pace = DRAFT_PACE;
+            return false;
+        }
+        self.carry += self.pace.max(DRAFT_PACE) * elapsed;
+        let count = self.carry.floor() as usize;
+        if count == 0 {
+            return false;
+        }
+        self.carry -= count as f32;
+        let rest = &self.text[self.shown..];
+        self.shown += rest
+            .char_indices()
+            .nth(count)
+            .map_or(rest.len(), |(at, _)| at);
+        true
+    }
+
+    /// The Markdown on the page. A last line that is so far only its
+    /// marker ("-", "#", an indent) waits for its first word, so a bullet
+    /// never flashes as a dash.
+    pub fn visible(&self) -> &str {
+        let shown = &self.text[..self.shown];
+        let line = shown.rfind('\n').map_or(0, |at| at + 1);
+        if shown[line..]
+            .chars()
+            .all(|c| c.is_whitespace() || matches!(c, '-' | '#' | '*' | '+'))
+        {
+            shown[..line].trim_end()
+        } else {
+            shown
+        }
+    }
+}
+
 pub fn elapsed_label(elapsed: Duration) -> String {
     let seconds = elapsed.as_secs();
     if seconds >= 3600 {
@@ -318,7 +464,8 @@ pub fn elapsed_label(elapsed: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Generation, GenerationPhase, Phase, Recording, TranscriptionAttention, elapsed_label,
+        Draft, Generation, GenerationPhase, Phase, Recording, TranscriptionAttention,
+        elapsed_label,
     };
     use std::time::{Duration, Instant};
 
@@ -541,6 +688,72 @@ mod tests {
         assert!(!generation.complete(epoch, 8, 3));
         assert!(generation.complete(epoch, 7, 3));
         assert_eq!(generation.phase, GenerationPhase::Ready);
+    }
+
+    #[test]
+    fn a_draft_writes_itself_out_evenly_and_never_shows_a_bare_marker() {
+        let mut draft = Draft::default();
+        assert!(!draft.showing(7));
+        draft.begin(7, 3);
+        assert!(draft.of(3) && !draft.of(4) && draft.follow);
+        draft.push("# Launch\n- Décision: lundi\n  - ");
+        assert!(draft.showing(7) && !draft.showing(8));
+        let start = Instant::now();
+        assert!(draft.step(start));
+        let mut seen = vec![draft.visible().to_owned()];
+        for frame in 1..200 {
+            draft.step(start + Duration::from_millis(16 * frame));
+            let now = draft.visible().to_owned();
+            // Only ever grows, always whole characters, never a bare marker.
+            assert!(now.starts_with(seen.last().unwrap().as_str()));
+            let last = now.lines().last().unwrap_or("");
+            assert!(last.is_empty() || last.chars().any(char::is_alphanumeric), "{now:?}");
+            seen.push(now);
+        }
+        assert!(draft.caught_up());
+        // The dangling "  - " waits for its first word.
+        assert_eq!(draft.visible(), "# Launch\n- Décision: lundi");
+        // It took more than a frame or two: the text was paced.
+        assert!(seen.iter().filter(|text| text.len() < 10).count() > 2);
+        draft.push("Après la revue");
+        for frame in 200..300 {
+            draft.step(start + Duration::from_millis(16 * frame));
+        }
+        assert_eq!(draft.visible(), "# Launch\n- Décision: lundi\n  - Après la revue");
+    }
+
+    #[test]
+    fn a_large_backlog_is_shown_within_half_a_second() {
+        let mut draft = Draft::default();
+        draft.begin(1, 1);
+        draft.push(&"word ".repeat(2000));
+        let start = Instant::now();
+        for frame in 0..40 {
+            draft.step(start + Duration::from_millis(16 * frame));
+        }
+        assert!(draft.caught_up());
+    }
+
+    #[test]
+    fn the_saved_notes_continue_the_draft_or_replace_it() {
+        let mut draft = Draft::default();
+        draft.begin(1, 1);
+        draft.push("# A\n- one");
+        let start = Instant::now();
+        for frame in 0..100 {
+            draft.step(start + Duration::from_millis(16 * frame));
+        }
+        // The saved notes add the link line: what is shown stays, the rest follows.
+        draft.finish("# A\n- one\n\n---\n\nChat with meeting transcript: https://notes.example/notes/1/chat");
+        assert!(draft.complete && !draft.caught_up());
+        assert_eq!(draft.visible(), "# A\n- one");
+        // Notes that are not a continuation are simply the notes.
+        draft.finish("# B\n- two");
+        assert!(draft.caught_up());
+        assert_eq!(draft.visible(), "# B\n- two");
+        // A server that does not stream: what was shown is dropped.
+        draft.restart();
+        assert!(!draft.showing(1) && draft.visible().is_empty());
     }
 
     #[test]

@@ -465,12 +465,12 @@ impl Cereal {
         let (right, centre_y) = crate::onboarding_view::placed("footer-trash")
             .map(|button| (f32::from(button.right()), f32::from(button.center().y)))
             .unwrap_or((
-                192. * (self.sidebar_level - 1.) + BUTTON_LEFT + BUTTON,
+                self.sidebar_span * (self.sidebar_level - 1.) + BUTTON_LEFT + BUTTON,
                 window_height - BUTTON_CENTRE_FROM_BOTTOM,
             ));
         // Clear of the workspace's name in the row under the button, as in
         // the reference (whose trash button is the fifth in its footer).
-        let left = (right + BESIDE_BUTTON).max(192. * (self.sidebar_level - 1.) + CARD_LEFT);
+        let left = (right + BESIDE_BUTTON).max(self.sidebar_span * (self.sidebar_level - 1.) + CARD_LEFT);
         // The card grows out of the point level with the button's centre.
         let top = window_height - ABOVE_BOTTOM - height;
         let anchor_y = ((centre_y - top) / height).clamp(0., 1.);

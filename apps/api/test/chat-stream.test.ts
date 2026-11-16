@@ -54,8 +54,9 @@ test("HTTP sends actual partial text before completion and disconnect aborts ups
 test("completed HTTP stream emits deltas and explicit done; failure stays bounded", async () => {
   const f = await fixture({ async *chatStream() { yield "One "; yield "two" } })
   const text = await (await f.call("chat/stream", { message: "Question", history: [] })).text()
-  expect(text).toContain('"text":"One "')
-  expect(text).toContain('"text":"two"')
+  // A space at the end of a piece waits for the next one: it may stand before a source marker, which a chat about one note never shows.
+  expect(text).toContain('"text":"One"')
+  expect(text).toContain('"text":" two"')
   expect(text).toContain('"type":"done"')
   const failing = await fixture({ async *chatStream() { yield "Partial"; throw new Error("secret upstream key fixture") } })
   const failed = await (await failing.call("chat/stream", { message: "Question", history: [] })).text()

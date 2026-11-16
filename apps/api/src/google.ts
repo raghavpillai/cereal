@@ -86,6 +86,8 @@ export function makeGoogleService(store: GoogleStore, box: SecretBox, options: {
   clientId?: string; clientSecret?: string; baseURL: string; fetch?: typeof fetch; clock?: () => Date; worker?: boolean
   /** The OAuth client as it is right now (set on the admin panel, else the environment). Read on every use, so a change needs no restart. */
   credentials?: () => Promise<{ clientId: string; clientSecret: string } | null>
+  /** Told the picture Google has for an identity each time one connects (the value is Google's, unchecked). */
+  picture?: (userId: string, subject: string, picture: unknown) => Promise<void>
 }) {
   const base = new URL(options.baseURL), fixed = options.clientId && options.clientSecret ? { clientId: options.clientId, clientSecret: options.clientSecret } : null
   const credentials = async () => options.credentials ? await options.credentials() : fixed
@@ -221,6 +223,7 @@ export function makeGoogleService(store: GoogleStore, box: SecretBox, options: {
         if (!accessToken || !calendarRead) throw new ProviderFailure()
         const identity = await googleGet('https://openidconnect.googleapis.com/v1/userinfo', accessToken), subject = text(identity.sub, 255), address = email(identity.email)
         if (!subject || !address || identity.email_verified !== true) throw new ProviderFailure()
+        await options.picture?.(principal.id, subject, identity.picture).catch(() => {})
         const old = (await store.listConnections(principal.id)).find(c => c.subject === subject)
         const refreshToken = text(data.refresh_token, 10000) ?? (old ? grant(old).refreshToken : null)
         if (!refreshToken) throw new ProviderFailure(true)

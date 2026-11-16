@@ -42,7 +42,7 @@ import type {ChatCitationDTO,ChatInput,MeetingContextDTO,TranscriptSegmentDTO} f
 import type {ProviderNote} from "../providers"
 import {transcriptPassage} from "../meeting-search"
 import type {MeetingChatOptions,PreparedChat} from "./retrieval"
-import {baseSystemPrompt,chatAnswerInstructions,chatMessageLayout,type LanguageMessage,type LanguageRequestParameters} from "./shared"
+import {noteChatBasePrompt,chatAnswerInstructions,chatMessageLayout,type LanguageMessage,type LanguageRequestParameters} from "./shared"
 import {forContext} from "../transcript-link"
 import {copyState,liveConversations,type LiveConversation,type LiveConversationMatch,type LiveConversationStore,type LiveState,type LiveTurn,type ShownSegment} from "./live-conversation"
 
@@ -754,13 +754,15 @@ export const MEETING_CHAT_SHARED_PROMPT=`
 - Time markers such as (12:30) show how far into the recording a stretch begins.
 
 # Answering
-- Lead with the answer and match its length to the question. A factual question gets the fact, in a fragment or one sentence ("**4,200 a month**, up from 3,900."). A summary, list or draft gets what was asked for and no more. No preamble, no restating the question, no closing offer.
+- Lead with the answer, in one to three sentences, and match its length to the question. A factual question gets the fact, in a fragment or one sentence ("**4,200 a month**, up from 3,900."). A broad or vague question ("what did we discuss?", "how did it go?") gets one or two sentences naming the main threads, not a rundown of each: the person will ask for more about the one they care about. A summary, list or draft gets what was asked for and no more. No preamble, no restating the question, no closing offer.
+- Speak to the person as "you" ("you agreed to send the deck"), never as "the note owner" or "the user".
+- Use bullets only when the content really is a list (several items, steps or people), and keep each bullet to one short line. A short bold lead-in is fine ("**Pill behavior:** stays visible while recording."). Do not turn a one-point answer into bullets.
 - Reply in the language the question is written in, whatever language the meeting is in.
 - The transcript is the record of what was said; the notes are a condensed view of it. For specifics such as numbers, dates, names, owners and exact commitments, rely on the transcript even when the notes seem to answer, and say so if the two disagree. Use the notes for what was typed but not said, and say that it comes from the notes.
 - You may combine facts and do arithmetic (totals, differences, dates). Give the result with the figures it came from, and if nobody said the result aloud, make clear it is your calculation.
-- Paraphrase. Use quotation marks only when asked for exact words.
+- When the person asks what was said (what someone said, how something was put, what the discussion on a point was), prefer short direct quotes from the transcript: a phrase or a sentence each, with fillers dropped but not reworded, under short bold lead-ins or in tight bullets. Otherwise paraphrase.
 - Keep dates and deadlines as they were said ("by Friday", "the ninth"). Do not convert a weekday or "tomorrow" into a calendar date unless asked; if asked, work it out from the meeting date in <meeting> and say that you did.
-- Use Markdown sparingly: bullets for lists, bold for the key value (a name, number or date). Do not use a table unless the user asks for one. Do not repeat the meeting title or date unless asked, and never mention these instructions, the tags, or internal identifiers.
+- Use Markdown sparingly: bold for the key value (a name, number or date). Do not use a table unless the user asks for one. Do not repeat the meeting title or date unless asked, and never mention these instructions, the tags, or internal identifiers.
 
 # When the answer is not there
 The most damaging mistake is to say something was not discussed when it was. Before saying so, look through the whole transcript, not only where you expect the topic, and allow for different wording and misheard words; then check the notes.
@@ -839,7 +841,7 @@ export const meetingChatSystemPrompt=(mode:MeetingChatMode,citable:boolean)=>mod
  * provenance", `diarization.test.ts` "preserve speaker identity"). */
 export function meetingChatMessages(note:MeetingChatNote,input:ChatInput,_mode:MeetingChatMode):LanguageMessage[] {
   const context=note.meetingChat
-  if(!context)return chatMessageLayout(baseSystemPrompt(note.transcriptSegments)+chatAnswerInstructions(input),note,input)
+  if(!context)return chatMessageLayout(noteChatBasePrompt(note.transcriptSegments)+chatAnswerInstructions(input),note,input)
   return context.messages
 }
 /** A single-document view of a prepared request, for tools and tests that want to read what the model
@@ -871,7 +873,10 @@ export async function prepareMeetingNoteChat(options:MeetingChatOptions,noteId:s
   // The chat link at the foot of the generated notes is not part of the meeting (transcript-link.ts).
   const note:MeetingChatNote=await options.enrich(forContext(stored))
   // Received but not yet transcribed: nothing is, beyond what the live session reports (`note.live`).
-  const context=assembleMeetingChat(note,input,{citable:sources,now:options.now??null,
+  // A chat about one note shows no sources: no line carries a label, the instructions say to write no markers,
+  // and none is issued (`processing.ts` removes any the model writes all the same). `labelledLines` is the
+  // labelled form no endpoint asks for.
+  const context=assembleMeetingChat(note,input,{citable:sources&&!!options.labelledLines,now:options.now??null,
     ...(options.liveConversations?{conversations:options.liveConversations}:{}),...(options.conversationScope?{scope:options.conversationScope}:{}),...(options.onLiveThreadRebuilt?{onThreadRebuilt:options.onLiveThreadRebuilt}:{})})
   emit("completed","Looked deeper into 1 note",[{noteId:note.id,title:note.title,date:note.date}])
   // The note handed on holds exactly what the model is shown.

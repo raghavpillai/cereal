@@ -9,6 +9,7 @@ import type {PrincipalData} from "@meeting-notes/contracts/api"
 import type {AuthenticationEngine} from "./auth"
 import {MCP_SCOPES} from "./mcp-tools"
 import {resolveNoteOrganization} from "./mcp-store"
+import {pictureAddress} from "./sign-in"
 
 export const MCP_OAUTH_SCOPES=[...MCP_SCOPES,"offline_access"]
 /** Every programmatic endpoint lives under /api, the MCP endpoint included. It used to be at /mcp: that exact
@@ -136,7 +137,8 @@ export function makeMcpAuthentication(db:Database,auth:AuthenticationEngine,base
     if(!user||user.banned||session&&session.userId!==userId||!client||client.disabled||!consent||consent.userId!==userId||consent.clientId!==clientId||consent.referenceId!==userId||![...scopes].every(scope=>MCP_OAUTH_SCOPES.includes(scope)&&consent.scopes.includes(scope)))return invalidGrant(called)
     const member=await selectedWorkspace(userId,session?.activeOrganizationId)
     if(!member)return deny("Select an accessible workspace before using this connection")
-    const principal:PrincipalData={id:user.id,name:user.name,email:user.email,role:role(user.role),createdAt:user.createdAt.toISOString(),source:"session",...(sessionId?{sessionId}:{}),expiresAt:typeof claims.exp==="number"?new Date(claims.exp*1000).toISOString():null}
+    const picture=pictureAddress(user.image)
+    const principal:PrincipalData={id:user.id,name:user.name,email:user.email,...(picture?{image:picture}:{}),role:role(user.role),createdAt:user.createdAt.toISOString(),source:"session",...(sessionId?{sessionId}:{}),expiresAt:typeof claims.exp==="number"?new Date(claims.exp*1000).toISOString():null}
     return handler(req,{principal,workspaceId:member.organizationId,scopes,connectionId,clientId})
    },{resource:audience,challengeScopes:MCP_OAUTH_SCOPES})(request)
    // A refused token for the other address is still answered with this address's own metadata.

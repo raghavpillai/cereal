@@ -60,6 +60,21 @@ const challengeOf = (verifier: string) => createHash("sha256").update(verifier).
 const token43 = /^[A-Za-z0-9_-]{43}$/
 const sameText = (a: string, b: string) => { const left = Buffer.from(a), right = Buffer.from(b); return left.length === right.length && timingSafeEqual(left, right) }
 const text = (value: unknown, max: number) => typeof value === "string" && value.trim() ? value.trim().slice(0, max) : null
+/** The address of a person's picture as Google's userinfo gives it (`picture`), or as it was saved: kept only
+ * when it is a plain https address of ordinary length. Anything else is no picture. */
+export function pictureAddress(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 2048 || !value.startsWith("https://") || /[\s"'<>\\]/.test(value)) return null
+  try { const url = new URL(value); return url.protocol === "https:" && url.hostname.includes(".") && !url.username && !url.password ? value : null } catch { return null }
+}
+/** Keeps the saved picture of the account that signs in with this Google identity the same as Google's. Only that
+ * account's: a second Google account connected for its calendar is somebody else's picture. Never fails its caller. */
+export async function refreshGooglePicture(db: Database, userId: string, subject: string, picture: unknown): Promise<void> {
+  try {
+    if (!await db.account.findFirst({ where: { providerId: "google", accountId: subject, userId } })) return
+    const image = pictureAddress(picture), user = await db.user.findUnique({ where: { id: userId }, select: { image: true } })
+    if (user && user.image !== image) await db.user.update({ where: { id: userId }, data: { image } })
+  } catch { /* A picture is never worth failing a sign-in or a calendar connection for. */ }
+}
 const duplicate = (error: unknown) => (error as { code?: string })?.code === "P2002"
 /** Deleting a row that is already gone is an answer (null); anything else is a database failure. */
 const alreadyGone = (error: unknown) => { if ((error as { code?: string })?.code === "P2025") return null; throw error }
@@ -135,7 +150,7 @@ export function makeSignInService(deps: {
   }
   /** The account for a verified Google identity: one already linked to it, else the account with the same
    * address, else a new one when the address is on the allow list. Null means not allowed. */
-  async function accountFor(identity: { subject: string; email: string; name: string | null; hostedDomain: string | null }, allowed: ReadonlyArray<string>): Promise<string | null> {
+  async function accountFor(identity: { subject: string; email: string; name: string | null; hostedDomain: string | null; image: string | null }, allowed: ReadonlyArray<string>): Promise<string | null> {
     const link = (userId: string) => db.account.create({ data: { id: crypto.randomUUID(), accountId: identity.subject, providerId: "google", userId } })
     for (let attempt = 0; attempt < 2; attempt++) {
       const linked = await db.account.findFirst({ where: { providerId: "google", accountId: identity.subject } })
@@ -146,7 +161,7 @@ export function makeSignInService(deps: {
         if (!emailAllowed(identity.email, allowed, identity.hostedDomain)) return null
         const id = crypto.randomUUID()
         await db.$transaction(async tx => {
-          await tx.user.create({ data: { id, name: identity.name ?? identity.email.split("@")[0]!, email: identity.email, emailVerified: true, role: "user" } })
+          await tx.user.create({ data: { id, name: identity.name ?? identity.email.split("@")[0]!, email: identity.email, emailVerified: true, image: identity.image, role: "user" } })
           await tx.account.create({ data: { id: crypto.randomUUID(), accountId: identity.subject, providerId: "google", userId: id } })
           await tx.member.create({ data: { id: crypto.randomUUID(), organizationId: deps.defaultOrganizationId, userId: id, role: "member" } })
         })
@@ -216,7 +231,7 @@ export function makeSignInService(deps: {
             await tx.$queryRawUnsafe('SELECT "id" FROM "User" WHERE "id"=$1::uuid FOR UPDATE', ownerId)
             if (await tx.account.findFirst({ where: { userId: ownerId } })) { refused = "already_claimed"; return }
             if (await tx.user.findFirst({ where: { email, id: { not: ownerId } } })) { refused = "email_taken"; return }
-            await tx.user.update({ where: { id: ownerId }, data: { name, email, emailVerified: true } })
+            await tx.user.update({ where: { id: ownerId }, data: { name, email, emailVerified: true, image: pictureAddress(identity.picture) } })
             // No password is made for this account: it signs in with Google only.
             await tx.account.create({ data: { id: crypto.randomUUID(), accountId: subject, providerId: "google", userId: ownerId } })
           })
@@ -237,6 +252,7 @@ export function makeSignInService(deps: {
       const undo = await deps.useGoogle(client)
       try { if (!linked) await db.account.create({ data: { id: crypto.randomUUID(), accountId: subject, providerId: "google", userId: user.id } }) }
       catch { await undo().catch(() => {}); return await finish("failed") }
+      await refreshGooglePicture(db, user.id, subject, identity.picture)
       return await finish("done")
     } catch { return await finish("failed") }
   }
@@ -312,8 +328,10 @@ export function makeSignInService(deps: {
         const subject = text(identity.sub, 255), email = text(identity.email, 254)?.toLowerCase() ?? null
         if (!subject || !email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || identity.email_verified !== true) return refused("failed", returnPath)
         // `hd` is the Google Workspace domain of the account; a consumer account has none.
-        const userId = await accountFor({ subject, email, name: text(identity.name, 200), hostedDomain: text(identity.hd, 253) }, policy.allowedEmails)
+        const userId = await accountFor({ subject, email, name: text(identity.name, 200), hostedDomain: text(identity.hd, 253), image: pictureAddress(identity.picture) }, policy.allowedEmails)
         if (!userId) return refused("not_allowed", returnPath)
+        // The picture is Google's as of this sign-in, for an account made just now and for one made long ago.
+        await refreshGooglePicture(db, userId, subject, identity.picture)
         // Like the web password form: the session ends with the browser session.
         const session = await deps.issueSession(userId, false, request.headers)
         return redirect(returnPath ?? DEFAULT_RETURN, [cookie("", 0), ...session.cookies])

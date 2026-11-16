@@ -31,7 +31,7 @@ import Contracts
 
 private func message(_ turn: Int, _ role: ChatMessageDTORole, _ content: String, _ status: ChatThreadMessageStatus = .complete, error: String? = nil) -> ChatThreadMessageDTO {
     ChatThreadMessageDTO(citations: [], content: content, createdAt: "2026-11-01T10:00:00.000Z", elapsedMs: nil, error: error, id: UUID().uuidString.lowercased(),
-                         model: nil, role: role, status: status, tools: [], turn: turn, updatedAt: "2026-11-01T10:00:00.000Z")
+                         model: nil, reasoning: [], role: role, status: status, tools: [], turn: turn, updatedAt: "2026-11-01T10:00:00.000Z")
 }
 
 @MainActor struct ServerChatThreadsTests {

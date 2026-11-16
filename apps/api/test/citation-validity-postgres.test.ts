@@ -18,7 +18,7 @@ describe.skipIf(!enabled)("citation validity through the scoped Prisma repositor
   const segment=(text:string,startMs:number)=>({id:crypto.randomUUID(),channel:"mic" as const,speakerId:"mic:fixture:speaker_1",speakerLabel:"Speaker 1",text,isFinal:true,startMs,endMs:startMs+4000})
   const spoken=[segment("The berth fee is three hundred a night.",0),segment("We booked the crane for Tuesday.",6000),segment("Ines will confirm the harbour pilot by Friday.",12000)]
   const make=async()=>(await db!.note.create({data:{ownerId:alice,organizationId:one,title:"Harbour planning",body:"- berth fee is 300\n- ask about the crane",enhanced:"# Decisions\n- The crane is booked for Tuesday.",date:new Date("2026-03-09T00:00:00Z"),recordingState:"recording",transcriptRevision:1,transcriptSegments:{create:spoken}}})).id
-  const issued=async(noteId:string)=>(await prepareMeetingChat({noteId,input:{message:"What was decided?",history:[],includeSources:true},repository:inOne!,providers:silent,enrich:async note=>note,signal:signal(),emit:()=>{}})).citations
+  const issued=async(noteId:string)=>(await prepareMeetingChat({labelledLines:true,noteId,input:{message:"What was decided?",history:[],includeSources:true},repository:inOne!,providers:silent,enrich:async note=>note,signal:signal(),emit:()=>{}})).citations
   beforeAll(async()=>{
     for(const [id,name]of[[alice,"Alice"],[bob,"Bob"]])await db!.user.create({data:{id:id!,name:name!,email:`citation-${id}@example.invalid`}})
     await db!.organization.createMany({data:[{id:one,name:"One",slug:`one-${one}`},{id:two,name:"Two",slug:`two-${two}`}]})

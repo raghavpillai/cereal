@@ -27,8 +27,12 @@ export interface LanguageRequestParameters {readonly maxTokens:number;readonly t
   readonly cache?:{readonly ttl:"5m"|"1h";readonly tail:boolean}}
 export const DEFAULT_LANGUAGE_PARAMETERS:LanguageRequestParameters={maxTokens:4096,temperature:0.2}
 
-export const completionSettings=(model:string,tokens:number,temperature:number)=>/^(?:(?:openai\/)?gpt-[56](?:[.\/-]|$)|o[1-9](?:-|$))/.test(model)
-  ? {max_completion_tokens:tokens,...(/^openai\/gpt-6(?:[.\/-]|$)/.test(model)?{reasoning_effort:/^openai\/gpt-6\.1(?:[\/-]|$)/.test(model)?"low":"none"}:{})}
+/** Models that reason before they answer (OpenAI's GPT-5 and GPT-6 families and the o-series, by OpenAI or OpenRouter id). */
+export const reasoningCapable=(model:string)=>/^(?:(?:openai\/)?gpt-[56](?:[.\/-]|$)|o[1-9](?:-|$))/.test(model)
+/** `effort` is set by a step that wants the model's reasoning to show (the chat research step): a reasoning model
+ * is then asked for exactly that effort. Without it the request is what it always was. */
+export const completionSettings=(model:string,tokens:number,temperature:number,effort?:"low")=>reasoningCapable(model)
+  ? {max_completion_tokens:tokens,...(effort?{reasoning_effort:effort}:/^openai\/gpt-6(?:[.\/-]|$)/.test(model)?{reasoning_effort:/^openai\/gpt-6\.1(?:[\/-]|$)/.test(model)?"low":"none"}:{})}
   : {max_tokens:tokens,temperature}
 const durationContext = (display: string) => {
   // Native elapsed labels are m:ss or h:mm:ss, not an ambiguous clock time.
@@ -87,9 +91,14 @@ export function baseSystemPrompt(segments:ReadonlyArray<Pick<TranscriptSegmentDT
   return BASE_SYSTEM_PROMPT.replace(PART_SPEAKER_RULE,live===segments.length?LIVE_SPEAKER_RULE:`${LIVE_SPEAKER_RULE} Any other speaker label is local to an audio part: repeated labels on different speakerIds are not evidence of the same person.`)
     .replace(MIC_RULE,live===segments.length?LIVE_MIC_RULE:`${LIVE_MIC_RULE} ${MIC_RULE.replace("A microphone channel","A microphone channel without such labels")}`)
 }
+/** The part of `BASE_SYSTEM_PROMPT` about source markers. A chat about one note shows no sources, so its prompt
+ * says the opposite in the same place (`noteChatBasePrompt`); every other feature sends the prompt unchanged. */
+const SOURCE_MARKER_RULE="Source IDs are issued by the server: cite only provided sources as [[S1]], [[S2]], and so on, immediately after the supported statement. Never invent a source marker, meeting, quotation, URL, or source ID. If the context contains no issued source IDs, do not add source markers."
+export const noteChatBasePrompt=(segments:ReadonlyArray<Pick<TranscriptSegmentDTO,"speakerId">>):string=>
+  baseSystemPrompt(segments).replace(SOURCE_MARKER_RULE,"Never invent a meeting, quotation or URL. Do not add source markers, line numbers or bracketed references of any kind.")
 /** Answer-format instructions appended for every chat answer, including the
  * recent-to-do format that is triggered by the wording of the question. */
-export const chatAnswerInstructions=(input:ChatInput)=>" Answer the user's question directly using readable Markdown and relevant topical sections. Do not add a repeated meeting title, date or duration unless the user asks for that metadata. Say when the context does not contain an answer."+
+export const chatAnswerInstructions=(input:ChatInput)=>" Lead with a direct answer of one to three sentences, addressed to the user as \"you\", with no preamble and without restating the question. A broad or vague question gets one or two sentences naming the main threads; the user can ask for more. Use Markdown bullets only when the content really is a list, each bullet short; a short bold lead-in is fine. Do not add a repeated meeting title, date or duration unless the user asks for that metadata. Say when the context does not contain an answer."+
     (/\b(?:recent|latest)\b[\s\S]{0,60}\b(?:to-?dos?|action items?)\b|\blist (?:my )?(?:recent )?todos\b/i.test(input.message)
       ? " For recent to-dos, group by date (Today/Yesterday only when justified by the supplied current date and timezone, otherwise calendar dates), then by source meeting title. Use concise action bullets with owners/deadlines only when recorded. Distinguish no recorded action item from no generated summary; unread or truncated content cannot prove absence. State actual meeting/date coverage and offer earlier dates if coverage is limited."+(/\b(?:table|tabular|csv)\b/i.test(input.message)?"":" Do not use a table for this recent-to-do list.")
       : "")

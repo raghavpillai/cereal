@@ -13,7 +13,9 @@
  *     one, or an earlier one with `replace`), the turns it replaces are removed, and the question and an
  *     empty answer marked "streaming" are inserted. The thread's earlier exchanges, read in that same
  *     transaction, are the history sent to the model.
- *  2. While it streams, what has arrived is written to that answer row about once a second.
+ *  2. While it streams, what has arrived is written to that answer row about once a second. The model's
+ *     reasoning is kept with it as stretches (`ChatReasoningDTO`): pieces join until a tool step that was not
+ *     there before starts, and each stretch records how many tool steps were known when it began.
  *  3. When the stream ends, however it ends, the answer is settled: "complete" after `done`, "failed" with
  *     its message after `error`, and "interrupted" with whatever had arrived when the client went away,
  *     the request was stopped or the server timed out. A server that dies mid-answer leaves a "streaming"
@@ -25,7 +27,7 @@
  */
 import { Effect, Schema, Stream } from "effect"
 import type { Database } from "@meeting-notes/database"
-import { ChatCitationDTO, ChatToolProgressDTO, type ChatInput, type ChatStreamEventDTO } from "@meeting-notes/contracts"
+import { ChatCitationDTO, ChatReasoningDTO, ChatToolProgressDTO, MAX_CHAT_REASONING, type ChatInput, type ChatStreamEventDTO } from "@meeting-notes/contracts"
 import type { ApiError } from "@meeting-notes/contracts/api"
 import { MAX_CHAT_TURNS, type AppendChatTurnInput, type ChatThreadDTO, type ChatThreadMessageDTO, type ChatThreadStreamInput, type ChatThreadSummaryDTO, type ChatThreadsPageDTO, type ChatTurnAnswerInput, type CreateChatThreadInput } from "@meeting-notes/contracts/chats"
 import type { NotesRepositoryService } from "./repository"
@@ -49,7 +51,7 @@ export interface StoredThread {
 export interface StoredMessage {
   readonly id: string; readonly position: number; readonly role: "user" | "assistant"; readonly content: string
   readonly status: Status; readonly error: string | null; readonly model: string | null
-  readonly citations: ReadonlyArray<ChatCitationDTO>; readonly tools: ReadonlyArray<ChatToolProgressDTO>
+  readonly citations: ReadonlyArray<ChatCitationDTO>; readonly tools: ReadonlyArray<ChatToolProgressDTO>; readonly reasoning: ReadonlyArray<ChatReasoningDTO>
   readonly elapsedMs: number | null; readonly createdAt: Date; readonly updatedAt: Date
 }
 export interface ThreadWithMessages { readonly thread: StoredThread; readonly messages: ReadonlyArray<StoredMessage> }
@@ -75,7 +77,7 @@ export interface TurnCommand {
 }
 export interface AnswerPatch {
   readonly content: string; readonly status: Status; readonly error: string | null
-  readonly citations: ReadonlyArray<ChatCitationDTO>; readonly tools: ReadonlyArray<ChatToolProgressDTO>
+  readonly citations: ReadonlyArray<ChatCitationDTO>; readonly tools: ReadonlyArray<ChatToolProgressDTO>; readonly reasoning: ReadonlyArray<ChatReasoningDTO>
   readonly elapsedMs: number | null; readonly now: Date
 }
 export interface NewThread {
@@ -118,25 +120,26 @@ function turnRows(command: TurnCommand, answerId: string): [StoredMessage, Store
   const answer = command.answer
   return [
     { id: crypto.randomUUID(), position: positionOf(command.turn, "user"), role: "user", content: command.question, status: "complete", error: null, model: command.model,
-      citations: [], tools: [], elapsedMs: null, createdAt: command.now, updatedAt: command.now },
+      citations: [], tools: [], reasoning: [], elapsedMs: null, createdAt: command.now, updatedAt: command.now },
     { id: answerId, position: positionOf(command.turn, "assistant"), role: "assistant", content: answer?.content ?? "", status: answer?.status ?? "streaming",
-      error: answer?.error ?? null, model: answer?.model ?? command.model, citations: answer?.citations ?? [], tools: answer?.tools ?? [],
+      error: answer?.error ?? null, model: answer?.model ?? command.model, citations: answer?.citations ?? [], tools: answer?.tools ?? [], reasoning: answer?.reasoning ?? [],
       elapsedMs: answer?.elapsedMs ?? null, createdAt: command.now, updatedAt: command.now },
   ]
 }
 
 // ---------------------------------------------------------------- PostgreSQL
 
-const Citations = Schema.Array(ChatCitationDTO), Tools = Schema.Array(ChatToolProgressDTO)
+const Citations = Schema.Array(ChatCitationDTO), Tools = Schema.Array(ChatToolProgressDTO), Reasoning = Schema.Array(ChatReasoningDTO)
 const decodeOr = <A>(schema: Schema.Codec<A, unknown>, value: unknown): A => { try { return Schema.decodeUnknownSync(schema)(value) } catch { return [] as unknown as A } }
 const json = (value: unknown) => JSON.parse(JSON.stringify(value))
 type ThreadRow = { id: string; userId: string; noteId: string | null; title: string | null; titleSource: string | null; turnCount: number; createdAt: Date; updatedAt: Date }
-type MessageRow = { id: string; position: number; role: string; content: string; status: string; error: string | null; model: string | null; citations: unknown; tools: unknown; elapsedMs: number | null; createdAt: Date; updatedAt: Date }
+type MessageRow = { id: string; position: number; role: string; content: string; status: string; error: string | null; model: string | null; citations: unknown; tools: unknown; reasoning: unknown; elapsedMs: number | null; createdAt: Date; updatedAt: Date }
 const threadOf = (row: ThreadRow): StoredThread => ({ ...row, titleSource: row.titleSource as TitleSource | null })
 const messageOf = (row: MessageRow): StoredMessage => ({ ...row, role: row.role === "assistant" ? "assistant" : "user", status: row.status as Status,
-  citations: decodeOr(Citations as Schema.Codec<ReadonlyArray<ChatCitationDTO>, unknown>, row.citations), tools: decodeOr(Tools as Schema.Codec<ReadonlyArray<ChatToolProgressDTO>, unknown>, row.tools) })
+  citations: decodeOr(Citations as Schema.Codec<ReadonlyArray<ChatCitationDTO>, unknown>, row.citations), tools: decodeOr(Tools as Schema.Codec<ReadonlyArray<ChatToolProgressDTO>, unknown>, row.tools),
+  reasoning: decodeOr(Reasoning as Schema.Codec<ReadonlyArray<ChatReasoningDTO>, unknown>, row.reasoning) })
 const messageData = (threadId: string, m: StoredMessage) => ({ id: m.id, threadId, position: m.position, role: m.role, content: m.content, status: m.status, error: m.error, model: m.model,
-  citations: json(m.citations), tools: json(m.tools), elapsedMs: m.elapsedMs, createdAt: m.createdAt, updatedAt: m.updatedAt })
+  citations: json(m.citations), tools: json(m.tools), reasoning: json(m.reasoning), elapsedMs: m.elapsedMs, createdAt: m.createdAt, updatedAt: m.updatedAt })
 const isUniqueViolation = (error: unknown) => typeof error === "object" && error !== null && "code" in error && (error as { code: unknown }).code === "P2002"
 
 export function makePrismaChatStore(db: Database): ChatStore {
@@ -186,7 +189,7 @@ export function makePrismaChatStore(db: Database): ChatStore {
     }),
     answer: async (userId, threadId, messageId, patch, touch) => {
       const updated = await db.chatMessage.updateMany({ where: { id: messageId, threadId, thread: { userId } }, data: { content: patch.content, status: patch.status, error: patch.error,
-        citations: json(patch.citations), tools: json(patch.tools), elapsedMs: patch.elapsedMs, updatedAt: patch.now } })
+        citations: json(patch.citations), tools: json(patch.tools), reasoning: json(patch.reasoning), elapsedMs: patch.elapsedMs, updatedAt: patch.now } })
       if (updated.count && touch) await db.chatThread.updateMany({ where: { id: threadId, userId }, data: { updatedAt: patch.now } })
       return updated.count > 0
     },
@@ -245,7 +248,7 @@ export function makeMemoryChatStore(notes?: NotesRepositoryService): ChatStore {
     answer: (userId: string, threadId: string, messageId: string, patch: AnswerPatch, touch: boolean) => serial(() => {
       const entry = own(userId, threadId), index = entry?.messages.findIndex(m => m.id === messageId) ?? -1
       if (!entry || index < 0) return false
-      entry.messages[index] = { ...entry.messages[index]!, content: patch.content, status: patch.status, error: patch.error, citations: patch.citations, tools: patch.tools, elapsedMs: patch.elapsedMs, updatedAt: patch.now }
+      entry.messages[index] = { ...entry.messages[index]!, content: patch.content, status: patch.status, error: patch.error, citations: patch.citations, tools: patch.tools, reasoning: patch.reasoning, elapsedMs: patch.elapsedMs, updatedAt: patch.now }
       if (touch) entry.thread = { ...entry.thread, updatedAt: patch.now }
       return true
     }),
@@ -297,10 +300,12 @@ const invalid = (message: string): ApiError => ({ error: "invalid_request", mess
 const iso = (date: Date) => date.toISOString()
 /** The longest answer a thread holds (`ChatThreadMessageDTO.content`). A longer one is kept up to here, so its thread stays readable. */
 const MAX_ANSWER_CHARS = 1_000_000
+/** The longest stretch of reasoning kept (`ChatReasoningDTO.text`); what a stretch gets beyond it is dropped. */
+const MAX_REASONING_CHARS = 20_000
 function messageDTO(m: StoredMessage, now: Date): ChatThreadMessageDTO {
   const stale = m.status === "streaming" && now.getTime() - m.updatedAt.getTime() > STALE_STREAM_MS
   return { id: m.id, turn: turnOf(m.position), role: m.role, content: m.content.slice(0, MAX_ANSWER_CHARS), status: stale ? "interrupted" : m.status, error: m.error, model: m.model,
-    citations: m.citations.slice(0, 40), tools: m.tools.slice(0, 40), elapsedMs: m.elapsedMs, createdAt: iso(m.createdAt), updatedAt: iso(m.updatedAt) }
+    citations: m.citations.slice(0, 40), tools: m.tools.slice(0, 40), reasoning: m.reasoning.slice(0, MAX_CHAT_REASONING), elapsedMs: m.elapsedMs, createdAt: iso(m.createdAt), updatedAt: iso(m.updatedAt) }
 }
 const summaryDTO = (t: StoredThread): ChatThreadSummaryDTO => ({ id: t.id, noteId: t.noteId, title: t.title, titleSource: t.titleSource, turnCount: t.turnCount, createdAt: iso(t.createdAt), updatedAt: iso(t.updatedAt) })
 const threadDTO = (value: ThreadWithMessages, now: Date): ChatThreadDTO => ({ ...summaryDTO(value.thread), messages: value.messages.map(m => messageDTO(m, now)) })
@@ -412,9 +417,11 @@ export function makeChatsService(store: ChatStore, options: ChatsOptions = {}) {
       const chatInput: ChatInput = { message: input.message, history: chatHistory(outcome.history),
         ...(input.includeSources !== undefined ? { includeSources: input.includeSources } : {}), ...(input.timeZone ? { timeZone: input.timeZone } : {}), ...(input.model ? { model: input.model } : {}) }
       let content = "", citations: ReadonlyArray<ChatCitationDTO> = [], tools: ChatToolProgressDTO[] = [], ended: { status: Status; error: string | null } | null = null
+      // `joining`: the next piece of reasoning continues the last stretch. A tool step with a new id ends that.
+      let reasoning: ChatReasoningDTO[] = [], joining = false
       let writes: Promise<unknown> = Promise.resolve(), flushed = began.getTime(), settled = false
       const write = (status: Status, error: string | null, touch: boolean) => {
-        const patch: AnswerPatch = { content, status, error, citations, tools: [...tools], elapsedMs: status === "streaming" ? null : Math.max(0, clock().getTime() - began.getTime()), now: clock() }
+        const patch: AnswerPatch = { content, status, error, citations, tools: [...tools], reasoning: [...reasoning], elapsedMs: status === "streaming" ? null : Math.max(0, clock().getTime() - began.getTime()), now: clock() }
         writes = writes.then(() => store.answer(userId, id, answerId, patch, touch)).catch(() => false)
         return writes
       }
@@ -437,9 +444,15 @@ export function makeChatsService(store: ChatStore, options: ChatsOptions = {}) {
           if (ended) return event
           if (event.type === "delta") { if (content.length < MAX_ANSWER_CHARS) content = (content + event.text).slice(0, MAX_ANSWER_CHARS) }
           else if (event.type === "citations") citations = (event.citations ?? []).slice(0, 40)
+          else if (event.type === "reasoning") {
+            const last = reasoning.at(-1)
+            if (!event.text) { /* nothing to keep */ }
+            else if (joining && last) reasoning = [...reasoning.slice(0, -1), { ...last, text: (last.text + event.text).slice(0, MAX_REASONING_CHARS) }]
+            else if (reasoning.length < MAX_CHAT_REASONING) { reasoning = [...reasoning, { text: event.text.slice(0, MAX_REASONING_CHARS), afterTools: tools.length }]; joining = true }
+          }
           else if (event.type === "tool" && event.tool) {
             const at = tools.findIndex(t => t.callId === event.tool!.callId)
-            if (at >= 0) tools[at] = event.tool; else if (tools.length < 40) tools.push(event.tool)
+            if (at >= 0) tools[at] = event.tool; else { joining = false; if (tools.length < 40) tools.push(event.tool) }
           } else if (event.type === "done") ended = { status: "complete", error: null }
           else if (event.type === "error") ended = { status: "failed", error: event.text.slice(0, 2000) || "Chat could not finish. Please retry." }
           if (!ended && clock().getTime() - flushed >= FLUSH_MS) { flushed = clock().getTime(); void write("streaming", null, false) }

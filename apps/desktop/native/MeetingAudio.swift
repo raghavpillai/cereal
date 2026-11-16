@@ -392,6 +392,12 @@ private final class NativeAudioSession: @unchecked Sendable {
         do {
             let engine = AVAudioEngine()
             let input = engine.inputNode
+            // The microphone chosen in the transcript panel, when it is plugged
+            // in; otherwise (and if macOS refuses it) the Mac's default input.
+            if var chosen = preferredInputDeviceID(), let unit = input.audioUnit {
+                _ = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+                                         &chosen, UInt32(MemoryLayout<AudioDeviceID>.size))
+            }
             let native = input.outputFormat(forBus: 0)
             guard native.sampleRate > 0, native.channelCount > 0 else {
                 throw CaptureFailure(code: "no_input", message: "The microphone has no usable audio channels.")

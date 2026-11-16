@@ -81,6 +81,7 @@
 /* A web address in a note: the text's own colour, underlined, as the apps draw it. */
 .note-link { color: inherit; text-decoration: underline; text-decoration-color: var(--app-marker); text-decoration-thickness: 1px; text-underline-offset: 3px; }
 .note-link:hover { text-decoration-color: currentColor; }
+.note-transcript-link { color: var(--app-muted); font-size: 14px; line-height: 20px; }
 
 .note-loading { display: grid; gap: 12px; padding-top: 4px; }
 .note-loading .skeleton { height: 14px; }
@@ -182,6 +183,8 @@
 .share-anyone { display: flex; align-items: center; gap: 8px; padding: 6px 10px; }
 .share-anyone > .icon { color: var(--app-secondary); }
 .share-anyone > span { flex: 1; min-width: 0; font-size: 13px; line-height: var(--app-leading); }
+.share-level { flex: 1; min-width: 0; height: 28px; padding: 0 4px; border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; font-size: 13px; }
+.share-level:disabled { opacity: 0.45; }
 .share-hint { margin: 0; padding: 2px 10px 6px; color: var(--app-muted); font-size: 12px; line-height: 16px; }
 .share-card > .app-separator { margin: 4px 0; }
 .share-card > .app-separator.is-roomy { margin: 6px 0; }

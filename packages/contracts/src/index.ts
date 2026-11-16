@@ -62,6 +62,13 @@ export const NoteDTO = Schema.Struct({
   importedAt: Schema.optionalKey(Schema.NullOr(Timestamp)),
 }).annotate({ identifier: "NoteDTO" })
 export type NoteDTO = typeof NoteDTO.Type
+/** Note generation as it is written (POST /api/v1/notes/:id/generate/stream): `title` carries the name given
+ * to a note nobody had named (at most once, first), `delta` events carry the notes' Markdown in order, then
+ * `done` carries the saved note in `note` (its `enhanced` replaces what was streamed), or `error` ends it. */
+export const GenerationStreamEventDTO = Schema.Struct({
+  type: Schema.Literals(["title", "delta", "done", "error"]), text: NoteText, note: Schema.optionalKey(NoteDTO),
+}).annotate({ identifier: "GenerationStreamEventDTO" })
+export type GenerationStreamEventDTO = typeof GenerationStreamEventDTO.Type
 
 export const CreateNoteInput = Schema.Struct({
   title: NoteTitle,
@@ -177,8 +184,25 @@ export const ChatToolProgressDTO = Schema.Struct({
   resultCount:Schema.optionalKey(Revision),results:Schema.optionalKey(Schema.Array(ChatToolMeetingDTO).check(Schema.isMaxLength(20))),
 }).annotate({identifier:"ChatToolProgressDTO"})
 export type ChatToolProgressDTO = typeof ChatToolProgressDTO.Type
+/**
+ * A stretch of the model's own reasoning behind an answer, as the provider gave it (a reasoning summary or
+ * thinking text; never written by the server). `afterTools` places it among the answer's tool steps: it is how
+ * many of them had started before this stretch began, so 0 comes before the first step. Markdown; a line that
+ * is only `**Bold**` is a heading for what follows.
+ */
+export const ChatReasoningDTO = Schema.Struct({
+  text:Schema.String.check(Schema.isMinLength(1),Schema.isMaxLength(20_000)),afterTools:Revision,
+}).annotate({identifier:"ChatReasoningDTO"})
+export type ChatReasoningDTO = typeof ChatReasoningDTO.Type
+/** Reasoning kept with one answer: at most this many stretches. */
+export const MAX_CHAT_REASONING = 40
+/**
+ * `reasoning`: `text` is the next piece of the model's reasoning. Pieces join into one stretch until a tool
+ * step that was not there before starts; the piece after that begins a new stretch (`ChatReasoningDTO`).
+ * A client that does not show reasoning ignores the event.
+ */
 export const ChatStreamEventDTO = Schema.Struct({
-  type: Schema.Literals(["delta", "done", "error","tool","citations"]), text: NoteText,
+  type: Schema.Literals(["delta", "done", "error","tool","citations","reasoning"]), text: NoteText,
   tool:Schema.optionalKey(ChatToolProgressDTO),citations:Schema.optionalKey(Schema.Array(ChatCitationDTO).check(Schema.isMaxLength(40))),
 }).annotate({ identifier: "ChatStreamEventDTO" })
 export type ChatStreamEventDTO = typeof ChatStreamEventDTO.Type
@@ -204,7 +228,10 @@ export type EvidenceStreamEventDTO = typeof EvidenceStreamEventDTO.Type
 
 /** Owner-only instance administration. Secret values are accepted only on writes. */
 export const UserRole = Schema.Literals(["owner", "admin", "user"])
-export const UserDTO = Schema.Struct({id: UUID, name: Schema.String, email: Schema.String, role: UserRole, createdAt: Timestamp}).annotate({identifier:"UserDTO"})
+/** `image` is the address of the person's picture as Google gave it at their last sign-in: always an https
+ * address, absent when they have none. Clients draw the person's initial when it is absent or does not load. */
+export const UserDTO = Schema.Struct({id: UUID, name: Schema.String, email: Schema.String, role: UserRole, createdAt: Timestamp,
+  image: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(2048), Schema.isPattern(/^https:\/\//)))}).annotate({identifier:"UserDTO"})
 export type UserDTO = typeof UserDTO.Type
 export const AuthSessionDTO = Schema.Struct({user:UserDTO, expiresAt:Schema.NullOr(Timestamp)}).annotate({identifier:"AuthSessionDTO"})
 export type AuthSessionDTO = typeof AuthSessionDTO.Type
@@ -292,6 +319,8 @@ export const ModelCatalogInput = Schema.Struct({provider: AIProvider, apiKey: Sc
 export type ModelCatalogInput = typeof ModelCatalogInput.Type
 export const ModelCatalogDTO = Schema.Struct({provider: AIProvider, models: Schema.Array(AIModelDTO), fetchedAt: Timestamp, notice: Schema.NullOr(Schema.String)}).annotate({identifier:"ModelCatalogDTO"})
 export type ModelCatalogDTO = typeof ModelCatalogDTO.Type
+/** The chat models a question may name (as `provider:model`), in the administrator's order. The first is the
+ * instance default: the one that answers a question that names none. */
 export const ChatModelsDTO = Schema.Struct({models: Schema.Array(LanguageModelSelection)}).annotate({identifier:"ChatModelsDTO"})
 // Raster-only data URLs avoid remote tracking and active SVG content.
 const InstanceLogo = Schema.String.check(Schema.isMaxLength(350_000), Schema.isPattern(/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/))
@@ -706,9 +735,9 @@ export const WireSchemas = {
   UserDTO, AuthSessionDTO, UsersDTO, CreateUserInput, UpdateUserRoleInput, CalendarPreferencesDTO,
   SignInSettingsDTO, UpdateSignInSettingsInput, AuthMethodsDTO, AppHandoffInput, AppHandoffDTO, AppHandoffExchangeInput, AppHandoffTokenDTO,
   AdminSettingsDTO, UpdateAdminSettingsInput, CalendarDTO, CreateCalendarInput, UpdateCalendarInput, CalendarEventDTO,
-  ChatMessageDTO, ChatInput, ChatAnswerDTO, ChatCitationDTO, ChatToolMeetingDTO, ChatToolProgressDTO, ChatStreamEventDTO,
+  ChatMessageDTO, ChatInput, ChatAnswerDTO, ChatCitationDTO, ChatToolMeetingDTO, ChatToolProgressDTO, ChatReasoningDTO, ChatStreamEventDTO,
   EvidenceRequestDTO, EvidenceQuoteDTO, EvidenceDTO, EvidenceStreamEventDTO,
-  TranscriptSegmentDTO, NoteDTO, CreateNoteInput, UpdateNoteInput, ImportedRecordingState, ImportNoteInput, ImportedSegmentIdDTO, ImportedNoteDTO, RecordingCommandDTO, GenerateNotesCommandDTO, GenerationProgressDTO,
+  TranscriptSegmentDTO, NoteDTO, CreateNoteInput, UpdateNoteInput, ImportedRecordingState, ImportNoteInput, ImportedSegmentIdDTO, ImportedNoteDTO, RecordingCommandDTO, GenerateNotesCommandDTO, GenerationProgressDTO, GenerationStreamEventDTO,
   SharedNoteDTO, CreateShareInput, ShareDTO, CreatedShareDTO, HealthDTO, DeletedDTO, ApiErrorDTO,
   DownloadFileDTO, MacDownloadDTO, DownloadsDTO,
   StorageSettingsDTO, UpdateStorageSettingsInput, StorageTestInput, StorageTestDTO,

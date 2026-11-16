@@ -11,7 +11,7 @@
  * exchange number the client named). `POST /api/v1/chats/:id/turns` stores a finished exchange as given.
  */
 import { Schema } from "effect"
-import { ChatCitationDTO, ChatToolProgressDTO, Timestamp, UUID } from "./index"
+import { ChatCitationDTO, ChatReasoningDTO, ChatToolProgressDTO, MAX_CHAT_REASONING, Timestamp, UUID } from "./index"
 
 const Count = Schema.Number.check(Schema.isInt32(), Schema.isGreaterThanOrEqualTo(0))
 /** Exchanges a thread may hold. */
@@ -44,6 +44,8 @@ export const ChatThreadMessageDTO = Schema.Struct({
   model: Schema.NullOr(ModelName),
   citations: Schema.Array(ChatCitationDTO).check(Schema.isMaxLength(40)),
   tools: Schema.Array(ChatToolProgressDTO).check(Schema.isMaxLength(40)),
+  /** The model's reasoning, in order; each stretch says where it falls among `tools`. Empty when the provider gave none. */
+  reasoning: Schema.Array(ChatReasoningDTO).check(Schema.isMaxLength(MAX_CHAT_REASONING)),
   /** How long the answer took, from the question to its end. */
   elapsedMs: Schema.NullOr(Count),
   createdAt: Timestamp,
@@ -87,6 +89,7 @@ export const ChatTurnAnswerInput = Schema.Struct({
   model: Schema.optionalKey(Schema.NullOr(ModelName)),
   citations: Schema.optionalKey(Schema.Array(ChatCitationDTO).check(Schema.isMaxLength(40))),
   tools: Schema.optionalKey(Schema.Array(ChatToolProgressDTO).check(Schema.isMaxLength(40))),
+  reasoning: Schema.optionalKey(Schema.Array(ChatReasoningDTO).check(Schema.isMaxLength(MAX_CHAT_REASONING))),
   elapsedMs: Schema.optionalKey(Schema.NullOr(Count)),
 }).annotate({ identifier: "ChatTurnAnswerInput" })
 export type ChatTurnAnswerInput = typeof ChatTurnAnswerInput.Type

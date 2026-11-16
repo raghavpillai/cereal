@@ -207,6 +207,18 @@ fn tool_base(id: ElementId, symbol: &str, t: Theme) -> Stateful<Div> {
     tool_shell(id, t, Some(6.)).child(glyph)
 }
 
+/// A [`tool`] with its glyph drawn at `size` instead of the usual 15 pt: the
+/// window's own controls beside the traffic lights, which are a size up.
+pub fn tool_sized(id: impl Into<ElementId>, symbol: &str, size: f32, t: Theme) -> Stateful<Div> {
+    let id = id.into();
+    let glyph = tool_glyph_at(&id, symbol, size, t);
+    let shell = tool_shell(id.clone(), t, Some(6.)).child(glyph);
+    match tool_label(&id, symbol) {
+        Some(label) => with_tooltip(shell, label, t),
+        None => shell,
+    }
+}
+
 /// How long a button shows that it did its job.
 const CONFIRM_FOR: std::time::Duration = std::time::Duration::from_millis(1200);
 
@@ -255,10 +267,14 @@ fn confirming(id: &ElementId, now: std::time::Instant) -> Option<bool> {
 /// A tool's glyph, or the check that briefly replaces it after [`confirm`].
 /// Each swap rises in on the snappy spring; at rest it is the plain icon.
 fn tool_glyph(id: &ElementId, symbol: &str, t: Theme) -> AnyElement {
+    tool_glyph_at(id, symbol, 15., t)
+}
+
+fn tool_glyph_at(id: &ElementId, symbol: &str, size: f32, t: Theme) -> AnyElement {
     match confirming(id, std::time::Instant::now()) {
-        Some(true) => crate::motion::swap_in("tool-confirmed", icon("check", 15., t.text)),
-        Some(false) => crate::motion::swap_in("tool-restored", icon(symbol, 15., t.muted)),
-        None => icon(symbol, 15., t.muted).into_any_element(),
+        Some(true) => crate::motion::swap_in("tool-confirmed", icon("check", size, t.text)),
+        Some(false) => crate::motion::swap_in("tool-restored", icon(symbol, size, t.muted)),
+        None => icon(symbol, size, t.muted).into_any_element(),
     }
 }
 
@@ -362,17 +378,16 @@ pub fn focus_ring() -> Hsla {
     }
 }
 
-/// The focused Ask bar's edge and the halo round it, as the reference draws
-/// them: a pale olive line (its olive at half strength, #b7bf8f on the white
-/// bar) inside a hard-edged 3 pt halo of the same olive at 19% (#e4e8d4).
-/// The dark theme has the same pair in a lighter olive.
+/// The focused Ask bar's edge and the halo round it: the brand gold as a
+/// line at 60% inside a hard-edged 3 pt halo of the same gold at 22%, in its
+/// light and dark values.
 pub fn ask_ring() -> (Hsla, Hsla) {
-    let olive: Hsla = if is_dark() {
-        rgb(0xb9c76a).into()
+    let gold: Hsla = if is_dark() {
+        rgb(0xe0af2f).into()
     } else {
-        rgb(0x708020).into()
+        rgb(0xa57900).into()
     };
-    (olive.opacity(0.5), olive.opacity(0.19))
+    (gold.opacity(0.6), gold.opacity(0.22))
 }
 
 thread_local! {
@@ -640,22 +655,33 @@ pub fn scrim(kind: Scrim, fade: f32) -> Hsla {
 }
 
 /// What lies behind a bar floating 26 px above the bottom of a page: the page
-/// colour from the bar's middle down to the window edge, easing in over the
-/// 24 px above that (behind the bar itself). Content scrolls up to the bar's
-/// top edge untouched and nothing peeks out underneath it. `side` is how far
+/// colour from just below the bar's top down to the window edge, easing in
+/// over the 54 px above that. Content fades out as it nears the bar and nothing peeks
+/// out underneath it. `side` is how far
 /// the bar's wrapper is inset from the page on each side. Not interactive.
 pub fn bar_scrim(t: Theme, side: f32) -> Div {
+    // Text scrolling under the bar dissolves into the page instead of being
+    // cut off behind the controls: a long, eased fade (two linear pieces,
+    // gentle then steep) from 48 px above the bar to just below its top
+    // edge, then the solid page colour down to the window edge, as in the
+    // reference.
     div()
         .absolute()
-        .top(px(6.))
-        .bottom(px(-26.))
+        .top(px(-48.))
+        // Past the window's edge: nothing of the page shows below the bar.
+        .bottom(px(-48.))
         .left(px(-side))
         .right(px(-side))
         .flex()
         .flex_col()
-        .child(div().h(px(24.)).flex_shrink_0().bg(linear_gradient(
+        .child(div().h(px(40.)).flex_shrink_0().bg(linear_gradient(
             180.,
             linear_color_stop(t.bg.opacity(0.), 0.),
+            linear_color_stop(t.bg.opacity(0.6), 1.),
+        )))
+        .child(div().h(px(14.)).flex_shrink_0().bg(linear_gradient(
+            180.,
+            linear_color_stop(t.bg.opacity(0.6), 0.),
             linear_color_stop(t.bg, 1.),
         )))
         .child(div().flex_1().bg(t.bg))

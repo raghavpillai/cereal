@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { ShareDTO } from '@meeting-notes/contracts'
-import { ShareError, activeShares, createSharesClient, shareChoice, shareIsActive, shareToken, shareURL } from './shares'
+import { ACCESS_LEVELS, ShareError, accessLevelLabel, accessPlace, activeShares, createSharesClient, shareChoice, shareIsActive, shareToken, shareURL } from './shares'
 
 const noteId = '01136768-b41d-4ee8-ad19-e73976f18475', token = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdE'
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
@@ -69,5 +69,24 @@ describe('shared links', () => {
     expect(error.message).not.toContain('upstream')
     const gone = createSharesClient('https://notes.example', transport(() => Response.json({ error: 'not_found', message: 'x' }, { status: 404 })))
     expect(await gone.revoke(id(1)).catch(error => error.status)).toBe(404)
+  })
+  test('a link reaches the people invited or the whole workspace, and there is nothing wider to choose', async () => {
+    expect([...ACCESS_LEVELS]).toEqual(['invited', 'organization'])
+    expect(accessLevelLabel('invited', 'example.test')).toBe('Only people invited')
+    expect(accessLevelLabel('organization', 'example.test')).toBe('Anyone at example.test with the link')
+    const organization = { id: id(9), name: 'Acme', domain: 'example.test' }
+    expect(accessPlace({ organization })).toBe('example.test')
+    expect(accessPlace({ organization: { ...organization, domain: null } })).toBe('Acme')
+    expect(accessPlace({ organization: null })).toBe('your organization')
+    expect(accessPlace(null)).toBe('your organization')
+    const sharing = { noteId, level: 'invited', suspended: false, organization, owner: { userId: id(1), name: 'Sam', email: 'sam@example.test' }, people: [], attendees: [] }
+    const seen: Array<{ method: string; path: string; body: string }> = []
+    const client = createSharesClient('https://notes.example', transport(async request => {
+      seen.push({ method: request.method, path: new URL(request.url).pathname, body: await request.text() })
+      return Response.json(request.method === 'PATCH' ? { ...sharing, level: 'organization' } : sharing)
+    }))
+    expect((await client.access(noteId)).level).toBe('invited')
+    expect((await client.setLevel(noteId, 'organization')).level).toBe('organization')
+    expect(seen).toEqual([{ method: 'GET', path: `/api/v1/notes/${noteId}/access`, body: '' }, { method: 'PATCH', path: `/api/v1/notes/${noteId}/access`, body: '{"level":"organization"}' }])
   })
 })

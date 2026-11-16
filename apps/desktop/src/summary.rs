@@ -62,6 +62,9 @@ pub struct SummaryState {
     /// height springs towards: text arriving grows the card instead of
     /// jumping it. Zero until the first layout of a newly opened card.
     pub measured: Rc<Cell<f32>>,
+    /// Whether the open card hangs above its paragraph's row rather than
+    /// under it: decided as it is laid out, and kept while it is open.
+    above: Cell<bool>,
 }
 
 /// How many finished summaries are kept.
@@ -316,6 +319,12 @@ pub(crate) fn paragraph_text(line: &str) -> String {
     note_line(line).text().to_owned()
 }
 
+/// The text of a block of the notes without its marker or indentation;
+/// empty for a blank line or a rule, which are not blocks.
+pub(crate) fn block_text(line: &str) -> &str {
+    note_line(line).text()
+}
+
 /// Control and invisible formatting characters (bidirectional overrides,
 /// zero-width spaces and the like, Unicode Cc and Cf): they can make an
 /// address show one place and open another.
@@ -430,6 +439,17 @@ struct LinkedLine {
     links: Rc<Vec<(std::ops::Range<usize>, String)>>,
 }
 
+/// The address of the closing "Chat with meeting transcript:" line, when
+/// `line` is that line and holds nothing but the label and one address.
+pub(crate) fn transcript_chat_address(line: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix("Chat with meeting transcript:")?.trim();
+    let links = web_links(rest);
+    match links.as_slice() {
+        [(range, address)] if range.start == 0 && range.end == rest.len() => Some(address.clone()),
+        _ => None,
+    }
+}
+
 fn linked_line(source: &str, theme: Theme) -> LinkedLine {
     // The text keeps its colour; the underline is the list markers' grey.
     let underline = HighlightStyle {
@@ -449,17 +469,25 @@ fn linked_line(source: &str, theme: Theme) -> LinkedLine {
         text.push_str(&drawn);
         highlights.extend(ranges.into_iter().map(|(range, style)| ((range.start + offset)..(range.end + offset), style)));
     };
-    // The line the notes end with is plain, as in the reference: its
-    // address still opens, it is just not drawn as a link.
-    let transcript_chat = source.trim_start().starts_with("Chat with meeting transcript:");
+    // The line the notes end with ("Chat with meeting transcript: <address>")
+    // is drawn as a short, quiet link: the label opens the address, which is
+    // not written out.
+    if let Some(address) = transcript_chat_address(source) {
+        let label = "Chat with meeting transcript ↗";
+        let text = StyledText::new(label).with_highlights(vec![(0..label.len(), underline)]);
+        let layout = text.layout().clone();
+        return LinkedLine {
+            text,
+            layout,
+            links: Rc::new(vec![(0..label.len(), address)]),
+        };
+    }
     let mut at = 0;
     for (range, address) in web_links(source) {
         plain(&source[at..range.start], &mut text, &mut highlights);
         let offset = text.len();
         text.push_str(&address);
-        if !transcript_chat {
-            highlights.push((offset..text.len(), underline));
-        }
+        highlights.push((offset..text.len(), underline));
         links.push((offset..text.len(), address));
         at = range.end;
     }
@@ -711,6 +739,9 @@ impl Cereal {
             if let Some(note) = this.workspace.note_mut(note_id) {
                 let text = format!("{prefix}{}{suffix}", event.content);
                 if note.enhanced != text {
+                    // Which blocks are the person's follows from the text
+                    // (so undo and redo take it back with them).
+                    crate::authorship::edited(&mut note.enhanced_authorship, &note.enhanced, &text);
                     note.enhanced = text;
                     note.enhanced_dirty = true;
                     this.persist(cx);
@@ -787,6 +818,7 @@ impl Cereal {
         // A new card is laid out at its natural size before its height
         // springs to anything.
         self.summary.measured.set(0.);
+        self.summary.above.set(false);
         self.stage.forget(("summary-height", 0));
         let ready = cached.is_some();
         let (explanation, quotes) = cached.unwrap_or((String::new(), quotes));
@@ -981,6 +1013,17 @@ impl Cereal {
             .map(|edit| edit.source.as_str())
             .unwrap_or(&note.enhanced);
         let indent_unit = list_indent_unit(source);
+        // The rows of the notes as they are now that the person wrote: drawn
+        // in the full ink, the model's in the softer grey this column has.
+        let written = note
+            .enhanced_authorship
+            .as_ref()
+            .map(|authorship| authorship.written(&note.enhanced))
+            .unwrap_or_default();
+        let gained_lines = edit.map_or(0, |edit| {
+            let breaks = |text: &str| text.bytes().filter(|byte| *byte == b'\n').count();
+            breaks(&note.enhanced).saturating_sub(breaks(&edit.source))
+        });
         // After a generation the user watched, the notes arrive block by
         // block (the note view sets the mark once; it expires by itself and
         // every block is back to being a plain child).
@@ -1007,6 +1050,7 @@ impl Cereal {
             let text = block.parsed.text();
             edit.is_none_or(|edit| edit.row != block.row)
                 && has_transcript
+                && transcript_chat_address(text).is_none()
                 && text.chars().any(char::is_alphanumeric)
                 && text.chars().count() > 1
         };
@@ -1118,6 +1162,13 @@ impl Cereal {
             if parsed == NoteLine::Blank {
                 return div().h(px(8.)).into_any_element();
             }
+            // The block being edited is one field however many lines it has
+            // been typed into.
+            let by_person = crate::authorship::block_written(
+                &written,
+                editable_row,
+                if editing.is_some() { gained_lines } else { 0 },
+            );
             if parsed == NoteLine::Rule {
                 return arrive(
                     div()
@@ -1138,6 +1189,7 @@ impl Cereal {
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_size(px(16.))
                         .line_height(px(24.))
+                        .when(by_person, |heading| heading.text_color(t.text))
                         .child(
                             div()
                                 .absolute()
@@ -1180,7 +1232,8 @@ impl Cereal {
                 .ml(px(-2.))
                 .mr(px(2.))
                 .pl(px(2.))
-                .rounded(px(4.));
+                .rounded(px(4.))
+                .when(by_person, |paragraph| paragraph.text_color(t.text));
             if eligible {
                 paragraph = paragraph
                     .pr(px(0.))
@@ -1338,6 +1391,9 @@ impl Cereal {
                 // bullet text rather than jumping back to the heading gutter.
                 let (indent, level) = levels(line);
                 paragraph
+                    .when(transcript_chat_address(line).is_some(), |row| {
+                        row.text_size(px(14.)).line_height(px(20.)).text_color(t.muted)
+                    })
                     .ml(px(-2. + level as f32 * 16.))
                     .when(indent > 0, |d| d.mt(px(-4.)))
                     .into_any_element()
@@ -1411,47 +1467,66 @@ impl Cereal {
         } else {
             rgb(0xf7f8f3).into()
         };
+        // One device pixel of edge, as the reference draws it: lighter than
+        // a full point of the menus' border would need to be.
+        let edge = hairline(0.5);
         let border: Hsla = if dark {
-            rgba(0xffffff26).into()
+            rgba(0xffffff2b).into()
         } else {
-            rgb(0xdedfd7).into()
+            card_edge(t)
         };
         let foreground: Hsla = if dark { rgb(0xfcfcf8).into() } else { t.text };
         let muted: Hsla = if dark { rgb(0xacada8).into() } else { t.muted };
+        // Who said a quotation and when: a step quieter than the label.
+        let faint: Hsla = if dark { rgb(0x9e9e99).into() } else { t.muted.opacity(0.85) };
         let skeleton: Hsla = if dark {
             rgb(0x3c3c3b).into()
         } else {
             rgb(0xe9ebe3).into()
+        };
+        let sheen: Hsla = if dark {
+            rgb(0x424241).into()
+        } else {
+            rgb(0xf1f2ec).into()
         };
         let rule: Hsla = if dark {
             rgb(0x645539).into()
         } else {
             rgb(0xd6c49e).into()
         };
-        let width = px(if window.viewport_size().width >= px(1024.) {
+        let viewport = window.viewport_size();
+        let width = px(if viewport.width >= px(1024.) {
             512.
-        } else if window.viewport_size().width >= px(640.) {
+        } else if viewport.width >= px(640.) {
             384.
         } else {
             320.
         })
-        .min(window.viewport_size().width - px(24.));
+        .min(viewport.width - px(24.));
         let offset = self.note_scroll.offset() - open.scroll_offset;
         let trigger = Bounds::new(open.trigger.origin + offset, open.trigger.size);
-        let anchor = trigger.bottom_right() + point(px(0.), px(5.));
-        if trigger.bottom() < px(40.) || trigger.top() > window.viewport_size().height {
+        if trigger.bottom() < px(40.) || trigger.top() > viewport.height {
             return None;
         }
+        let waiting = !open.ready && open.explanation.is_empty();
+        let quoted = open.error.is_none() && !waiting && !open.quotes.is_empty();
+        // The blocks are spaced by their own margins: 12 pt under the label,
+        // 16 pt between the summary and the first quotation and 20 pt between
+        // quotations, with 24 pt under the last one, as the reference measures.
         let mut body = div()
             .w_full()
             .whitespace_normal()
             .flex()
             .flex_col()
-            .gap(px(12.))
-            .p(px(16.))
+            .px(px(16.))
+            .pt(px(15.))
+            .pb(px(if quoted { 20. } else { 16. }))
             .text_size(px(14.))
-            .line_height(px(22.))
+            .line_height(px(22.75))
             .text_color(foreground)
+            // While the summary is on its way the card is as tall as the
+            // reference's waiting card, so the first words do not shrink it.
+            .when(!open.ready, |body| body.min_h(px(SUMMARY_WAITING_HEIGHT - 2. * edge)))
             .child(
                 div()
                     .text_size(px(12.))
@@ -1460,22 +1535,14 @@ impl Cereal {
                     .text_color(muted)
                     .child("TRANSCRIPT SUMMARY"),
             );
-        if !open.ready && open.explanation.is_empty() {
-            // Until the first words arrive: one line, as tall as a line of
-            // the summary that replaces it, so the card does not jump.
-            body = body.child(
-                div()
-                    .h(px(22.))
-                    .flex()
-                    .items_center()
-                    .text_color(muted)
-                    .child(crate::motion::shimmer_label(
-                        SharedString::from(format!("source-reading-{}", self.summary.epoch)),
-                        "Reading the transcript…",
-                        t,
-                        cx,
-                    )),
-            );
+        if waiting {
+            // Until the first words arrive: the lines they will take the
+            // place of, with a sheen passing over them.
+            body = body.child(summary_skeleton(
+                SharedString::from(format!("source-reading-{}", self.summary.epoch)),
+                skeleton,
+                sheen,
+            ));
         } else if let Some(error) = &open.error {
             let note_id = open.note_id;
             let row = open.row;
@@ -1496,6 +1563,7 @@ impl Cereal {
                 .child(
                     div()
                         .relative()
+                        .mt(px(12.))
                         .child(
                             div()
                                 .text_size(px(14.))
@@ -1519,6 +1587,7 @@ impl Cereal {
                 .child(
                     div()
                         .id("retry-source-summary")
+                        .mt(px(12.))
                         .opacity(shown)
                         .px(px(10.))
                         .py(px(6.))
@@ -1533,57 +1602,71 @@ impl Cereal {
                         })),
                 );
         } else {
-            body = body.child(crate::chat::inline_text(
+            body = body.child(div().mt(px(12.)).child(crate::chat::inline_text(
                 if open.ready && open.explanation.trim().is_empty() {
                     "No relevant context found"
                 } else {
                     &open.explanation
                 },
                 t,
-            ));
+            )));
             for (index, quote) in open.quotes.iter().enumerate() {
                 let quote_text = quote.text.clone();
                 let segment_id = quote.segment_id.clone();
                 let note_id = open.note_id;
                 let revision = open.transcript_revision;
-                let attribution = [quote.speaker.clone(), quote.timestamp.clone()]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>()
-                    .join(" • ");
+                let speaker = quote.speaker.as_deref().map(quote_speaker);
                 // Each quotation rises in on its turn once the segments
                 // are known; reduced motion fades them in together.
                 let pose = self.stage.cascade("source-quotes", index);
                 body = body.child(crate::motion::lift(
                     div()
                         .id(SharedString::from(format!("source-quote-{index}")))
+                        // No box: a rule at the left and the words. The row
+                        // still answers the pointer, 8 pt wider and 4 pt
+                        // taller than the words on every side, which the
+                        // margins take back so the spacing is the text's.
+                        .mt(px(12.))
+                        .mx(px(-8.))
+                        .px(px(8.))
+                        .py(px(4.))
                         .flex()
                         .gap(px(12.))
-                        .py(px(4.))
                         .rounded(px(6.))
-                        .bg(skeleton)
                         .cursor_default()
                         // The row jumps to its place in the transcript: it
                         // answers the pointer like any other row.
                         .child(crate::motion::tactile(t.hover).radius(6.))
-                        .child(div().w(px(4.)).flex_shrink_0().rounded_full().bg(rule))
+                        .child(div().w(px(4.)).flex_shrink_0().rounded(px(1.)).bg(rule))
                         .child(
                             div()
                                 .min_w_0()
                                 .flex_1()
                                 .flex()
                                 .flex_col()
-                                .text_size(px(14.))
-                                .line_height(px(20.))
+                                .text_size(px(13.))
+                                .line_height(px(19.5))
                                 .child(quote.text.clone())
-                                .when(!attribution.is_empty(), |container| {
+                                .when(speaker.is_some() || quote.timestamp.is_some(), |container| {
+                                    // "You · 01:19"
                                     container.child(
                                         div()
                                             .mt(px(4.))
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(5.))
                                             .text_size(px(12.))
                                             .line_height(px(16.))
-                                            .text_color(muted)
-                                            .child(attribution),
+                                            .text_color(faint)
+                                            .when_some(speaker, |line, speaker| {
+                                                line.child(div().min_w_0().truncate().child(speaker.to_string()))
+                                            })
+                                            .when(speaker.is_some() && quote.timestamp.is_some(), |line| {
+                                                line.child("·")
+                                            })
+                                            .when_some(quote.timestamp.clone(), |line, time| {
+                                                line.child(div().flex_shrink_0().child(time))
+                                            }),
                                     )
                                 }),
                         )
@@ -1603,17 +1686,38 @@ impl Cereal {
         }
         if open.ready && self.recording.note_id == Some(open.note_id) && self.recording.is_active()
         {
-            body = body.child(div().pt(px(8.)).border_t_1().border_color(border).text_size(px(12.)).line_height(px(16.)).text_color(muted).child("Transcription is still active. These notes were generated at a previous point when transcription was paused."));
+            body = body.child(div().mt(px(12.)).pt(px(8.)).border_t_1().border_color(border).text_size(px(12.)).line_height(px(16.)).text_color(muted).child("Transcription is still active. These notes were generated at a previous point when transcription was paused."));
         }
+        // The card opens under its paragraph's row, its right edge on the
+        // row's. Where the window has no room for it there and more above,
+        // it opens above the row instead and stays there while it is open.
+        let measured = self.summary.measured.get();
+        let gap = px(6.);
+        let tallest = px(448.).min(viewport.height - px(32.));
+        let (side, room) = summary_side(
+            f32::from(trigger.top()),
+            f32::from(trigger.bottom()),
+            f32::from(viewport.height),
+            (measured + 2. * edge).max(SUMMARY_WAITING_HEIGHT).min(f32::from(tallest)),
+            self.summary.above.get(),
+        );
+        if live {
+            self.summary.above.set(side == Corner::BottomRight);
+        }
+        let above = side == Corner::BottomRight;
+        let anchor = if above {
+            trigger.top_right() - point(px(0.), gap)
+        } else {
+            trigger.bottom_right() + point(px(0.), gap)
+        };
         // The card's height follows its content on a spring: the summary
         // arriving line by line and the quotations after it grow the card
         // rather than jump it. Its first layout is at the natural size, which
         // is then measured; reduced motion follows at once.
-        let max_height = px(448.).min(window.viewport_size().height - px(32.));
-        let measured = self.summary.measured.get();
+        let max_height = tallest.min(px(room));
         let height = (measured > 0.).then(|| {
-            // The content and the card's 1 px border above and below it.
-            let target = (measured + 2.).min(f32::from(max_height));
+            // The content and the card's edge above and below it.
+            let target = (measured + 2. * edge).min(f32::from(max_height));
             if live {
                 self.stage
                     .aim(("summary-height", 0), target, crate::motion::SNAPPY)
@@ -1647,9 +1751,9 @@ impl Cereal {
             .overflow_x_hidden()
             .rounded(px(12.))
             .bg(card)
-            .border_1()
+            .border(px(edge))
             .border_color(border)
-            .shadow_xl()
+            .shadow_lg()
             .child(body)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .when(live, |card| {
@@ -1663,20 +1767,106 @@ impl Cereal {
         Some(
             deferred(
                 anchored()
-                    .anchor(Corner::TopRight)
+                    .anchor(side)
                     .position(anchor)
                     .snap_to_window_with_margin(px(12.))
                     // The source card grows out of the paragraph's trigger at
-                    // its top-right corner, and folds back into it.
+                    // the corner it hangs from, and folds back into it.
                     .child(crate::motion::pop(
                         card,
-                        crate::motion::Pop::menu((1., 0.)),
+                        crate::motion::Pop::menu((1., if above { 1. } else { 0. })),
                         pose,
                     )),
             )
             .with_priority(10)
             .into_any_element(),
         )
+    }
+}
+
+/// How tall the source card is while its summary is on the way: the
+/// reference's waiting card, label and three placeholder lines over room for
+/// the first of the text.
+const SUMMARY_WAITING_HEIGHT: f32 = 192.;
+/// The placeholder lines' widths as shares of the card's text column, as the
+/// reference draws them.
+const SKELETON_LINES: [f32; 3] = [0.92, 0.986, 0.863];
+/// How wide the sheen is, as a share of the text column.
+const SHEEN_WIDTH: f32 = 0.55;
+
+/// Where the sheen's left edge is `turn` (0..1) of the way through its loop,
+/// as a share of the text column: it enters from the left, crosses in the
+/// first two thirds of the loop and is out of sight for the rest. At 0 (and
+/// so with reduced motion, which never advances) it is out of sight.
+fn sheen_left(turn: f32) -> f32 {
+    let crossing = (turn.clamp(0., 1.) / 0.68).min(1.);
+    -SHEEN_WIDTH + (1. + SHEEN_WIDTH) * crate::motion::standard_curve(crossing)
+}
+
+/// The lines a summary will take the place of, with a soft highlight
+/// sweeping across all three together. Still with reduced motion.
+fn summary_skeleton(id: impl Into<ElementId>, base: Hsla, sheen: Hsla) -> impl IntoElement {
+    crate::motion::slow_loop(
+        id,
+        Duration::from_millis(1700),
+        div().mt(px(12.)).flex().flex_col().gap(px(8.)),
+        move |column, turns| {
+            let left = sheen_left(turns.fract());
+            column.children(SKELETON_LINES.map(|width| {
+                // The sheen is at one place in the column, whatever the
+                // width of the line it is passing over.
+                let band = div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(relative(left / width))
+                    .w(relative(SHEEN_WIDTH / width))
+                    .flex()
+                    .child(div().h_full().flex_1().bg(linear_gradient(
+                        90.,
+                        linear_color_stop(sheen.opacity(0.), 0.),
+                        linear_color_stop(sheen, 1.),
+                    )))
+                    .child(div().h_full().flex_1().bg(linear_gradient(
+                        90.,
+                        linear_color_stop(sheen, 0.),
+                        linear_color_stop(sheen.opacity(0.), 1.),
+                    )));
+                div()
+                    .relative()
+                    .h(px(16.))
+                    .w(relative(width))
+                    .rounded(px(4.))
+                    .bg(base)
+                    .overflow_hidden()
+                    .child(band)
+            }))
+        },
+    )
+}
+
+/// Who a quotation is attributed to in the source card. The transcript
+/// calls the microphone's own voice "Me"; the card, which speaks to the
+/// person reading it, says "You", as the reference does.
+fn quote_speaker(label: &str) -> &str {
+    if label.trim() == "Me" { "You" } else { label }
+}
+
+/// Which corner of the source card hangs on its paragraph's row, and how
+/// tall the card may be there. Under the row (its top-right corner on the
+/// row's) unless the card as tall as it `wants` to be does not fit there and
+/// there is more room above; once above (`was_above`) it stays, so a card
+/// does not change sides as its text arrives. The room is to the window's
+/// 12 pt margin below and to the title bar above, never less than a card
+/// that can show a few lines.
+fn summary_side(top: f32, bottom: f32, viewport: f32, wants: f32, was_above: bool) -> (Corner, f32) {
+    const GAP: f32 = 6.;
+    let below = viewport - bottom - GAP - 12.;
+    let above = top - GAP - 52.;
+    if was_above || (wants > below && above > below) {
+        (Corner::BottomRight, above.max(160.))
+    } else {
+        (Corner::TopRight, below.max(160.))
     }
 }
 
@@ -1698,6 +1888,12 @@ pub mod probe {
     /// Where the source trigger of `row` was last laid out.
     pub fn placed(note_id: u64, row: usize, bounds: Bounds<Pixels>) {
         TRIGGERS.with(|triggers| triggers.borrow_mut().insert((note_id, row), bounds));
+    }
+
+    /// Where the source trigger of `row` was last laid out, for a still
+    /// that opens its card where a click would.
+    pub fn trigger(note_id: u64, row: usize) -> Option<Bounds<Pixels>> {
+        TRIGGERS.with(|triggers| triggers.borrow().get(&(note_id, row)).copied())
     }
 
     fn say(what: &str) {
@@ -1864,7 +2060,7 @@ pub mod probe {
 mod tests {
     use super::{
         NoteLine, SummaryOpen, SummaryState, emphasis_ranges, list_indent_unit, matching_quotes,
-        note_line, web_links,
+        note_line, transcript_chat_address, web_links,
     };
     use gpui::{Bounds, FontStyle, FontWeight, Point};
     use std::sync::{
@@ -1959,6 +2155,18 @@ mod tests {
             }).collect();
             assert_eq!(found, expected, "{text:?}");
         }
+    }
+
+    #[test]
+    fn the_closing_chat_line_is_a_short_link_to_its_address() {
+        let line = "Chat with meeting transcript: https://notes.example.com/notes/be954608-a942-4d1f-bb83-a6a252a5106e/chat";
+        assert_eq!(
+            transcript_chat_address(line).as_deref(),
+            Some("https://notes.example.com/notes/be954608-a942-4d1f-bb83-a6a252a5106e/chat")
+        );
+        // Anything else on the line keeps it an ordinary line.
+        assert!(transcript_chat_address("Chat with meeting transcript: see https://a.example/x").is_none());
+        assert!(transcript_chat_address("- Chat about https://a.example/x").is_none());
     }
 
     #[test]
@@ -2179,6 +2387,49 @@ mod tests {
         assert!(open.quotes.is_empty());
         assert!(open.explanation.is_empty());
         assert_eq!(open.error.as_deref(), Some("Try again"));
+    }
+
+    #[test]
+    fn the_card_says_you_for_the_readers_own_voice_and_leaves_other_speakers_alone() {
+        assert_eq!(super::quote_speaker("Me"), "You");
+        assert_eq!(super::quote_speaker(" Me "), "You");
+        for other in ["Speaker 2", "Maya Example", "Room speaker 1", "Men", "me too"] {
+            assert_eq!(super::quote_speaker(other), other);
+        }
+    }
+
+    #[test]
+    fn the_card_hangs_under_its_row_unless_only_above_has_room_and_then_stays() {
+        use gpui::Corner;
+        // Plenty of room below: under the row, as tall as the room allows.
+        assert_eq!(super::summary_side(200., 224., 800., 192., false), (Corner::TopRight, 558.));
+        // Near the foot of the window with more room above: above the row.
+        assert_eq!(super::summary_side(600., 624., 800., 192., false), (Corner::BottomRight, 542.));
+        // It fits below as long as what it wants is no taller than the room.
+        assert_eq!(super::summary_side(566., 590., 800., 192., false).0, Corner::TopRight);
+        assert_eq!(super::summary_side(566., 590., 800., 193., false).0, Corner::BottomRight);
+        // Too tall for below but with even less room above: it stays below.
+        assert_eq!(super::summary_side(150., 174., 500., 448., false).0, Corner::TopRight);
+        // Once above it does not come back down as its text arrives.
+        assert_eq!(super::summary_side(200., 224., 800., 192., true).0, Corner::BottomRight);
+        // Never so short that nothing can be read.
+        assert_eq!(super::summary_side(40., 64., 200., 448., false).1, 160.);
+    }
+
+    #[test]
+    fn the_placeholder_sheen_is_out_of_sight_at_rest_and_crosses_once_a_loop() {
+        // At rest, and with reduced motion (which stays at 0): left of every line.
+        assert!(super::sheen_left(0.) + super::SHEEN_WIDTH <= 0.);
+        let mut last = super::sheen_left(0.);
+        for step in 1..=100 {
+            let left = super::sheen_left(step as f32 / 100.);
+            assert!(left >= last - 1e-4, "it never goes back");
+            last = left;
+        }
+        // Past the right edge for the last part of the loop.
+        assert!(super::sheen_left(0.7) >= 1. - 1e-3);
+        assert!(super::sheen_left(1.) >= 1. - 1e-3);
+        assert!(super::SKELETON_LINES.iter().all(|width| *width > 0.5 && *width <= 1.));
     }
 
     #[test]

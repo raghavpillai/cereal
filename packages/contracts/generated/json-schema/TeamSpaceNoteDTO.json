@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/TeamSpaceNoteDTO",
+  "$defs": {
+    "UUID": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|[fF]{8}-[fF]{4}-[fF]{4}-[fF]{4}-[fF]{12})$",
+      "format": "uuid",
+      "description": "UUID encoded as a string"
+    },
+    "Timestamp": {
+      "type": "string"
+    },
+    "NoteMeetingTimeDTO": {
+      "type": "object",
+      "properties": {
+        "startAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "endAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "allDay": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "startAt",
+        "endAt",
+        "allDay"
+      ],
+      "additionalProperties": true
+    },
+    "NoteAttendeeDTO": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 254
+        },
+        "shortName": {
+          "type": "string",
+          "maxLength": 254
+        },
+        "initials": {
+          "type": "string",
+          "maxLength": 8
+        }
+      },
+      "required": [
+        "name",
+        "shortName",
+        "initials"
+      ],
+      "additionalProperties": true
+    },
+    "NoteAttendeesDTO": {
+      "type": "object",
+      "properties": {
+        "people": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NoteAttendeeDTO"
+          },
+          "maxItems": 4
+        },
+        "others": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "minimum": -2147483648,
+              "maximum": 2147483647
+            }
+          ],
+          "minimum": 0
+        }
+      },
+      "required": [
+        "people",
+        "others",
+        "total"
+      ],
+      "additionalProperties": true
+    },
+    "TeamSpaceMemberDTO": {
+      "type": "object",
+      "properties": {
+        "userId": {
+          "$ref": "#/$defs/UUID"
+        },
+        "name": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        },
+        "image": {
+          "type": "string",
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "userId",
+        "name",
+        "email"
+      ],
+      "additionalProperties": true
+    },
+    "TeamSpaceNoteDTO": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/UUID"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "date": {
+          "type": "string"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "meeting": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NoteMeetingTimeDTO"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attendees": {
+          "$ref": "#/$defs/NoteAttendeesDTO"
+        },
+        "owner": {
+          "$ref": "#/$defs/TeamSpaceMemberDTO"
+        },
+        "addedAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "mine": {
+          "type": "boolean"
+        },
+        "canRemove": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "date",
+        "createdAt",
+        "meeting",
+        "attendees",
+        "owner",
+        "addedAt",
+        "mine",
+        "canRemove"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

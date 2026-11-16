@@ -122,6 +122,9 @@ impl Cereal {
         self.recording_changed_at = Some(Instant::now());
         let epoch = self.recording.epoch;
         cx.notify();
+        if crate::audio::preview_mode() {
+            self.apply_capture_choices();
+        }
         if !crate::audio::preview_mode() {
             if crate::server::enabled() {
                 self.server_action(
@@ -195,14 +198,16 @@ impl Cereal {
             capture.request_stop();
         }
         if let Some(id) = self.recording.note_id {
-            if crate::server::enabled() {
-                // On to the notes: the stream delivers what the server does
-                // not have yet ("Finishing the transcript…"), then the server
-                // is told to stop and the notes are written from the live
-                // transcript. No audio goes up.
-                self.active_tab = NoteTab::Enhanced;
-            }
-            self.live_stop(id, crate::model::PendingStop::Generate, cx);
+            // The person stopped it, and may only be pausing: the note stays
+            // as it is, on their own notes, with "Generate notes" above the
+            // bar and "Resume" in the capsule. The stream delivers what the
+            // server does not have yet and the server is told the recording
+            // stopped; the notes are written when they are asked for.
+            // Leaving the note, quitting or a capture that fails stop the
+            // same way (`finish_recording_preview`, `PendingStop::Stop`):
+            // nothing in this app ends a meeting by itself yet, so notes are
+            // only ever written when asked for.
+            self.live_stop(id, crate::model::PendingStop::Stop, cx);
             self.recording_stopped_by_person(id, cx);
         } else {
             self.live_end();
@@ -224,6 +229,9 @@ impl Cereal {
         if self.microphone_muted {
             options.microphone = false;
         }
+        // The microphone chosen in the transcript panel; the language goes
+        // to the server with the stream.
+        self.apply_capture_choices();
         // The capture is kept in the directory of the note's account.
         let result = crate::model::audio_directory_of(id)
             .and_then(|directory| crate::audio::Capture::start(id, &directory, options));
@@ -473,9 +481,272 @@ impl Cereal {
         .detach();
     }
 
+    /// The generation `epoch` of note `id` has said something (see
+    /// [`crate::server::GenerateProgress`]). `submitted_title` is the title
+    /// the note had when the notes were asked for.
+    pub fn generation_progress(
+        &mut self,
+        id: u64,
+        epoch: u64,
+        submitted_title: &str,
+        event: crate::server::GenerateProgress,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::server::GenerateProgress;
+        if self.generation.epoch != epoch || !self.generation_draft.of(epoch) {
+            return;
+        }
+        match event {
+            GenerateProgress::Began => {
+                self.generation.writing(epoch);
+            }
+            // The name arrives before the notes, and is shown at once. Only
+            // a note nobody has named takes it (`adopt_server_title`).
+            GenerateProgress::Title(title) => {
+                let named = self
+                    .workspace
+                    .note_mut(id)
+                    .is_some_and(|note| note.adopt_server_title(submitted_title, &title));
+                if named && self.current_note == Some(id) {
+                    self.title_input
+                        .update(cx, |input, cx| input.set_content(title, cx));
+                }
+            }
+            GenerateProgress::Delta(text) => {
+                self.generation.writing(epoch);
+                if !self.generation_draft.showing(id) {
+                    // The first words: the source card of the old notes,
+                    // if one is open, has nothing left to point at.
+                    self.summary.dismiss();
+                }
+                self.generation_draft.push(&text);
+            }
+            GenerateProgress::Buffered => self.generation_draft.restart(),
+        }
+        cx.notify();
+    }
+
+    /// Write a little more of the draft of generation `epoch` onto the
+    /// page, and keep the page on its last line unless the person has
+    /// scrolled away. False once there is nothing more to write: the
+    /// generation was cancelled, or its saved notes are all shown (the
+    /// note's own text takes over from the draft, with the same words in
+    /// the same place).
+    pub fn generation_draft_step(&mut self, epoch: u64, cx: &mut Context<Self>) -> bool {
+        if !self.generation_draft.of(epoch) {
+            return false;
+        }
+        if self.generation.epoch != epoch {
+            self.generation_draft.clear();
+            cx.notify();
+            return false;
+        }
+        let changed = self.generation_draft.step(Instant::now());
+        let on_page = self.current_note == self.generation_draft.note_id
+            && self.active_tab == NoteTab::Enhanced;
+        if on_page && self.follow_draft() {
+            cx.notify();
+        }
+        if self.generation_draft.complete && self.generation_draft.caught_up() {
+            self.generation_draft.clear();
+            cx.notify();
+            return false;
+        }
+        if changed {
+            cx.notify();
+        }
+        true
+    }
+
+    /// Ease the note's page down to the end of the draft. The person
+    /// scrolling anywhere else stops it; scrolling back to the end takes it
+    /// up again. True if the page moved.
+    fn follow_draft(&mut self) -> bool {
+        let offset = -f32::from(self.note_scroll.offset().y);
+        let end = f32::from(self.note_scroll.max_offset().height);
+        let draft = &mut self.generation_draft;
+        if draft
+            .scrolled_to
+            .is_some_and(|put| (offset - put).abs() > 2.)
+        {
+            draft.follow = offset >= end - 4.;
+        }
+        if !draft.follow || end - offset < 0.5 {
+            draft.scrolled_to = Some(offset);
+            return false;
+        }
+        // A quarter of the way each frame, never less than a point.
+        let next = (offset + ((end - offset) * 0.25).max(1.)).min(end);
+        draft.scrolled_to = Some(next);
+        self.note_scroll.set_offset(point(px(0.), px(-next)));
+        true
+    }
+
+    /// For the tour's stills and the smoke test: write `notes` into note
+    /// `id` as a streamed generation would, from a script instead of a
+    /// server. `hold_at` stops the script after that many characters (a
+    /// still of the notes mid-stream); `None` writes them all and saves them.
+    #[cfg(debug_assertions)]
+    pub fn start_scripted_generation(
+        &mut self,
+        id: u64,
+        title: Option<&str>,
+        notes: &str,
+        hold_at: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::server::GenerateProgress;
+        let Some(note) = self.workspace.note(id) else {
+            return;
+        };
+        let (revision, submitted_title) = (note.transcript_revision, note.title.clone());
+        let epoch = self.generation.begin(id, revision);
+        self.generation_draft.begin(id, epoch);
+        self.active_tab = NoteTab::Enhanced;
+        self.summary.dismiss();
+        let (sender, progress) = std::sync::mpsc::channel();
+        let (title, notes) = (title.map(str::to_owned), notes.to_owned());
+        let script = notes.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(GenerateProgress::Began);
+            std::thread::sleep(crate::motion::slow(Duration::from_millis(500)));
+            if let Some(title) = title {
+                let _ = sender.send(GenerateProgress::Title(title));
+            }
+            let mut sent = 0;
+            for word in script.split_inclusive(' ') {
+                if hold_at.is_some_and(|limit| sent + word.chars().count() > limit) {
+                    // Held: the channel stays open, so the draft stays up.
+                    std::thread::sleep(Duration::from_secs(600));
+                    return;
+                }
+                sent += word.chars().count();
+                if sender.send(GenerateProgress::Delta(word.into())).is_err() {
+                    return;
+                }
+                std::thread::sleep(crate::motion::slow(Duration::from_millis(14)));
+            }
+        });
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+                let mut ended = false;
+                let events: Vec<GenerateProgress> = loop {
+                    let mut events = Vec::new();
+                    loop {
+                        match progress.try_recv() {
+                            Ok(event) => events.push(event),
+                            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                ended = true;
+                                break;
+                            }
+                        }
+                    }
+                    break events;
+                };
+                let Ok(live) = this.update(cx, |this, cx| {
+                    for event in events {
+                        this.generation_progress(id, epoch, &submitted_title, event, cx);
+                    }
+                    if ended && this.generation.epoch == epoch && !this.generation_draft.complete {
+                        if let Some(note) = this.workspace.note_mut(id) {
+                            note.enhanced = notes.clone();
+                            note.generated_revision = Some(revision);
+                        }
+                        this.generation.writing(epoch);
+                        this.generation.complete(epoch, id, revision);
+                        this.generation_draft.finish(&notes);
+                        this.persist(cx);
+                    }
+                    this.generation_draft_step(epoch, cx)
+                }) else {
+                    break;
+                };
+                if !live {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     /// The live account uses the legacy floating `m_n` controls, not the
     /// feature-flagged 32 px `yHr` header capsule. Its layout changes naturally.
     pub fn render_recording_control(&self, id: u64, cx: &mut Context<Self>) -> AnyElement {
+        self.recording_control(id, false, cx)
+    }
+
+    /// The same control in the transcript panel's footer: the panel is its
+    /// surface, so it draws none of its own, whether the panel is open,
+    /// opening or closing.
+    pub fn render_panel_recording_control(&self, id: u64, cx: &mut Context<Self>) -> AnyElement {
+        self.recording_control(id, true, cx)
+    }
+
+    /// How wide the note bar's record capsule is while the transcript is
+    /// closed: where the bar divides when the panel grows out of it.
+    pub fn closed_capsule_width(&self, id: u64, cx: &mut Context<Self>) -> f32 {
+        let owned = self.recording.note_id == Some(id);
+        let phase = if owned {
+            self.recording.phase
+        } else if self
+            .workspace
+            .note(id)
+            .is_some_and(|n| !n.transcript.is_empty())
+        {
+            Phase::Complete
+        } else {
+            Phase::Idle
+        };
+        let live = matches!(phase, Phase::Starting | Phase::Live);
+        if self.generation.is_running_for(id) {
+            return COMPACT_CAPSULE;
+        }
+        if !live
+            && self
+                .workspace
+                .note(id)
+                .is_some_and(|note| !note.enhanced.trim().is_empty())
+        {
+            return COMPACT_CAPSULE;
+        }
+        let face = cx.text_system().resolve_font(&font(FONT));
+        let text_width = |label: &str| -> f32 {
+            label
+                .chars()
+                .map(|character| {
+                    cx.text_system()
+                        .advance(face, px(13.), character)
+                        .map_or(7., |size| f32::from(size.width))
+                })
+                .sum()
+        };
+        let scheduled = if phase == Phase::Idle {
+            self.workspace
+                .note(id)
+                .and_then(|n| n.meeting_context.as_ref())
+                .and_then(|meeting| crate::meeting::start_label(meeting, crate::menubar::now()))
+        } else {
+            None
+        };
+        if let Some(label) = &scheduled {
+            scheduled_capsule_width(text_width(label), false)
+        } else if live {
+            LIVE_CAPSULE
+        } else {
+            labelled_capsule_width(text_width(match phase {
+                Phase::Idle => "Start now",
+                Phase::Held | Phase::Failed => "Retry",
+                _ => "Resume",
+            }))
+        }
+    }
+
+    fn recording_control(&self, id: u64, embedded: bool, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme();
         let owned = self.recording.note_id == Some(id);
         let phase = if owned {
@@ -680,8 +951,8 @@ impl Cereal {
             .items_center()
             .rounded(px(CAPSULE_HEIGHT / 2.))
             .bg(t.card)
-            .when(!open && !attention, |s| bar_edge(s, t))
-            .when(attention && !open, |s| {
+            .when(!embedded && !attention, |s| bar_edge(s, t))
+            .when(attention && !embedded, |s| {
                 // The warning tint has its own inset edge instead of the ring.
                 s.bg(rgba(0xed921233))
                     .shadow(vec![BoxShadow {
@@ -693,7 +964,9 @@ impl Cereal {
                     .child(edge(crate::ui::hairline(0.5), 0., t.warning_edge))
                     .text_color(t.warning_ink)
             })
-            .when(open, |s| {
+            // In the panel's footer the panel is the surface, whether it is
+            // open, opening or on its way shut.
+            .when(embedded, |s| {
                 s.bg(rgba(0x00000000))
                     .border_color(rgba(0x00000000))
                     .shadow(Vec::<BoxShadow>::new())
@@ -864,7 +1137,9 @@ impl Cereal {
         let label = match self.generation.phase {
             // The stream is still delivering the end of the recording.
             _ if finishing => "Finishing the transcript…",
-            GenerationPhase::AnalyzingTranscript => "Analyzing transcript",
+            // The note is being saved and its recording stopped.
+            GenerationPhase::AnalyzingTranscript => "Reading the transcript",
+            // The model has been asked: its first words replace this chip.
             // Also while the finished chip is leaving: its last words stay.
             _ => "Writing notes",
         };
@@ -1026,84 +1301,6 @@ impl Cereal {
             pose,
             ))
             .into_any_element()
-    }
-
-    pub fn recording_settings(&self, cx: &mut Context<Self>) -> Div {
-        let t = self.theme();
-        div()
-            .w(px(272.))
-            .p(px(8.))
-            .flex()
-            .flex_col()
-            .gap(px(4.))
-            .rounded(px(12.))
-            .bg(t.card)
-            .border_1()
-            .border_color(t.border)
-            .shadow_lg()
-            .child(
-                div()
-                    .px(px(8.))
-                    .py(px(7.))
-                    .text_size(px(12.))
-                    .text_color(t.muted)
-                    .child("Audio input"),
-            )
-            .child(
-                div()
-                    .id("microphone-preview-toggle")
-                    .px(px(8.))
-                    .py(px(8.))
-                    .rounded(px(6.))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .cursor_default()
-                    .child(row_feedback(t, 6.))
-                    .child(icon("mic", 16., t.muted))
-                    .child(if self.microphone_muted {
-                        "Microphone off for next segment"
-                    } else {
-                        "Microphone on for next segment"
-                    })
-                    .reach().on_click(cx.listener(|this, _, _, cx| {
-                        if this.recording.is_active() && !crate::audio::preview_mode() {
-                            this.show_toast("Stop recording before changing audio inputs", cx);
-                            return;
-                        }
-                        this.microphone_muted = !this.microphone_muted;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                div()
-                    .px(px(8.))
-                    .py(px(6.))
-                    .text_size(px(11.))
-                    .line_height(px(16.))
-                    .text_color(t.muted)
-                    .child(if crate::audio::preview_mode() {
-                        "Preview · audio capture is off"
-                    } else {
-                        "Changes apply when you start or resume recording."
-                    }),
-            )
-            .child(separator(t))
-            .child(
-                div()
-                    .id("sound-settings")
-                    .px(px(8.))
-                    .py(px(9.))
-                    .rounded(px(6.))
-                    .cursor_default()
-                    .child(row_feedback(t, 6.))
-                    .child("Sound settings")
-                    .reach().on_click(cx.listener(|this, _, _, cx| {
-                        this.menu = None;
-                        cx.open_url(crate::desktop_preferences::SOUND_SETTINGS_URL);
-                        cx.notify();
-                    })),
-            )
     }
 }
 
@@ -1381,6 +1578,37 @@ pub fn recording_waveform(level: f32, color: Hsla) -> AnyElement {
     .into_any_element()
 }
 
+/// The fewest spoken words notes are offered for.
+const WORDS_WORTH_NOTES: usize = 12;
+
+/// Whether `transcript` (the note's transcript as it is kept here: blocks
+/// of a speaker-and-time line and what was said) holds enough speech to
+/// write notes from. A recording of a cough and a "hello" offers nothing to
+/// generate, rather than an empty note.
+pub fn enough_speech(transcript: &str) -> bool {
+    let mut words = 0;
+    for block in transcript.split("\n\n") {
+        let mut lines = block.lines().peekable();
+        if lines.peek().is_some_and(|first| {
+            first.split_whitespace().last().is_some_and(|word| {
+                word.contains(':') && word.chars().all(|c| c.is_ascii_digit() || c == ':')
+            })
+        }) {
+            lines.next();
+        }
+        for line in lines {
+            words += line
+                .split_whitespace()
+                .filter(|word| word.chars().any(char::is_alphanumeric))
+                .count();
+            if words >= WORDS_WORTH_NOTES {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Flatten saved transcript blocks into a plain local-outline input. Speaker/time
 /// headers stay in the transcript rather than becoming generated note bullets.
 fn outline_source(body: &str, transcript: &str) -> String {
@@ -1430,6 +1658,19 @@ mod tests {
         // Resume: 8 pt either side of the label and 3 pt short of the end.
         assert_eq!(labelled_capsule_width(48.), 4. + 48. + 67. + 4.);
         assert_eq!(labelled_capsule_width(10.), 96.);
+    }
+
+    #[test]
+    fn notes_are_offered_only_for_a_recording_with_something_said() {
+        assert!(!enough_speech(""));
+        assert!(!enough_speech("Me 0:01\nHello? Is this on?"));
+        // Speaker-and-time lines are not speech.
+        assert!(!enough_speech("Me 0:01\nHello.\n\nSpeaker 1 0:04\nHi.\n\nMe 0:09\nOkay, bye."));
+        assert!(enough_speech(
+            "Me 0:01\nSo the launch moves to Monday.\n\nSpeaker 1 0:04\nRight, after the accessibility review is done."
+        ));
+        // A transcript without headers counts too.
+        assert!(enough_speech("one two three four five six seven eight nine ten eleven twelve"));
     }
 
     #[test]

@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/NoteAccessDTO",
+  "$defs": {
+    "UUID": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|[fF]{8}-[fF]{4}-[fF]{4}-[fF]{4}-[fF]{12})$",
+      "format": "uuid",
+      "description": "UUID encoded as a string"
+    },
+    "NoteAccessLevel": {
+      "type": "string",
+      "enum": [
+        "invited",
+        "organization"
+      ]
+    },
+    "NoteAccessOrganizationDTO": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/UUID"
+        },
+        "name": {
+          "type": "string"
+        },
+        "domain": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 253
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "domain"
+      ],
+      "additionalProperties": true
+    },
+    "NoteAccessPersonDTO": {
+      "type": "object",
+      "properties": {
+        "userId": {
+          "$ref": "#/$defs/UUID"
+        },
+        "name": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        },
+        "image": {
+          "type": "string",
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "userId",
+        "name",
+        "email"
+      ],
+      "additionalProperties": true
+    },
+    "Timestamp": {
+      "type": "string"
+    },
+    "NoteAccessGrantDTO": {
+      "type": "object",
+      "properties": {
+        "userId": {
+          "$ref": "#/$defs/UUID"
+        },
+        "name": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        },
+        "image": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "addedAt": {
+          "$ref": "#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "userId",
+        "name",
+        "email",
+        "addedAt"
+      ],
+      "additionalProperties": true
+    },
+    "NoteAccessAttendeeDTO": {
+      "type": "object",
+      "properties": {
+        "userId": {
+          "$ref": "#/$defs/UUID"
+        },
+        "name": {
+          "type": "string"
+        },
+        "email": {
+          "type": "string"
+        },
+        "image": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "hasAccess": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "userId",
+        "name",
+        "email",
+        "hasAccess"
+      ],
+      "additionalProperties": true
+    },
+    "NoteAccessDTO": {
+      "type": "object",
+      "properties": {
+        "noteId": {
+          "$ref": "#/$defs/UUID"
+        },
+        "level": {
+          "$ref": "#/$defs/NoteAccessLevel"
+        },
+        "suspended": {
+          "type": "boolean"
+        },
+        "organization": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NoteAccessOrganizationDTO"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owner": {
+          "$ref": "#/$defs/NoteAccessPersonDTO"
+        },
+        "people": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NoteAccessGrantDTO"
+          }
+        },
+        "attendees": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NoteAccessAttendeeDTO"
+          }
+        }
+      },
+      "required": [
+        "noteId",
+        "level",
+        "suspended",
+        "organization",
+        "owner",
+        "people",
+        "attendees"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

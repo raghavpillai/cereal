@@ -174,16 +174,17 @@ const CASES:Case[]=[
     reference:c=>`Nine clinics with home-visit nurses. A sixty-day pilot at three clinics cut missed visits from eleven percent to seven percent. They want to roll out to all nine, but only once Export has the audit log (shipping ${c.d(-18).spoken}); their board decides on ${c.d(-25).spoken}. Quoted $49 per seat for about 140 seats, formal quote owed by Aditi. Stage three in the pipeline.`,
     must:()=>["eleven|11 ?%","seven|7 ?%","audit log"]},
 ]
-/** The answer must close with the coverage note the server derived from the
- * lookups that actually ran: recomputed here from the stream's tool events, so
- * a note that claims a search or a read that did not happen fails. */
+/** An answer says nothing about its research unless the research was partial; then it must close with the one
+ * line the server derived from the lookups that actually ran, recomputed here from the stream's tool events.
+ * The old "Coverage note" label is never written. */
 export function coverageCheck(execution:Pick<Execution,"output"|"tools">):Check {
   // Typographic and plain quotation marks are the same note.
   const normal=(text:string)=>text.replace(/\[\[S\d+\]\]/g,"").replace(/[*_`]/g,"").replace(/[\u201c\u201d\u201e]/g,'"').replace(/[\u2018\u2019]/g,"'").replace(/\s+/g," ").trim()
-  const expected=normal(coverageNote(execution.tools)),at=execution.output.lastIndexOf("Coverage note")
-  if(!expected)return {id:"coverage-note-true",group:"format",pass:at<0,...(at<0?{}:{detail:"a coverage note was written although nothing was looked up"})}
-  const actual=at<0?"":normal(execution.output.slice(at)).replace(/^Coverage note:?\s*/,"")
-  return {id:"coverage-note-true",group:"format",pass:actual===expected,...(actual===expected?{}:{detail:at<0?"no closing coverage note":`says "${actual.slice(0,160)}" but the lookups were "${expected.slice(0,160)}"`})}
+  const expected=normal(coverageNote(execution.tools)),output=normal(execution.output)
+  if(/coverage note/i.test(output))return {id:"coverage-note-true",group:"format",pass:false,detail:"a \"Coverage note\" label was written"}
+  if(!expected)return {id:"coverage-note-true",group:"format",pass:true}
+  const pass=output.endsWith(expected)
+  return {id:"coverage-note-true",group:"format",pass,...(pass?{}:{detail:`does not close with "${expected.slice(0,160)}"`})}
 }
 /** Days ago of Monday of the current week (UTC). */
 const mondayAgo=(context:Context)=>["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"].indexOf(context.d(0).weekday)

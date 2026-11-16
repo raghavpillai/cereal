@@ -674,7 +674,10 @@ private let invitationJSON = #"{"id":"00000000-0000-4000-8000-000000000013","org
 
 @Suite struct SourceAwareStreamingTests {
     @Test func actualToolEventsAndIssuedSourcesRemainTypedAndOptInWithLocalTimeZone() async throws {
+        // The model's reasoning arrives among the other events; it is not shown yet, so it is passed over.
         let body = """
+        data: {"type":"reasoning","text":"**Finding the meeting**\\n\\nLooking for the date."}
+
         data: {"type":"tool","text":"","tool":{"callId":"\(memberID)","name":"search_meetings","label":"Searching meetings","status":"running"}}
 
         data: {"type":"tool","text":"","tool":{"callId":"\(memberID)","name":"search_meetings","label":"Found meetings","status":"completed","resultCount":1,"results":[{"noteId":"\(noteID)","title":"Actual returned title","date":"2026-11-13"}]}}

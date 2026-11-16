@@ -3,6 +3,7 @@ import { FetchHttpClient } from 'effect/http'
 import { HttpApiClient } from 'effect/http-api'
 import { MeetingsApi } from '@meeting-notes/contracts/api'
 import type { ShareDTO } from '@meeting-notes/contracts'
+import type { NoteAccessDTO, NoteAccessLevel } from '@meeting-notes/contracts/note-access'
 
 /** Shared links of a note: make one, list them, revoke them. The same three calls the
  * desktop app makes. A link publishes a fixed copy of the chosen text; the transcript
@@ -38,6 +39,15 @@ export const shareIsActive = (share: Pick<ShareDTO, 'revokedAt' | 'expiresAt'>, 
 export function activeShares(shares: readonly ShareDTO[], now = Date.now()): ShareDTO[] {
   return shares.filter(share => shareIsActive(share, now)).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || (a.id < b.id ? -1 : 1))
 }
+
+/** What the note's workspace is called in a sentence: its mail domain, else its name. */
+export const accessPlace = (access: Pick<NoteAccessDTO, 'organization'> | null): string =>
+  access?.organization?.domain?.trim() || access?.organization?.name.trim() || 'your organization'
+
+/** The two reaches a link can have, in the words of the desktop app. There is no wider one. */
+export const ACCESS_LEVELS: readonly NoteAccessLevel[] = ['invited', 'organization']
+export const accessLevelLabel = (level: NoteAccessLevel, place: string): string =>
+  level === 'organization' ? `Anyone at ${place} with the link` : 'Only people invited'
 
 /** What may be put in a link, given what the note has: a link with nothing in it is never made. */
 export function shareChoice(has: { enhanced: boolean; body: boolean }, wanted: { enhanced: boolean; body: boolean }): { includeEnhanced: boolean; includeBody: boolean } | null {
@@ -84,6 +94,9 @@ export function createSharesClient(baseUrl: string, transport: typeof fetch = gl
       return { share: made.share, url }
     },
     revoke: (shareId: string, signal?: AbortSignal) => execute(c => c.owner.revokeShare({ params: { id: shareId } }), signal),
+    /** Who the note is shared with and how far its links reach (the owner's to read and change). */
+    access: (noteId: string, signal?: AbortSignal): Promise<NoteAccessDTO> => execute(c => c.owner.getNoteAccess({ params: { id: noteId } }), signal),
+    setLevel: (noteId: string, level: NoteAccessLevel, signal?: AbortSignal): Promise<NoteAccessDTO> => execute(c => c.owner.updateNoteAccess({ params: { id: noteId }, payload: { level } }), signal),
   }
 }
 export type SharesClient = ReturnType<typeof createSharesClient>

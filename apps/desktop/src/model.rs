@@ -111,6 +111,15 @@ pub struct Note {
     /// provider completions. Only an acknowledgement of this text clears it.
     #[serde(default, rename = "enhancedDirty")]
     pub enhanced_dirty: bool,
+    /// The generated original of notes edited here, by which the edited
+    /// blocks are told from the model's (see `authorship`). Kept with this
+    /// device's copy of the note only.
+    #[serde(
+        default,
+        rename = "enhancedAuthorship",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub enhanced_authorship: Option<crate::authorship::Authorship>,
     pub transcript: String,
     /// Preserve canonical server provenance for transcript bubble alignment and
     /// diarized identities. The plain transcript remains the copy/search format.
@@ -270,6 +279,7 @@ impl Note {
             body: present(&self.body),
             enhanced: self.enhanced.clone(),
             enhanced_dirty: self.enhanced_dirty,
+            enhanced_authorship: self.enhanced_authorship.clone(),
             transcript: present(&self.transcript),
             server_transcript_segments: Vec::new(),
             server_id: self.server_id.clone(),
@@ -394,20 +404,101 @@ impl Note {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// The colour scheme the person chose. `System` follows macOS.
+    pub theme: ThemeMode,
+    /// The scheme in use, resolved from `theme` ([`Settings::resolve_theme`]).
+    /// This is what the rest of the app reads.
     pub dark_mode: bool,
     pub auto_enhance: bool,
     /// The note about privacy on the private space page has been closed.
     /// Kept so that it stays closed after a restart.
     pub space_banner_dismissed: bool,
+    /// The same for the banner on the team space page, closed separately.
+    pub team_banner_dismissed: bool,
+    /// The workspace's name as its server last gave it, so the sidebar can
+    /// name the team space before the server has been asked again.
+    pub team_space_name: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            theme: ThemeMode::System,
             dark_mode: false,
             auto_enhance: true,
             space_banner_dismissed: false,
+            team_banner_dismissed: false,
+            team_space_name: String::new(),
         }
+    }
+}
+
+/// The interface colour scheme: the Mac's own, or one that is forced.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeMode {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+/// Anything that is not a scheme this build knows reads as `System`, so one
+/// odd value never costs the other settings in the file.
+impl<'de> Deserialize<'de> for ThemeMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            Some("light") => ThemeMode::Light,
+            Some("dark") => ThemeMode::Dark,
+            _ => ThemeMode::System,
+        })
+    }
+}
+
+impl ThemeMode {
+    pub const ALL: [ThemeMode; 3] = [ThemeMode::System, ThemeMode::Light, ThemeMode::Dark];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemeMode::System => "System",
+            ThemeMode::Light => "Light",
+            ThemeMode::Dark => "Dark",
+        }
+    }
+
+    /// Whether the interface is dark, given whether macOS is.
+    pub fn dark(self, system_dark: bool) -> bool {
+        match self {
+            ThemeMode::System => system_dark,
+            ThemeMode::Light => false,
+            ThemeMode::Dark => true,
+        }
+    }
+}
+
+impl Settings {
+    /// Choose a scheme. `dark_mode` follows at once for a forced scheme, and
+    /// with the next [`Self::resolve_theme`] for `System`.
+    pub fn set_theme(&mut self, theme: ThemeMode) {
+        self.theme = theme;
+        if theme == ThemeMode::Light || theme == ThemeMode::Dark {
+            self.dark_mode = theme == ThemeMode::Dark;
+        }
+    }
+
+    /// Force light or dark, whatever macOS shows (`--dark`, the tours).
+    pub fn force_dark(&mut self, dark: bool) {
+        self.set_theme(if dark { ThemeMode::Dark } else { ThemeMode::Light });
+    }
+
+    /// Bring `dark_mode` in line with the chosen scheme, given whether macOS
+    /// is dark. Returns whether it changed.
+    pub fn resolve_theme(&mut self, system_dark: bool) -> bool {
+        let dark = self.theme.dark(system_dark);
+        let changed = self.dark_mode != dark;
+        self.dark_mode = dark;
+        changed
     }
 }
 
@@ -528,9 +619,11 @@ impl Workspace {
                 let seeded = file.settings.clone().unwrap_or_default();
                 device.settings = Some(seeded.clone());
                 // A `--dark` launch has already chosen; keep what is shown.
-                let dark = self.settings.dark_mode;
+                let forced = self.settings.theme == ThemeMode::Dark;
                 self.settings = seeded;
-                self.settings.dark_mode |= dark;
+                if forced {
+                    self.settings.force_dark(true);
+                }
             }
         }
         // Native finalization can complete during app shutdown after GPUI's
@@ -1329,12 +1422,18 @@ mod tests {
         let path = directory.join("workspace.json");
         let mut workspace = Workspace::demo();
         workspace.note_mut(1).unwrap().body = "An edited note, with café and 🌱".into();
-        workspace.settings.dark_mode = true;
+        workspace.settings.force_dark(true);
         // A workspace written before the banner could be closed for good
         // has no such setting: the banner is shown.
         assert!(!workspace.settings.space_banner_dismissed);
         let older: Settings = serde_json::from_str(r#"{"dark_mode":true}"#).unwrap();
         assert!(older.dark_mode && !older.space_banner_dismissed);
+        // It has no scheme either: it follows macOS, and a value from a
+        // build this one does not know does too.
+        assert_eq!(older.theme, ThemeMode::System);
+        let newer: Settings =
+            serde_json::from_str(r#"{"theme":"sepia","auto_enhance":false}"#).unwrap();
+        assert!(newer.theme == ThemeMode::System && !newer.auto_enhance);
         workspace.settings.space_banner_dismissed = true;
         workspace.save_to(&path).unwrap();
         let restored = Workspace::load_from(&path).unwrap();
@@ -1343,6 +1442,7 @@ mod tests {
             "An edited note, with café and 🌱"
         );
         assert!(restored.settings.dark_mode);
+        assert_eq!(restored.settings.theme, ThemeMode::Dark);
         // Closing the space banner survives a restart.
         assert!(restored.settings.space_banner_dismissed);
         assert_eq!(restored.notes.len(), workspace.notes.len());
@@ -1392,6 +1492,41 @@ mod tests {
             workspace.notes.iter().filter(|note| note.id == gap).count(),
             1
         );
+    }
+
+    /// A fresh install follows macOS, live; Light and Dark hold whatever
+    /// macOS shows; and the choice is what is saved.
+    #[test]
+    fn the_theme_follows_macos_unless_one_is_forced() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.theme, ThemeMode::System);
+        assert!(settings.resolve_theme(true) && settings.dark_mode);
+        assert!(!settings.resolve_theme(true), "nothing changed");
+        assert!(settings.resolve_theme(false) && !settings.dark_mode);
+        settings.set_theme(ThemeMode::Dark);
+        assert!(settings.dark_mode, "a forced scheme applies at once");
+        assert!(!settings.resolve_theme(false) && settings.dark_mode);
+        settings.set_theme(ThemeMode::Light);
+        assert!(!settings.resolve_theme(true) && !settings.dark_mode);
+        settings.force_dark(true);
+        assert_eq!(settings.theme, ThemeMode::Dark);
+        // Back to System: the scheme in use stays until macOS is asked.
+        settings.set_theme(ThemeMode::System);
+        assert!(settings.dark_mode);
+        assert!(settings.resolve_theme(false) && !settings.dark_mode);
+        for (theme, saved) in [
+            (ThemeMode::System, "system"),
+            (ThemeMode::Light, "light"),
+            (ThemeMode::Dark, "dark"),
+        ] {
+            settings.set_theme(theme);
+            let json = serde_json::to_value(&settings).unwrap();
+            assert_eq!(json["theme"], saved);
+            let read: Settings = serde_json::from_value(json).unwrap();
+            assert_eq!(read.theme, theme);
+            assert_eq!(theme.label().to_lowercase(), saved);
+        }
+        assert_eq!(ThemeMode::ALL.map(ThemeMode::label), ["System", "Light", "Dark"]);
     }
 
     #[test]

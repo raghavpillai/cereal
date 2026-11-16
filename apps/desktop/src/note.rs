@@ -429,7 +429,14 @@ impl Cereal {
             && note.pending_stop == Some(crate::model::PendingStop::Generate)
             && (self.live.delivering(id) || !note.live_pending.is_empty());
         let generating = self.generation.is_running_for(id) || finishing;
-        let has_enhanced = !note.enhanced.trim().is_empty() || generating;
+        // The notes of a generation as far as they have been written: they
+        // take the place of the chip (and of the notes being replaced) from
+        // their first word, and the note's own text takes over from them,
+        // word for word, once they are saved.
+        let draft = (self.generation_draft.of(self.generation.epoch)
+            && self.generation_draft.showing(id))
+        .then(|| self.generation_draft.visible().to_owned());
+        let has_enhanced = !note.enhanced.trim().is_empty() || generating || draft.is_some();
         let document_width =
             window
                 .viewport_size()
@@ -469,9 +476,11 @@ impl Cereal {
         if !watched && !generating {
             self.stage.forget(("generation", id));
         }
-        let chip = self
-            .stage
-            .presence(("generation", id), generating, crate::motion::GOOEY);
+        let chip = self.stage.presence(
+            ("generation", id),
+            generating && draft.is_none(),
+            crate::motion::GOOEY,
+        );
         if watched
             && was_generating
             && !generating
@@ -488,14 +497,28 @@ impl Cereal {
             // (a regeneration) slide down to make room and the new ones
             // slide into place, instead of jumping by the block's height in
             // a single frame.
-            NoteTab::Enhanced if generating || chip.visible=>div().w(body_width).flex().flex_col()
+            NoteTab::Enhanced if generating || chip.visible || draft.is_some()=>div().w(body_width).flex().flex_col()
                 // Clipped to the block (which is widened to the chip's
                 // 24 px overhang), so the chip is covered as the notes rise
                 // rather than drawn across their first heading.
                 .child(div().h(px(88. * chip.value.clamp(0., 1.))).mx(px(-24.)).px(px(24.)).overflow_hidden().flex().flex_col().gap(px(12.))
                     .child(div().text_size(px(16.)).line_height(px(24.)).text_color(t.muted).opacity(chip.fade).child("Add your thoughts…"))
                     .child(self.render_generation_status(body_width + px(48.), chip, finishing)))
-                .when(!note.enhanced.trim().is_empty(), |d| d.child(self.render_enhanced_content(&note,t,body_width,window,cx)))
+                .map(|d| match &draft {
+                    // Read-only while it is being written: the same blocks,
+                    // in the same places, as the saved notes will have.
+                    Some(text) => {
+                        let written = crate::model::Note {
+                            enhanced: text.clone(),
+                            enhanced_dirty: false,
+                            enhanced_authorship: Default::default(),
+                            ..note.clone()
+                        };
+                        d.child(self.render_note_markdown(&written, true, t, body_width, window, cx))
+                    }
+                    None if !note.enhanced.trim().is_empty() => d.child(self.render_enhanced_content(&note,t,body_width,window,cx)),
+                    None => d,
+                })
                 .into_any_element(),
             NoteTab::Enhanced if note.enhanced.trim().is_empty()=>div().w(body_width).flex().flex_col().items_center().py(px(48.)).gap(px(12.))
                 .child(icon("sparkles",24.,t.accent)).child(heading("A little more clarity",t))
@@ -571,7 +594,7 @@ impl Cereal {
         let transcript = self.stage.presence(
             ("transcript", 0),
             self.transcript_open,
-            crate::motion::PANEL,
+            crate::transcript_panel::OPEN,
         );
         let assistant =
             self.stage
@@ -580,6 +603,8 @@ impl Cereal {
         let live = owned && self.recording.is_active();
         // The bar's centre sits 56 pt above the window's bottom edge, as in
         // the reference, now that its controls are 56 pt tall.
+        let ask_focused = self.ask.read(cx).focus_handle.is_focused(window);
+        let ask_typed = !self.ask.read(cx).content().trim().is_empty();
         let footer = div()
             .absolute()
             .bottom(px(28.))
@@ -588,40 +613,47 @@ impl Cereal {
             .flex()
             .justify_center()
             .child(bar_scrim(t, 24.))
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(672.))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(self.render_recording_control(id, cx))
-                    .when(!assistant.visible, |d| {
-                        d.child(
+            // While the chat panel is up its bottom row is this row: the
+            // record capsule and the Ask pill in the same places, merged
+            // into the panel's body (`render_note_assistant`).
+            .when(!assistant.visible, |footer| {
+                footer.child(
+                    div()
+                        .w_full()
+                        .max_w(px(672.))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(self.render_recording_control(id, cx))
+                        .child(
                             div()
-                                .relative()
-                                .h(px(56.))
                                 .flex_1()
                                 .min_w_0()
-                                .rounded_full()
-                                .bg(t.card)
-                                .map(|d| crate::recording_view::bar_edge(d, t))
-                                .flex()
-                                .items_center()
-                                .gap(px(10.))
-                                .pl(px(20.))
-                                .pr(px(11.))
+                                // A press anywhere outside the pill gives
+                                // the focus back to the page (the press goes
+                                // on to whatever it was aimed at).
+                                .on_mouse_down_out(cx.listener(
+                                    |this, event: &MouseDownEvent, window, cx| {
+                                        if event.button == MouseButton::Left
+                                            && !this.chat_popover_open()
+                                            && this.ask.read(cx).focus_handle.is_focused(window)
+                                        {
+                                            this.focus.focus(window);
+                                            cx.notify();
+                                        }
+                                    },
+                                ))
                                 .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_size(px(14.))
-                                        .line_height(px(22.))
-                                        .child(self.ask.clone()),
+                                    self.render_chat_composer_in_tray(
+                                        ask_focused,
+                                        !ask_focused && !ask_typed && self.chat_stream.is_none(),
+                                        cx,
+                                    )
+                                    .min_h(px(NOTE_PILL)),
                                 ),
-                        )
-                    }),
-            );
+                        ),
+                )
+            });
         let mut result = div()
             .relative()
             .flex()
@@ -664,7 +696,15 @@ impl Cereal {
                                 .h(px(58.))
                                 .child(bar_scrim(t, 24.)),
                         )
-                        .child(
+                        .child({
+                            // Where the bar stood, for the shape the panel
+                            // grows out of and folds back into.
+                            let bar = crate::transcript_panel::BarGeometry {
+                                width: f32::from(window.viewport_size().width - px(48.)).min(672.),
+                                lift: 6.,
+                                capsule: self.closed_capsule_width(id, cx),
+                                ask: !assistant.visible,
+                            };
                             self.render_transcript_panel(
                                 id,
                                 (document_width + px(8.)).min(px(682.)),
@@ -672,10 +712,11 @@ impl Cereal {
                                     .min(px(465.))
                                     .max(px(280.)),
                                 transcript,
+                                bar,
                                 window,
                                 cx,
-                            ),
-                        )
+                            )
+                        })
                     })
                     .when(
                         owned && self.audio_error.is_some() && !crate::audio::preview_mode(),
@@ -753,8 +794,17 @@ impl Cereal {
                     ),
             );
         // Both notices leave the way they arrived instead of cutting out.
+        // Nothing to offer for a recording in which next to nothing was
+        // said: its notes would be empty.
+        let spoken = !crate::server::enabled()
+            || self
+                .workspace
+                .note(id)
+                .is_some_and(|note| crate::recording_view::enough_speech(&note.transcript));
         let offer_generate = !live
             && !generating
+            && draft.is_none()
+            && spoken
             && (!crate::server::enabled()
                 || (self.server_pending == 0 && !note.transcript.trim().is_empty()))
             && note.enhanced.trim().is_empty()
@@ -849,10 +899,17 @@ impl Cereal {
         width: Pixels,
         height: Pixels,
         pose: crate::motion::Pose,
+        bar: crate::transcript_panel::BarGeometry,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = self.theme();
+        // The footer names the microphone, and the sound popover's meter
+        // listens while it is up.
+        if self.transcript_last_epoch != self.transcript_epoch {
+            self.refresh_input_devices();
+        }
+        self.tend_meter(cx);
         let note = self.workspace.note(id);
         let transcript = note
             .map(|note| note.transcript.as_str())
@@ -953,7 +1010,7 @@ impl Cereal {
         };
         // Stored rows that are firming up, by row index (they are among the
         // newest few).
-        let firming: Vec<(usize, f32)> = note
+        let firming: Vec<(usize, f32, Option<(u64, SharedString)>)> = note
             .map(|note| {
                 note.server_transcript_segments
                     .iter()
@@ -971,7 +1028,11 @@ impl Cereal {
                             .take(16)
                             .find(|(_, row)| row.id == id)?
                             .0;
-                        Some((row, line_level(Some(slot))))
+                        let replaced = self
+                            .live
+                            .replaced(&segment.id)
+                            .map(|(key, text)| (key, SharedString::from(text.to_owned())));
+                        Some((row, line_level(Some(slot)), replaced))
                     })
                     .collect()
             })
@@ -1000,171 +1061,34 @@ impl Cereal {
             .items_center()
             .gap(px(2.));
         if self.transcript_find_open {
-            let mut find = div()
-                .id("transcript-find-capsule")
-                .w(px(220.))
-                .h(px(32.))
-                .pl(px(8.))
-                .pr(px(4.))
-                .rounded_full()
-                .border(px(0.5))
-                .border_color(t.border)
-                .flex()
-                .items_center()
-                .gap(px(4.))
-                .child(icon("search", 13., t.muted))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_size(px(12.))
-                        .line_height(px(18.))
-                        .child(self.search.clone()),
-                );
-            if !query.is_empty() {
-                find = find.child(
-                    div()
-                        .flex_shrink_0()
-                        .text_size(px(10.))
-                        .line_height(px(14.))
-                        .text_color(t.muted)
-                        .whitespace_nowrap()
-                        .child(if matches.is_empty() {
-                            "No results".into()
-                        } else {
-                            format!("{}/{}", self.transcript_find_index + 1, matches.len())
-                        }),
-                );
-            }
-            if !matches.is_empty() {
-                for previous in [true, false] {
-                    let positions: Vec<_> = matches.iter().map(|m| m.utterance_index).collect();
-                    let tip = if previous {
-                        "Previous match"
-                    } else {
-                        "Next match"
-                    };
-                    find = find.child(
-                        div()
-                            .id(if previous {
-                                "transcript-find-previous"
-                            } else {
-                                "transcript-find-next"
-                            })
-                            .size(px(20.))
-                            .flex_shrink_0()
-                            .rounded(px(4.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_default()
-                            .child(crate::motion::tactile(t.hover).radius(4.))
-                            .child(icon("chevron-down", 12., t.muted).with_transformation(
-                                Transformation::rotate(radians(if previous {
-                                    std::f32::consts::PI
-                                } else {
-                                    0.
-                                })),
-                            ))
-                            .tooltip(move |_, cx| cx.new(|_| ToolTip::new(tip, t)).into())
-                            .reach().on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(index) = transcript_find_step(
-                                    this.transcript_find_index,
-                                    positions.len(),
-                                    previous,
-                                ) {
-                                    this.transcript_find_index = index;
-                                    crate::lazy::reveal("transcript", positions[index]);
-                                }
-                                cx.notify();
-                            })),
-                    );
-                }
-                find = find.child(div().w(px(0.5)).h(px(12.)).bg(t.border));
-            }
-            toolbar = toolbar.child(
-                find.child(
-                    tool_tip("transcript-find-close", "close", "Close Find", t)
-                        .size(px(20.))
-                        .flex_shrink_0()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.transcript_find_open = false;
-                            this.transcript_find_index = 0;
-                            this.search
-                                .update(cx, |input, cx| input.set_content("", cx));
-                            this.focus.focus(window);
-                            cx.notify();
-                        })),
-                ),
-            );
+            toolbar = toolbar.child(self.transcript_find_field(
+                &query,
+                self.transcript_find_index,
+                matches.iter().map(|found| found.utterance_index).collect(),
+                cx,
+            ));
         } else {
             toolbar = toolbar.child(
                 tool_tip("transcript-find", "search", "Find in transcript", t).on_click(
-                    cx.listener(|this, _, window, cx| {
-                        this.transcript_find_open = true;
-                        this.summary.transcript_selection = None;
-                        this.transcript_find_index = 0;
-                        this.search.update(cx, |input, cx| {
-                            input.set_content("", cx);
-                            input.set_placeholder("Find", cx);
-                        });
-                        this.search.read(cx).focus_handle.focus(window);
-                        cx.notify();
-                    }),
+                    cx.listener(|this, _, window, cx| this.transcript_find_begin(window, cx)),
                 ),
             );
         }
-        toolbar = toolbar
-            .child(div().flex_1())
-            .child(
-                tool_tip("transcript-help", "help", "Recording help", t).on_click(cx.listener(
-                    |this, _, window, cx| {
-                        this.focus.focus(window);
-                        this.open_menu(Menu::RecordingHelp);
-                        cx.notify();
-                    },
-                )),
-            )
-            .child(
-                tool_tip("transcript-copy", "copy", "Copy transcript", t).on_click(cx.listener(
-                    move |this, _, _, cx| {
-                        if let Some(note) = this.workspace.note(id) {
-                            if note.transcript.is_empty() {
-                                this.show_toast("No transcript to copy yet", cx);
-                                return;
-                            }
-                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                note.transcript.clone(),
-                            ));
-                            // Confirmed on the button itself.
-                            crate::ui::confirm("transcript-copy", cx);
+        toolbar = toolbar.child(div().flex_1()).child(
+            tool_tip("transcript-copy", "copy", "Copy transcript", t).on_click(cx.listener(
+                move |this, _, _, cx| {
+                    if let Some(note) = this.workspace.note(id) {
+                        if note.transcript.is_empty() {
+                            this.show_toast("No transcript to copy yet", cx);
+                            return;
                         }
-                    },
-                )),
-            )
-            .child(
-                div()
-                    .id("transcript-collapse")
-                    .size(px(28.))
-                    .rounded(px(6.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_default()
-                    .child(crate::motion::tactile(t.hover).radius(6.))
-                    .active(|d| d.opacity(0.7))
-                    .child(div().w(px(12.)).h(px(1.)).bg(t.muted))
-                    .reach().on_click(cx.listener(|this, _, window, cx| {
-                        this.transcript_open = false;
-                        this.summary.transcript_selection = None;
-                        this.transcript_find_open = false;
-                        this.search
-                            .update(cx, |input, cx| input.set_content("", cx));
-                        this.focus.focus(window);
-                        cx.notify();
-                    })),
-            );
+                        cx.write_to_clipboard(ClipboardItem::new_string(note.transcript.clone()));
+                        // Confirmed on the button itself.
+                        crate::ui::confirm("transcript-copy", cx);
+                    }
+                },
+            )),
+        );
         let mut body = div()
             .id("transcript-panel-scroll")
             .w_full()
@@ -1188,14 +1112,21 @@ impl Cereal {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(11.))
+                .gap(px(4.))
+                .text_size(px(12.))
                 .line_height(px(16.))
                 .text_color(t.muted)
                 .cursor_pointer()
                 .map(|link| {
                     crate::motion::dims(link, crate::motion::reveal_key("consent-notice"), 0.25)
                 })
-                .child("Always get consent when transcribing others. Learn more ›")
+                .child("Always get consent when transcribing others.")
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(t.secondary)
+                        .child("Learn more ›"),
+                )
                 .reach().on_click(cx.listener(|this, _, window, cx| {
                     this.focus.focus(window);
                     this.open_menu(Menu::RecordingHelp);
@@ -1262,15 +1193,26 @@ impl Cereal {
                     )
                 },
                 |index| {
-                    // Interim text is half strength; it and the text that
-                    // replaces it ease to their level instead of popping.
-                    let level = if index >= stored {
-                        0.5 * fresh.get(index - stored).copied().unwrap_or(1.)
+                    // A line being spoken fades in as it appears; a final
+                    // that replaced one settles in that same bubble.
+                    let (level, live) = if index >= stored {
+                        (
+                            fresh.get(index - stored).copied().unwrap_or(1.),
+                            Some(LiveLine {
+                                settle: None,
+                                inherits: None,
+                                ghost: None,
+                            }),
+                        )
                     } else {
-                        firming
-                            .iter()
-                            .find(|(row, _)| *row == index)
-                            .map_or(1., |(_, level)| 0.5 + 0.5 * level)
+                        let line = firming.iter().find(|(row, _, _)| *row == index).map(
+                            |(_, level, replaced)| LiveLine {
+                                settle: Some(*level),
+                                inherits: replaced.as_ref().map(|(key, _)| *key),
+                                ghost: replaced.as_ref().map(|(_, text)| text.clone()),
+                            },
+                        );
+                        (1., line)
                     };
                     transcript_bubble(
                         index,
@@ -1284,6 +1226,7 @@ impl Cereal {
                         source_highlight,
                         ring,
                         level,
+                        live.as_ref(),
                     )
                 },
             ));
@@ -1390,36 +1333,52 @@ impl Cereal {
             .child(crate::ui::scroll_thumb("transcript", &self.transcript_scroll))
             .child(separator(t))
             .child(
+                // The record controls are drawn by the shape itself (they
+                // ride from the bar into this footer), so the footer keeps
+                // their room and holds the microphone, the sound settings
+                // and the language at its end.
                 div()
                     .h(px(64.))
                     .flex_shrink_0()
-                    .px(px(12.))
+                    .pl(px(12. + bar.capsule + 12.))
+                    .pr(px(12.))
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .child(self.render_recording_control(id, cx))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(12.))
-                            .child(
-                                tool_tip(
-                                    "transcript-audio-settings",
-                                    "sliders-vertical",
-                                    "Audio settings",
-                                    t,
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
-                                        this.focus.focus(window);
-                                        this.open_menu(Menu::RecordingSettings);
-                                        cx.notify();
-                                    },
-                                )),
-                            ),
-                    ),
+                    .child(self.transcript_footer_tools(cx)),
             );
+        let inner = inner
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        // The record control, at its place in the footer: 12 pt in and
+        // centred in the 64 pt strip. In the bar it stood `from` away.
+        let controls = div()
+            .absolute()
+            .left(px(12.))
+            .bottom(px(4.))
+            .child(self.render_panel_recording_control(id, cx));
+        let from = point(px((f32::from(width) - bar.width) / 2. - 12.), px(-2.));
+        // What the bar's Ask capsule showed, fading as the capsules meet.
+        let bar_left = (f32::from(width) - bar.width) / 2.;
+        let leaving = div()
+            .absolute()
+            .left(px(bar_left + bar.capsule + 8. + 20.))
+            .w(px((bar.width - bar.capsule - 8. - 31.).max(0.)))
+            .bottom(px(bar.lift))
+            .h(px(56.))
+            .flex()
+            .items_center()
+            .text_size(px(14.))
+            .line_height(px(22.))
+            .child(self.ask.clone());
+        let shape = crate::transcript_panel::fuse(
+            (f32::from(width), f32::from(height)),
+            bar,
+            pose,
+            t,
+            div().absolute().inset_0().child(inner),
+        )
+        .pinned(controls, from)
+        .when(bar.ask, |shape| shape.leaving(leaving));
         div()
             .absolute()
             .bottom(px(22.))
@@ -1427,25 +1386,10 @@ impl Cereal {
             .right(px(16.))
             .flex()
             .justify_center()
-            // The shell grows at paint time; the transcript inside keeps its
-            // final layout and is simply uncovered, so nothing reflows.
-            .child(crate::motion::pop(
-                div()
-                    .relative()
-                    .w(width)
-                    .h(height)
-                    .rounded(px(32.))
-                    .occlude()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .border_1()
-                    .border_color(t.border)
-                    .bg(t.card)
-                    .overflow_hidden()
-                    .shadow_sm()
-                    .child(inner),
-                crate::motion::Pop::unfold(59., f32::from(height)),
-                pose.solid(),
-            ))
+            // One shape with the note's bar: its two capsules fuse and grow
+            // into the panel, and split back out of it. The transcript
+            // inside keeps its final layout throughout, so nothing reflows.
+            .child(shape)
             .into_any_element()
     }
 
@@ -1453,170 +1397,50 @@ impl Cereal {
         if crate::server::enabled() {
             return self.render_connected_note_details(cx);
         }
-        let t = self.theme();
+        use crate::meeting::{DetailsCard, DetailsPerson};
         let note = self.current_note.and_then(|id| self.workspace.note(id));
-        let date = note
-            .and_then(|note| NaiveDate::parse_from_str(&note.date, "%Y-%m-%d").ok())
-            .unwrap_or_else(|| Local::now().date_naive());
-        let time = note.map(|note| note.time.as_str()).unwrap_or("");
-        let mut people = div().flex().flex_col().gap(px(3.));
-        people = people.child(
-            div()
-                .h(px(28.))
-                .px(px(8.))
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(
-                    div()
-                        .size(px(20.))
-                        .rounded_full()
-                        .bg(t.fill)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(10.))
-                        .text_color(t.muted)
-                        .child("M"),
-                )
-                .child(div().text_size(px(13.)).child("Me")),
-        );
-        if let Some(note) = note {
-            for (index, name) in note.participants.iter().enumerate() {
-                let remove = name.clone();
-                let initial = name
-                    .chars()
-                    .next()
-                    .map(|c| c.to_uppercase().collect::<String>())
-                    .unwrap_or_else(|| "?".into());
-                people = people.child(
-                    div()
-                        .id(("note-attendee", index))
-                        .h(px(30.))
-                        .px(px(8.))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .rounded(px(5.))
-                        .child(crate::motion::tactile(t.hover).radius(5.))
-                        .child(
-                            div()
-                                .size(px(20.))
-                                .rounded_full()
-                                .bg(t.fill)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_size(px(10.))
-                                .text_color(t.muted)
-                                .child(initial),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(13.))
-                                .child(name.clone()),
-                        )
-                        .child(
-                            tool_tip(
-                                ("remove-note-attendee", index),
-                                "close",
-                                "Remove attendee",
-                                t,
-                            )
-                            .size(px(22.))
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    if let Some(note) =
-                                        this.current_note.and_then(|id| this.workspace.note_mut(id))
-                                    {
-                                        note.participants.retain(|name| name != &remove);
-                                    }
-                                    this.persist(cx);
-                                },
-                            )),
-                        ),
-                );
+        let when = note
+            .map(|note| crate::meeting::note_when(None, &note.date, &note.time))
+            .unwrap_or_default();
+        // A note kept here has no account: its writer is "Me", or whoever a
+        // layout review signed in.
+        let session = crate::portrait::tour_session(cx);
+        let picture = session
+            .as_ref()
+            .and_then(|session| crate::portrait::of(session, cx));
+        let mut people = vec![match session {
+            Some(session) => DetailsPerson {
+                name: session.user.name,
+                aside: "(me)",
+                picture,
+                removable: false,
+            },
+            None => DetailsPerson {
+                name: "Me".into(),
+                aside: "",
+                picture: None,
+                removable: false,
+            },
+        }];
+        people.extend(note.into_iter().flat_map(|note| &note.participants).map(|name| {
+            DetailsPerson {
+                name: name.clone(),
+                aside: "",
+                picture: None,
+                removable: true,
             }
-        }
-        div()
-            .w(px(280.))
-            .rounded(px(POPOVER_RADIUS))
-            .border_1()
-            .border_color(t.border)
-            .bg(t.card)
-            .shadow_lg()
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .id("note-select-calendar-event")
-                    .h(px(58.))
-                    .px(px(12.))
-                    .flex()
-                    .flex_col()
-                    .justify_center()
-                    .gap(px(3.))
-                    .cursor_default()
-                    .child(crate::motion::tactile(t.bg).radius(0.))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .text_size(px(14.))
-                            .line_height(px(18.))
-                            .child("Select calendar event")
-                            .child(icon("chevron-down", 12., t.muted)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .line_height(px(14.))
-                            .text_color(t.muted)
-                            .child(format!("{} · {}", date.format("%a, %b %-d"), time)),
-                    )
-                    .reach().on_click(cx.listener(|this, _, window, cx| {
-                        this.search.update(cx, |input, cx| {
-                            input.set_content("", cx);
-                            input.set_placeholder("Search event...", cx);
-                        });
-                        this.open_menu(Menu::CalendarEvent);
-                        this.search.read(cx).focus_handle.focus(window);
-                        cx.notify();
-                    })),
-            )
-            .child(separator(t))
-            .child(
-                div()
-                    .h(px(40.))
-                    .px(px(12.))
-                    .flex()
-                    .items_center()
-                    .text_size(px(13.))
-                    .child(self.attendee_input.clone()),
-            )
-            .child(separator(t))
-            .child(
-                div()
-                    .pt(px(8.))
-                    .pb(px(5.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .px(px(8.))
-                            .text_size(px(11.))
-                            .line_height(px(15.))
-                            .text_color(t.muted)
-                            .child("My workspace"),
-                    )
-                    .child(people),
-            )
+        }));
+        self.render_details_card(
+            DetailsCard {
+                title: None,
+                when,
+                links: None,
+                status: Vec::new(),
+                people,
+                empty: None,
+            },
+            cx,
+        )
     }
 
     pub fn render_event_picker(&self, cx: &mut Context<Self>) -> Div {
@@ -1726,7 +1550,7 @@ impl Cereal {
         let t = self.theme();
         let available_width = window.viewport_size().width
             - px(if self.current_note.is_none() {
-                192. * self.sidebar_level
+                self.sidebar_inset()
             } else {
                 0.
             });
@@ -1736,18 +1560,21 @@ impl Cereal {
         // even before its answer arrives, as the reference measures. Over a
         // note it keeps the note's own bar.
         let home = self.current_note.is_none();
+        // Either way the pill stands `ASK_INSET` inside the panel's edge on
+        // its left, right and bottom (3 px of card inside the 1 px hairline),
+        // and the panel's corners are concentric with the pill's.
         let width = if home {
             px(683.).min(available_width - px(40.))
         } else {
-            px(682.).min(available_width - px(32.))
+            // The note's bar (672 wide, 24 in from each side) with the
+            // inset round it.
+            px(672. + 2. * crate::motion::ASK_INSET)
+                .min(available_width - px(48. - 2. * crate::motion::ASK_INSET))
         };
-        let has_answer = if home {
-            !self.chat_messages.is_empty()
-        } else {
-            self.chat_messages
-                .iter()
-                .any(|(_, answer)| !answer.is_empty())
-        };
+        // Tall as soon as a question is asked, on Home and over a note
+        // alike: the panel does not grow again in a second jump when the
+        // first words of the answer arrive.
+        let has_answer = !self.chat_messages.is_empty();
         // The recent-chats list drops down inside the panel. Over a
         // conversation the panel is already tall enough and keeps its
         // height: it used to shrink to 360, which moved the header, and the
@@ -1776,6 +1603,8 @@ impl Cereal {
         ));
         let mut messages = div()
             .p(px(16.))
+            // The last row stops clear of the fade above the composer.
+            .pb(px(30.))
             .pt(px(match (has_answer, home) {
                 (true, true) => 33.,
                 (true, false) => 60.,
@@ -1789,8 +1618,41 @@ impl Cereal {
         if let Some(queue) = self.render_chat_queue(true, window, cx) {
             messages = messages.child(queue);
         }
+        // What the panel grows out of: the pill's own outline, or the tray
+        // the focused bar stood in on Home (whose footprint the panel's
+        // lower 101 px are). Folding back, it always returns to the pill.
+        let foot = if home {
+            self.stage.aim(
+                ("assistant-foot", 0),
+                if self.assistant_open && self.stage.target(("ask-tray", 0)) == Some(1.) {
+                    1.
+                } else {
+                    0.
+                },
+                crate::motion::PANEL,
+            )
+        } else {
+            0.
+        };
+        // The header and the conversation arrive behind the frame's moving
+        // edge. The composer does not: it is the pill the panel grew out
+        // of, and it stays exactly as it was, at full strength, throughout.
+        let arriving = if pose.value < 1. {
+            crate::motion::content_fade(pose.value)
+        } else {
+            pose.fade
+        };
+        // Grown out of the focused bar's tray, the recent-chats button there
+        // is the header's: it carries on rather than going out and coming
+        // back, and rides the panel's top edge up.
+        let leading = if pose.value < 1. {
+            arriving.max(foot.min(1.))
+        } else {
+            arriving
+        };
         let header = {
-            // No rule under it: the conversation runs up to the controls.
+            // A hairline appears under it once the conversation has
+            // scrolled beneath (see the body's fades).
             div()
                 .relative()
                 .h(px(48.))
@@ -1803,13 +1665,15 @@ impl Cereal {
                 .child(
                     tool_tip("note-chat-history", "chat-history", "Recent chats", t)
                         .size(px(26.))
+                        .opacity(leading)
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_chat_history(cx))),
                 )
-                .child(icon("chevron-down", 12., t.muted))
+                .child(div().opacity(leading).child(icon("chevron-down", 12., t.muted)))
                 .child(div().flex_1())
                 .child(
-                    tool_tip("new-note-chat", "edit", "New chat", t)
+                    tool_tip("new-note-chat", "chat-new", "New chat", t)
                         .size(px(28.))
+                        .opacity(arriving)
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.clear_chat(cx);
                             this.ask.read(cx).focus_handle.focus(window);
@@ -1818,6 +1682,7 @@ impl Cereal {
                 .child(
                     tool_tip("maximize-note-chat", "chat-maximize", "Maximize", t)
                         .size(px(28.))
+                        .opacity(arriving)
                         .on_click(cx.listener(|this, _, window, cx| {
                             if this.current_note.is_some() {
                                 this.chat_maximized = true;
@@ -1832,17 +1697,68 @@ impl Cereal {
                         })),
                 )
         };
-        let body = {
-            div()
-                .id("note-chat-scroll")
-                .track_scroll(&self.chat_scroll)
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
-                .child(messages)
-                .into_any_element()
-        };
+        // The conversation dissolves into the panel at both ends instead of
+        // running hard into the header or under the composer, and the
+        // header gains its hairline while there is something above.
+        let scrolled = self.stage.presence(
+            ("chat-panel-rule", 0),
+            self.chat_scroll.offset().y < px(-1.),
+            crate::motion::SNAPPY,
+        );
+        let body = div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id("note-chat-scroll")
+                    .track_scroll(&self.chat_scroll)
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
+                    .child(messages),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(18.))
+                    .bg(linear_gradient(
+                        180.,
+                        linear_color_stop(t.card, 0.),
+                        linear_color_stop(t.card.opacity(0.), 1.),
+                    ))
+                    .opacity(scrolled.fade),
+            )
+            .when(scrolled.visible, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(1.))
+                        .bg(t.border.opacity(scrolled.fade)),
+                )
+            })
+            .child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(28.))
+                    .bg(linear_gradient(
+                        180.,
+                        linear_color_stop(t.card.opacity(0.), 0.),
+                        linear_color_stop(t.card, 1.),
+                    )),
+            );
         // The scroll-to-latest button and the history popover leave as they
         // arrive.
         let scroll_down = self.stage.presence(
@@ -1855,17 +1771,33 @@ impl Cereal {
             self.chat_history_open,
             crate::motion::GOOEY,
         );
+        let full = f32::from(height) + 2.;
+        let pill = if home { crate::motion::ASK_PILL } else { NOTE_PILL };
+        let unfold = crate::motion::ask_unfold(foot, pill, (f32::from(width), full));
+        // Over a note: which note's record capsule shares the bottom row,
+        // and how wide it is, for the bridge that joins it to the pill.
+        let capsule = self
+            .current_note
+            .map(|id| (id, self.closed_capsule_width(id, cx)));
+        let level = pose.value.max(0.);
+        // How much of the panel the frame has reached so far, from its
+        // bottom edge: the content is cut to it, as the frame's own would be.
+        let reached = full * (unfold.scale.1 + (1. - unfold.scale.1) * level)
+            - unfold.rise * (1. - level);
         let inner = div()
             .absolute()
             .bottom(px(0.))
             .w_full()
-            .h_full()
-            .rounded(px(32.))
+            .h(px(full))
+            .rounded(px(crate::motion::ASK_FRAME_RADIUS))
+            .p(px(1.))
             .flex()
             .flex_col()
             .overflow_hidden()
-            .child(header)
-            .child(body)
+            // The header's room; the header itself rides the frame's edge
+            // (below).
+            .child(div().h(px(48.)).flex_shrink_0())
+            .child(body.opacity(arriving))
             // The edit warning takes 44 px (36 + 8). The panel's height
             // already springs to make room; the banner opens into that room
             // and closes with it instead of appearing in one frame.
@@ -1876,7 +1808,7 @@ impl Cereal {
                         .h(px(44. * open))
                         .flex_shrink_0()
                         .overflow_hidden()
-                        .opacity(edit_banner.fade)
+                        .opacity(edit_banner.fade * arriving)
                         .px(px(4.))
                         .child(self.render_chat_edit_banner(cx)),
                 )
@@ -1884,12 +1816,25 @@ impl Cereal {
             .child(
                 div()
                     .flex_shrink_0()
-                    .px(px(if home { 3. } else { 4. }))
-                    .when(home, |d| d.pb(px(3.)))
-                    // No focus ring in the panel, even while its field has
-                    // the keyboard: the panel is the frame, as in the
-                    // reference.
-                    .child(self.render_chat_composer_focused(false, cx)),
+                    .px(px(crate::motion::ASK_INSET - 1.))
+                    .pb(px(crate::motion::ASK_INSET - 1.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    // Over a note the record capsule stays where it stood in
+                    // the bar, beside the pill: the panel grows out of both.
+                    .when_some(capsule, |row, (id, _)| {
+                        row.child(self.render_recording_control(id, cx))
+                    })
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            // No focus ring in the panel, even while its
+                            // field has the keyboard: the panel is the
+                            // frame, as in the reference.
+                            self.render_chat_composer_focused(false, cx)
+                                .when(!home, |pill| pill.min_h(px(NOTE_PILL))),
+                        ),
+                    ),
             )
             .when(scroll_down.visible, |d| {
                 d.child(crate::motion::pop(
@@ -1897,12 +1842,106 @@ impl Cereal {
                     crate::motion::Pop::chip((0.5, 1.)),
                     scroll_down,
                 ))
+            });
+        // The frame (fill, hairline, shadow) is a shape of its own that
+        // morphs out of the pill's outline; see `motion::Morph`. The content
+        // lies over it, cut to as much of the panel as the frame has reached.
+        let frame = crate::motion::pop(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .rounded(px(crate::motion::ASK_FRAME_RADIUS))
+                .border_1()
+                .border_color(t.border)
+                .bg(t.card)
+                .shadow(vec![BoxShadow {
+                    // Soft and low: the panel reads by its hairline, with
+                    // just enough under it to lift it off a note's text.
+                    // It goes with the body: none left to pop off when the
+                    // panel lands back in the bar.
+                    color: hsla(0., 0., 0.1, if home { 0.06 } else { 0.14 } * level.min(1.)),
+                    offset: point(px(0.), px(if home { 4. } else { 8. })),
+                    blur_radius: px(if home { 16. } else { 28. }),
+                    spread_radius: px(0.),
+                }]),
+            unfold,
+            if crate::motion::reduce_motion() {
+                pose
+            } else {
+                pose.solid()
+            },
+        );
+        // On the frame's top edge all the way; out of the tray, 6 px higher
+        // at first, where the tray had its button.
+        let header_top = (full - reached).max(0.) + 1. - 6. * foot.min(1.) * (1. - level.min(1.));
+        div()
+            .absolute()
+            // The pill stands where the bar's did: 27 px up on Home, 28 on
+            // a note, with the inset under it.
+            .bottom(px(if home { 23. } else { 28. - crate::motion::ASK_INSET }))
+            .left((available_width - width) / 2. + px(if home { 0.5 } else { 0. }))
+            .w(width)
+            .h(px(full))
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            // A press outside the panel folds it back into the bar and gives
+            // the focus back to the page; what was typed stays in the pill
+            // and an answer that is arriving keeps arriving. The press goes
+            // on to whatever it was aimed at. While the recent chats or the
+            // model menu is open the press only closes that (each sees to
+            // itself), as Escape does.
+            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                if event.button == MouseButton::Left && !this.chat_popover_open() {
+                    this.close_chat_surface(cx);
+                    if this.ask.read(cx).focus_handle.is_focused(window) {
+                        this.focus.focus(window);
+                    }
+                }
+            }))
+            .child(frame)
+            .when_some(capsule, |panel, (_, capsule)| {
+                panel.child(crate::motion::ask_bridge(
+                    crate::motion::ASK_INSET + capsule + 4.,
+                    pill,
+                    reached,
+                    level,
+                    t.bg,
+                ))
             })
+            .child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .right_0()
+                    // Below the header, which rides the frame's moving top
+                    // edge: the conversation shows only under it, never
+                    // behind it or past the frame's rounded corners. The
+                    // bottom row (the pill, and a note's record capsule) is
+                    // never cut: it is what the panel grows out of.
+                    .h(px((reached - 49.)
+                        .max(pill + crate::motion::ASK_INSET)
+                        .clamp(0., full)))
+                    .overflow_hidden()
+                    .child(inner),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(1.))
+                    .right(px(1.))
+                    .top(px(header_top))
+                    .child(header),
+            )
+            // The recent chats drop from the header's button, over the
+            // conversation.
             .when(history.visible, |d| {
                 d.child(
                     div()
                         .absolute()
-                        .top(px(36.))
+                        .top(px(header_top + 35.))
                         .left(px(12.))
                         .child(crate::motion::pop(
                             self.render_chat_history(cx),
@@ -1914,50 +1953,22 @@ impl Cereal {
                         // grows to fit the list and the button moves up, so
                         // the list could not be closed from where it was
                         // opened.)
-                        .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_chat_history(cx))),
+                        .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                            // Only the list closes: the field keeps the
+                            // keyboard (as with the model menu).
+                            if this.chat_history_open {
+                                window.prevent_default();
+                            }
+                            this.dismiss_chat_history(cx)
+                        })),
                 )
             })
-            .on_mouse_down_out(cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                if event.button == MouseButton::Left {
-                    this.close_chat_surface(cx);
-                }
-            }));
-        // The card owns the whole shell (fill, border, shadow) so it can morph
-        // out of the composer bar as one shape; see `motion::Morph`.
-        crate::motion::pop(
-            div()
-                .absolute()
-                .bottom(px(if home { 23. } else { 22. }))
-                .left((available_width - width) / 2. + px(if home { 0.5 } else { 1. }))
-                .w(width)
-                .h(height + px(2.))
-                .rounded(px(32.))
-                .border_1()
-                .border_color(t.border)
-                .bg(t.card)
-                .map(|card| {
-                    if home {
-                        // Barely there, as in the reference: the panel reads
-                        // by its edge, not by a cast shadow.
-                        card.shadow(vec![BoxShadow {
-                            color: rgba(0x2929290f).into(),
-                            offset: point(px(0.), px(4.)),
-                            blur_radius: px(16.),
-                            spread_radius: px(0.),
-                        }])
-                    } else {
-                        card.shadow_xl()
-                    }
-                })
-                .overflow_hidden()
-                .occlude()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(inner),
-            crate::motion::Pop::unfold(if home { 58. } else { 59. }, f32::from(height) + 2.),
-            pose.solid(),
-        )
+            .into_any_element()
     }
 }
+
+/// The Ask pill's height in a note's bar: the record capsule's.
+const NOTE_PILL: f32 = 56.;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TranscriptUtterance {
@@ -2425,7 +2436,7 @@ fn transcript_find_matches(
     matches
 }
 
-fn transcript_find_step(current: usize, count: usize, previous: bool) -> Option<usize> {
+pub(crate) fn transcript_find_step(current: usize, count: usize, previous: bool) -> Option<usize> {
     if count == 0 {
         return None;
     }
@@ -2468,6 +2479,7 @@ fn transcript_content(
                 source_highlight,
                 crate::motion::Pose::REST,
                 1.,
+                None,
             )
         })
         .collect()
@@ -2570,42 +2582,12 @@ pub(crate) const SOURCE_RING: crate::motion::TrackKey = ("transcript-source-ring
 /// 1.08 px, of which the font's metrics (ascent 0.986 em, descent 0.327 em)
 /// account for 0.33 and the rest is where text is placed on the pixel grid.
 const TIME_BASELINE: f32 = 1.;
-/// The least time between two centred times.
-const MARK_EVERY_SECONDS: u32 = 60;
-
-/// Seconds into the meeting of a row's "MM:SS" or "H:MM:SS" time.
-fn transcript_seconds(timestamp: &str) -> Option<u32> {
-    timestamp.split(':').try_fold(0u32, |total, part| {
-        Some(total.checked_mul(60)?.checked_add(part.trim().parse().ok()?)?)
-    })
-}
-
-/// Which rows are preceded by a centred time: where the other channel takes
-/// over, at most once a minute (the reference marks a change of channel the
-/// same way). Words still being spoken count too, by when they started, so a
-/// row has its mark (and its height) from its first word and keeps it when
-/// the words become final: the tail never steps down. A row's mark depends
-/// only on the rows before it, so text arriving at the end never moves one.
+/// Which rows are preceded by a centred time. None are: the reference
+/// panel has no times between the bubbles, and they read as unexplained
+/// numbers. (The cited passage still shows its own time beside it.) Kept as
+/// a per-row answer so the row layout and its height estimate stay one rule.
 fn transcript_marks(rows: Rows) -> Vec<bool> {
-    let mut last = rows
-        .get(0)
-        .and_then(|row| row.timestamp.as_deref())
-        .and_then(transcript_seconds);
-    (0..rows.len())
-        .map(|index| {
-            let row = rows.at(index);
-            let seconds = row.timestamp.as_deref().and_then(transcript_seconds);
-            let mark = index > 0
-                && rows.at(index - 1).own != row.own
-                && seconds.is_some_and(|seconds| {
-                    last.is_none_or(|last| seconds >= last + MARK_EVERY_SECONDS)
-                });
-            if mark {
-                last = seconds;
-            }
-            mark
-        })
-        .collect()
+    vec![false; rows.len()]
 }
 
 /// Everything that decides how tall utterance `index` is drawn (at a given
@@ -2701,6 +2683,16 @@ fn transcript_gap_row(index: usize, rows: Rows, t: Theme, width: Pixels) -> AnyE
         .into_any_element()
 }
 
+/// What a row that is still being spoken (or has just become final) needs
+/// besides its text.
+pub(crate) struct LiveLine {
+    /// `None` while spoken; then how far the final has settled, 0..=1.
+    settle: Option<f32>,
+    /// The interim row this final took over from, and the words it showed.
+    inherits: Option<u64>,
+    ghost: Option<SharedString>,
+}
+
 /// One utterance of the transcript.
 #[allow(clippy::too_many_arguments)]
 fn transcript_bubble(
@@ -2715,9 +2707,10 @@ fn transcript_bubble(
     source_highlight: Option<usize>,
     // Where the source ring is in its entrance (see [`SOURCE_RING`]).
     ring: crate::motion::Pose,
-    // Strength of the bubble: 1 for stored text, 0.5 for text still being
-    // spoken, in between while one is becoming the other.
+    // How far the row is into its entrance (1 at rest).
     level: f32,
+    // Set for a line still being spoken or just become final.
+    live: Option<&LiveLine>,
 ) -> AnyElement {
     let dark = t.bg.l < 0.5;
     if rows.at(index).is_gap() {
@@ -2728,28 +2721,22 @@ fn transcript_bubble(
     let marked = marks.get(index).copied().unwrap_or(false);
     let cited = source_highlight == Some(index);
     let own = utterance.own;
-    let highlights = transcript_match_ranges(&utterance.text, query)
-        .into_iter()
-        .map(|range| {
-            (
-                range.clone(),
-                HighlightStyle {
-                    background_color: Some(
-                        if active_match.is_some_and(|active| {
-                            active.utterance_index == index
-                                && active.text_range.as_ref() == Some(&range)
-                        }) {
-                            rgb(0xf4a340).into()
-                        } else {
-                            rgb(0xfde047).into()
-                        },
-                    ),
-                    color: Some(rgb(0x292929).into()),
-                    ..Default::default()
-                },
-            )
-        });
-    let text = StyledText::new(utterance.text.clone()).with_highlights(highlights);
+    // Every match on a yellow box, the one Find is on in orange, dark text
+    // on both, boxed line by line where a match wraps.
+    let marks: Vec<_> = if live.is_some() {
+        Vec::new()
+    } else {
+        transcript_match_ranges(&utterance.text, query)
+            .into_iter()
+            .map(|range| {
+                let current = active_match.is_some_and(|active| {
+                    active.utterance_index == index && active.text_range.as_ref() == Some(&range)
+                });
+                (range, current)
+            })
+            .collect()
+    };
+    let text = crate::transcript_panel::marked_text(utterance.text.clone(), marks);
     // Corners: 8 px, tightened to 6 on the side that continues the voice.
     let corner = |joined: bool| if joined { BUBBLE_JOINED_RADIUS } else { BUBBLE_RADIUS };
     let (top_left, top_right, bottom_left, bottom_right) = (
@@ -2758,6 +2745,22 @@ fn transcript_bubble(
         corner(same_after && !own),
         corner(same_after && own),
     );
+    let fill: Hsla = if dark {
+        if own { rgb(0x292929) } else { rgb(0x4e4d4b) }
+    } else if own {
+        rgba(0xe0af2f66)
+    } else {
+        rgb(0xf2f2ec)
+    }
+    .into();
+    let ink: Hsla = if dark {
+        if own { rgb(0xfcf2df) } else { rgb(0xfcfcf8) }
+    } else if own {
+        rgb(0x363024)
+    } else {
+        rgb(0x292929)
+    }
+    .into();
     let mut bubble = div()
         .relative()
         .max_w_full()
@@ -2770,23 +2773,9 @@ fn transcript_bubble(
         .rounded_br(px(bottom_right))
         .text_size(px(BUBBLE_TEXT))
         .line_height(px(BUBBLE_LINE))
-        .bg(if dark {
-            if own { rgb(0x292929) } else { rgb(0x4e4d4b) }
-        } else if own {
-            rgba(0xe0af2f66)
-        } else {
-            rgb(0xf2f2ec)
-        })
-        .text_color(if dark {
-            if own { rgb(0xfcf2df) } else { rgb(0xfcfcf8) }
-        } else if own {
-            rgb(0x363024)
-        } else {
-            rgb(0x292929)
-        })
-        .when(!utterance.is_final || level < 1., |d| {
-            d.opacity(if utterance.is_final { level } else { level.min(0.5) })
-        })
+        .bg(fill)
+        .text_color(ink)
+        .when(level < 1., |d| d.opacity(level))
         .child(text);
     if cited {
         // An outline on the bubble's own edge, in the gold of the app's
@@ -2865,7 +2854,40 @@ fn transcript_bubble(
                 .child(speaker.clone()),
         );
     }
-    stack = stack.child(bubble);
+    // A line still being spoken, or just become final, is the live bubble:
+    // it eases to its text's size, its dots pulse, its final settles in it.
+    let bubble = match live {
+        Some(line) => {
+            let bubble = crate::transcript_panel::live_bubble(
+                utterance.id,
+                line.inherits,
+                utterance.text.clone(),
+                line.ghost.clone(),
+                own,
+                fill,
+                ink,
+                [top_left, top_right, bottom_right, bottom_left],
+                line.settle,
+                line.settle.is_none(),
+            )
+            .metrics((BUBBLE_PAD_X, BUBBLE_PAD_Y), (BUBBLE_TEXT, BUBBLE_LINE));
+            if line.settle.is_none() {
+                crate::motion::slow_loop(
+                    ("live-dots", utterance.id),
+                    crate::transcript_panel::DOTS_PERIOD,
+                    bubble,
+                    |bubble, turns| bubble.turns(turns),
+                )
+                .into_any_element()
+            } else {
+                bubble.into_any_element()
+            }
+        }
+        None => bubble.into_any_element(),
+    };
+    stack = stack
+        .when(live.is_some() && level < 1., |stack| stack.opacity(level))
+        .child(bubble);
     let (top, inside) = transcript_row_top(index, same_before, marked);
     let row = div()
         .id(("transcript-bubble", index))
@@ -3344,16 +3366,9 @@ mod transcript_tests {
     }
 
     #[test]
-    fn transcript_times_read_minutes_and_hours() {
-        assert_eq!(super::transcript_seconds("00:10"), Some(10));
-        assert_eq!(super::transcript_seconds("12:34"), Some(754));
-        assert_eq!(super::transcript_seconds("1:02:03"), Some(3723));
-        assert_eq!(super::transcript_seconds("soon"), None);
-    }
-
-    #[test]
-    fn a_centred_time_marks_a_change_of_channel_at_most_once_a_minute() {
-        // A row every 20 s, the channel changing every second row.
+    fn the_live_panel_has_no_centred_times_between_bubbles() {
+        // A row every 20 s, the channel changing every second row: before,
+        // a time was set between the bubbles at most once a minute.
         let stored: Vec<_> = (0..12)
             .map(|index| {
                 let mut row = row(&format!("Line {index}."));
@@ -3363,36 +3378,13 @@ mod transcript_tests {
                 row
             })
             .collect();
-        let mut speaking = row("and then");
-        speaking.own = !stored[11].own;
-        speaking.timestamp = Some("04:00".into());
-        let speaking = [speaking];
+        let speaking = [row("and then")];
         let rows = super::Rows {
             stored: &stored,
             live: &speaking,
         };
-        let marks = super::transcript_marks(rows);
-        let marked: Vec<usize> = (0..marks.len()).filter(|index| marks[*index]).collect();
-        // Changes at rows 2, 4, 6, 8, 10 and 12 (0:40, 1:20, 2:00, 2:40,
-        // 3:20, 4:00): the first a minute after the start is 1:20, then
-        // 2:40, then the words still being spoken at 4:00.
-        assert_eq!(marked, [4, 8, 12]);
-        // They keep it, and so their height, when they become final.
-        let mut finished = stored.clone();
-        let mut last = speaking[0].clone();
-        last.is_final = true;
-        finished.push(last);
-        let finished = super::Rows {
-            stored: &finished,
-            live: &[],
-        };
-        assert_eq!(super::transcript_marks(finished), marks);
-        // A mark depends only on what is above it.
-        let fewer = super::Rows {
-            stored: &stored[..9],
-            live: &[],
-        };
-        assert_eq!(super::transcript_marks(fewer), marks[..9]);
+        assert!(super::transcript_marks(rows).iter().all(|marked| !marked));
+        assert_eq!(super::transcript_marks(rows).len(), 13);
     }
 
     #[test]

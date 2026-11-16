@@ -91,6 +91,9 @@ export function generationStyle(output:string,context:StyleContext):Check[] {
   const signoff=last&&last.kind==="prose"&&/(?:let me know|hope this helps|feel free|if you(?:'d| would) like|anything else|end of (?:notes|summary))/i.test(last.text)
   const typedActionHeading=context.typedNotes.split("\n").some(line=>/^#+\s/.test(line)&&isActionHeading(line.replace(/^#+\s+/,"")))
   const actionIndex=headings.findIndex(isActionHeading),lowerCased=headings.filter(heading=>!isTitleCase(heading))
+  const actionLines=parseNotes(output).filter(line=>line.kind==="bullet"&&line.depth===0&&isActionHeading(line.heading))
+  const actionPlaceholder=actionLines.some(line=>/\((?:no owner|unassigned|tbd|owner tbd)\)|^(?:unassigned|tbd|someone|team)\s*:/i.test(line.text))
+  const actionSentence=actionLines.some(line=>/[a-z0-9)]\.$/.test(line.text))
   const check=(id:string,pass:boolean,detail:string):Check=>({id,group:"format",soft:true,pass,...(pass?{}:{detail})})
   return [
     check("style:heading-count",metrics.headings<=metrics.maxHeadings&&(metrics.headings>=1||context.transcriptWords<60),`${metrics.headings} headings, at most ${metrics.maxHeadings} for ${context.transcriptCharacters} transcript characters`),
@@ -100,7 +103,9 @@ export function generationStyle(output:string,context:StyleContext):Check[] {
     check("style:one-sub-level",metrics.maxDepth<=1,`nesting depth ${metrics.maxDepth}`),
     check("style:fragment-bullets",metrics.medianBulletWords<=12&&metrics.longestBulletWords<=30&&metrics.sentenceBullets<=Math.max(1,metrics.bullets*0.1),`median bullet ${metrics.medianBulletWords} words, longest ${metrics.longestBulletWords}, ${metrics.sentenceBullets} of ${metrics.bullets} end with a full stop`),
     check("style:actions-last",typedActionHeading||actionIndex<0||actionIndex===headings.length-1,`"${headings[actionIndex]}" is section ${actionIndex+1} of ${headings.length}`),
-    check("style:action-format",metrics.actionBullets===0||metrics.actionBold===metrics.actionBullets,`${metrics.actionBold} of ${metrics.actionBullets} action items are a bold task`),
+    // An action item is "Owner: task" in plain text (the earlier form, a bold task with the owner in parentheses, is
+    // still accepted for stored outputs). Never a placeholder where an owner would go, and never a sentence.
+    check("style:action-format",metrics.actionBullets===0||(metrics.actionBold===metrics.actionBullets||metrics.actionBold===0)&&!actionPlaceholder&&!actionSentence,`${metrics.actionBold} of ${metrics.actionBullets} action items are bold${actionPlaceholder?"; a placeholder stands in for an owner":""}${actionSentence?"; an action item is a sentence":""}`),
     {id:"style:metrics",group:"format",soft:true,pass:true,detail:JSON.stringify(metrics)},
   ]
 }

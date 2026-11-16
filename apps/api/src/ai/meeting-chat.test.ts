@@ -24,7 +24,7 @@ const segments=[
 ]
 const ask=(message:string,history:ChatInput["history"]=[]):ChatInput=>({message,history,includeSources:true})
 const silent:ProviderServices={generate:()=>Effect.succeed(""),chat:()=>Effect.succeed("")}
-const prepare=(notes:NoteDTO[],input:ChatInput,enrich:(note:NoteDTO)=>ProviderNote=note=>note)=>prepareMeetingChat({noteId:notes[0]!.id,input,repository:makeMemoryRepository(notes),providers:silent,enrich:async source=>enrich(source),signal:new AbortController().signal,emit:()=>{}})
+const prepare=(notes:NoteDTO[],input:ChatInput,enrich:(note:NoteDTO)=>ProviderNote=note=>note)=>prepareMeetingChat({labelledLines:true,noteId:notes[0]!.id,input,repository:makeMemoryRepository(notes),providers:silent,enrich:async source=>enrich(source),signal:new AbortController().signal,emit:()=>{}})
 const resolves=(citation:ChatCitationDTO,source:NoteDTO)=>{
   if(citation.source!=="transcript")return (citation.source==="notes"?source.body:source.enhanced).includes(citation.quote)&&citation.segmentId===null
   const segment=source.transcriptSegments.find(item=>item.id===citation.segmentId)
@@ -135,7 +135,7 @@ test("a live answer completes when speech lands while it streams, and its citati
     yield "Ines asked for a revised quote by Thursday [[S3]]."
     await Effect.runPromise(repository.updateNote(during.id,{transcriptSegments:[...during.transcriptSegments,segments[3]!]}))
   }}
-  const processing=makeProcessingService(repository,{providers}),events:ChatStreamEventDTO[]=[]
+  const processing=makeProcessingService(repository,{labelledNoteChat:true,providers}),events:ChatStreamEventDTO[]=[]
   await Effect.runPromise(Stream.runForEach(await Effect.runPromise(processing.chatStream(during.id,ask("What did Ines ask for?"))),event=>Effect.sync(()=>{events.push(event)})))
   await processing.dispose()
   const stored=await Effect.runPromise(repository.getNote(during.id))
@@ -215,7 +215,7 @@ test("meeting details: invitees are labelled as invited, and transcript text can
 
 test("a finished note states the date, never the time, so its record is the same for every question that day",async()=>{
   const stored=note({transcriptSegments:segments.slice(0,3)})
-  const at=async(input:ChatInput,now:Date)=>chatAnswerMessages((await prepareMeetingChat({noteId:stored.id,input,repository:makeMemoryRepository([stored]),providers:silent,enrich:async source=>source,signal:new AbortController().signal,emit:()=>{},now})).note,input)[1]!.content
+  const at=async(input:ChatInput,now:Date)=>chatAnswerMessages((await prepareMeetingChat({labelledLines:true,noteId:stored.id,input,repository:makeMemoryRepository([stored]),providers:silent,enrich:async source=>source,signal:new AbortController().signal,emit:()=>{},now})).note,input)[1]!.content
   const now=new Date("2026-03-10T23:30:00.000Z")
   const stockholm=await at({...ask("What is due tomorrow?"),timeZone:"Europe/Stockholm"},now)
   // 23:30 UTC is already the next day in Stockholm.
@@ -231,7 +231,7 @@ test("a finished note states the date, never the time, so its record is the same
 test("a meeting in progress states the date and time at the end of the newest message's <status>",async()=>{
   const stored=note({recordingState:"recording",transcriptSegments:segments.slice(0,3)}),now=new Date("2026-03-10T23:30:00.000Z")
   const input={...ask("What is due tomorrow?"),timeZone:"Europe/Stockholm"}
-  const text=chatAnswerMessages((await prepareMeetingChat({noteId:stored.id,input,repository:makeMemoryRepository([stored]),providers:silent,enrich:async source=>source,signal:new AbortController().signal,emit:()=>{},now,liveConversations:makeLiveConversationStore()})).note,input)[1]!.content
+  const text=chatAnswerMessages((await prepareMeetingChat({labelledLines:true,noteId:stored.id,input,repository:makeMemoryRepository([stored]),providers:silent,enrich:async source=>source,signal:new AbortController().signal,emit:()=>{},now,liveConversations:makeLiveConversationStore()})).note,input)[1]!.content
   expect(text).toContain("For the person asking, today is Wednesday 2026-03-11 and the time is 00:30 (time zone Europe/Stockholm).")
   expect(text.endsWith("it says nothing about what was said.\n</status>")).toBe(true)
 })
