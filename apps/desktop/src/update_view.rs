@@ -98,6 +98,10 @@ pub fn progress_text(received: u64, total: u64) -> String {
 impl Updates {
     /// A state of the update to look at, for the scripted tour: nothing is
     /// checked, fetched or installed.
+    /// Release builds compile the tour too; there it has nothing to show.
+    #[cfg(not(debug_assertions))]
+    pub fn review(&mut self, _state: &str) {}
+
     #[cfg(debug_assertions)]
     pub fn review(&mut self, state: &str) {
         let offer = Offer {

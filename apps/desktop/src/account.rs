@@ -166,6 +166,10 @@ impl AccountView {
     /// answer to an earlier one, however late it arrives, is dropped.
     /// A state of the form to look at, for the scripted tour: no server is
     /// asked anything and nobody is signed in or out.
+    /// Release builds compile the tour too; there it has nothing to show.
+    #[cfg(not(debug_assertions))]
+    pub fn review(&mut self, _state: &str, _cx: &mut Context<Self>) {}
+
     #[cfg(debug_assertions)]
     pub fn review(&mut self, state: &str, cx: &mut Context<Self>) {
         let (address, methods) = match state {

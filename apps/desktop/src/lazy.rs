@@ -86,6 +86,12 @@ thread_local! {
 
 /// What a column last knew, for the scripted tour: how many heights it has
 /// measured, their sum and where the column starts.
+/// Release builds compile the tour too; there it has nothing to describe.
+#[cfg(not(debug_assertions))]
+pub fn describe(_name: &'static str) -> String {
+    String::new()
+}
+
 #[cfg(debug_assertions)]
 pub fn describe(name: &'static str) -> String {
     COLUMNS.with(|columns| {
