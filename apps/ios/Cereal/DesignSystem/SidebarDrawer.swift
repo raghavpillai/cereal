@@ -10,8 +10,8 @@ import APIClient
     private(set) var progress: CGFloat = 0
     private(set) var isDragging = false
     @ObservationIgnored var width: CGFloat = 300
-    @ObservationIgnored var openAnimation: Animation = .spring(duration: 0.55, bounce: 0.15)
-    @ObservationIgnored var closeAnimation: Animation = .spring(duration: 0.36, bounce: 0)
+    @ObservationIgnored var openAnimation: Animation = Motion(reduceMotion: false).settle
+    @ObservationIgnored var closeAnimation: Animation = Motion(reduceMotion: false).exit(.settle)
     @ObservationIgnored private var dragStart: CGFloat = 0
     @ObservationIgnored private var dragOrigin: CGFloat = 0
     /// True during a drag and for a moment after it, so the touch that moved
@@ -98,6 +98,7 @@ struct SidebarDrawer: View {
         GeometryReader { proxy in
             let width = min(320, proxy.size.width * 0.82)
             let direction: CGFloat = layoutDirection == .rightToLeft ? -1 : 1
+            let travel = (width + 16) * direction
             ZStack(alignment: .leading) {
                 if model.isVisible {
                     Color.black.opacity(0.42 * model.progress)
@@ -105,12 +106,19 @@ struct SidebarDrawer: View {
                         .contentShape(Rectangle())
                         .onTapGesture { model.close() }
                         .accessibilityHidden(true)
+                        // Dims in and out with the panel, in the same animation.
+                        .transition(.opacity)
                     SidebarPanel()
                         .frame(width: width)
                         // 8 pt from the top, leading and bottom edges of the screen.
                         .padding(.leading, 8).padding(.top, 8).padding(.bottom, 8)
                         .ignoresSafeArea(.container, edges: .bottom)
-                        .offset(x: -(width + 16) * (1 - model.progress) * direction)
+                        .offset(x: -travel * (1 - model.progress))
+                        // Opened or closed by a tap, the panel is added or removed in the same
+                        // change that moves `progress`, so its offset alone would not animate and
+                        // it cross-faded in place. It slides the rest of the way instead: in from
+                        // fully closed, out by whatever is left of its travel.
+                        .transition(SidebarDrawer.slide(travel: travel, progress: model.progress, reduceMotion: motion.reduceMotion))
                         .accessibilityAddTraits(.isModal)
                         .accessibilityAction(.escape) { model.close() }
                 }
@@ -137,6 +145,22 @@ struct SidebarDrawer: View {
             model.openAnimation = motion.settle
             model.closeAnimation = motion.exit(.settle)
         }
+    }
+}
+
+extension SidebarDrawer {
+    /// Insertion starts fully closed; removal covers the travel that is left at
+    /// `progress`, so a panel let go half way does not overshoot. Both run in the
+    /// open or close animation of the change. Reduce Motion fades instead.
+    static func slide(travel: CGFloat, progress: CGFloat, reduceMotion: Bool) -> AnyTransition {
+        guard !reduceMotion else { return .opacity }
+        return .asymmetric(insertion: .offset(x: -travel), removal: .offset(x: -remainingTravel(travel, progress: progress)))
+    }
+
+    /// How much further the panel moves to leave from `progress`: with its own
+    /// offset of `travel * (1 - progress)` it ends exactly at fully closed.
+    nonisolated static func remainingTravel(_ travel: CGFloat, progress: CGFloat) -> CGFloat {
+        travel * min(1, max(0, progress))
     }
 }
 

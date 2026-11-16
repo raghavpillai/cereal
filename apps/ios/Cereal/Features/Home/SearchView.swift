@@ -83,7 +83,6 @@ struct SearchView: View {
     @Environment(ServerRecordingController.self) private var recording
     @Environment(ConnectionMode.self) private var mode
     @Environment(Router.self) private var router
-    @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     /// The account the search is sent to. A query is text that leaves the device,
     /// so it goes only to an account in the search scope; until the scope can be
@@ -138,7 +137,7 @@ struct SearchView: View {
                 router.path.append(hit.route)
             }
         } leading: {
-            GlassCircleButton(systemImage: "chevron.left") { dismiss() }
+            BackButton()
         } bottom: {
             SearchBar(query: $query, focused: $focused)
         }

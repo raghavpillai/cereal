@@ -21,6 +21,9 @@ struct CerealApp: App {
                 .environment(sharedHistory)
                 .preferredColorScheme(.dark)
                 .tint(Theme.accent)
+                #if DEBUG
+                .task { FrameLog.shared.start() }
+                #endif
         }
     }
 }

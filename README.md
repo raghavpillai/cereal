@@ -63,6 +63,26 @@ docker compose down
 
 AI clients can connect through the OAuth-protected MCP endpoint at `/api/mcp`; the page at `/mcp/connect` has the setup steps. Clients set up with the earlier address, `/mcp`, keep working.
 
+## Update a server
+
+On the server itself, from a git checkout:
+
+```sh
+git pull
+docker compose up --build -d                    # applies database migrations before the server starts
+docker compose ps                               # app should read "healthy" within a minute
+```
+
+For a server you reach over SSH, `scripts/deploy-ssh.sh` sends a commit from your machine instead, so the server needs no git checkout and nothing uncommitted is sent:
+
+```sh
+./scripts/deploy-ssh.sh ubuntu@notes.example.com --check       # what it runs now; changes nothing
+./scripts/deploy-ssh.sh ubuntu@notes.example.com main          # deploy main
+./scripts/deploy-ssh.sh ubuntu@notes.example.com main --release dist/release   # and publish a Mac build
+```
+
+It dumps the database to `~/cereal-backups` first, builds the new image while the old server keeps answering, swaps in the new copy, and waits for it to report healthy. If it does not, it puts the previous copy back and prints the command to restore the dump. Migrations only go forward, so after a failed update that had already migrated, restore the dump as well. The `.env` and the published downloads are carried over; the commit that is running is in `DEPLOYED_COMMIT`.
+
 ## Apps
 
 People get the Mac app from your server: `/download` offers the installer for the version the server is running, and the desktop app's "Check for updates" reads the same place (`GET /api/v1/downloads`). To publish a release:

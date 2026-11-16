@@ -6,7 +6,6 @@ import Contracts
 struct ServerChatView: View {
     let noteID: String?
     @Environment(ServerNotesModel.self) private var server
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.motion) private var motion
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Namespace private var glass
@@ -160,7 +159,7 @@ struct ServerChatView: View {
             }
         } leading: {
             // Going back leaves the answer arriving; it is here on return.
-            GlassCircleButton(systemImage: "chevron.left") { dismiss() }
+            BackButton()
         } rail: {
             RailGroup {
                 RailIcon(systemImage: "square.and.pencil") { newConversation() }

@@ -18,6 +18,10 @@ struct ServerHomeView: View {
     @State private var entrance = EntranceGate()
     @State private var sections: [ServerHomeSection] = []
     @State private var steppedForward = true
+    /// The day whose calendars were last read to the end. While that same day
+    /// is read again (each return to Home, or the app coming back) its events
+    /// stay on screen instead of blinking out until the answer arrives.
+    @State private var calendarsReadFor: Int?
     @Environment(\.motion) private var motion
     @Environment(\.restoringConnection) private var restoring
     @Namespace private var glass
@@ -162,11 +166,13 @@ struct ServerHomeView: View {
 
     /// Each account is asked for its own calendars, with its own client.
     private func refreshCalendars() async {
+        let day = dayOffset
         let start = Calendar.current.startOfDay(for: selectedCalendarDay)
         guard let end = Calendar.current.date(byAdding: .day, value: 1, to: start) else { return }
         await withTaskGroup(of: Void.self) { group in
             for session in accounts.sessions where session.isReady { group.addTask { await session.notes.refreshCalendars(from: start, to: end) } }
         }
+        if !Task.isCancelled, day == dayOffset { calendarsReadFor = day }
     }
 
     /// An event with the account it was read through. An event id of one account is never sent to another.
@@ -184,14 +190,22 @@ struct ServerHomeView: View {
     @ViewBuilder private var upcoming: some View {
         let ready = accounts.sessions.filter(\.isReady)
         let snapshots = ready.map { $0.notes.calendarState.snapshot }
-        let events: [AccountEvent] = ready.flatMap { session -> [AccountEvent] in
+        let readForDay = calendarsReadFor == dayOffset
+        let events: [AccountEvent] = !readForDay ? [] : ready.flatMap { session -> [AccountEvent] in
             let snapshot = session.notes.calendarState.snapshot
             let enabledIDs = Set(snapshot.calendars.filter(\.enabled).map(\.id))
             return CalendarSchedule.events(snapshot.events, on: selectedCalendarDay, enabledCalendarIDs: enabledIDs, knownCalendarIDs: Set(snapshot.calendars.map(\.id)))
                 .map { AccountEvent(session: session, account: session.notes.accountID, event: $0) }
         }
         let failed = ready.contains { if case .failed = $0.notes.calendarState { true } else { false } }
-        let loaded = !ready.isEmpty && ready.allSatisfy { if case .loaded = $0.notes.calendarState { true } else { false } }
+        // Only answers read for this day count. Reading it again keeps what it showed;
+        // a day just stepped to stays empty until its own answer, which then fades in.
+        let loaded = readForDay && !ready.isEmpty && ready.allSatisfy {
+            switch $0.notes.calendarState {
+            case .loaded, .loading: true
+            default: false
+            }
+        }
         let loading = ready.contains { if case .loading = $0.notes.calendarState { $0.notes.calendarState.snapshot.calendars.isEmpty } else { false } }
         VStack(alignment: .leading, spacing: 10) {
             if failed {
@@ -244,7 +258,16 @@ struct ServerHomeView: View {
             }
         }
         .frame(minHeight: 36.7, alignment: .topLeading)
+        // A day's events arrive after its page has stepped in; they fade in rather than appear.
+        .animation(motion.snappy, value: UpcomingSignature(events: events.map(\.id), loaded: loaded, loading: loading, failed: failed))
         .accessibilityElement(children: .contain).accessibilityLabel("Upcoming calendar events")
+    }
+
+    private struct UpcomingSignature: Equatable {
+        let events: [String]
+        let loaded: Bool
+        let loading: Bool
+        let failed: Bool
     }
 
     private func calendarColor(_ text: String) -> Color {

@@ -44,7 +44,8 @@ struct ServerNoteView: View {
     /// The note with its account, which is what a route, the recorder and a chat know it by.
     private var ref: NoteRef? { account.map { NoteRef(account: $0, id: noteID) } }
     @Environment(Router.self) private var router
-    @Environment(\.dismiss) private var dismiss
+    /// Not `@Environment(\.dismiss)`; see `BackButton`.
+    @State private var dismiss = DismissHandle()
     @State private var loaded: NoteDTO?
     @State private var error: String?
     @State private var busy = false
@@ -137,7 +138,7 @@ struct ServerNoteView: View {
             }
             .refreshable { await load() }
         } leading: {
-            GlassCircleButton(systemImage: "chevron.left") { dismiss() }
+            BackButton()
         } standalone: {
             GlassCircleButton(systemImage: "square.and.arrow.up") { sharing = true }
                 .disabled(note == nil || busy).accessibilityLabel("Share a read-only snapshot")
@@ -223,6 +224,7 @@ struct ServerNoteView: View {
             .animation(motion.animation(.gooey, entering: showsScheduledStart), value: showsScheduledStart)
         }
         .navigationBarBackButtonHidden().toolbarVisibility(.visible, for: .navigationBar)
+        .capturesDismiss(into: dismiss)
         // This page has no field of its own. The keyboard here belongs to the
         // "Edit title" alert, and the bar must not ride up underneath that alert.
         .ignoresSafeArea(.keyboard, edges: .bottom)
@@ -326,16 +328,17 @@ struct ServerNoteView: View {
         loadRevision &+= 1
         let revision = loadRevision
         do {
+            // Both are asked for at once, so the meeting details (the chips under the
+            // title) land with the note while the page is still sliding in, not a
+            // round trip later, and the two are applied in one change. A context that
+            // fails leaves the one shown; the Meeting sheet offers its own retry.
+            async let context = try? server.noteContext(id: noteID)
             let document = try await server.note(id: noteID)
+            let found = await context
             guard revision == loadRevision else { return }
             loaded = document
             error = nil
-            do {
-                let context = try await server.noteContext(id: noteID)
-                guard revision == loadRevision else { return }
-                meetingContext = context
-            } catch is CancellationError { }
-            catch { /* Note content remains available; the Meeting sheet exposes context retries. */ }
+            if let found { meetingContext = found }
         }
         catch is CancellationError { }
         catch { if revision == loadRevision { self.error = error.localizedDescription } }
@@ -416,6 +419,8 @@ struct ServerNoteMarkdown: View {
             }
         }
         .readingFont(.body).lineSpacing(6).foregroundStyle(Theme.textSecondary)
+        // A long document's text is replaced, never cross-faded (see `MarkdownBlocks`).
+        .contentTransition(.identity)
         .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
     }
 

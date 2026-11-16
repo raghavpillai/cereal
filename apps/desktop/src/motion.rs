@@ -90,6 +90,32 @@ const MAX_STRETCH: f32 = 2.4;
 const MIN_SQUASH: f32 = 0.72;
 /// The spring envelope decays to e^-6.9 ≈ 0.1% by the end of its duration.
 const SETTLE_DECAY: f32 = 6.9;
+/// A frame built now reaches the screen about one display refresh later.
+/// Stage tracks, highlights and page entrances are evaluated that far ahead,
+/// the way Core Animation evaluates at the frame's display time, so the very
+/// first frame after an input already moves instead of repeating the
+/// resting pose. Transitions still start where they were and end on target.
+pub const FRAME_LEAD: Duration = Duration::from_millis(16);
+
+/// When the frame being built will be on screen: [`FRAME_LEAD`] from `now`.
+pub fn shown_at(now: Instant) -> Instant {
+    now + FRAME_LEAD
+}
+
+/// A GPUI animation of `duration` that starts [`FRAME_LEAD`] in, so its
+/// first frame already moves. Returns the animation and the share of the
+/// original duration that is skipped; map GPUI's delta with [`led`].
+fn led_animation(duration: Duration) -> (Animation, f32) {
+    let lead = FRAME_LEAD.min(duration / 2);
+    let skipped = lead.as_secs_f32() / duration.as_secs_f32().max(0.001);
+    (Animation::new(duration - lead), skipped)
+}
+
+/// GPUI's 0..=1 delta for an animation made with [`led_animation`], mapped
+/// back onto the full transition.
+fn led(skipped: f32, delta: f32) -> f32 {
+    skipped + (1. - skipped) * delta
+}
 
 /// `CEREAL_SLOW_MOTION=8` stretches every transition eight-fold so it can be
 /// inspected frame by frame, like the iOS simulator's slow animations.
@@ -468,8 +494,10 @@ impl Stage {
         let track = tracks
             .entry(key)
             .or_insert_with(|| Track::rest(initial, now));
+        let before = track.to;
         track.present(open, spring, now, reduced);
-        let pose = track.pose(now, reduced);
+        stats::traced(key, before, track);
+        let pose = track.pose(shown_at(now), reduced);
         if !pose.settled {
             self.live.set(true);
         } else if !open {
@@ -502,11 +530,14 @@ impl Stage {
         let track = tracks
             .entry(key)
             .or_insert_with(|| Track::rest(target, now));
+        let before = track.to;
         track.spring_to(target, spring, now, reduced);
-        if !track.settled(now) {
+        stats::traced(key, before, track);
+        let shown = shown_at(now);
+        if !track.settled(shown) {
             self.live.set(true);
         }
-        track.value(now)
+        track.value(shown)
     }
 
     /// Where a track is heading, if it exists: lets a surface that is leaving
@@ -517,10 +548,19 @@ impl Stage {
 
     /// Restart an open surface's entrance from a partially collapsed pose,
     /// e.g. when one menu replaces another in place.
+    ///
+    /// A surface still on its way in is not pushed forward: it restarts
+    /// from wherever it is if that is further collapsed than `from`.
     pub fn kick(&self, key: TrackKey, from: f32, spring: Spring) {
         let (now, reduced) = (Instant::now(), reduce_motion());
+        let from = self
+            .tracks
+            .borrow()
+            .get(&key)
+            .map_or(from, |track| track.value(shown_at(now)).min(from));
         let mut track = Track::rest(from, now);
         track.present(true, spring, now, reduced);
+        stats::traced(key, f32::NAN, &track);
         self.tracks.borrow_mut().insert(key, track);
         self.live.set(true);
     }
@@ -528,6 +568,7 @@ impl Stage {
     /// Start a staggered entrance for the group called `name`.
     pub fn mark(&self, name: &'static str) {
         self.marks.borrow_mut().insert(name, Instant::now());
+        stats::traced((name, u64::MAX), f32::NAN, &Track::rest(0., Instant::now()));
         self.live.set(true);
     }
 
@@ -539,13 +580,20 @@ impl Stage {
         let Some(start) = marks.get(name) else {
             return Pose::REST;
         };
-        let elapsed = start.elapsed();
-        if elapsed >= stagger_delay(STAGGER_CAP) + SNAPPY.duration() {
+        let elapsed = shown_at(Instant::now()).saturating_duration_since(*start);
+        let reduced = reduce_motion();
+        // Reduced, every item fades at once, so the group is done when one is.
+        let length = if reduced {
+            slow(REDUCED_FADE)
+        } else {
+            stagger_delay(STAGGER_CAP) + SNAPPY.duration()
+        };
+        if elapsed >= length {
             marks.remove(name);
             return Pose::REST;
         }
         self.live.set(true);
-        cascade_pose(elapsed, index, reduce_motion())
+        cascade_pose(elapsed, index, reduced)
     }
 
     /// [`Stage::cascade`] for the next item of `name` in render order.
@@ -576,13 +624,26 @@ impl Stage {
         let Some(changed) = entry.1 else {
             return Pose::REST;
         };
-        let progress = now.duration_since(changed).as_secs_f32() / SNAPPY.duration().as_secs_f32();
-        if progress >= 1. {
+        let reduced = reduce_motion();
+        let elapsed = shown_at(now).duration_since(changed);
+        // Reduced, the swap is a short fade and stops asking for frames
+        // when the fade is over rather than when the spring would have been.
+        if elapsed
+            >= if reduced {
+                slow(REDUCED_FADE)
+            } else {
+                SNAPPY.duration()
+            }
+        {
             entry.1 = None;
             return Pose::REST;
         }
         self.live.set(true);
-        mount_pose(SNAPPY, progress, reduce_motion())
+        mount_pose(
+            SNAPPY,
+            elapsed.as_secs_f32() / SNAPPY.duration().as_secs_f32(),
+            reduced,
+        )
     }
 
     /// The shared moving highlight called `name`.
@@ -675,6 +736,89 @@ pub mod stats {
         /// Guessed row heights that were then measured, and how many of
         /// those guesses were wrong by more than a pixel.
         guessed: (u64, u64),
+        /// The step in progress (see [`step_began`]): when its input was
+        /// dispatched, and what the main window did after it.
+        step: Option<Step>,
+    }
+
+    /// What the main window did after one scripted input: when it first
+    /// rendered, what that first frame cost, every gap between its frames,
+    /// and when the last frame that something moving asked for was drawn.
+    #[derive(Default)]
+    struct Step {
+        at: Option<Instant>,
+        first: Option<f32>,
+        first_cost: Option<f32>,
+        first_motion: Option<f32>,
+        last: Option<f32>,
+        last_motion: Option<f32>,
+        last_frame: Option<Instant>,
+        gaps: Vec<f32>,
+        renders: u64,
+        /// Another window's view (the pill, its popup): its first and last
+        /// render after the input, and how many.
+        side: Vec<(&'static str, f32, f32, u64)>,
+    }
+
+    /// The refresh interval the long-frame count is measured against:
+    /// `CEREAL_REFRESH_HZ`, or 60 Hz.
+    fn refresh_ms() -> f32 {
+        thread_local! {
+            static MS: f32 = std::env::var("CEREAL_REFRESH_HZ")
+                .ok()
+                .and_then(|hz| hz.trim().parse::<f32>().ok())
+                .filter(|hz| *hz > 1.)
+                .map_or(1000. / 60., |hz| 1000. / hz);
+        }
+        MS.with(|ms| *ms)
+    }
+
+    /// With `CEREAL_MOTION_TRACE=1`: print every stage track that starts
+    /// moving, with its target, duration and curve, relative to the step.
+    pub fn traced(key: super::TrackKey, before: f32, track: &super::Track) {
+        thread_local! {
+            static TRACE: bool = std::env::var_os("CEREAL_MOTION_TRACE").is_some();
+        }
+        if !TRACE.with(|trace| *trace) || before == track.to {
+            return;
+        }
+        let since = COUNTS.with(|counts| {
+            counts
+                .borrow()
+                .step
+                .as_ref()
+                .and_then(|step| step.at)
+                .map_or(-1., |at| at.elapsed().as_secs_f32() * 1000.)
+        });
+        // How far the first frame that shows the change has already moved.
+        let first = track.value(super::shown_at(Instant::now()));
+        let share = if (track.to - track.from).abs() > f32::EPSILON {
+            (first - track.from) / (track.to - track.from) * 100.
+        } else {
+            100.
+        };
+        eprintln!(
+            "track {}#{} {:.2} -> {:.2} over {} ms ({:?}) at +{since:.1} ms; first frame {share:.1}% of the way",
+            key.0,
+            key.1,
+            track.from,
+            track.to,
+            track.duration.as_millis(),
+            track.curve,
+        );
+    }
+
+    /// A scripted input is about to be dispatched: measure what follows it
+    /// until the next [`report`].
+    pub fn step_began() {
+        if enabled() {
+            COUNTS.with(|counts| {
+                counts.borrow_mut().step = Some(Step {
+                    at: Some(Instant::now()),
+                    ..Step::default()
+                })
+            });
+        }
     }
 
     /// Two renders further apart than this are not consecutive frames of one
@@ -742,10 +886,43 @@ pub mod stats {
                 *counts.causes.entry(cause).or_default() += 1;
             }
             if view != "main" {
+                if let Some(step) = counts.step.as_mut()
+                    && let Some(at) = step.at
+                {
+                    let since = now.duration_since(at).as_secs_f32() * 1000.;
+                    let index = match step.side.iter().position(|side| side.0 == view) {
+                        Some(index) => index,
+                        None => {
+                            step.side.push((view, since, since, 0));
+                            step.side.len() - 1
+                        }
+                    };
+                    let side = &mut step.side[index];
+                    side.2 = since;
+                    side.3 += 1;
+                }
                 return;
             }
             counts.builds.push(micros as f32 / 1000.);
             counts.frame_began = Some(started);
+            if let Some(step) = counts.step.as_mut()
+                && let Some(at) = step.at
+            {
+                let since = now.duration_since(at).as_secs_f32() * 1000.;
+                step.renders += 1;
+                step.first.get_or_insert(since);
+                step.last = Some(since);
+                if continues {
+                    step.first_motion.get_or_insert(since);
+                    step.last_motion = Some(since);
+                }
+                if let Some(previous) = step.last_frame.replace(now) {
+                    let gap = now.duration_since(previous).as_secs_f32() * 1000.;
+                    if gap < SAME_ANIMATION {
+                        step.gaps.push(gap);
+                    }
+                }
+            }
             if let Some(last) = counts.frame_last.replace(now) {
                 let gap = now.duration_since(last).as_secs_f32() * 1000.;
                 if continues && gap < SAME_ANIMATION {
@@ -820,9 +997,17 @@ pub mod stats {
         COUNTS.with(|counts| {
             let mut counts = counts.borrow_mut();
             if let Some(began) = counts.frame_began.take() {
-                counts.paints.push(began.elapsed().as_secs_f32() * 1000.);
+                let cost = began.elapsed().as_secs_f32() * 1000.;
+                counts.paints.push(cost);
+                if let Some(step) = counts.step.as_mut()
+                    && step.first.is_some()
+                {
+                    step.first_cost.get_or_insert(cost);
+                }
                 if let Some((began, now)) = counts.cpu_began.take().zip(thread_cpu()) {
-                    counts.cpus.push(now.saturating_sub(began).as_secs_f32() * 1000.);
+                    counts
+                        .cpus
+                        .push(now.saturating_sub(began).as_secs_f32() * 1000.);
                 }
             }
         });
@@ -927,6 +1112,39 @@ pub mod stats {
                 counts.guessed.1,
                 cpus.len(),
             );
+            if let Some(mut step) = counts.step.take() {
+                let budget = refresh_ms();
+                let long = step.gaps.iter().filter(|gap| **gap > budget * 1.5).count();
+                step.gaps.sort_by(f32::total_cmp);
+                let at = |share: usize| {
+                    step.gaps
+                        .get((step.gaps.len() * share / 100).min(step.gaps.len().saturating_sub(1)))
+                        .copied()
+                        .unwrap_or(0.)
+                };
+                let ms = |value: Option<f32>| value.map_or("-".to_string(), |v| format!("{v:.1}"));
+                eprintln!(
+                    "step {label}: renders {}; first render {} ms (cost {} ms); first motion {} ms; last motion {} ms; last render {} ms; gaps {} median {:.2} p95 {:.2} p99 {:.2} max {:.2} ms; long {} (> {:.1} ms)",
+                    step.renders,
+                    ms(step.first),
+                    ms(step.first_cost),
+                    ms(step.first_motion),
+                    ms(step.last_motion),
+                    ms(step.last),
+                    step.gaps.len(),
+                    at(50),
+                    at(95),
+                    at(99),
+                    step.gaps.last().copied().unwrap_or(0.),
+                    long,
+                    budget * 1.5,
+                );
+                for (view, first, last, renders) in step.side {
+                    eprintln!(
+                        "step {label} {view}: renders {renders}; first render {first:.1} ms; last render {last:.1} ms"
+                    );
+                }
+            }
             counts.listed = (0, 0);
             counts.guessed = (0, 0);
             counts.copied = 0;
@@ -1318,9 +1536,17 @@ pub fn swap_in<E: Styled + IntoElement + 'static>(
     element: E,
 ) -> AnyElement {
     let reduced = reduce_motion();
+    // Reduced, only the short fade runs, and no frames are drawn after it.
+    let length = if reduced {
+        slow(REDUCED_FADE)
+    } else {
+        SNAPPY.duration()
+    };
+    let share = length.as_secs_f32() / SNAPPY.duration().as_secs_f32();
+    let (animation, skipped) = led_animation(length);
     Morph::new(element)
-        .with_animation(id, Animation::new(SNAPPY.duration()), move |morph, t| {
-            let pose = mount_pose(SNAPPY, t, reduced);
+        .with_animation(id, animation, move |morph, t| {
+            let pose = mount_pose(SNAPPY, led(skipped, t) * share, reduced);
             morph.opacity(pose.fade).offset(0., 4. * (1. - pose.value))
         })
         .into_any_element()
@@ -1343,9 +1569,10 @@ pub fn page_pose(t: f32, reduced: bool) -> (f32, f32) {
 /// is the most repeated transition in the app, so it is short and quiet.
 pub fn page<E: Styled + IntoElement + 'static>(id: impl Into<ElementId>, element: E) -> AnyElement {
     let reduced = reduce_motion();
+    let (animation, skipped) = led_animation(slow(if reduced { REDUCED_FADE } else { PAGE_FADE }));
     Morph::new(element)
-        .with_animation(id, Animation::new(slow(PAGE_FADE)), move |morph, t| {
-            let (opacity, rise) = page_pose(t, reduced);
+        .with_animation(id, animation, move |morph, t| {
+            let (opacity, rise) = page_pose(led(skipped, t), reduced);
             morph.opacity(opacity).offset(0., rise)
         })
         .into_any_element()
@@ -1357,9 +1584,10 @@ pub fn crossfade<E: Styled + IntoElement + 'static>(
     id: impl Into<ElementId>,
     element: E,
 ) -> AnyElement {
+    let (animation, skipped) = led_animation(slow(REDUCED_FADE));
     Morph::new(element)
-        .with_animation(id, Animation::new(slow(REDUCED_FADE)), |morph, t| {
-            morph.opacity(page_pose(t, true).0)
+        .with_animation(id, animation, move |morph, t| {
+            morph.opacity(page_pose(led(skipped, t), true).0)
         })
         .into_any_element()
 }
@@ -1389,6 +1617,12 @@ struct GlideState {
     to: Bounds<Pixels>,
     start: Option<Instant>,
     shown: Option<Bounds<Pixels>>,
+    /// Opacity of the highlight: it eases in where a selection appears and
+    /// out where it goes away, like the hover wash, instead of popping.
+    alpha: Option<Track>,
+    /// How far ahead of `now` frames are evaluated ([`FRAME_LEAD`] when
+    /// painting; zero in tests).
+    lead: Duration,
 }
 
 /// A selection highlight shared by a group of items. The selected item drops
@@ -1462,17 +1696,25 @@ impl Glide {
         canvas(
             |_, _, _| (),
             move |_, _, window, _| {
-                let Some(rect) = state.borrow_mut().advance(Instant::now(), reduce_motion()) else {
-                    return;
+                let now = Instant::now();
+                let painted = {
+                    let mut state = state.borrow_mut();
+                    state.lead = FRAME_LEAD;
+                    state.advance(now, reduce_motion())
                 };
-                if !state.borrow().settled(Instant::now()) {
+                if !state.borrow().settled(now) {
                     stats::cause("glide");
                     window.request_animation_frame();
                 }
+                let Some((rect, alpha)) = painted else {
+                    return;
+                };
                 let radius = px(radius).min(rect.size.height / 2.);
-                let quad = fill(rect, color).corner_radii(radius);
+                let quad = fill(rect, color.opacity(alpha)).corner_radii(radius);
                 window.paint_quad(match outline {
-                    Some(outline) => quad.border_widths(px(1.)).border_color(outline),
+                    Some(outline) => quad
+                        .border_widths(px(1.))
+                        .border_color(outline.opacity(alpha)),
                     None => quad,
                 });
             },
@@ -1484,18 +1726,43 @@ impl Glide {
 
 impl GlideState {
     fn settled(&self, now: Instant) -> bool {
+        let shown = now + self.lead;
         self.start
-            .is_none_or(|start| now.saturating_duration_since(start) >= GOOEY.duration())
+            .is_none_or(|start| shown.saturating_duration_since(start) >= GOOEY.duration())
+            && self.alpha.is_none_or(|alpha| alpha.settled(shown))
     }
 
-    /// Consume this frame's probe report and return where to paint.
-    fn advance(&mut self, now: Instant, reduced: bool) -> Option<Bounds<Pixels>> {
+    /// Ease the highlight's opacity towards `to`.
+    fn fade_to(&mut self, to: f32, now: Instant) {
+        let duration = if to > 0.5 { HOVER_IN } else { HOVER_OUT };
+        // No track means at rest: unseen before a fade in, opaque before a
+        // fade out.
+        let alpha = self
+            .alpha
+            .get_or_insert(Track::rest(if to > 0.5 { 0. } else { 1. }, now));
+        if (alpha.to - to).abs() > f32::EPSILON {
+            alpha.retarget(to, now, slow(duration), Curve::Fade);
+        }
+    }
+
+    /// Consume this frame's probe report and return where to paint, and at
+    /// what opacity.
+    fn advance(&mut self, now: Instant, reduced: bool) -> Option<(Bounds<Pixels>, f32)> {
+        let shown_at = now + self.lead;
         let Some((key, rect)) = self.fresh.take() else {
-            // Nothing is selected in this group right now.
+            // Nothing is selected in this group right now: the highlight
+            // fades out where it was, and the position is forgotten.
             self.key = None;
-            self.shown = None;
             self.start = None;
-            return None;
+            let shown = self.shown?;
+            self.fade_to(0., now);
+            let alpha = self.alpha.map_or(0., |alpha| alpha.value(shown_at));
+            if alpha <= 0. {
+                self.shown = None;
+                self.alpha = None;
+                return None;
+            }
+            return Some((shown, alpha));
         };
         if self.key != Some(key) {
             match self.shown {
@@ -1509,6 +1776,11 @@ impl GlideState {
                     self.start = None;
                 }
             }
+            if self.key.is_none() {
+                // A selection appearing (or coming back while the last one
+                // fades out) eases in where it is, without flying in.
+                self.fade_to(1., now);
+            }
             self.key = Some(key);
             self.to = rect;
         } else {
@@ -1517,18 +1789,28 @@ impl GlideState {
             self.to = rect;
         }
         let shown = match self.start {
-            Some(start) if !self.settled(now) => stretch_bounds(
-                self.from,
-                self.to,
-                now.saturating_duration_since(start).as_secs_f32() / GOOEY.duration().as_secs_f32(),
-            ),
+            Some(start) if shown_at.saturating_duration_since(start) < GOOEY.duration() => {
+                stretch_bounds(
+                    self.from,
+                    self.to,
+                    shown_at.saturating_duration_since(start).as_secs_f32()
+                        / GOOEY.duration().as_secs_f32(),
+                )
+            }
             _ => {
                 self.start = None;
                 self.to
             }
         };
         self.shown = Some(shown);
-        Some(shown)
+        let alpha = self.alpha.map_or(1., |alpha| alpha.value(shown_at));
+        if self
+            .alpha
+            .is_some_and(|alpha| alpha.to >= 1. && alpha.settled(shown_at))
+        {
+            self.alpha = None;
+        }
+        Some((shown, alpha))
     }
 }
 
@@ -1895,6 +2177,31 @@ struct BarsState {
 /// Level bars are three small shapes: 30 frames a second is smooth for them
 /// and halves what a meeting-long animation costs.
 const BARS_FRAME: Duration = Duration::from_millis(33);
+/// [`BARS_FRAME`] is kept by the display's own refreshes, not by a timer:
+/// a 33 ms timer started at paint time wakes late (timers are coalesced,
+/// more so on a busy machine or in the background) and its frame then waits
+/// for the refresh after, so it ran at 20 frames a second at 60 Hz. Instead
+/// the view is redrawn on the first refresh at least this long after the
+/// last paint (a 33 ms frame less the slack for a frame's own build time):
+/// every second refresh at 60 Hz, every third at 120 Hz.
+const BARS_WAKE: Duration = BARS_FRAME.saturating_sub(Duration::from_millis(12));
+
+/// Redraw the current view on the first display refresh at or after `due`.
+/// The refreshes in between run a callback and draw nothing.
+fn redraw_at(window: &Window, due: Instant, cause: &'static str) {
+    let view = window.current_view();
+    fn wait(window: &Window, view: EntityId, due: Instant, cause: &'static str) {
+        window.on_next_frame(move |window, cx| {
+            if Instant::now() >= due {
+                stats::cause(cause);
+                cx.notify(view);
+            } else {
+                wait(window, view, due, cause);
+            }
+        });
+    }
+    wait(window, view, due, cause);
+}
 
 /// A row of vertical level bars that follow their target heights on springs.
 /// It paints quads directly and requests frames only until the bars come to
@@ -1986,7 +2293,7 @@ impl Element for Bars {
         _: &mut Self::RequestLayoutState,
         _: &mut Self::PrepaintState,
         window: &mut Window,
-        cx: &mut App,
+        _: &mut App,
     ) {
         let Some(id) = id else { return };
         let (now, reduced) = (Instant::now(), reduce_motion());
@@ -2019,7 +2326,7 @@ impl Element for Bars {
             let moving = moving && {
                 let due = now >= state.next_frame;
                 if due {
-                    state.next_frame = now + BARS_FRAME;
+                    state.next_frame = now + BARS_WAKE;
                 }
                 due
             };
@@ -2032,13 +2339,7 @@ impl Element for Bars {
             )
         });
         if moving {
-            let view = window.current_view();
-            cx.spawn(async move |cx| {
-                cx.background_executor().timer(BARS_FRAME).await;
-                stats::cause("bars");
-                let _ = cx.update(|cx| cx.notify(view));
-            })
-            .detach();
+            redraw_at(window, now + BARS_WAKE, "bars");
         }
         for (index, height) in heights.into_iter().enumerate() {
             let height = height.clamp(self.bar.min(self.height), self.height);
@@ -2254,17 +2555,12 @@ impl<E: IntoElement + 'static> Element for SlowLoop<E> {
                 frames.retain(|_, next| *next + Duration::from_secs(1) > now);
                 let due = frames.get(&view).is_none_or(|next| now >= *next);
                 if due {
-                    frames.insert(view, now + BARS_FRAME);
+                    frames.insert(view, now + BARS_WAKE);
                 }
                 due
             });
             if due {
-                cx.spawn(async move |cx| {
-                    cx.background_executor().timer(BARS_FRAME).await;
-                    stats::cause("loop");
-                    let _ = cx.update(|cx| cx.notify(view));
-                })
-                .detach();
+                redraw_at(window, now + BARS_WAKE, "loop");
             }
         }
         let mut element = self
@@ -2630,14 +2926,17 @@ mod tests {
         assert_eq!(mount_pose(GOOEY, 1., true).fade, 1.);
         assert_eq!(mount_pose(GOOEY, 0.5, true).fade, 1.);
 
-        // A moving highlight snaps to its new item.
+        // A moving highlight snaps to its new item; appearing, it only fades.
         let mut glide = GlideState::default();
         let row = |y: f32| Bounds::new(point(px(8.), px(y)), size(px(176.), px(28.)));
         glide.fresh = Some((1, row(60.)));
-        assert_eq!(glide.advance(start, true), Some(row(60.)));
+        assert_eq!(glide.advance(start, true), Some((row(60.), 0.)));
+        let shown = start + HOVER_IN;
+        glide.fresh = Some((1, row(60.)));
+        assert_eq!(glide.advance(shown, true), Some((row(60.), 1.)));
         glide.fresh = Some((2, row(147.)));
-        assert_eq!(glide.advance(start, true), Some(row(147.)));
-        assert!(glide.settled(start));
+        assert_eq!(glide.advance(shown, true), Some((row(147.), 1.)));
+        assert!(glide.settled(shown));
     }
 
     #[test]
@@ -2686,18 +2985,24 @@ mod tests {
     fn highlight_glides_from_where_it_is_and_chases_a_moving_target() {
         let start = Instant::now();
         let row = |x: f32, y: f32| Bounds::new(point(px(x), px(y)), size(px(176.), px(28.)));
+        let rect = |painted: Option<(Bounds<Pixels>, f32)>| painted.map(|(rect, _)| rect);
         let mut glide = GlideState::default();
-        // First appearance has nothing to glide from.
+        // First appearance has nothing to glide from: it eases in in place.
         glide.fresh = Some((1, row(8., 60.)));
-        assert_eq!(glide.advance(start, false), Some(row(8., 60.)));
-        assert!(glide.settled(start));
+        assert_eq!(glide.advance(start, false), Some((row(8., 60.), 0.)));
+        assert!(!glide.settled(start));
+        let faded_in = start + HOVER_IN;
+        glide.fresh = Some((1, row(8., 60.)));
+        assert_eq!(glide.advance(faded_in, false), Some((row(8., 60.), 1.)));
+        assert!(glide.settled(faded_in));
+        let start = faded_in;
 
         glide.fresh = Some((2, row(8., 147.)));
-        assert_eq!(glide.advance(start, false), Some(row(8., 60.)));
+        assert_eq!(glide.advance(start, false), Some((row(8., 60.), 1.)));
         assert!(!glide.settled(start));
         let middle = start + Duration::from_millis(70);
         glide.fresh = Some((2, row(8., 147.)));
-        let stretched = glide.advance(middle, false).unwrap();
+        let stretched = rect(glide.advance(middle, false)).unwrap();
         assert!(stretched.size.height > px(40.));
         assert_eq!(stretched.size.width, px(176.));
         assert!(stretched.top() >= px(60.) && stretched.bottom() <= px(180.));
@@ -2705,24 +3010,78 @@ mod tests {
         // The target moves mid-flight (its tab is still widening): the droplet
         // keeps heading for wherever the item is now, without restarting.
         glide.fresh = Some((2, row(-40., 147.)));
-        let chasing = glide.advance(middle, false).unwrap();
+        let chasing = rect(glide.advance(middle, false)).unwrap();
         assert!(chasing.left() < px(8.) && chasing.left() >= px(-40.));
         assert_eq!(chasing.size.height, stretched.size.height);
 
         // Retargeting starts from the stretched shape, not from an endpoint.
         glide.fresh = Some((1, row(-40., 60.)));
-        assert_eq!(glide.advance(middle, false), Some(chasing));
+        assert_eq!(rect(glide.advance(middle, false)), Some(chasing));
 
         let done = middle + GOOEY.duration();
         glide.fresh = Some((1, row(-40., 60.)));
-        assert_eq!(glide.advance(done, false), Some(row(-40., 60.)));
+        assert_eq!(glide.advance(done, false), Some((row(-40., 60.), 1.)));
         assert!(glide.settled(done));
 
-        // Losing the selection forgets the position instead of flying in later.
-        assert_eq!(glide.advance(done, false), None);
+        // Losing the selection fades the highlight out where it was, and
+        // forgets the position instead of flying in later.
+        let (fading, alpha) = glide.advance(done, false).unwrap();
+        assert_eq!(fading, row(-40., 60.));
+        assert_eq!(alpha, 1.);
+        assert!(!glide.settled(done));
+        let half = done + HOVER_OUT / 2;
+        let (_, alpha) = glide.advance(half, false).unwrap();
+        assert!(alpha > 0. && alpha < 1.);
+        // A new selection while it fades eases in from that opacity, in place.
         glide.fresh = Some((3, row(8., 200.)));
-        assert_eq!(glide.advance(done, false), Some(row(8., 200.)));
-        assert!(glide.settled(done));
+        let (back, from) = glide.advance(half, false).unwrap();
+        assert_eq!(back, row(8., 200.));
+        assert!((from - alpha).abs() < 1e-6);
+        glide.fresh = Some((3, row(8., 200.)));
+        assert_eq!(
+            glide.advance(half + HOVER_IN, false),
+            Some((row(8., 200.), 1.))
+        );
+        let gone = half + HOVER_IN + HOVER_OUT;
+        glide.advance(half + HOVER_IN, false);
+        assert_eq!(glide.advance(gone, false), None);
+        assert!(glide.settled(gone));
+        glide.fresh = Some((4, row(8., 240.)));
+        assert_eq!(rect(glide.advance(gone, false)), Some(row(8., 240.)));
+    }
+
+    #[test]
+    fn frames_are_evaluated_one_refresh_ahead_so_the_first_one_moves() {
+        // A highlight move: with the lead the first frame has already left.
+        let row = |y: f32| Bounds::new(point(px(8.), px(y)), size(px(176.), px(28.)));
+        let start = Instant::now();
+        let mut glide = GlideState {
+            lead: FRAME_LEAD,
+            ..GlideState::default()
+        };
+        glide.fresh = Some((1, row(60.)));
+        glide.advance(start, false);
+        let later = start + Duration::from_secs(1);
+        glide.fresh = Some((1, row(60.)));
+        glide.advance(later, false);
+        glide.fresh = Some((2, row(147.)));
+        let (first, _) = glide.advance(later, false).unwrap();
+        assert!(first.bottom() > row(60.).bottom());
+        assert!(first.top() <= row(147.).top());
+        // It still lands exactly, one lead before the token ends.
+        glide.fresh = Some((2, row(147.)));
+        let end = later + GOOEY.duration() - FRAME_LEAD;
+        assert_eq!(glide.advance(end, false), Some((row(147.), 1.)));
+        assert!(glide.settled(end));
+
+        // GPUI animations skip the same share, and map onto the whole curve.
+        let (animation, skipped) = led_animation(slow(PAGE_FADE));
+        assert_eq!(animation.duration, slow(PAGE_FADE) - FRAME_LEAD);
+        assert!(
+            (led(skipped, 0.) - FRAME_LEAD.as_secs_f32() / PAGE_FADE.as_secs_f32()).abs() < 1e-6
+        );
+        assert_eq!(led(skipped, 1.), 1.);
+        assert!(page_pose(led(skipped, 0.), false).0 > PAGE_FROM);
     }
 
     #[test]

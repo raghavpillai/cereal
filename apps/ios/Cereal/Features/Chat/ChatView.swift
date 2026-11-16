@@ -377,6 +377,12 @@ struct MarkdownBlocks: View {
                 .transition(streaming ? motion.rise : .identity)
             }
         }.readingFont(.body).lineSpacing(6).foregroundStyle(Theme.chatText)
+            // Text whose words change (sources arriving turn "[1]" into links, the
+            // last block growing) is replaced, never cross-faded. A cross-fade of
+            // text is drawn on the CPU every frame: when a long answer's sources
+            // arrived inside the settle animation, every paragraph was redrawn for
+            // the length of the spring and the screen ran at about 20 frames a second.
+            .contentTransition(.identity)
             .frame(maxWidth: .infinity, alignment: .leading)
             .environment(\.openURL, OpenURLAction { url in
                 if let citation = ChatCitationMarkup.resolve(url, turnID: turnID, citations: citations) { onCitation?(citation); return .handled }

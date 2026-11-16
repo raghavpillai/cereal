@@ -2051,6 +2051,7 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |elapsed| elapsed.as_millis());
             eprintln!("tour {stamp} {name}");
+            crate::motion::stats::step_began();
             let ran = match action {
                 Action::View(action) => handle.update(cx, |view, _, cx| {
                     action(view, cx);

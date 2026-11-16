@@ -134,6 +134,10 @@ struct ConnectionView: View {
     @State private var busy = false
     @State private var error: String?
     @State private var discovery = SignInDiscoveryModel()
+    /// The "Checking…" row waits a moment before it appears. Most servers answer
+    /// within it, and the form then changes once (to its sign-in rows) instead of
+    /// twice while the sheet is still rising.
+    @State private var checkingShown = false
     @State private var browser = BrowserSignInSession()
     /// True while the sign-in in progress is the one in the browser, so its own button shows it.
     @State private var inBrowser = false
@@ -223,7 +227,9 @@ struct ConnectionView: View {
                     switch discovery.state {
                     case .idle: EmptyView()
                     case .checking:
-                        HStack { Text("Checking how this server signs in…").foregroundStyle(Theme.textSecondary); Spacer(); ProgressView() }
+                        if checkingShown {
+                            HStack { Text("Checking how this server signs in…").foregroundStyle(Theme.textSecondary); Spacer(); ProgressView() }
+                        }
                     case .failed(let message):
                         Text(message).foregroundStyle(Theme.danger)
                         Button("Try again") { discovery.check(address, again: true) }
@@ -356,6 +362,13 @@ struct ConnectionView: View {
             .animation(motion.snappy, value: busy)
             .animation(motion.snappy, value: error)
             .animation(motion.snappy, value: discovery.state)
+            .animation(motion.snappy, value: checkingShown)
+            .task(id: discovery.state == .checking) {
+                checkingShown = false
+                guard discovery.state == .checking else { return }
+                try? await Task.sleep(for: .milliseconds(300))
+                if !Task.isCancelled { checkingShown = true }
+            }
             .onChange(of: address, initial: true) { _, text in discovery.check(text) }
             .animation(motion.settle, value: accounts.signature)
             .navigationTitle("Connection")

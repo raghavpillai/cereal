@@ -249,6 +249,47 @@ struct GlassCircleButton: View {
     }
 }
 
+// MARK: - Going back
+
+/// The Back control of a pushed screen. It reads `dismiss` itself so that the
+/// screen does not: a view that declares `@Environment(\.dismiss)` runs its
+/// whole body again each time the navigation transition updates that value
+/// (three or four times while one push is moving, and again on the way back),
+/// and a screen's body rebuilds its toolbar items each time it runs.
+struct BackButton: View {
+    /// Runs just before the screen goes back.
+    var before: (() -> Void)? = nil
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        GlassCircleButton(systemImage: "chevron.left") { before?(); dismiss() }
+    }
+}
+
+/// `dismiss` for code other than the Back control (a screen that closes
+/// itself after deleting its note), without the screen depending on it.
+/// See `BackButton`.
+@MainActor final class DismissHandle {
+    fileprivate var action: DismissAction?
+    func callAsFunction() { action?() }
+}
+
+private struct DismissCapture: View {
+    let handle: DismissHandle
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        // Kept, not published: nothing is drawn from it.
+        let _ = { handle.action = dismiss }()
+        Color.clear.frame(width: 0, height: 0).accessibilityHidden(true)
+    }
+}
+
+extension View {
+    func capturesDismiss(into handle: DismissHandle) -> some View {
+        background(DismissCapture(handle: handle))
+    }
+}
+
 /// A vertical glass capsule that groups several rail buttons.
 struct RailGroup<Content: View>: View {
     @ViewBuilder var content: Content

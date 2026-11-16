@@ -182,6 +182,20 @@ struct SidebarTests {
         #expect(!SidebarModel.shouldOpen(progress: 0.3, velocity: 0))
     }
 
+    @Test func aTappedPanelSlidesTheRestOfItsTravelAndNoFurther() {
+        // Fully open: the whole travel. Let go half way: the half that is left.
+        #expect(SidebarDrawer.remainingTravel(316, progress: 1) == 316)
+        #expect(SidebarDrawer.remainingTravel(316, progress: 0.5) == 158)
+        #expect(SidebarDrawer.remainingTravel(-316, progress: 0.25) == -79)
+        // A spring's overshoot never sends it past fully closed.
+        #expect(SidebarDrawer.remainingTravel(316, progress: 1.04) == 316)
+        #expect(SidebarDrawer.remainingTravel(316, progress: -0.1) == 0)
+        for progress in stride(from: 0.0, through: 1.0, by: 0.125) {
+            let own = 316 * (1 - progress)
+            #expect(own + SidebarDrawer.remainingTravel(316, progress: progress) == 316)
+        }
+    }
+
     @MainActor @Test func aDragOpensAndTheSameTouchCannotPressARow() async throws {
         let model = SidebarModel()
         model.width = 300
