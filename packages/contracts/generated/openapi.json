@@ -18101,13 +18101,7 @@
         "type": "object",
         "properties": {
           "state": {
-            "type": "string",
-            "enum": [
-              "none",
-              "pending",
-              "done",
-              "failed"
-            ]
+            "$ref": "#/components/schemas/GoogleVerificationState"
           },
           "reason": {
             "anyOf": [
@@ -18125,6 +18119,15 @@
           "reason"
         ],
         "additionalProperties": false
+      },
+      "GoogleVerificationState": {
+        "type": "string",
+        "enum": [
+          "none",
+          "pending",
+          "done",
+          "failed"
+        ]
       },
       "AuthMethodsDTO": {
         "type": "object",

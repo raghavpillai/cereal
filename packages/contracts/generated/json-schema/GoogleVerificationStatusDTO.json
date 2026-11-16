@@ -2,17 +2,20 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$ref": "#/$defs/GoogleVerificationStatusDTO",
   "$defs": {
+    "GoogleVerificationState": {
+      "type": "string",
+      "enum": [
+        "none",
+        "pending",
+        "done",
+        "failed"
+      ]
+    },
     "GoogleVerificationStatusDTO": {
       "type": "object",
       "properties": {
         "state": {
-          "type": "string",
-          "enum": [
-            "none",
-            "pending",
-            "done",
-            "failed"
-          ]
+          "$ref": "#/$defs/GoogleVerificationState"
         },
         "reason": {
           "anyOf": [

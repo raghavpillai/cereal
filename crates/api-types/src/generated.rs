@@ -1824,20 +1824,20 @@ pub struct GoogleVerificationStartDTO {
 pub struct GoogleVerificationStatusDTO {
     pub reason: Option<String>,
 
-    pub state: State,
+    pub state: GoogleVerificationState,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum State {
+pub enum GoogleVerificationState {
     Done,
 
     Failed,
 
-    Pending,
-
     #[serde(rename = "none")]
-    StateNone,
+    GoogleVerificationStateNone,
+
+    Pending,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

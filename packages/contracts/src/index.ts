@@ -322,7 +322,9 @@ export type GoogleVerificationStartDTO = typeof GoogleVerificationStartDTO.Type
 /** How this browser's proving sign-in went. `reason` is set when it failed: "invalid_client" (Google refused the
  * secret), "redirect_uri_mismatch", "cancelled", "unverified_email", "email_taken", "already_claimed",
  * "google_account_in_use", "expired" or "failed". */
-export const GoogleVerificationStatusDTO = Schema.Struct({ state: Schema.Literals(["none", "pending", "done", "failed"]), reason: Schema.NullOr(Schema.String) }).annotate({ identifier: "GoogleVerificationStatusDTO" })
+// Named, so generated code does not get a type called `State` (which collides with SwiftUI's).
+export const GoogleVerificationState = Schema.Literals(["none", "pending", "done", "failed"]).annotate({ identifier: "GoogleVerificationState" })
+export const GoogleVerificationStatusDTO = Schema.Struct({ state: GoogleVerificationState, reason: Schema.NullOr(Schema.String) }).annotate({ identifier: "GoogleVerificationStatusDTO" })
 export type GoogleVerificationStatusDTO = typeof GoogleVerificationStatusDTO.Type
 /** The password the signed-in administrator will use once the server signs in with email and password. */
 export const SwitchToPasswordInput = Schema.Struct({ password: Schema.String.check(Schema.isMinLength(12), Schema.isMaxLength(128)) }).annotate({ identifier: "SwitchToPasswordInput" })

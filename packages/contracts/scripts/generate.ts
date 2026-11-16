@@ -74,6 +74,11 @@ for (const [name, schema] of objects) {
   const encode = properties.map(([key]) => `        try container.${required.has(key) ? "encode" : "encodeIfPresent"}(${property(key)}, forKey: .${key})`).join("\n")
   swiftSource += `\n\nextension ${swiftName} {\n    private enum ContractWireKeys: String, CodingKey {\n${keys}\n    }\n    public func encode(to encoder: Encoder) throws {\n        var container = encoder.container(keyedBy: ContractWireKeys.self)\n${encode}\n    }\n}\n`
 }
+// A generated type with the name of a SwiftUI type makes every `@State` or `View` in a file that imports
+// Contracts ambiguous, and only an iPhone build shows it. Name the schema instead (see OnboardingStepState).
+const swiftUINames = new Set(["State", "Binding", "View", "Text", "Color", "Image", "Button", "Environment", "Label", "Link", "List", "Section", "Group", "Form", "Menu", "Picker", "Toggle", "Font", "Animation", "Shape", "Path", "Alignment", "Scene", "App", "Observable", "Transaction", "Namespace"])
+const colliding = [...swiftSource.matchAll(/^public (?:enum|struct|class) (\w+)\b/gm)].map(match => match[1]!).filter(name => swiftUINames.has(name))
+if (colliding.length) throw new Error(`Generated Swift types collide with SwiftUI: ${colliding.join(", ")}. Give the schema an identifier.`)
 let structName = ""
 const snake = (name: string) => name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase()
 const rustSource = rust.lines.join("\n").replace(/\b([A-Z]\w*)Dto\b/g, "$1DTO").split("\n").flatMap((line) => {

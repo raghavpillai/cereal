@@ -2817,20 +2817,20 @@ public struct GoogleVerificationStartDTO: Codable, Sendable {
 // MARK: - GoogleVerificationStatusDTO
 public struct GoogleVerificationStatusDTO: Codable, Sendable {
     public let reason: String?
-    public let state: State
+    public let state: GoogleVerificationState
 
     public enum CodingKeys: String, CodingKey {
         case reason = "reason"
         case state = "state"
     }
 
-    public init(reason: String?, state: State) {
+    public init(reason: String?, state: GoogleVerificationState) {
         self.reason = reason
         self.state = state
     }
 }
 
-public enum State: String, Codable, Sendable {
+public enum GoogleVerificationState: String, Codable, Sendable {
     case done = "done"
     case failed = "failed"
     case none = "none"
