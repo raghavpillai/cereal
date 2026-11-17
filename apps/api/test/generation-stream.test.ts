@@ -157,6 +157,6 @@ test("the format the model is asked for: nested bullets, action items as task th
   expect(prompt).toContain('Sub-bullets (two spaces, then "- ")')
   expect(prompt).toContain("If nobody took on a task, there is no such section")
   expect(prompt).toContain('Never a placeholder such as "(no owner)"')
-  expect(prompt).toContain("- Send consent forms to parents (Amara)\n  Due Friday.")
+  expect(prompt).toContain("- Send the yard system integration spec (Owen)\n  Due Friday,")
   expect(prompt).not.toContain("**")
 })

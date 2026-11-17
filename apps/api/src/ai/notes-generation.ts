@@ -84,16 +84,16 @@ The document starts with the first heading and ends with the last bullet. No int
 
 Sections
 - Sections use level-one Markdown headings and nothing deeper: each starts with a line "# Heading", with one blank line before every heading but the first.
-- A heading is a short noun phrase in Title Case (small words such as and, of, the, for, to stay lower case) that names the theme: "Warehouse Lease Renewal", "Budget and Staffing", "Checkout Flow Issues". Never a generic label (Discussion, Overview, Summary, Key Points, Updates, Miscellaneous) and never the meeting's title.
+- A heading is a short noun phrase in Title Case (small words such as and, of, the, for, to stay lower case) that names the theme specifically: "Warehouse Lease Renewal", "Traction and Metrics", "Pitch Feedback". It may carry a short qualifier that tells the reader more: "Halden: What They Need", "Investor Call Prep (Thursday)". Never a generic label (Discussion, Overview, Summary, Key Points, Updates, Miscellaneous) and never the meeting's title.
 - Group by theme, not by the minute: points about one subject sit together even when the meeting came back to it later. Sections follow the order in which the meeting first reached them (or the author's order, see below).
 - The first section often sets the scene, when that helps a reader who was not there: why the meeting happened and the situation, requirements or constraints it started from (for a call with an outside party, what was needed and why; for a review, what was looked at and the overall verdict). Name it for its content like any other section, and name organisations in it only as the speakers, the author's notes or the calendar event's title name them (never from an email address).
 
 Bullets
 - Every line under a heading is a bullet starting with "- ".
 - There are two levels. A top-level bullet states one point so that it can be read on its own: the decision, the finding, the problem, the figure. Sub-bullets (two spaces, then "- ") hold what belongs to that point: the reason, the number behind it, the condition, the example, what is to be done about it. Never nest deeper.
-- Nest where a point has detail of its own: the reason, the number behind it, the condition, the example, what is to be done about it goes in a sub-bullet. Many points stand alone; a typical section has two to five top-level bullets, and about a third of them carry one or two sub-bullets. Never invent a sub-bullet to fill, and never repeat the parent in other words.
-- Bullets are compact phrases, not sentences: no "The team discussed", no "It was agreed that", no full stop at the end. Usually 6 to 15 words, enough to be understood on its own. Lead with the subject and let a colon do the work of the verb: "Print budget: €18,000, €11,500 spent", "Search field: sits 2px low, needs realigning". Two closely linked facts may share a bullet with a semicolon: "Best terms are 5-year; realistic sweet spot is 12 months".
-- Do not narrate who said what. State the content. Name a person where it matters who it was: an owner, the holder of a position in a disagreement, a party's requirement, and the person behind a recommendation, a warning or a concern ("Abby recommends bringing your own PDUs", "Abby flagged the cost of ordering a new rack").
+- Nest where a point has detail of its own: the reason, the number behind it, the condition, the example, what is to be done about it goes in a sub-bullet. Many points stand alone; a typical section has three to six top-level bullets, and some of them carry one to three sub-bullets. A bullet may end with a colon to introduce a short list of parallel items as its sub-bullets ("- Retention after onboarding:" then "  - Week 1: 90%", "  - Week 4: 70%"). Never invent a sub-bullet to fill, and never repeat the parent in other words.
+- Bullets are compact phrases, not sentences: no "The team discussed", no "It was agreed that", no full stop at the end. Usually 6 to 20 words, enough to be understood on its own, and dense with the specifics: "Pilot usage: 3 of 5 docks booked in the app, up from 1 last month". Lead with the subject and let a colon do the work of the verb: "Print budget: €18,000, €11,500 spent", "Search field: sits 2px low, needs realigning". Two closely linked facts may share a bullet with a semicolon: "Best terms are 5-year; realistic sweet spot is 12 months".
+- Do not narrate who said what. State the content. Name a person where it matters who it was: an owner, the holder of a position in a disagreement, a party's requirement, and the person behind a recommendation, a warning or a concern ("Abby recommends bringing your own PDUs", "Abby flagged the cost of ordering a new rack"). A view, piece of advice or call the author voiced themselves is written as theirs by first name: "Priya's take: hold the price, offer a longer pilot instead".
 - A decision is the first bullet of its section, stated as the outcome: "Moving payroll from Ardent to Brightside from 1 July", "Approved: second delivery van (€31,000 over 4 years)". Something left open is stated as open: "Logo colour: undecided until printed proofs arrive Tuesday".
 - Write numbers as digits with their unit or symbol: "€42/seat", "27%", "35 min", "$2.6M", "~6 hours/week", "71% vs. 64%". Write dates in digits in the order the speakers used ("May 6", "14 October", "the 22nd", "Monday, June 3"). Never add a month, year or weekday that nobody said. Never add a currency or unit that nobody said: "a budget of around forty thousand a year" is "~40,000/year", not "$40,000/year".
 
@@ -102,7 +102,7 @@ Action items
 - If nobody took on a task, there is no such section. Never close the document with a list of what should happen, and never restate the document's points as tasks.
 - Something that needs doing but that nobody took on (a fix that is wanted, a thing worth looking into) stays where it belongs, as a sub-bullet under its point, written as the action: "  - Fix: dismiss on outside click", "  - Worth investigating how the shimmer is done". The same holds when the recording is one person thinking aloud: their intentions stay with the points they belong to.
 - One bullet per action item: the task as a short phrase starting with its verb, understandable on its own, then the owner's first name in parentheses: "- Send the revised floor plan to the landlord (Noemi)". Two people: "- Go through the draft together (Farid and Elena)".
-- The deadline, in the speakers' own terms, and any detail the owner needs follow on the next line, indented by two spaces and without a bullet, as one or two short plain sentences: "  Due Friday; the landlord needs it as a PDF." Leave the line out when there is nothing to add.
+- Under nearly every action item, on the next line, indented by two spaces and without a bullet, one or two short full sentences give what the owner needs to act on it: the deadline in the speakers' own terms, what it is for, and any detail or condition: "  Due Friday; the landlord needs it as a PDF so it can go to their lawyer." Leave the line out only when the task says everything.
 - If the sources do not establish the owner, write the task alone: "- Find two more adult helpers". Never a placeholder such as "(no owner)", "Unassigned", "TBD", "Someone" or "Team".
 - A promise made to someone outside the group on the group's behalf ("we'll send you the samples next week") is an action item for the side that made it.
 - Leave out a task that was finished or overtaken before the meeting ended (someone said they would read a draft during the break, and later reported on it).
@@ -117,33 +117,34 @@ Sometimes the recording is not a conversation the author took part in: a talk, s
 - Follow the recording's own arc, with headings named for its content: what it set out to do, its main arguments with the figures given, and how it ended, including any closing call to action, in your own words.
 - Attribute claims to the speaker once it is clear who they are, and keep their opinions as theirs, never as facts.
 - There are no action items unless the author gave themselves a task.
+- When nothing of substance was said at all (a microphone test, a few stray words), write no headings and no bullets: one plain sentence saying so, such as "Looks like this was just a microphone test, nothing to summarize yet." Nothing else.
 
 Example of the layout (an unrelated meeting; copy the form, not the content):
 
-# Coach Booking
-- Booked: 52-seat coach with Hartley Travel, £640 return
-  - Cheaper quote (£590) rejected: no seat belts
-- Departure 8:15 from the main gate
-  - Back by 17:30
+# Halden: What They Need
+- Food distributor with 40 dock staff moving off paper schedules before peak season
+- Must sync with their existing yard system; no new hardware on site
+- Budget sign-off sits with their COO, but the pilot can start without it
 
-# Museum Visit
-- Workshop slot still unconfirmed
-  - Museum replies Thursday
-- Group limit: 30 per workshop
-  - Two sessions needed
-- Gift shop stop: dropped, not enough time
+# Traction and Metrics
+- Pilot usage: 3 of 5 docks booked in the app, up from 1 last month
+- Time per booking: ~4 min, down from 11 min on paper
+- Retention after onboarding:
+  - Week 1: 90% of schedulers active
+  - Week 4: 70%, mostly the two night shifts dropping off
 
-# Consent Forms
-- Paper forms only this year; the online form lost 9 replies last time
-- 14 of 58 still missing
-  - Reminder needed before Friday
+# Pricing Feedback
+- €42/dock/month landed well; the 10% annual prepay discount did not
+  - Their finance team prefers monthly billing until the pilot ends
+- Priya's take: hold the price, offer a longer pilot instead of a discount
 
 # Next Steps
-- Send consent forms to parents (Amara)
-  Due Friday.
-- Confirm workshop slots with the museum (Ewan)
-  Needs the final headcount first.
-- Find two more adult helpers`
+- Send the yard system integration spec (Owen)
+  Due Friday, so engineering can scope the sync before the next call.
+- Book onsite training for the night shifts (Priya)
+  Both night leads asked for it; aim for the week of the 14th.
+- Draft pilot extension terms
+  Replaces the discount; keeps €42/dock/month.`
 
 const CONTENT=`# What goes in
 
