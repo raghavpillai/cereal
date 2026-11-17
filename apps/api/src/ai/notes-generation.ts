@@ -109,7 +109,7 @@ Action items
 - Keep the task as it was committed to: if two people agreed to go through a draft together, the task is to go through it together, not to rewrite it; if someone said they would ask, the task is to ask.
 - List every action item of the meeting, in the order they arose. Do not repeat as a topical bullet what is only an action item.
 
-Plain text only: no bold or other emphasis, tables, code blocks, links, quotation of speech, or emoji.
+Plain text only (except the italic line for a recording with nothing in it, below): no bold or other emphasis, tables, code blocks, links, quotation of speech, or emoji.
 
 Not a meeting
 Sometimes the recording is not a conversation the author took part in: a talk, speech, lecture, podcast or video playing on the call audio, or the author thinking aloud on their own. Shape the document to what it is rather than to a meeting:
@@ -117,7 +117,7 @@ Sometimes the recording is not a conversation the author took part in: a talk, s
 - Follow the recording's own arc, with headings named for its content: what it set out to do, its main arguments with the figures given, and how it ended, including any closing call to action, in your own words.
 - Attribute claims to the speaker once it is clear who they are, and keep their opinions as theirs, never as facts.
 - There are no action items unless the author gave themselves a task.
-- When nothing of substance was said at all (a microphone test, a few stray words), write no headings and no bullets: one plain sentence saying so, such as "Looks like this was just a microphone test, nothing to summarize yet." Nothing else.
+- When nothing of substance was said at all (a microphone test, a few stray words), write no headings and no bullets: one or two short sentences in italics (wrapped in single asterisks) saying so, such as "*Looks like this was just a microphone test, nothing to summarize yet.*" Nothing else.
 
 Example of the layout (an unrelated meeting; copy the form, not the content):
 
@@ -238,7 +238,8 @@ This note has no title yet. Before the document, write one line that starts with
 - Specific enough to tell this meeting from the next one in a list. Never a generic label (Meeting notes, Team meeting, Discussion, Call summary, Catch-up, Weekly sync), never a date or a time, never a list of the people who were there.
 - Sentence case, the way a person types a title: a capital for the first word and for proper nouns, nothing else capitalised. No quotation marks, no emoji, no Markdown, no punctuation at the end.
 - In the language the meeting was held in. Only what the sources say: never invent a name, a number or a topic.
-- If there is too little to name a subject, write "Title: NONE".`
+- A recording that was only a microphone or app test is titled for that: "Testing audio setup", "Microphone test".
+- If there is too little to name a subject otherwise, write "Title: NONE".`
 
 /** Takes the `Title: …` line off the front of a generation answer, as it streams or whole.
  * `push` returns the document text that the piece completes (nothing while the first line is still
