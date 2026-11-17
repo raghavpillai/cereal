@@ -425,6 +425,13 @@ struct ServerNoteMarkdown: View {
                 // A Markdown rule (the one above the chat link at the foot of generated notes) is a hairline, as on the desktop and web.
                 case .paragraph(let value) where ["---", "***", "___"].contains(value.trimmingCharacters(in: .whitespaces)):
                     Rectangle().fill(Theme.textTertiary.opacity(0.35)).frame(height: 1).padding(.vertical, 10).accessibilityHidden(true)
+                // An indented plain line continues the item above it (a next step's deadline and detail): it
+                // starts where that item's text does, as on the desktop and web.
+                case .paragraph(let value) where value.first?.isWhitespace == true:
+                    let depth = min(4, max(0, value.prefix { $0.isWhitespace }.count / 2 - 1))
+                    Text(inline(value.trimmingCharacters(in: .whitespaces)))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.leading, CGFloat(depth * 14) + 17)
                 case .paragraph(let value): Text(inline(value)).frame(maxWidth: .infinity, alignment: .leading)
                 case .quote(let value):
                     HStack(alignment: .top, spacing: 12) {

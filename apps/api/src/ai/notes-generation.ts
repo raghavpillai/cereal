@@ -86,14 +86,14 @@ Sections
 - Sections use level-one Markdown headings and nothing deeper: each starts with a line "# Heading", with one blank line before every heading but the first.
 - A heading is a short noun phrase in Title Case (small words such as and, of, the, for, to stay lower case) that names the theme: "Warehouse Lease Renewal", "Budget and Staffing", "Checkout Flow Issues". Never a generic label (Discussion, Overview, Summary, Key Points, Updates, Miscellaneous) and never the meeting's title.
 - Group by theme, not by the minute: points about one subject sit together even when the meeting came back to it later. Sections follow the order in which the meeting first reached them (or the author's order, see below).
-- When the whole meeting was one review, comparison or walkthrough, the first section may set the scene in one or two bullets: what was looked at, and the overall verdict if one was stated.
+- The first section often sets the scene, when that helps a reader who was not there: why the meeting happened and the situation, requirements or constraints it started from (for a call with an outside party, what was needed and why; for a review, what was looked at and the overall verdict). Name it for its content like any other section, and name organisations in it only as the speakers, the author's notes or the calendar event's title name them (never from an email address).
 
 Bullets
 - Every line under a heading is a bullet starting with "- ".
 - There are two levels. A top-level bullet states one point so that it can be read on its own: the decision, the finding, the problem, the figure. Sub-bullets (two spaces, then "- ") hold what belongs to that point: the reason, the number behind it, the condition, the example, what is to be done about it. Never nest deeper.
-- Nest instead of listing flat. When a bullet would need "because", "so", "but" or a semicolon to fit everything in, the second half is a sub-bullet. A typical section has two to four top-level bullets, and about half of them carry one to three sub-bullets. A point with nothing more to say stands alone: never invent a sub-bullet to fill, and never repeat the parent in other words.
-- Bullets are telegraphic fragments, not sentences: no "The team discussed", no "It was agreed that", no full stop at the end, rarely more than 12 words. Lead with the subject and let a colon do the work of the verb: "Print budget: €18,000, €11,500 spent", "Search field: sits 2px low, needs realigning", "Onboarding email: open rate down to 31%".
-- Do not narrate who said what. State the content. Name a person only where it matters who it was: an owner, the holder of a position in a disagreement, a party's requirement or concern.
+- Nest where a point has detail of its own: the reason, the number behind it, the condition, the example, what is to be done about it goes in a sub-bullet. Many points stand alone; a typical section has two to five top-level bullets, and about a third of them carry one or two sub-bullets. Never invent a sub-bullet to fill, and never repeat the parent in other words.
+- Bullets are compact phrases, not sentences: no "The team discussed", no "It was agreed that", no full stop at the end. Usually 6 to 15 words, enough to be understood on its own. Lead with the subject and let a colon do the work of the verb: "Print budget: €18,000, €11,500 spent", "Search field: sits 2px low, needs realigning". Two closely linked facts may share a bullet with a semicolon: "Best terms are 5-year; realistic sweet spot is 12 months".
+- Do not narrate who said what. State the content. Name a person where it matters who it was: an owner, the holder of a position in a disagreement, a party's requirement, and the person behind a recommendation, a warning or a concern ("Abby recommends bringing your own PDUs", "Abby flagged the cost of ordering a new rack").
 - A decision is the first bullet of its section, stated as the outcome: "Moving payroll from Ardent to Brightside from 1 July", "Approved: second delivery van (€31,000 over 4 years)". Something left open is stated as open: "Logo colour: undecided until printed proofs arrive Tuesday".
 - Write numbers as digits with their unit or symbol: "€42/seat", "27%", "35 min", "$2.6M", "~6 hours/week", "71% vs. 64%". Write dates in digits in the order the speakers used ("May 6", "14 October", "the 22nd", "Monday, June 3"). Never add a month, year or weekday that nobody said. Never add a currency or unit that nobody said: "a budget of around forty thousand a year" is "~40,000/year", not "$40,000/year".
 
@@ -101,9 +101,9 @@ Action items
 - An action item is a task a person took on: they said they would do it, or were asked and did not decline. Only these go in one final section, called "Next Steps" unless the author's notes name it differently.
 - If nobody took on a task, there is no such section. Never close the document with a list of what should happen, and never restate the document's points as tasks.
 - Something that needs doing but that nobody took on (a fix that is wanted, a thing worth looking into) stays where it belongs, as a sub-bullet under its point, written as the action: "  - Fix: dismiss on outside click", "  - Worth investigating how the shimmer is done". The same holds when the recording is one person thinking aloud: their intentions stay with the points they belong to.
-- One bullet per action item: the owner's first name, a colon, then the task as a short phrase that can be understood on its own, with the deadline at the end in the speakers' own terms: "- Noemi: send the revised floor plan to the landlord by Friday". Two people: "- Farid and Elena: go through the draft together before the 22nd".
+- One bullet per action item: the task as a short phrase starting with its verb, understandable on its own, then the owner's first name in parentheses: "- Send the revised floor plan to the landlord (Noemi)". Two people: "- Go through the draft together (Farid and Elena)".
+- The deadline, in the speakers' own terms, and any detail the owner needs follow on the next line, indented by two spaces and without a bullet, as one or two short plain sentences: "  Due Friday; the landlord needs it as a PDF." Leave the line out when there is nothing to add.
 - If the sources do not establish the owner, write the task alone: "- Find two more adult helpers". Never a placeholder such as "(no owner)", "Unassigned", "TBD", "Someone" or "Team".
-- One detail the owner needs to do the task may follow as a sub-bullet: "  - Landlord needs it as a PDF". Most action items need none.
 - A promise made to someone outside the group on the group's behalf ("we'll send you the samples next week") is an action item for the side that made it.
 - Leave out a task that was finished or overtaken before the meeting ended (someone said they would read a draft during the break, and later reported on it).
 - Keep the task as it was committed to: if two people agreed to go through a draft together, the task is to go through it together, not to rewrite it; if someone said they would ask, the task is to ask.
@@ -139,9 +139,10 @@ Example of the layout (an unrelated meeting; copy the form, not the content):
   - Reminder needed before Friday
 
 # Next Steps
-- Amara: send consent forms to parents by Friday
-- Ewan: confirm workshop slots with the museum
-  - Needs final headcount first
+- Send consent forms to parents (Amara)
+  Due Friday.
+- Confirm workshop slots with the museum (Ewan)
+  Needs the final headcount first.
 - Find two more adult helpers`
 
 const CONTENT=`# What goes in
@@ -159,6 +160,7 @@ Leave out greetings, small talk, sound checks, jokes, repetition, and the path o
 - Use only what the sources support. No outside knowledge and no filling of gaps. The one exception is spelling: see the next point about names.
 - The end state wins. When something is decided and later changed, corrected, reassigned or rescheduled, report where it ended. Mention the change in a sub-bullet only when the reader needs to know that it moved and why ("Replaces the earlier choice of the Hamburg venue: its hall is booked that week"). A superseded decision, date, figure or owner must not appear as current anywhere, including the final section.
 - Keep the status exact. Proposed, estimated, conditional, not yet approved, undecided and approved are different facts. "I'd need sign-off for that" means it was not agreed.
+- Keep a hedge where the source hedged, in a few words: a guess stays a guess ("Competitor: likely QTS"), and what nobody could explain is marked as unclear ("Purpose of the timestamp: unclear").
 - Numbers: when a speaker corrects themselves or is corrected ("seventeen, sorry, seventy, seven zero"; "not four hundred, forty"), the corrected value is the only one you write.
 - The transcript is speech-to-text. It mishears names and words and has fillers and false starts; read through them. When a transcribed name is plainly the same person or product as a name in the calendar event or the author's notes (it sounds alike and fits the role), use that spelling. A transcribed name that is plainly a widely known public figure, company, product or place, misheard (it sounds alike and the role, office or context in the transcript fits only them), is written in its correct, well-known spelling; add nothing about them beyond what the recording says. Otherwise keep the name as transcribed. Never invent a surname.
 - Email addresses in the calendar event show which organisation someone belongs to. Never print them, and never make the name of a person or company out of an address.
@@ -183,7 +185,7 @@ ${theirs}
 - ${analysis.notes.actionHeading?`Their heading "${analysis.notes.actionHeading}" is the section for action items: keep it where they put it and under their name for it, and make it complete, including tasks they did not write down.`:`They have no heading for tasks, so add "Next Steps" as the last section for the action items, if there are any.`}
 - Every decision and action item of the meeting appears, whether or not they noted it.`
   const unnoted=policy==="strict"?"Leave out topics the author did not note. The action items are the exception: the final section lists all of them."
-    :policy==="keep"?"After the author's topics, cover what else mattered in the meeting briefly, in at most two further sections within the limit: decisions first, then the key figures."
+    :policy==="keep"?"After the author's topics, cover what else mattered in the meeting briefly, in at most two further sections within the limit. Every decision of the meeting, including anything parked or deferred, and the key figures behind it still appear, under the closest of the author's topics or in those further sections; shorten bullets rather than leave one out."
     :"Do not open sections for topics the author did not note; they chose what this document is about. Two things are exempt, because losing them costs more than an extra line: every decision of the meeting appears, including anything parked or deferred (under the closest of the author's topics, or together in one further short section named for what it holds, such as \"Open Question\" or \"Parking Permits\"), and the final section lists every action item."
   return `# The author's original notes
 

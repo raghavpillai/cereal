@@ -152,11 +152,11 @@ test("the title line is read off the front of an answer however it is cut, and o
   expect(splitGeneratedTitle("Tidy notes\n- a")).toEqual({ title: null, document: "Tidy notes\n- a" })
 })
 
-test("the format the model is asked for: nested bullets, owner-first action items, no placeholders, no padding section", () => {
+test("the format the model is asked for: nested bullets, action items as task then owner with the deadline under it, no placeholders, no padding section", () => {
   const prompt = generationSystemPrompt({ id: crypto.randomUUID(), title: "", body: "", enhanced: "", date: "2026-11-16", duration: "3:00", createdAt: "", updatedAt: "", recordingState: "stopped", generationState: "idle", transcriptRevision: 1, generatedRevision: null, transcriptSegments: [] } as never)
   expect(prompt).toContain('Sub-bullets (two spaces, then "- ")')
   expect(prompt).toContain("If nobody took on a task, there is no such section")
   expect(prompt).toContain('Never a placeholder such as "(no owner)"')
-  expect(prompt).toContain("- Amara: send consent forms to parents by Friday")
+  expect(prompt).toContain("- Send consent forms to parents (Amara)\n  Due Friday.")
   expect(prompt).not.toContain("**")
 })

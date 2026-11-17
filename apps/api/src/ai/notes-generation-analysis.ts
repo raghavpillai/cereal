@@ -49,11 +49,14 @@ export function voiceTags(segments:ReadonlyArray<Segment>):string[] {
  * to 8. The count includes the final actions section. */
 export const maxSectionsFor=(transcriptCharacters:number)=>transcriptCharacters<8_000?4:transcriptCharacters<50_000?5:transcriptCharacters<80_000?Math.floor(transcriptCharacters/10_000)+1:8
 /** Target length in words. Notes should grow much more slowly than the
- * meeting: about 125 words for 250 spoken and about 200 for 500. The target is
- * a square-root curve through those two points, extended to long meetings.
+ * meeting: about 150 words for 250 spoken and about 270 for 500. The target is
+ * a square-root curve through those points, extended to long meetings. It is a
+ * fifth above the first version's, for bullets as full as the reference's
+ * (usually 6 to 15 words, against 12 at most before), which squeezed figures
+ * out of notes that also had to keep the author's lines.
  * Typed notes add room, because none of the author's lines is dropped. */
 export function targetWords(transcriptWords:number,typedWords:number):[number,number] {
-  const upper=Math.min(10*Math.sqrt(transcriptWords),0.5*transcriptWords+20,1000)+0.6*typedWords
+  const upper=Math.min(12*Math.sqrt(transcriptWords),0.6*transcriptWords+24,1200)+0.6*typedWords
   const round=(value:number)=>value<100?Math.max(10,Math.round(value/5)*5):Math.round(value/10)*10
   return [round(upper*0.6),round(upper)]
 }

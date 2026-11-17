@@ -59,7 +59,7 @@ test("document conventions: the reference layout passes, a wordy sentence layout
   const wordy="Here are the notes.\n\n# flour discussion\n- The team discussed the flour supplier at length and agreed, after hearing from everyone present, that the co-operative would switch from Graystone Mills to Windrush Organics at the start of January.\n- The seller will send the contract.\n\n# Next steps\n- Yusuf will sign the contract by 20 November.\n\n# Other\n- More.\n\n# Four\n- x\n\n# Five\n- y"
   expect(generationStyle(wordy,context).filter(check=>!check.pass).map(check=>check.id)).toEqual(expect.arrayContaining(["style:heading-count","style:title-case-headings","style:no-preamble-or-signoff","style:fragment-bullets","style:actions-last","style:action-format"]))
   expect([maxHeadingsFor(1500),maxHeadingsFor(8000),maxHeadingsFor(30_000),maxHeadingsFor(55_000),maxHeadingsFor(69_999),maxHeadingsFor(200_000)]).toEqual([4,5,5,6,7,8])
-  expect(wordBudget(250,0)).toBeGreaterThan(125);expect(wordBudget(14_000,0)).toBe(1200);expect(wordBudget(100,0)).toBeLessThan(100)
+  expect(wordBudget(250,0)).toBeGreaterThan(150);expect(wordBudget(14_000,0)).toBe(1440);expect(wordBudget(100,0)).toBeLessThan(110)
   expect(isTitleCase("Budget and Vendors")).toBe(true);expect(isTitleCase("Go-Live Decision and Next Steps")).toBe(true);expect(isTitleCase("Open questions")).toBe(false)
   expect(parseNotes(REFERENCE_NOTES).find(line=>line.kind==="continuation")!.ancestors).toEqual(["Sign Windrush Organics contract (Yusuf)"])
 })
@@ -123,8 +123,8 @@ test("context: part-scoped voice tags, no segment or calendar identifiers, typed
 })
 test("analysis: size limits follow transcript length; typed-notes mode and channel facts are worked out in code",()=>{
   expect([maxSectionsFor(3_000),maxSectionsFor(8_000),maxSectionsFor(45_000),maxSectionsFor(60_000),maxSectionsFor(90_000)]).toEqual([4,5,5,7,8])
-  expect(targetWords(250,0)[1]).toBeGreaterThanOrEqual(125);expect(targetWords(250,0)[1]).toBeLessThanOrEqual(160)
-  expect(targetWords(14_000,0)).toEqual([600,1000]);expect(targetWords(100,0)[1]).toBeLessThanOrEqual(70)
+  expect(targetWords(250,0)[1]).toBeGreaterThanOrEqual(150);expect(targetWords(250,0)[1]).toBeLessThanOrEqual(195)
+  expect(targetWords(14_000,0)).toEqual([720,1200]);expect(targetWords(100,0)[1]).toBeLessThanOrEqual(85)
   const owners=analyseNote(noteFor("hard-owners","sparse"))
   expect(owners.notes.mode).toBe("fragments");expect(owners.people.owner).toEqual({name:"Halima Yusufzai",first:"Halima"})
   expect(owners.people.channels).toEqual({kind:"two-channel",oneMicVoice:true});expect(owners.size.maxSections).toBe(4)

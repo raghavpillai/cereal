@@ -24,7 +24,7 @@ export const maxHeadingsFor=(transcriptCharacters:number)=>transcriptCharacters<
  * that shrinks as the meeting grows, plus room for every word the author typed.
  * A ceiling, not a target: notes of about 125 words for a 250-word meeting, or
  * about 200 for a 500-word one, fit with room to spare. */
-export const wordBudget=(transcriptWords:number,typedWords:number)=>Math.round(Math.min(140+0.18*transcriptWords,0.6*transcriptWords+30,1200))+typedWords
+export const wordBudget=(transcriptWords:number,typedWords:number)=>Math.round(Math.min(170+0.22*transcriptWords,0.7*transcriptWords+36,1440))+typedWords
 
 export interface Line {raw:string;text:string;kind:"heading"|"bullet"|"continuation"|"prose"|"blank";depth:number;
   /** The heading this line sits under, and the bullets it is nested in. */
@@ -101,10 +101,11 @@ export function generationStyle(output:string,context:StyleContext):Check[] {
     check("style:length-budget",metrics.words<=metrics.budget,`${metrics.words} words, budget ${metrics.budget} for a ${context.transcriptWords}-word meeting`),
     check("style:no-preamble-or-signoff",!preamble&&!signoff&&first?.kind!=="prose",`starts with "${first?.text.slice(0,50)}", ends with "${last?.text.slice(0,50)}"`),
     check("style:one-sub-level",metrics.maxDepth<=1,`nesting depth ${metrics.maxDepth}`),
-    check("style:fragment-bullets",metrics.medianBulletWords<=12&&metrics.longestBulletWords<=30&&metrics.sentenceBullets<=Math.max(1,metrics.bullets*0.1),`median bullet ${metrics.medianBulletWords} words, longest ${metrics.longestBulletWords}, ${metrics.sentenceBullets} of ${metrics.bullets} end with a full stop`),
+    check("style:fragment-bullets",metrics.medianBulletWords<=14&&metrics.longestBulletWords<=30&&metrics.sentenceBullets<=Math.max(1,metrics.bullets*0.1),`median bullet ${metrics.medianBulletWords} words, longest ${metrics.longestBulletWords}, ${metrics.sentenceBullets} of ${metrics.bullets} end with a full stop`),
     check("style:actions-last",typedActionHeading||actionIndex<0||actionIndex===headings.length-1,`"${headings[actionIndex]}" is section ${actionIndex+1} of ${headings.length}`),
-    // An action item is "Owner: task" in plain text (the earlier form, a bold task with the owner in parentheses, is
-    // still accepted for stored outputs). Never a placeholder where an owner would go, and never a sentence.
+    // An action item is "Task (Owner)" in plain text, its deadline or detail on an indented plain line under it
+    // ("Owner: task" and a bold task are still accepted for stored outputs). Never a placeholder where an owner
+    // would go, and never a sentence.
     check("style:action-format",metrics.actionBullets===0||(metrics.actionBold===metrics.actionBullets||metrics.actionBold===0)&&!actionPlaceholder&&!actionSentence,`${metrics.actionBold} of ${metrics.actionBullets} action items are bold${actionPlaceholder?"; a placeholder stands in for an owner":""}${actionSentence?"; an action item is a sentence":""}`),
     {id:"style:metrics",group:"format",soft:true,pass:true,detail:JSON.stringify(metrics)},
   ]
