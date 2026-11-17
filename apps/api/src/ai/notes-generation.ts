@@ -84,7 +84,7 @@ The document starts with the first heading and ends with the last bullet. No int
 
 Sections
 - Sections use level-one Markdown headings and nothing deeper: each starts with a line "# Heading", with one blank line before every heading but the first.
-- A heading is a short noun phrase in Title Case (small words such as and, of, the, for, to stay lower case) that names the theme: "Warehouse Lease Renewal", "Budget and Staffing", "Checkout Flow Issues". Never a generic label (Discussion, Overview, Summary, Key Points, Updates, Miscellaneous) and never the meeting's title. The one exception is "Context", for the opening section described under "Not a meeting" below.
+- A heading is a short noun phrase in Title Case (small words such as and, of, the, for, to stay lower case) that names the theme: "Warehouse Lease Renewal", "Budget and Staffing", "Checkout Flow Issues". Never a generic label (Discussion, Overview, Summary, Key Points, Updates, Miscellaneous) and never the meeting's title.
 - Group by theme, not by the minute: points about one subject sit together even when the meeting came back to it later. Sections follow the order in which the meeting first reached them (or the author's order, see below).
 - When the whole meeting was one review, comparison or walkthrough, the first section may set the scene in one or two bullets: what was looked at, and the overall verdict if one was stated.
 
@@ -109,13 +109,13 @@ Action items
 - Keep the task as it was committed to: if two people agreed to go through a draft together, the task is to go through it together, not to rewrite it; if someone said they would ask, the task is to ask.
 - List every action item of the meeting, in the order they arose. Do not repeat as a topical bullet what is only an action item.
 
-Plain text only: no bold or other emphasis, tables, code blocks, links, quotation of speech, or emoji. (The single exception is the closing line of a talk, under "Not a meeting".)
+Plain text only: no bold or other emphasis, tables, code blocks, links, quotation of speech, or emoji.
 
 Not a meeting
-Sometimes the recording is not a conversation the author took part in: a talk, speech, lecture, podcast or video playing on the call audio, or the author thinking aloud on their own.
-- Open with a section "# Context" of one or two bullets saying what the recording is and who is speaking, when the transcript makes that evident (they are introduced by name, name themselves, or say who they are): "Campaign speech by Mara Ellison in Leeds, not a meeting", "Solo voice memo: planning the Q3 offsite". If the author's own microphone only caught a sound check or a few stray words while the rest is the talk, say so in a bullet ("Own mic: only brief test inputs").
-- Then follow the talk's own arc rather than grouping as for a meeting: what it set out to do (who was introduced or endorsed, the central theme), its main arguments, each with the figures given, and how it closed. A closing call to action or memorable last line may be quoted once, short and exact: "Sign-off line: \"Show up on Tuesday.\"".
-- Attribute claims to the speaker once it is clear who they are ("Ellison argued tariffs raise prices"), and keep the speaker's opinions as theirs, never as facts.
+Sometimes the recording is not a conversation the author took part in: a talk, speech, lecture, podcast or video playing on the call audio, or the author thinking aloud on their own. Shape the document to what it is rather than to a meeting:
+- Make clear early what the recording is and who is speaking, when the transcript makes that evident (they are introduced by name, name themselves, or say who they are), in whatever section fits best. Say so when the author's own microphone only caught a sound check or stray words.
+- Follow the recording's own arc, with headings named for its content: what it set out to do, its main arguments with the figures given, and how it ended, including any closing call to action, in your own words.
+- Attribute claims to the speaker once it is clear who they are, and keep their opinions as theirs, never as facts.
 - There are no action items unless the author gave themselves a task.
 
 Example of the layout (an unrelated meeting; copy the form, not the content):
