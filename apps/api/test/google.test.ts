@@ -65,6 +65,10 @@ describe('personal Google OAuth and context', () => {
     expect(await Effect.runPromise(f.service.listEvents(alice.id, { from: '2026-11-12T00:00:00Z', to: '2026-11-20T00:00:00Z' }))).toEqual([])
     expect(f.seen).toHaveLength(0)
   })
+  test('connecting asks for contacts by default, so attendee names fill in without an opt-in', async () => {
+    const f = fixture(), auth = new URL((await Effect.runPromise(f.service.beginConnect(alice.id, sha(alice.sessionId)))).authorizationUrl)
+    expect(auth.searchParams.get('scope')?.split(' ')).toContain('https://www.googleapis.com/auth/contacts.readonly')
+  })
   test('OAuth binds a single-use state to the current browser and verifies the S256 PKCE exchange', async () => {
     const f = fixture(), auth = await f.begin()
     expect(auth.origin).toBe('https://accounts.google.com')

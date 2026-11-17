@@ -15,7 +15,7 @@ export function syncedNotice(status: GoogleStatusDTO, id: string): string | null
 export function GoogleCalendars({ client, expired }: { client: AdminClient; expired: () => void }) {
   const load = useCallback((signal: AbortSignal) => client.getGoogleStatus(signal), [client])
   const resource = useResource(load, expired), tasks = useAdminTask(expired)
-  const [contacts, setContacts] = useState(false), [notice, setNotice] = useState<string | null>(null), [navigationError, setNavigationError] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null), [navigationError, setNavigationError] = useState(false)
   useEffect(() => {
     const url = new URL(window.location.href), result = url.searchParams.get('google')
     if (result === 'connected') setNotice('Google account connected. Choose which calendars appear in your upcoming meetings.')
@@ -24,7 +24,7 @@ export function GoogleCalendars({ client, expired }: { client: AdminClient; expi
   }, [])
   async function connect() {
     setNavigationError(false)
-    const result = await tasks.run('google:connect', signal => client.beginGoogleConnect(contacts, signal))
+    const result = await tasks.run('google:connect', signal => client.beginGoogleConnect(signal))
     if (!result.ok) return
     const url = googleAuthorizationURL(result.value.authorizationUrl, window.location.origin)
     if (!url) { setNavigationError(true); return }
@@ -37,7 +37,7 @@ export function GoogleCalendars({ client, expired }: { client: AdminClient; expi
       {resource.busy && !resource.data && <Loading label="Loading your calendars…" />}
       {resource.data?.needsHttps && <Empty title="Needs an HTTPS address">Google only connects to HTTPS servers, and this one uses plain HTTP.</Empty>}
       {resource.data?.configured === false && !resource.data.needsHttps && <Empty title="Not set up yet">An administrator needs to add a Google client in Admin first.</Empty>}
-      {resource.data?.configured && !resource.data.needsHttps && <><label className="admin-checkbox google-contact-option"><input type="checkbox" checked={contacts} disabled={tasks.pending.has('google:connect')} onChange={event => setContacts(event.target.checked)} />Fill in attendee names from my contacts</label><p className="admin-hint">Cereal only reads your calendar and contacts. It never changes them.</p>{resource.data.connections.length === 0 && <Empty title="No calendars yet">Connect a Google account, then pick which of its calendars to show.</Empty>}</>}
+      {resource.data?.configured && !resource.data.needsHttps && <><p className="admin-hint google-contact-option">Attendee names are filled in from your Google contacts. Cereal only reads your calendar and contacts. It never changes them.</p>{resource.data.connections.length === 0 && <Empty title="No calendars yet">Connect a Google account, then pick which of its calendars to show.</Empty>}</>}
     </section>
     {resource.data?.connections.map(connection => <Connection key={connection.id} connection={connection} configured={resource.data!.configured} client={client} expired={expired} refresh={resource.reload} reconnect={connect} />)}
   </>

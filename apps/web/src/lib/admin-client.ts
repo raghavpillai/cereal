@@ -55,7 +55,8 @@ export function createAdminClient(baseUrl: string, transport: typeof fetch = glo
     acceptOrganizationInvitation: (id: string, signal?: AbortSignal) => execute(c => c.owner.acceptOrganizationInvitation({ params: { id } }), signal),
     rejectOrganizationInvitation: (id: string, signal?: AbortSignal) => execute(c => c.owner.rejectOrganizationInvitation({ params: { id } }), signal),
     getGoogleStatus: (signal?: AbortSignal) => execute(c => c.owner.getGoogleStatus(), signal),
-    beginGoogleConnect: (contacts: boolean, signal?: AbortSignal) => execute(c => c.owner.beginGoogleConnect({ payload: { contacts } }), signal),
+    // Contacts are always asked for: they fill in attendee names. Google still lets the person untick them.
+    beginGoogleConnect: (signal?: AbortSignal) => execute(c => c.owner.beginGoogleConnect({ payload: { contacts: true } }), signal),
     listGoogleCalendars: (id: string, signal?: AbortSignal) => execute(c => c.owner.listGoogleCalendars({ params: { id } }), signal),
     updateGoogleCalendar: (id: string, selected: boolean, signal?: AbortSignal) => execute(c => c.owner.updateGoogleCalendar({ params: { id }, payload: { selected } }), signal),
     syncGoogleConnection: (id: string, signal?: AbortSignal) => execute(c => c.owner.syncGoogleConnection({ params: { id } }), signal),

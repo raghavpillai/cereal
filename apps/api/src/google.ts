@@ -195,7 +195,7 @@ export function makeGoogleService(store: GoogleStore, box: SecretBox, options: {
   }
   const service = {
     getStatus: (userId: string) => boundary(() => status(userId)),
-    beginConnect: (userId: string, sessionHash: string, contacts = false) => boundary(async () => {
+    beginConnect: (userId: string, sessionHash: string, contacts = true) => boundary(async () => {
       if (needsHttps) throw new Failure({ error: 'invalid_request', message: 'Google Calendar needs an HTTPS address. This server is reached over plain HTTP.' })
       const client = await requireConfigured(); if (!/^[a-f\d]{64}$/.test(sessionHash)) throw new Failure({ error: 'forbidden', message: 'A signed-in browser session is required' })
       const state = randomBytes(32).toString('base64url'), verifier = randomBytes(48).toString('base64url')
