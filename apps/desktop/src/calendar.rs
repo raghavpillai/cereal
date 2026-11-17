@@ -246,6 +246,28 @@ fn events_on_day<'a>(
         .collect()
 }
 
+/// Whether `day` had any events at all, including ones already over.
+fn had_events_today(
+    sources: &[CalendarDTO],
+    events: &[CalendarEventDTO],
+    day: NaiveDate,
+    filter: &EventFilter,
+) -> bool {
+    day.and_hms_opt(0, 0, 0)
+        .and_then(|start| start.and_local_timezone(Local).earliest())
+        .is_some_and(|start| !events_on_day(sources, events, day, start, filter).is_empty())
+}
+
+/// Today's line when nothing is left on it, in the reference's words: "No
+/// more" once today's events are over, "No events" when there were none.
+fn empty_today(had_events: bool) -> &'static str {
+    if had_events {
+        "No more events today"
+    } else {
+        "No events today"
+    }
+}
+
 pub(crate) fn event_time(event: &CalendarEventDTO) -> String {
     if event.all_day {
         return "All day".into();
@@ -304,10 +326,11 @@ fn event_time_label(event: &CalendarEventDTO, t: Theme) -> Div {
         .text_color(t.muted)
         .children(event_time_pieces(event).into_iter().map(|(text, meridiem)| {
             if meridiem {
+                // A small capital run as the reference sets it: 8.5 pt at
+                // the regular weight.
                 div()
                     .ml(px(3.))
-                    .text_size(px(7.5))
-                    .font_weight(FontWeight::MEDIUM)
+                    .text_size(px(8.5))
                     .child(text)
             } else {
                 div().child(text)
@@ -829,10 +852,10 @@ impl Cereal {
                     if events.is_empty() && delta != 0 {
                         continue;
                     }
-                    // Today, then the next three days that have events, as
-                    // the reference shows.
+                    // Today, then the next two days that have events: three
+                    // days in all, as the reference shows.
                     if delta != 0 {
-                        if ahead == 3 {
+                        if ahead == 2 {
                             break;
                         }
                         ahead += 1;
@@ -868,7 +891,12 @@ impl Cereal {
                                                 .line_height(px(18.))
                                                 .text_color(t.muted)
                                                 .child(if self.calendar_page == 0 {
-                                                    "No more events today"
+                                                    empty_today(had_events_today(
+                                                        &self.calendars.sources,
+                                                        &self.calendars.events,
+                                                        date,
+                                                        &filter,
+                                                    ))
                                                 } else {
                                                     "No events on this day"
                                                 }),
@@ -1225,6 +1253,20 @@ mod tests {
         }
         assert_eq!(event_time(&event), "All day");
         assert_eq!(super::event_time_pieces(&event), vec![("All day".to_owned(), false)]);
+    }
+
+    #[test]
+    fn an_empty_today_says_whether_it_had_events() {
+        assert_eq!(super::empty_today(true), "No more events today");
+        assert_eq!(super::empty_today(false), "No events today");
+        let day = NaiveDate::from_ymd_opt(2026, 11, 27).unwrap();
+        let sources = [source("a", true)];
+        // Measured from the start of the local day, so an event early in
+        // the day counts wherever the tests run.
+        let local = day.and_hms_opt(9, 0, 0).unwrap().and_local_timezone(Local).unwrap();
+        let mine = event("mine", "a", false, &local.to_rfc3339(), &(local + Duration::minutes(30)).to_rfc3339());
+        assert!(super::had_events_today(&sources, std::slice::from_ref(&mine), day, &EventFilter::default()));
+        assert!(!super::had_events_today(&sources, &[], day, &EventFilter::default()));
     }
 
     #[test]

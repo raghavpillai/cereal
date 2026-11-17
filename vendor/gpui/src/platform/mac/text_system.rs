@@ -403,6 +403,11 @@ impl MacTextSystemState {
             cx.set_gray_fill_color(0.0, 1.0);
             cx.set_allows_antialiasing(true);
             cx.set_should_antialias(true);
+            // No font smoothing (CoreText's stem darkening): glyphs keep the
+            // weight they were drawn at, as browsers draw them with
+            // `-webkit-font-smoothing: antialiased`.
+            cx.set_allows_font_smoothing(false);
+            cx.set_should_smooth_fonts(false);
             cx.set_allows_font_subpixel_positioning(true);
             cx.set_should_subpixel_position_fonts(true);
             cx.set_allows_font_subpixel_quantization(false);

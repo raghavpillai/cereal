@@ -156,6 +156,8 @@ fn main() {
                         view.connect_server(cx);
                         if std::env::args().any(|a| a == "--dark") {
                             view.workspace.settings.force_dark(true);
+                        } else if std::env::args().any(|a| a == "--light") {
+                            view.workspace.settings.force_dark(false);
                         }
                         let mode = crate::audio::review_view();
                         match mode.as_str() {

@@ -754,10 +754,11 @@ impl Cereal {
             .border_1()
             .border_color(t.border)
             .overflow_hidden();
-        for (i, delta) in [0, 4, 5, 6, 11].iter().enumerate() {
+        // Today and the next two days with events, as the linked card shows.
+        for (i, delta) in [0, 4, 5].iter().enumerate() {
             let day = today + Duration::days(*delta);
             let events = [
-                ("No more events today", ""),
+                ("No events today", ""),
                 ("Product & design sync", "10:30 – 11:00 AM"),
                 ("Weekly team standup", "9:00 – 9:30 AM"),
                 ("Customer discovery", "2:00 – 2:45 PM"),
@@ -765,7 +766,7 @@ impl Cereal {
             ];
             let (mut name, time) = events[i];
             if i == 0 && self.calendar_page != 0 {
-                name = "No events scheduled";
+                name = "No events on this day";
             }
             let row_id = i as u64;
             let event_hover = crate::motion::reveal_key(("calendar-event", row_id));

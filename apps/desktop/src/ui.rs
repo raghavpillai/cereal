@@ -866,9 +866,8 @@ pub fn time_label(time: &str, t: Theme) -> Div {
         .when_some(meridiem, |label, meridiem| {
             label.child(
                 div()
-                    .text_size(px(7.5))
+                    .text_size(px(8.5))
                     .line_height(px(16.))
-                    .font_weight(FontWeight::MEDIUM)
                     .child(meridiem.to_uppercase()),
             )
         })
