@@ -65,6 +65,12 @@ pub struct Cereal {
     pub screen: Screen,
     pub current_note: Option<u64>,
     pub sidebar_open: bool,
+    /// In a narrow window the sidebar is not beside the page: it slides out
+    /// over it, on a dimmed page, while this is set (`sidebar_narrow`).
+    pub sidebar_overlay: bool,
+    /// Whether the window is too narrow for the sidebar beside the page
+    /// (`desktop_preferences::SIDEBAR_OVERLAY_BELOW`), as of the last frame.
+    pub sidebar_narrow: bool,
     pub search_open: bool,
     pub search_results_query: String,
     pub search: Entity<TextInput>,
@@ -474,6 +480,8 @@ impl Cereal {
             },
             current_note: None,
             sidebar_open: true,
+            sidebar_overlay: false,
+            sidebar_narrow: false,
             search_open: false,
             search_results_query: String::new(),
             search,
@@ -601,6 +609,8 @@ impl Cereal {
         Theme::new(self.workspace.settings.dark_mode)
     }
     pub fn navigate(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        // A row picked in the sidebar over a narrow window: it slides away.
+        self.sidebar_overlay = false;
         // A link's page is shown to anyone: it says where the note is and
         // reads nothing without a session on that server.
         let screen = if crate::server::enabled()
@@ -705,6 +715,7 @@ impl Cereal {
     }
 
     pub fn open_note(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.sidebar_overlay = false;
         self.summary.dismiss();
         let changed = self.current_note != Some(id);
         if self.current_note != Some(id) {
@@ -991,6 +1002,11 @@ impl Cereal {
             self.focus.focus(window);
             return;
         }
+        if self.sidebar_overlay && self.menu.is_none() && !self.search_open {
+            self.sidebar_overlay = false;
+            cx.notify();
+            return;
+        }
         // The composer's popovers close and leave the field its keyboard,
         // as a press outside them does: the next Escape folds the bar.
         if self.chat_model_picker_open {
@@ -1138,10 +1154,18 @@ impl Render for Cereal {
             self.sidebar_grab = None;
             self.sidebar_edge_hovered = false;
         }
-        self.sidebar_span = crate::desktop_preferences::sidebar_width_in(
-            self.sidebar_width,
-            f32::from(window.viewport_size().width),
-        );
+        let viewport_width = f32::from(window.viewport_size().width);
+        self.sidebar_narrow = viewport_width < crate::desktop_preferences::SIDEBAR_OVERLAY_BELOW;
+        if !self.sidebar_narrow {
+            self.sidebar_overlay = false;
+        }
+        // Over a narrow window the sidebar has its chosen width (it covers
+        // the page rather than sharing the window with it).
+        self.sidebar_span = if self.sidebar_narrow {
+            crate::desktop_preferences::clamp_sidebar_width(self.sidebar_width)
+        } else {
+            crate::desktop_preferences::sidebar_width_in(self.sidebar_width, viewport_width)
+        };
         let t = self.theme();
         let login = matches!(
             self.screen,
@@ -1178,10 +1202,21 @@ impl Render for Cereal {
             ("sidebar", 0),
             // A link's page is a note page: it has the window to itself.
             self.sidebar_open
+                && !self.sidebar_narrow
                 && !login
                 && self.screen != Screen::Link
                 && (self.current_note.is_none() || self.chat_maximized),
             SETTLE,
+        );
+        // The sidebar over a narrow window, on a dimmed page.
+        let overlay = self.stage.presence(
+            ("sidebar-overlay", 0),
+            self.sidebar_overlay
+                && self.sidebar_narrow
+                && !login
+                && self.screen != Screen::Link
+                && (self.current_note.is_none() || self.chat_maximized),
+            crate::motion::PANEL,
         );
         self.sidebar_level = if sidebar.visible {
             sidebar.value.clamp(0., 1.)
@@ -1267,7 +1302,7 @@ impl Render for Cereal {
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
-                this.sidebar_open = !this.sidebar_open;
+                this.toggle_sidebar();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Save, _, cx| {
@@ -1367,6 +1402,7 @@ impl Render for Cereal {
             // The sidebar's edge: the strip that resizes it, over both the
             // sidebar and the page, under every popover.
             .children(self.render_sidebar_edge(sidebar, cx))
+            .when(overlay.visible, |s| s.child(self.render_sidebar_overlay(overlay, cx)))
             .when(self.search_pose.visible, |s| {
                 s.child(self.render_search(cx))
             })

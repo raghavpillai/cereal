@@ -311,6 +311,9 @@ pub const SIDEBAR_MAX: f32 = 320.;
 /// (760 pt) less the default sidebar. A wide sidebar gives way to it in a
 /// narrow window, so the page is never crushed.
 pub const SIDEBAR_PAGE_MIN: f32 = 568.;
+/// Below this window width the sidebar is not beside the page: the sidebar
+/// button slides it out over the page instead, as in the reference.
+pub const SIDEBAR_OVERLAY_BELOW: f32 = 900.;
 
 /// A width the sidebar may be given: within its limits, and the default for
 /// anything that is not a number.

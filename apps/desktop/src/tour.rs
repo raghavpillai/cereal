@@ -1407,6 +1407,15 @@ fn thinking_steps() -> Vec<Step> {
             view.clear_chat(cx);
             view.ask.update(cx, |input, cx| input.set_content("What", cx));
         }),
+        // A narrow window: no sidebar beside the page; the sidebar button
+        // slides it over the dimmed page. `CEREAL_TOUR=p-narrow` with
+        // `CEREAL_TOUR_SIZE=800x900`.
+        step("p-narrow-1-home", 900, |view, cx| {
+            view.close_chat_surface(cx);
+            view.navigate(Screen::Home, cx);
+        }),
+        step("p-narrow-2-overlay", 900, |view, _| view.toggle_sidebar()),
+        input("p-narrow-3-pressed-page", 900, |window, cx| click(window, cx, 700., 500.)),
         step("p-think-end", 300, |view, cx| {
             view.close_chat_surface(cx);
             view.clear_chat(cx);

@@ -253,6 +253,69 @@ impl Cereal {
         cx.stop_propagation();
     }
 
+    /// The sidebar button and its shortcut: beside the page, the sidebar
+    /// opens or closes; in a narrow window it slides over the page or away.
+    pub fn toggle_sidebar(&mut self) {
+        if self.sidebar_narrow {
+            self.sidebar_overlay = !self.sidebar_overlay;
+        } else {
+            self.sidebar_open = !self.sidebar_open;
+        }
+    }
+
+    /// The sidebar over a narrow window, as in the reference: it slides in
+    /// from the left edge with rounded outer corners and a shadow, over the
+    /// page dimmed behind it. A press on the page closes it, as do Escape and
+    /// any row it opens.
+    pub(crate) fn render_sidebar_overlay(
+        &self,
+        pose: crate::motion::Pose,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let t = self.theme();
+        let level = pose.value.clamp(0., 1.);
+        let width = self.sidebar_span;
+        div()
+            .absolute()
+            .inset_0()
+            .child(
+                div()
+                    .id("sidebar-overlay-scrim")
+                    .absolute()
+                    .inset_0()
+                    .bg(hsla(0., 0., 0., if self.workspace.settings.dark_mode { 0.4 } else { 0.28 } * pose.fade.clamp(0., 1.)))
+                    .occlude()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.sidebar_overlay = false;
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .id("sidebar-overlay")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    // Slid out from under the window's left edge; the spring's
+                    // overshoot is held at the edge.
+                    .left(px(-(width + 24.) * (1. - level)))
+                    .w(px(width))
+                    .occlude()
+                    .rounded_r(px(12.))
+                    .overflow_hidden()
+                    .shadow(vec![BoxShadow {
+                        color: hsla(0., 0., 0., 0.18 * pose.fade.clamp(0., 1.)),
+                        offset: point(px(4.), px(0.)),
+                        blur_radius: px(24.),
+                        spread_radius: px(0.),
+                    }])
+                    .child(self.render_sidebar(cx).border_r_0()),
+            )
+    }
+
     /// The sidebar's on-screen width right now: its width as far as it has
     /// slid out. What the page beside it starts at.
     pub(crate) fn sidebar_inset(&self) -> f32 {
@@ -411,7 +474,7 @@ impl Cereal {
                     .child(
                         tool_sized("sidebar-toggle", "sidebar-expanded", WINDOW_TOOL, t).on_click(
                             cx.listener(|this, _, _, cx| {
-                                this.sidebar_open = false;
+                                this.toggle_sidebar();
                                 cx.notify();
                             }),
                         ),
@@ -899,10 +962,10 @@ impl Cereal {
                     .items_center()
                     .gap(px(5.))
                     .ml(px(80. * (1. - self.sidebar_level)))
-                    .when(!self.sidebar_open, |s| {
+                    .when(!self.sidebar_open || (self.sidebar_narrow && self.sidebar_level <= 0. && self.current_note.is_none()), |s| {
                         s.child(tool_sized("open-sidebar", "sidebar-collapsed", WINDOW_TOOL, t).on_click(
                             cx.listener(|this, _, _, cx| {
-                                this.sidebar_open = true;
+                                this.toggle_sidebar();
                                 cx.notify();
                             }),
                         ))
