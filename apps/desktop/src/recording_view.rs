@@ -120,6 +120,8 @@ impl Cereal {
                 Some((note.transcript_revision, note.transcript.clone()));
         }
         self.recording_changed_at = Some(Instant::now());
+        // The one confirmation that it is now listening.
+        crate::haptics::play(crate::haptics::Haptic::LevelChange);
         let epoch = self.recording.epoch;
         cx.notify();
         crate::latency::mark("ui_state");
@@ -201,6 +203,7 @@ impl Cereal {
         if !self.recording.stop() {
             return;
         }
+        crate::haptics::play(crate::haptics::Haptic::Generic);
         crate::latency::mark("ui_state");
         crate::latency::on_paint("ui_painted");
         if let Some(capture) = self.audio_capture.take() {

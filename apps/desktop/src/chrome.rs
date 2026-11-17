@@ -413,11 +413,26 @@ impl Cereal {
                             finish(this, cx);
                             return;
                         }
+                        let viewport = f32::from(window.viewport_size().width);
                         let width = crate::desktop_preferences::sidebar_width_in(
                             f32::from(event.position.x) - grab,
-                            f32::from(window.viewport_size().width),
+                            viewport,
                         );
                         if width != this.sidebar_width {
+                            // A tap where it meets its usual width and where it
+                            // stops, as Finder's column edges do.
+                            use crate::desktop_preferences::{
+                                sidebar_width_in, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN,
+                            };
+                            if crate::haptics::edge_tap(
+                                this.sidebar_width,
+                                width,
+                                sidebar_width_in(SIDEBAR_DEFAULT, viewport),
+                                SIDEBAR_MIN,
+                                sidebar_width_in(SIDEBAR_MAX, viewport),
+                            ) {
+                                crate::haptics::play(crate::haptics::Haptic::Alignment);
+                            }
                             this.sidebar_width = width;
                             cx.notify();
                         }

@@ -12,6 +12,7 @@ mod device_settings;
 mod environment;
 mod fetch;
 mod handoff;
+mod haptics;
 mod home;
 mod input;
 mod latency;
