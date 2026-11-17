@@ -2,99 +2,64 @@ import SwiftUI
 import APIClient
 import Contracts
 
-struct ChatToolProgressView: View {
-    let tools: [ChatToolProgressDTO]
-    let streaming: Bool
-    let interrupted: Bool
-    var onMeeting: ((ChatToolMeetingDTO) -> Void)?
-    @Environment(\.motion) private var motion
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(tools, id: \.callId) { tool in
-                DisclosureGroup {
-                    if let results = tool.results {
-                        if results.isEmpty { Text("No meetings returned").font(.caption).foregroundStyle(Theme.textSecondary) }
-                        ForEach(results, id: \.noteId) { meeting in
-                            Button { onMeeting?(meeting) } label: {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(meeting.title.isEmpty ? "Untitled note" : meeting.title).lineLimit(2)
-                                    Text(meeting.date).font(.caption).foregroundStyle(Theme.textSecondary)
-                                }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 5)
-                            }.buttonStyle(.plain).disabled(onMeeting == nil)
-                                .accessibilityLabel("Open meeting \(meeting.title), \(meeting.date)")
-                        }
-                    } else {
-                        Text(status(tool)).font(.caption).foregroundStyle(Theme.textSecondary)
-                    }
-                } label: {
-                    HStack(spacing: 8) {
-                        ZStack {
-                            if tool.status == .running && streaming { ProgressView().controlSize(.mini).transition(motion.swap) }
-                            else { Image(systemName: tool.status == .completed ? "checkmark" : "minus.circle").transition(motion.swap) }
-                        }
-                        .animation(motion.snappy, value: tool.status == .running && streaming)
-                        Text(tool.label).lineLimit(2)
-                        if tool.status == .running && !streaming { Text(interrupted ? "Stopped" : "Incomplete").font(.caption2) }
-                        if tool.status == .failed { Text("Failed").font(.caption2) }
-                        Spacer(minLength: 4)
-                        if let count = tool.resultCount { Text("\(count)").monospacedDigit() }
-                    }.font(.system(size: 13)).foregroundStyle(Theme.textSecondary)
-                }
-                .tint(Theme.textSecondary).padding(10)
-                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10))
-                .accessibilityIdentifier("chat-tool-\(tool.callId)")
-                .transition(motion.rise)
-            }
-        }
-        .animation(streaming ? motion.settle : nil, value: tools.count)
-    }
-    private func status(_ tool: ChatToolProgressDTO) -> String {
-        switch tool.status {
-        case .completed: "Completed"
-        case .failed: "Could not complete this lookup"
-        case .running: streaming ? "Working" : interrupted ? "Stopped" : "Lookup did not finish"
-        }
-    }
+/// A citation's place in an answer's text, with the number its chip shows. `id`
+/// keeps two chips side by side apart when the text is laid out.
+struct CitationChipMark: TextAttribute {
+    let id: Int
+    let number: String
 }
 
-struct ChatSourceChips: View {
-    let citations: [ChatCitationDTO]
-    var onCitation: ((ChatCitationDTO) -> Void)?
-    @State private var entrance: EntranceGate
+/// Paints each source mark of an answer as the desktop does (`citation_chips`):
+/// a light grey disc (a capsule for two or more digits) in the room the mark has
+/// in the text, centred on its line, with its number in small grey figures. A
+/// text background cannot draw it (it fills the whole line box) and text cannot
+/// change size within a line, so the room is laid out by the text and the chip is
+/// painted there; the room's own figures are not drawn.
+struct CitationChipRenderer: TextRenderer {
+    /// The desktop's chip: its hover fill with a little of the text's colour in it.
+    static let fill = Color.white.opacity(0.1)
+    /// The desktop's muted ink.
+    static let ink = Color(hex: 0x9E9E99)
 
-    /// `entering` is true while the reply that owns these sources is still
-    /// arriving. Saved conversations show their chips at once, however often
-    /// they scroll in and out of view.
-    init(citations: [ChatCitationDTO], entering: Bool = false, onCitation: ((ChatCitationDTO) -> Void)? = nil) {
-        self.citations = citations
-        self.onCitation = onCitation
-        _entrance = State(initialValue: EntranceGate(open: entering))
+    func draw(layout: Text.Layout, in context: inout GraphicsContext) {
+        for line in layout {
+            // One chip per mark on the line, over every run its room was laid out in.
+            var chips: [(mark: CitationChipMark, rect: CGRect, height: CGFloat)] = []
+            for run in line {
+                guard let mark = run[CitationChipMark.self] else { context.draw(run); continue }
+                let bounds = run.typographicBounds
+                if let last = chips.last, last.mark.id == mark.id {
+                    chips[chips.count - 1].rect = last.rect.union(bounds.rect)
+                } else {
+                    chips.append((mark, bounds.rect, bounds.ascent + bounds.descent))
+                }
+            }
+            for chip in chips {
+                let tall = min(chip.height * 0.78, 18)
+                let rect = CGRect(x: chip.rect.minX, y: chip.rect.midY - tall / 2, width: max(chip.rect.width, tall), height: tall)
+                context.fill(Capsule().path(in: rect), with: .color(Self.fill))
+                context.draw(Text(chip.mark.number).font(.system(size: 11)).foregroundStyle(Self.ink),
+                             at: CGPoint(x: rect.midX, y: rect.midY), anchor: .center)
+            }
+        }
     }
 
-    var body: some View {
-        // Flat surfaces: these scroll with the conversation, and glass is kept
-        // for floating chrome.
-        ScrollView(.horizontal) {
-                HStack(spacing: 7) {
-                    ForEach(Array(citations.enumerated()), id: \.element.id) { index, citation in
-                        Button { onCitation?(citation) } label: {
-                            HStack(spacing: 6) {
-                                Text(ChatCitationMarkup.number(citation)).fontWeight(.semibold)
-                                Text(citation.title.isEmpty ? "Untitled note" : citation.title).lineLimit(1)
-                                    .frame(maxWidth: 180, alignment: .leading).fixedSize(horizontal: true, vertical: false)
-                                Image(systemName: citation.source == .transcript ? "text.alignleft" : "doc.text")
-                            }.font(.caption).padding(.horizontal, 10).padding(.vertical, 7)
-                                .background(Theme.surface, in: Capsule())
-                                .overlay(Capsule().strokeBorder(Theme.stroke, lineWidth: 1))
-                                .contentShape(Capsule().inset(by: -8))
-                        }.buttonStyle(.squash).foregroundStyle(Theme.textSecondary).disabled(onCitation == nil)
-                            // The same fallback the chip shows; VoiceOver read an untitled note as "Source 3: , transcript".
-                            .accessibilityLabel("Source \(ChatCitationMarkup.number(citation)): \(citation.title.isEmpty ? "Untitled note" : citation.title), \(citation.source.rawValue)")
-                            .accessibilityIdentifier("chat-source-\(citation.id)")
-                            .staggeredEntrance(index, gate: entrance)
-                    }
-                }
-        }.scrollIndicators(.hidden)
+    /// The text of a block with its source marks made into chips' rooms. Each mark keeps
+    /// its link, so a tap on it opens the source.
+    static func text(_ attributed: AttributedString) -> Text {
+        var result = Text(verbatim: "")
+        var plain = AttributedString()
+        var marks = 0
+        for run in attributed.runs {
+            let slice = AttributedString(attributed[run.range])
+            guard run.link?.scheme == "cereal-citation" else { plain.append(slice); continue }
+            if !plain.characters.isEmpty { result = Text("\(result)\(Text(plain))"); plain = AttributedString() }
+            let number = String(slice.characters).trimmingCharacters(in: .whitespaces)
+            result = Text("\(result)\(Text(slice).customAttribute(CitationChipMark(id: marks, number: number)))")
+            marks += 1
+        }
+        if !plain.characters.isEmpty { result = Text("\(result)\(Text(plain))") }
+        return result
     }
 }
 

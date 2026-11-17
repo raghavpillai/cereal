@@ -419,20 +419,22 @@ struct ServerNoteMarkdown: View {
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
                         // A number keeps its own width, so the text of a wrapped item hangs clear of it.
                         // A sub-bullet is a hollow circle, as on the desktop and web.
-                        Text(marker == "•" && depth % 2 == 1 ? "◦" : marker).foregroundStyle(Theme.textTertiary).monospacedDigit()
+                        Text(Self.marker(marker, depth: depth)).foregroundStyle(Theme.textTertiary).monospacedDigit()
                         Text(inline(value)).frame(maxWidth: .infinity, alignment: .leading)
                     }.padding(.leading, CGFloat(min(4, depth) * 14))
+                // An indented plain line continues the item above it (a next step's deadline and detail): it
+                // starts where that item's text does, drawn 4 pt up under it, as on the desktop and web. The
+                // item's marker holds the same room, unseen, so a number's width is matched too.
+                case .continuation(let marker, let value, let depth):
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text(Self.marker(marker, depth: depth)).monospacedDigit().hidden().accessibilityHidden(true)
+                        Text(inline(value)).frame(maxWidth: .infinity, alignment: .leading)
+                    }.padding(.leading, CGFloat(min(4, depth) * 14)).padding(.top, -4)
                 // A Markdown rule (the one above the chat link at the foot of generated notes) is a hairline, as on the desktop and web.
                 case .paragraph(let value) where ["---", "***", "___"].contains(value.trimmingCharacters(in: .whitespaces)):
                     Rectangle().fill(Theme.textTertiary.opacity(0.35)).frame(height: 1).padding(.vertical, 10).accessibilityHidden(true)
-                // An indented plain line continues the item above it (a next step's deadline and detail): it
-                // starts where that item's text does, as on the desktop and web.
-                case .paragraph(let value) where value.first?.isWhitespace == true:
-                    let depth = min(4, max(0, value.prefix { $0.isWhitespace }.count / 2 - 1))
-                    Text(inline(value.trimmingCharacters(in: .whitespaces)))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.leading, CGFloat(depth * 14) + 17)
-                case .paragraph(let value): Text(inline(value)).frame(maxWidth: .infinity, alignment: .leading)
+                // Indented text that follows no list item is a plain paragraph, not a block of spaces.
+                case .paragraph(let value): Text(inline(value.trimmingCharacters(in: .whitespaces))).frame(maxWidth: .infinity, alignment: .leading)
                 case .quote(let value):
                     HStack(alignment: .top, spacing: 12) {
                         RoundedRectangle(cornerRadius: 2).fill(Theme.textTertiary).frame(width: 3)
@@ -450,6 +452,9 @@ struct ServerNoteMarkdown: View {
         .contentTransition(.identity)
         .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
     }
+
+    /// A list marker as the note draws it: a sub-bullet is a hollow circle.
+    static func marker(_ marker: String, depth: Int) -> String { marker == "•" && depth % 2 == 1 ? "◦" : marker }
 
     private func inline(_ text: String) -> AttributedString {
         ChatMarkdownCache.inline(text, context: "note") {

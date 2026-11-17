@@ -16,14 +16,16 @@ enum ChatThreadTurns {
         thread.messages.sorted { ($0.turn, $0.role == .user ? 0 : 1) < ($1.turn, $1.role == .user ? 0 : 1) }.compactMap { message in
             let id = UUID(uuidString: message.id) ?? UUID()
             if message.role == .user { return ChatMessage(id: id, role: .user, text: message.content) }
-            var annotations = ChatTurnAnnotations()
+            var annotations = ChatTurnAnnotations(saved: message.reasoning, elapsedMs: message.elapsedMs)
             for tool in message.tools { annotations.apply(ChatStreamEventDTO(text: "", tool: tool, type: .tool)) }
             if !message.citations.isEmpty { annotations.apply(ChatStreamEventDTO(citations: message.citations, text: "", type: .citations)) }
             var text = message.content
             if message.status == .failed, text.isEmpty { text = message.error ?? "The answer could not be completed." }
             guard !text.isEmpty || annotations.hasContent else { return nil }
+            // How long it thought is kept even with nothing else to show: its line says so.
+            let kept = annotations.hasContent || annotations.elapsedMs != nil
             return ChatMessage(id: id, role: .assistant, text: text, isInterrupted: message.status != .complete,
-                               annotations: annotations.hasContent ? annotations : nil)
+                               annotations: kept ? annotations : nil)
         }
     }
 

@@ -216,6 +216,9 @@ struct ChatMessageView: View {
     let message: ChatMessage
     var onCitation: ((ChatCitationDTO) -> Void)? = nil
     var onMeeting: ((ChatToolMeetingDTO) -> Void)? = nil
+    /// False in a conversation about one note: everything in it comes from that note, so
+    /// its answers carry no source marks, as on the desktop.
+    var showsSources = true
     @State private var copied = false
     @State private var copyCount = 0
     @State private var expanded = false
@@ -239,7 +242,8 @@ struct ChatMessageView: View {
                     // the first one stays on the text column.
                     HStack(spacing: 0) {
                         Button {
-                            UIPasteboard.general.string = message.text
+                            // Copied text carries no source marks, as on the desktop.
+                            UIPasteboard.general.string = ChatCitationMarkup.withoutMarkers(message.text)
                             copyCount += 1
                             withAnimation(motion.snappy) { copied = true }
                         } label: {
@@ -289,13 +293,15 @@ struct ChatMessageView: View {
     }
     private var response: some View {
         VStack(alignment: .leading, spacing: 14) {
-            if let annotations = message.annotations, !annotations.tools.isEmpty {
-                ChatToolProgressView(tools: annotations.tools, streaming: message.isStreaming, interrupted: message.isInterrupted, onMeeting: openMeeting)
-                    .transition(motion.rise)
-            }
-            if message.text.isEmpty && message.isStreaming { ThinkingIndicator().transition(motion.fade) }
-            else {
-                MarkdownBlocks(text: message.text, citations: message.annotations?.citations ?? [], turnID: message.annotations == nil ? nil : message.id, streaming: message.isStreaming, onCitation: openCitation)
+            // One status line, whether or not the answer searched meetings: "Thinking" and what is
+            // being done, then "Thought for Ns" or "Worked for Ns", with the thoughts under it.
+            ChatThoughtsView(annotations: message.annotations, thinking: message.text.isEmpty && message.isStreaming,
+                             streaming: message.isStreaming, stopped: message.isInterrupted && !message.isStreaming, onMeeting: openMeeting)
+                .padding(.bottom, -4)
+            if !message.text.isEmpty {
+                MarkdownBlocks(text: message.text, citations: showsSources ? message.annotations?.citations ?? [] : [],
+                               turnID: message.annotations == nil ? nil : message.id, streaming: message.isStreaming,
+                               showsSources: showsSources, onCitation: openCitation)
                     .transition(motion.fade)
             }
             if message.isInterrupted {
@@ -303,15 +309,10 @@ struct ChatMessageView: View {
                     .accessibilityIdentifier("chat-response-interrupted")
                     .transition(motion.fade)
             }
-            if let citations = message.annotations?.citations, !citations.isEmpty {
-                ChatSourceChips(citations: citations, entering: message.isStreaming, onCitation: openCitation)
-                    .transition(motion.fade)
-            }
         }
         .animation(motion.snappy, value: message.text.isEmpty)
         .animation(motion.snappy, value: message.isInterrupted)
         .animation(motion.settle, value: message.annotations?.tools.isEmpty ?? true)
-        .animation(motion.settle, value: message.annotations?.citations.isEmpty ?? true)
     }
     private func openCitation(_ citation: ChatCitationDTO) {
         if expanded {
@@ -335,8 +336,12 @@ struct MarkdownBlocks: View {
     var turnID: UUID? = nil
     /// New blocks of a streaming reply settle in; saved text is simply shown.
     var streaming = false
+    /// False: source marks are taken out of the text, with the space before them.
+    var showsSources = true
     var onCitation: ((ChatCitationDTO) -> Void)? = nil
     @Environment(\.motion) private var motion
+    /// Source marks are painted as chips (`CitationChipRenderer`) only where there are any.
+    private var chips: Bool { showsSources && turnID != nil && !citations.isEmpty }
     var body: some View {
         let _ = PerfProbe.hit("MarkdownBlocks.body")
         let blocks = ChatMarkdownCache.blocks(text)
@@ -345,18 +350,24 @@ struct MarkdownBlocks: View {
                 Group {
                 switch block {
                 case .heading(let value):
-                    Text(inline(value)).font(.system(size: 17, weight: .semibold))
+                    text(value).font(.system(size: 17, weight: .semibold))
                         .foregroundStyle(Theme.chatText).padding(.top, 6)
                 case .list(let marker, let value, let depth):
                     HStack(alignment: .firstTextBaseline, spacing: 12) {
                         Text(marker).frame(minWidth: 12, alignment: .leading)
-                        Text(inline(value)).frame(maxWidth: .infinity, alignment: .leading)
+                        text(value).frame(maxWidth: .infinity, alignment: .leading)
                     }.padding(.leading, CGFloat(8 + depth * 14))
-                case .paragraph(let value): Text(inline(value))
+                // Under its item's text, as the desktop and web draw it: the same row with the marker not shown.
+                case .continuation(let marker, let value, let depth):
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        Text(marker).frame(minWidth: 12, alignment: .leading).hidden().accessibilityHidden(true)
+                        text(value).frame(maxWidth: .infinity, alignment: .leading)
+                    }.padding(.leading, CGFloat(8 + depth * 14)).padding(.top, -4)
+                case .paragraph(let value): text(value)
                 case .quote(let value):
                     HStack(alignment: .top, spacing: 12) {
                         RoundedRectangle(cornerRadius: 2).fill(Theme.textTertiary).frame(width: 3)
-                        Text(inline(value)).frame(maxWidth: .infinity, alignment: .leading)
+                        text(value).frame(maxWidth: .infinity, alignment: .leading)
                     }.fixedSize(horizontal: false, vertical: true).foregroundStyle(Theme.textSecondary)
                 case .code(let value):
                     ScrollView(.horizontal) {
@@ -371,6 +382,7 @@ struct MarkdownBlocks: View {
                 .transition(streaming ? motion.rise : .identity)
             }
         }.readingFont(.body).lineSpacing(6).foregroundStyle(Theme.chatText)
+            .modifier(CitationChipsModifier(on: chips))
             // Text whose words change (sources arriving turn "[1]" into links, the
             // last block growing) is replaced, never cross-faded. A cross-fade of
             // text is drawn on the CPU every frame: when a long answer's sources
@@ -384,10 +396,16 @@ struct MarkdownBlocks: View {
             })
     }
 
+    /// A block's text, with its source marks as chips' rooms where there are sources.
+    private func text(_ s: String) -> Text {
+        chips ? CitationChipRenderer.text(inline(s)) : Text(inline(s))
+    }
+
     /// Built once per block and citation set, then served from the cache.
     private func inline(_ s: String) -> AttributedString {
         ChatMarkdownCache.inline(s, context: cacheContext) {
-            var result = (try? AttributedString(markdown: ChatCitationMarkup.markdown(s, turnID: turnID, citations: citations), options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
+            let source = showsSources ? ChatCitationMarkup.markdown(s, turnID: turnID, citations: citations) : ChatCitationMarkup.withoutMarkers(s)
+            var result = (try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
             for run in Array(result.runs) {
                 if let link = run.link, !["http", "https", "mailto"].contains(link.scheme?.lowercased() ?? ""), ChatCitationMarkup.resolve(link, turnID: turnID, citations: citations) == nil { result[run.range].link = nil }
             }
@@ -397,7 +415,17 @@ struct MarkdownBlocks: View {
 
     /// Links resolve against this turn's own citations, so they are part of the key.
     private var cacheContext: String {
-        (turnID?.uuidString ?? "-") + "|" + citations.map { "\($0.id):\($0.noteId):\($0.segmentId ?? ""):\($0.transcriptRevision):\($0.source.rawValue)" }.joined(separator: ",")
+        (showsSources ? "" : "plain|") + (turnID?.uuidString ?? "-") + "|" + citations.map { "\($0.id):\($0.noteId):\($0.segmentId ?? ""):\($0.transcriptRevision):\($0.source.rawValue)" }.joined(separator: ",")
+    }
+}
+
+/// Lets the text of an answer with sources draw their chips; other text is drawn as usual.
+/// Selectable text is drawn by the system and ignores a renderer (measured: the marks came
+/// out as plain gold link digits), so such an answer is copied with its Copy button instead.
+private struct CitationChipsModifier: ViewModifier {
+    let on: Bool
+    func body(content: Content) -> some View {
+        if on { content.textRenderer(CitationChipRenderer()).textSelection(.disabled) } else { content }
     }
 }
 
@@ -415,6 +443,9 @@ private extension View {
 
 enum ChatMarkdownBlock: Equatable, Sendable {
     case heading(String), list(marker: String, text: String, depth: Int), paragraph(String), quote(String), code(String), space
+    /// An indented plain line under a list item (a next step's deadline and detail): it is drawn
+    /// where that item's text starts, so it carries the item's marker and depth (the marker is not shown).
+    case continuation(marker: String, text: String, depth: Int)
     /// A pipe table: the cells of its header row, when it has one, and of each row under it.
     case table(header: [String], rows: [[String]])
 }
@@ -455,6 +486,14 @@ enum ChatMarkdownParser {
             if !digits.isEmpty, let punctuation = line.dropFirst(digits.count).first,
                [".", ")"].contains(punctuation), line.dropFirst(digits.count + 1).first == " " {
                 blocks.append(.list(marker: String(digits) + String(punctuation), text: String(line.dropFirst(digits.count + 2)), depth: depth)); continue
+            }
+            // An indented plain line straight under a list item continues that item.
+            if raw.first?.isWhitespace == true {
+                switch blocks.last {
+                case .list(let marker, _, let depth)?, .continuation(let marker, _, let depth)?:
+                    blocks.append(.continuation(marker: marker, text: line, depth: depth)); continue
+                default: break
+                }
             }
             blocks.append(.paragraph(raw))
         }
@@ -517,43 +556,17 @@ struct MarkdownTable: View {
     }
 }
 
-struct ThinkingIndicator: View {
-    @State private var phase: CGFloat = -1
-    @Environment(\.motion) private var motion
-    private var reduceMotion: Bool { motion.reduceMotion }
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "rays").symbolEffect(.rotate, options: .repeating, isActive: !reduceMotion)
-            Text("Thinking")
-                .overlay {
-                    GeometryReader { geometry in
-                        LinearGradient(colors: [.clear, .white.opacity(0.5), .clear], startPoint: .leading, endPoint: .trailing)
-                            .frame(width: 50, height: geometry.size.height)
-                            .offset(x: phase * (geometry.size.width + 50))
-                    }
-                    .mask(Text("Thinking").font(.system(size: 15)))
-                }
-        }
-        .font(.system(size: 15))
-        .foregroundStyle(Theme.textTertiary)
-        .onAppear {
-            if !reduceMotion { withAnimation(.linear(duration: 1.2).repeatForever(autoreverses: false)) { phase = 1 } }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Thinking")
-    }
-}
-
 /// What the composer's one round button does.
 enum ChatComposerRule {
-    enum Action: Hashable { case voice, send, stop }
+    /// `idle`: nothing typed yet, the send arrow dimmed, as on the desktop.
+    enum Action: Hashable { case idle, send, stop }
 
     /// While an answer arrives the button stops it. Where questions can wait their
     /// turn (`queues`), text in the field makes it a send button instead, and Stop
     /// is back as soon as the field is empty.
     static func action(isGenerating: Bool, hasText: Bool, queues: Bool) -> Action {
         if isGenerating && !(queues && hasText) { return .stop }
-        return hasText ? .send : .voice
+        return hasText ? .send : .idle
     }
 }
 
@@ -629,20 +642,21 @@ struct ChatComposer: View {
                     .background(Theme.bgTop, in: Capsule())
                 }
                 Spacer()
+                // As on the desktop: a gold disc with a bold dark arrow that sends; the
+                // same arrow on a dimmed grey disc until there is something to send; a
+                // quiet disc with a square while an answer arrives, which holds the eye.
                 Button {
-                    if stops { onStop() } else if sends { onSend() } else {
-                        focused.wrappedValue = true
-                        unavailableAction = "Voice input is not connected to chat yet. You can use the microphone on your keyboard to dictate a message."
-                    }
+                    if stops { onStop() } else if sends { onSend() }
                 } label: {
-                    Image(systemName: stops ? "stop.fill" : sends ? "arrow.up" : "mic")
-                        .font(.system(size: stops ? 13 : 17, weight: .semibold))
-                        .foregroundStyle(stops || sends ? Theme.chatActionGlyph : Theme.chatAction)
+                    Image(systemName: stops ? "stop.fill" : "arrow.up")
+                        .font(.system(size: stops ? 13 : 18, weight: stops ? .semibold : .bold))
+                        .foregroundStyle(stops ? Theme.chatText : sends ? Theme.sendGlyph : Theme.textSecondary)
                         .contentTransition(motion.symbolReplace)
                         .frame(width: 40, height: 40)
-                        .background(stops || sends ? Theme.chatAction : Theme.chatMicrophone, in: Circle())
-                        // Voice, send and stop are one droplet: it dips and
-                        // springs back as the glyph and colour change.
+                        .background(sends ? Theme.sendGold : Theme.quietFill, in: Circle())
+                        .opacity(action == .idle ? 0.45 : 1)
+                        // Send and stop are one droplet: it dips and springs
+                        // back as the glyph and colour change.
                         .keyframeAnimator(initialValue: 1.0, trigger: action) { content, scale in
                             content.scaleEffect(motion.reduceMotion ? 1 : scale)
                         } keyframes: { _ in
@@ -651,7 +665,9 @@ struct ChatComposer: View {
                         }
                 }
                 .buttonStyle(SquashButtonStyle())
-                .accessibilityLabel(stops ? "Stop answer" : sends ? (isGenerating ? "Queue message" : "Send message") : "Voice input")
+                .disabled(action == .idle)
+                .accessibilityLabel(stops ? "Stop answer" : sends ? (isGenerating ? "Queue message" : "Send message") : "Send message")
+                .accessibilityHint(action == .idle ? "Type a question to send" : "")
                 .accessibilityIdentifier("\(identifierPrefix)-send")
             }
             .padding(.horizontal, 7)

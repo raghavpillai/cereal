@@ -244,7 +244,20 @@ struct RecordingPill: View {
     var onOpen: (() -> Void)? = nil
     /// The recording screen grows out of this pill and returns into it.
     var zoomsToCapture = false
+    /// As the indicator: the note's title, shown in place of the clock (on a page
+    /// other than the note's own), as the desktop's pill shows it.
+    var title: String? = nil
+    /// As the indicator: a close control at the trailing end that stops the recording.
+    var onClose: (() -> Void)? = nil
     @Environment(\.motion) private var motion
+
+    /// The indicator is dark in the app's theme, as the desktop's pill is: a near-black
+    /// capsule (the desktop's dark-theme 0x41403c) with white words and a green meter,
+    /// so it reads as the recording at a glance over any page.
+    static let indicatorFill = Color(hex: 0x41403C)
+    static let indicatorInk = Color(hex: 0xF6F4EE)
+    /// The desktop's meter green (`recording_view::WAVEFORM`).
+    static let indicatorMeter = Color(hex: 0x74BD00)
 
     @State private var pressed = false
     /// How far the menu's target reaches below the pill; see the menu.
@@ -270,10 +283,14 @@ struct RecordingPill: View {
             .animation(motion.gooey, value: recorder.state)
             .overlay {
                 if let onOpen {
-                    Button(action: onOpen) { Color.clear.contentShape(Capsule()) }
-                        .buttonStyle(PressReportingStyle(pressed: $pressed))
-                        .accessibilityLabel("Return to recording")
-                        .accessibilityValue(recorder.state == .paused ? "Paused" : recorder.isCapturing ? "Recording" : "Stopped")
+                    HStack(spacing: 0) {
+                        Button(action: onOpen) { Color.clear.contentShape(Capsule()) }
+                            .buttonStyle(PressReportingStyle(pressed: $pressed))
+                            .accessibilityLabel("Return to recording")
+                            .accessibilityValue(recorder.state == .paused ? "Paused" : recorder.isCapturing ? "Recording" : "Stopped")
+                        // The close control in the pill takes its own touches.
+                        if onClose != nil { Color.clear.frame(width: 48).allowsHitTesting(false).accessibilityHidden(true) }
+                    }
                 } else {
                 Menu {
                     if recorder.state == .recording {
@@ -311,7 +328,58 @@ struct RecordingPill: View {
             }
     }
 
-    private var pill: some View {
+    @ViewBuilder private var pill: some View {
+        if onOpen != nil { indicator } else { control }
+    }
+
+    static func shortTitle(_ title: String) -> String {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return "New note" }
+        return trimmed.count > 24 ? trimmed.prefix(23).trimmingCharacters(in: .whitespaces) + "…" : trimmed
+    }
+
+    /// The pill as the way back to a recording that runs while another page is open.
+    private var indicator: some View {
+        HStack(spacing: 8) {
+            ZStack {
+                if recorder.state == .paused {
+                    Image(systemName: "pause.fill").font(.system(size: 13))
+                        .foregroundStyle(Self.indicatorInk)
+                        .frame(width: 20.5, height: 16)
+                        .transition(motion.swap)
+                } else {
+                    RecorderWaveform(recorder: recorder, color: Self.indicatorMeter).transition(motion.swap)
+                }
+            }
+            .accessibilityHidden(true)
+            Group {
+                if let title {
+                    // As wide as the title, up to about the desktop's 240 pt pill.
+                    Text(Self.shortTitle(title)).lineLimit(1)
+                } else {
+                    RecorderTimer(recorder: recorder).monospacedDigit()
+                }
+            }
+            .font(.system(size: 15)).foregroundStyle(Self.indicatorInk)
+            if let onClose {
+                Button(action: onClose) {
+                    Image(systemName: "xmark").font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Self.indicatorInk)
+                        .frame(width: 28, height: 28)
+                        .background(Color.white.opacity(0.12), in: Circle())
+                        .frame(width: 40, height: 48).contentShape(Rectangle())
+                }
+                .buttonStyle(.squash)
+                .accessibilityLabel("Stop recording")
+                .accessibilityIdentifier("recording-indicator-stop")
+            }
+        }
+        .padding(.leading, 16).padding(.trailing, onClose == nil ? 18 : 6)
+        .frame(height: 48)
+        .contentShape(Capsule())
+    }
+
+    private var control: some View {
         HStack(spacing: 10) {
             ZStack {
                 switch recorder.state {
@@ -340,11 +408,12 @@ struct RecordingPill: View {
     }
 
     private var pillColor: Color {
+        if onOpen != nil { return Self.indicatorFill }
         switch recorder.state {
-        case .recording: Theme.accent
-        case .paused: Theme.accent.opacity(0.55)
-        case .idle, .stopped: Theme.surfaceRaised
-        case .failed: Theme.danger.opacity(0.8)
+        case .recording: return Theme.accent
+        case .paused: return Theme.accent.opacity(0.55)
+        case .idle, .stopped: return Theme.surfaceRaised
+        case .failed: return Theme.danger.opacity(0.8)
         }
     }
 }
@@ -378,8 +447,9 @@ struct RecorderTimer: View {
 
 struct RecorderWaveform: View {
     let recorder: Recorder
+    var color: Color = Theme.onAccent
     var body: some View {
-        WaveformBars(levels: recorder.levels, active: recorder.state == .recording)
+        WaveformBars(levels: recorder.levels, active: recorder.state == .recording, color: color)
     }
 }
 
@@ -433,13 +503,14 @@ struct GenerateButton: View {
 struct WaveformBars: View {
     let levels: [Float]
     let active: Bool
+    var color: Color = Theme.onAccent
     @Environment(\.motion) private var motion
 
     var body: some View {
         HStack(spacing: 2) {
             ForEach(levels.indices, id: \.self) { i in
                 Capsule()
-                    .fill(Theme.onAccent)
+                    .fill(color)
                     .frame(width: 2.5, height: 4 + 12 * CGFloat(active ? levels[i] : 0.1))
             }
         }

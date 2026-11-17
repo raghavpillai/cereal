@@ -196,7 +196,7 @@ private func turns(_ history: [ChatMessageDTO]) -> [String] { history.map { ($0.
 
     @Test func theComposerButtonQueuesWhenThereIsTextAndStopsWhenThereIsNone() {
         typealias Rule = ChatComposerRule
-        #expect(Rule.action(isGenerating: false, hasText: false, queues: true) == .voice)
+        #expect(Rule.action(isGenerating: false, hasText: false, queues: true) == .idle)
         #expect(Rule.action(isGenerating: false, hasText: true, queues: true) == .send)
         #expect(Rule.action(isGenerating: true, hasText: false, queues: true) == .stop)
         // A question typed while an answer arrives is sent to wait its turn.

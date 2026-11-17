@@ -189,12 +189,17 @@ enum ChatHistoryRule {
         #if DEBUG
         let timing = ChatTimingLog(question: text)
         #endif
+        let asked = ContinuousClock.now
         // Tokens are gathered and shown about once a frame.
         let buffer = ChatDeltaBuffer { [weak self] delta in
             guard let self, requestID == id, let index = messages.firstIndex(where: { $0.id == reply.id }) else { return }
-            #if DEBUG
-            if messages[index].text.isEmpty, !delta.isEmpty { timing.mark("first-text") }
-            #endif
+            if messages[index].text.isEmpty, !delta.isEmpty {
+                #if DEBUG
+                timing.mark("first-text")
+                #endif
+                // The first text ends the thinking: its line says how long that took.
+                markThought(index, since: asked)
+            }
             messages[index].text += delta
         }
         deltaBuffer = buffer
@@ -223,6 +228,13 @@ enum ChatHistoryRule {
                     if event.type == .delta {
                         PerfProbe.hit("Chat.token")
                         buffer.append(event.text)
+                    } else if event.type == .reasoning {
+                        // Reasoning that trails in after the answer began is not shown, as on the desktop.
+                        buffer.flushNow()
+                        guard messages[index].text.isEmpty, !event.text.isEmpty else { continue }
+                        var annotations = messages[index].annotations ?? ChatTurnAnnotations()
+                        annotations.addReasoning(event.text)
+                        messages[index].annotations = annotations
                     } else if event.type == .tool || event.type == .citations {
                         // Keep order: text received so far is shown before the annotation.
                         buffer.flushNow()
@@ -237,8 +249,17 @@ enum ChatHistoryRule {
             #if DEBUG
             if self?.requestID == id { timing.mark(failure == nil ? "finished" : "failed") }
             #endif
+            // An answer that ended before any text still says how long it thought.
+            if let self, requestID == id, let index = messages.firstIndex(where: { $0.id == reply.id }) { markThought(index, since: asked) }
             self?.finish(id, failure: failure)
         }
+    }
+
+    private func markThought(_ index: Int, since asked: ContinuousClock.Instant) {
+        let elapsed = ContinuousClock.now - asked
+        var annotations = messages[index].annotations ?? ChatTurnAnnotations()
+        annotations.markThought(elapsedMs: Int(elapsed.components.seconds * 1000 + elapsed.components.attoseconds / 1_000_000_000_000_000))
+        messages[index].annotations = annotations
     }
 
     /// The answer ended by itself: it finished, or the request failed.

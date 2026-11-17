@@ -24,4 +24,19 @@ struct ChatMarkdownParserTests {
         // A table inside a code fence stays literal.
         #expect(ChatMarkdownParser.blocks("```\n| a | b |\n```") == [.code("| a | b |")])
     }
+    @Test func anIndentedLineUnderAnItemContinuesIt() {
+        // A next step with its deadline beneath, as generated notes write them.
+        #expect(ChatMarkdownParser.blocks("# Next Steps\n- Send the spec (Owen)\n  Due Friday, so engineering can scope it.\n1. Book training (Priya)\n   Aim for the 14th.\n  - Night shift\n    Both leads asked.") == [
+            .heading("Next Steps"),
+            .list(marker: "•", text: "Send the spec (Owen)", depth: 0),
+            .continuation(marker: "•", text: "Due Friday, so engineering can scope it.", depth: 0),
+            .list(marker: "1.", text: "Book training (Priya)", depth: 0),
+            .continuation(marker: "1.", text: "Aim for the 14th.", depth: 0),
+            .list(marker: "•", text: "Night shift", depth: 1),
+            .continuation(marker: "•", text: "Both leads asked.", depth: 1)
+        ])
+        // Indented text after a gap, or under no item, stays a paragraph; a note that is one plain sentence is that sentence.
+        #expect(ChatMarkdownParser.blocks("- Item\n\n  Later") == [.list(marker: "•", text: "Item", depth: 0), .space, .paragraph("  Later")])
+        #expect(ChatMarkdownParser.blocks("Looks like this was just a microphone test, nothing to summarize yet.") == [.paragraph("Looks like this was just a microphone test, nothing to summarize yet.")])
+    }
 }

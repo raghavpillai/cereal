@@ -35,6 +35,10 @@ import Contracts
         #expect(ChatCitationMarkup.resolve(url, turnID: UUID(), citations: [source]) == nil)
         #expect(ChatCitationMarkup.resolve(url, turnID: turn, citations: []) == nil)
         #expect(ChatCitationMarkup.markdown("[[S1]]", turnID: nil, citations: []) == "[[S1]]")
+        // A note's own chat shows no marks, and leaves no space where they were; neighbours stay apart.
+        #expect(ChatCitationMarkup.withoutMarkers("Moved [[S25]][[S26]]. Later [[S3]]") == "Moved. Later")
+        let pair = ChatCitationMarkup.markdown("Moved. [[S1]][[S1]]", turnID: turn, citations: [source])
+        #expect(pair.hasPrefix("Moved. [\u{2007}1](") && pair.contains(") [\u{2007}1]("))
     }
     @Test func metadataIsPerAssistantTurnAndSurvivesProtectedHistoryWithoutCrossAccountLeak() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -88,7 +92,7 @@ import Contracts
         let turn = UUID(), source = citation()
         let markdown = ChatCitationMarkup.markdown("Friday [[S1]].", turnID: turn, citations: [source])
         let rendered = try AttributedString(markdown: markdown, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
-        #expect(String(rendered.characters) == "Friday [1].")
+        #expect(String(rendered.characters) == "Friday \u{2007}1.")
         #expect(rendered.runs.contains { $0.link == ChatCitationMarkup.url(id: "S1", turnID: turn) })
     }
 
@@ -103,7 +107,7 @@ import Contracts
         let beforeWithdrawal = annotations
         annotations.apply(ChatStreamEventDTO(citations: [], text: "", tool: nil, type: .citations))
         #expect(annotations != beforeWithdrawal && annotations.citations.isEmpty)
-        #expect(ChatCitationMarkup.markdown("Claim [[S2]].", turnID: turn, citations: annotations.citations) == "Claim .")
+        #expect(ChatCitationMarkup.markdown("Claim [[S2]].", turnID: turn, citations: annotations.citations) == "Claim.")
     }
 
 }

@@ -29,8 +29,9 @@ struct ThemePaletteTests {
 
     @Test func theBrandColoursAreTheGoldPalette() {
         #expect(hex(Theme.accent) == 0xE3B025)
-        #expect(hex(Theme.chatAction) == 0x755400)
-        #expect(hex(Theme.chatMicrophone) == 0xF0E2C3)
+        // The send button's gold and its near-black arrow, as on the desktop.
+        #expect(hex(Theme.sendGold) == 0xE0AF2F)
+        #expect(hex(Theme.sendGlyph) == 0x1D1A12)
         // Neutrals are not brand colours and did not move.
         #expect(hex(Theme.onAccent) == 0x1A1A1A)
         #expect(hex(Theme.lightButton) == 0xECECE6)
@@ -44,9 +45,8 @@ struct ThemePaletteTests {
         #expect(contrast(hex(Theme.accent), hex(Theme.bgTop)) > 8)
         // The lightest surface gold text sits on (sheets).
         #expect(contrast(hex(Theme.accent), hex(Theme.surfaceRaised)) > 6)
-        // The microphone glyph on its pale disc, and the pale disc on the composer.
-        #expect(contrast(hex(Theme.chatAction), hex(Theme.chatMicrophone)) > 5)
-        #expect(contrast(hex(Theme.chatMicrophone), hex(Theme.chatComposer)) > 10)
+        // The send arrow on its gold disc.
+        #expect(contrast(hex(Theme.sendGlyph), hex(Theme.sendGold)) > 7)
     }
 
     @Test func noLetterTileIsGreen() {

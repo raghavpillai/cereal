@@ -211,7 +211,7 @@ private func savedNotes(_ url: URL) throws -> [Note] {
     private static func text(of block: ChatMarkdownBlock) -> String? {
         switch block {
         case .heading(let value), .paragraph(let value), .quote(let value): value
-        case .list(_, let value, _): value
+        case .list(_, let value, _), .continuation(_, let value, _): value
         case .code, .space, .table: nil
         }
     }

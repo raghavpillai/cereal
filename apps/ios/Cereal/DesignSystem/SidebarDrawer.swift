@@ -194,6 +194,12 @@ private struct SidebarPanel: View {
                     .accessibilityFocused($focusedOnOpen)
                 row("Account and workspaces", symbol: "person.crop.circle", selected: false) { router.showConnection = true }
                 row("Shared with me", symbol: "link", selected: selected(.sharedWithMe)) { router.path = [.sharedWithMe] }
+                // As on the desktop, Chat opens a new conversation; the open one is kept in its history.
+                if !connectionMode.isDemo, accounts.defaultSession?.notes.accountID != nil {
+                    row("Chat", symbol: "bubble.left", selected: router.path.last.map(Self.isWorkspaceChat) ?? false) {
+                        if let route = ChatNavigation.workspaceChat(accounts) { router.path = [route] }
+                    }
+                }
                 Text("My notes").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.textSecondary)
                     .accessibilityAddTraits(.isHeader)
                     .padding(.horizontal, 14).padding(.top, 18).padding(.bottom, 6)
@@ -247,6 +253,10 @@ private struct SidebarPanel: View {
         }
         .buttonStyle(RowPressStyle())
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private static func isWorkspaceChat(_ route: Route) -> Bool {
+        if case .serverChat(_, noteID: nil) = route { true } else { false }
     }
 
     private func selected(_ route: Route) -> Bool {

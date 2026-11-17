@@ -28,9 +28,12 @@ enum Theme {
     /// Keeps the composer's glass close to the reference's dark bar.
     static let chatComposerTint = Color.black.opacity(0.2)
     static let chatQuestion = Color(hex: 0x272727)
-    static let chatAction = Color(hex: 0x755400)
-    static let chatActionGlyph = Color.black
-    static let chatMicrophone = Color(hex: 0xF0E2C3)
+    /// The send button of every composer, as on the desktop: the brand's bright gold
+    /// with a bold near-black arrow. Until there is something to send it is a quiet grey disc.
+    static let sendGold = Color(hex: 0xE0AF2F)
+    static let sendGlyph = Color(hex: 0x1D1A12)
+    /// The desktop's hover fill (white at 6%), the idle send and the Stop button's disc.
+    static let quietFill = Color.white.opacity(0.06)
     static let chatText = Color.white
 
     static let gutter: CGFloat = 16

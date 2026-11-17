@@ -6,6 +6,7 @@ import Contracts
 struct ServerChatView: View {
     let noteID: String?
     @Environment(ServerNotesModel.self) private var server
+    @Environment(AccountsModel.self) private var accounts
     @Environment(\.motion) private var motion
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Namespace private var glass
@@ -47,13 +48,15 @@ struct ServerChatView: View {
     var body: some View {
         RailScaffold {
             VStack(alignment: .leading, spacing: 0) {
-                Text(title).font(.system(size: 15, weight: .semibold))
+                // The splash says hello in its own words; the bar's title is for a conversation.
+                Text(splash ? " " : title).font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Theme.chatText).lineLimit(1)
                     .padding(.top, RailMetrics.chatTitleInsets(compact: verticalSizeClass == .compact).top)
                     .padding(.bottom, RailMetrics.chatTitleInsets(compact: verticalSizeClass == .compact).bottom).padding(.leading, Theme.gutter)
                     // A long title ends where the messages do, 16 pt from the edge.
                     .padding(.trailing, ChatColumn.trailing)
-                if noteID == nil { Text("Across your private notes").font(.caption).foregroundStyle(Theme.textSecondary).padding(.leading, Theme.gutter).padding(.bottom, 8) }
+                    .accessibilityHidden(splash)
+                if noteID == nil && !splash { Text("Across your private notes").font(.caption).foregroundStyle(Theme.textSecondary).padding(.leading, Theme.gutter).padding(.bottom, 8) }
                 ScrollViewReader { proxy in
                     ScrollView {
                         // Not a lazy stack. A lazy one guesses the height of rows that are off
@@ -66,7 +69,8 @@ struct ServerChatView: View {
                         VStack(alignment: .leading, spacing: 22) {
                             if messages.isEmpty { emptyState.transition(motion.fade) }
                             ForEach(messages) { message in
-                                ChatMessageView(message: message, onCitation: { openCitation($0, turnID: message.id) }, onMeeting: { openMeeting($0, turnID: message.id) })
+                                ChatMessageView(message: message, onCitation: { openCitation($0, turnID: message.id) }, onMeeting: { openMeeting($0, turnID: message.id) },
+                                                showsSources: noteID == nil)
                                     .equatable().id(message.id)
                                     .transition(message.role == .user ? motion.pop(anchor: .bottomTrailing) : motion.rise)
                             }
@@ -184,6 +188,10 @@ struct ServerChatView: View {
                 draft = second; send()
             }
         }
+        // QA only: `-qa.draft "text"` types a question into the composer without sending it.
+        .task {
+            if let typed = UserDefaults.standard.string(forKey: "qa.draft"), !typed.isEmpty { draft = typed }
+        }
         // QA only: `-qa.history YES` opens the saved chats once the screen is up.
         .task {
             guard UserDefaults.standard.bool(forKey: "qa.history") else { return }
@@ -208,11 +216,71 @@ struct ServerChatView: View {
 
     private var showsLatest: Bool { ChatTail.showsJumpToLatest(hasMessages: !messages.isEmpty, followsTail: followsTail) }
 
-    private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ChatSuggestionChips(suggestions: suggestions) { draft = $0; send() }
-        }.padding(.top, 8)
+    /// The chat across meetings with nothing asked yet: a new conversation's splash.
+    private var splash: Bool { noteID == nil && messages.isEmpty }
+
+    /// "Hi Sam, ask anything", with the account's first name, as on the desktop.
+    private var greeting: String {
+        let name = accounts.sessions.first { $0.notes === server }?.record.name ?? ""
+        let first = name.split(whereSeparator: \.isWhitespace).first.map { String($0.prefix(40)) } ?? ""
+        return first.isEmpty ? "Ask anything" : "Hi \(first), ask anything"
     }
+
+    @ViewBuilder private var emptyState: some View {
+        if noteID == nil {
+            // As on the desktop: the greeting, then the newest saved chats. The composer is the bar below.
+            VStack(alignment: .leading, spacing: 0) {
+                Text(greeting).font(.display(26)).foregroundStyle(Theme.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.isHeader)
+                    .padding(.top, 24)
+                if !recents.isEmpty {
+                    HStack {
+                        Text("Recents").accessibilityAddTraits(.isHeader)
+                        Spacer()
+                        Button { focused = false; showHistory = true } label: {
+                            Text("See all").frame(minHeight: 44).contentShape(Rectangle())
+                        }.buttonStyle(.plain).accessibilityIdentifier("server-chat-see-all")
+                    }
+                    .font(.system(size: 14)).foregroundStyle(Theme.textSecondary)
+                    .padding(.top, 40)
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(recents, id: \.id) { thread in
+                            Button { openSaved(thread) } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: thread.noteId == nil ? "bubble.left" : "doc.text")
+                                        .font(.system(size: 14)).foregroundStyle(Theme.textSecondary)
+                                        .frame(width: 32, height: 32)
+                                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.stroke, lineWidth: 1))
+                                    Text(ChatThreadTurns.title(thread)).font(.system(size: 15)).foregroundStyle(Theme.textPrimary).lineLimit(1)
+                                    Spacer(minLength: 8)
+                                    if let at = CalendarSchedule.timestamp(thread.updatedAt) {
+                                        Text(ChatThreadTurns.age(of: at)).font(.system(size: 13)).monospacedDigit()
+                                            .foregroundStyle(Theme.textSecondary)
+                                            .accessibilityLabel(ChatThreadTurns.spokenAge(of: at))
+                                    }
+                                }
+                                .frame(minHeight: 48).contentShape(Rectangle())
+                            }
+                            .buttonStyle(RowPressStyle())
+                            .accessibilityIdentifier("server-chat-recent")
+                        }
+                    }
+                    .transition(motion.fade)
+                }
+            }
+            .animation(motion.snappy, value: recents.map(\.id))
+            .task { await saved.refresh(server: server, noteID: nil) }
+        } else {
+            VStack(alignment: .leading, spacing: 12) {
+                ChatSuggestionChips(suggestions: suggestions) { draft = $0; send() }
+            }.padding(.top, 8)
+        }
+    }
+
+    /// The three newest saved chats, for the splash.
+    private var recents: [ChatThreadSummaryDTO] { Array(saved.listed.prefix(3)) }
 
     /// Conversations kept on this iPhone only. Those saved on the server are listed from there instead.
     private var visibleHistory: [ChatConversation] { (session?.conversationsForHistory ?? []).filter { $0.threadID == nil } }
@@ -353,6 +421,19 @@ struct ServerChatView: View {
     }
 }
 
+/// Where Chat in the app's navigation leads.
+enum ChatNavigation {
+    /// The chat across meetings of the default account, on a new conversation's splash
+    /// (the one that was open is kept in the history). Nil without an account to ask.
+    @MainActor static func workspaceChat(_ accounts: AccountsModel) -> Route? {
+        guard let session = accounts.defaultSession, let account = session.notes.accountID else { return nil }
+        if let key = ChatHistoryScope.key(accountIdentity: session.notes.accountIdentity, noteID: nil) {
+            ServerChatSessions.shared.freshConversation(for: key)
+        }
+        return .serverChat(account, noteID: nil)
+    }
+}
+
 /// A question that waits for the answer before it. Dimmed, in the place it
 /// will take, with a way to take it back out.
 struct QueuedQuestionRow: View {
@@ -486,6 +567,20 @@ struct QueuedQuestionRow: View {
         session.end(); live[key] = nil; liveOrder.removeAll { $0 == key }
     }
 
+    /// Opening Chat from Home or the sidebar starts on a new conversation's splash, as
+    /// on the desktop: the one that was open is kept in the history (and, once asked
+    /// in, on the server). One whose answer is still arriving is shown as it is,
+    /// since this device keeps one conversation going per chat.
+    func freshConversation(for key: String) {
+        if let session = live[key] {
+            if !session.busy, session.queue.isEmpty, !session.messages.isEmpty { session.newConversation() }
+            return
+        }
+        let state = load(for: key)
+        guard !state.messages.isEmpty else { return }
+        save(messages: [], history: Self.archive(state.messages, in: state.history, threadID: state.threadID), threadID: nil, for: key)
+    }
+
     /// Answers arriving now. For tests.
     var answering: [String] { live.filter { $0.value.busy }.map(\.key).sorted() }
 
@@ -550,10 +645,38 @@ extension ServerChatView {
     static var debugSeed: [ChatMessage] {
         #if DEBUG
         guard ProcessInfo.processInfo.arguments.contains("server-chat-sample") else { return [] }
-        return [
-            ChatMessage(role: .user, text: "What was decided about the regatta date?"),
-            ChatMessage(role: .assistant, text: "The regatta was set for **Saturday the 19th** because it avoids the ferry maintenance window.\n\n- Priya books the slipway\n- Tomas orders twelve buoys"),
+        // A fictional company and team. The first answer searched (sources, lookups, reasoning:
+        // "Worked for"), the second only read the meeting's transcript ("Thought for").
+        func meeting(_ id: Int, _ title: String, _ date: String) -> ChatToolMeetingDTO {
+            ChatToolMeetingDTO(date: date, noteId: String(format: "00000000-0000-4000-8000-%012d", id), title: title)
+        }
+        func source(_ id: String, _ note: Int, _ title: String) -> ChatCitationDTO {
+            ChatCitationDTO(id: id, noteId: String(format: "00000000-0000-4000-8000-%012d", note), quote: "", segmentId: nil, source: .notes, startMs: nil, title: title, transcriptRevision: 1)
+        }
+        let today = Date.now.formatted(.iso8601.year().month().day())
+        var worked = ChatTurnAnnotations(saved: [
+            ChatReasoningDTO(afterTools: 0, text: "**Finding the pilot calls**\n\nThe dock pilot came up in more than one meeting, so I will search for it first."),
+            ChatReasoningDTO(afterTools: 1, text: "**Reading both calls**\n\nThe later call has the pricing decision; the earlier one has the dock counts."),
+        ], elapsedMs: 6_400)
+        worked.apply(ChatStreamEventDTO(text: "", tool: ChatToolProgressDTO(callId: "qa-1", label: "Searched meetings for the dock pilot", name: .searchMeetings, resultCount: 2,
+            results: [meeting(1, "Halden pilot check-in", today), meeting(2, "Halden pricing call", "2026-11-12")], status: .completed), type: .tool))
+        worked.apply(ChatStreamEventDTO(text: "", tool: ChatToolProgressDTO(callId: "qa-2", label: "Read 2 meetings", name: .getMeetings, resultCount: 2, results: nil, status: .completed), type: .tool))
+        worked.apply(ChatStreamEventDTO(citations: [source("S1", 1, "Halden pilot check-in"), source("S2", 2, "Halden pricing call"), source("S12", 2, "Halden pricing call")], text: "", type: .citations))
+        var thought = ChatTurnAnnotations(saved: [], elapsedMs: 2_900)
+        thought.apply(ChatStreamEventDTO(text: "", tool: ChatToolProgressDTO(callId: "qa-3", label: "Read the transcript", name: .getMeetingTranscript, resultCount: nil, results: nil, status: .completed), type: .tool))
+        var messages = [
+            ChatMessage(role: .user, text: "What did we decide about the dock pilot?"),
+            ChatMessage(role: .assistant, text: "The pilot is staying at **€42/dock/month**, with a longer trial instead of a discount [[S2]]. Usage is up: 3 of 5 docks now book in the app [[S1]][[S12]].\n\n# Next Steps\n- Send the yard system integration spec (Owen)\n  Due Friday, so engineering can scope the sync before the next call.\n- Book onsite training for the night shifts (Priya)\n  Both night leads asked for it; aim for the week of the 14th.", annotations: worked),
+            ChatMessage(role: .user, text: "Who is running the training?"),
+            ChatMessage(role: .assistant, text: "Priya is booking it, with the two night leads joining the first session.", annotations: thought),
         ]
+        // `-qa.chatSeed thinking`: a third question still being thought about, a lookup under way.
+        if UserDefaults.standard.string(forKey: "qa.chatSeed") == "thinking" {
+            var live = ChatTurnAnnotations(saved: [ChatReasoningDTO(afterTools: 0, text: "**Checking the calendar**\n\nLooking for the training dates.\n")], elapsedMs: nil)
+            live.apply(ChatStreamEventDTO(text: "", tool: ChatToolProgressDTO(callId: "qa-4", label: "Listing meetings this month", name: .listMeetings, resultCount: nil, results: nil, status: .running), type: .tool))
+            messages += [ChatMessage(role: .user, text: "When is the first session?"), ChatMessage(role: .assistant, text: "", isStreaming: true, annotations: live)]
+        }
+        return messages
         #else
         return []
         #endif

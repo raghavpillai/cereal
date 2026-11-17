@@ -104,16 +104,20 @@ struct ServerHomeView: View {
                 // The recording carries on while the user is here. The indicator is the
                 // recording screen's own pill; it buds off the Ask pill and one tap returns.
                 if let indicator {
+                    // As on the desktop: the note's title, and a close control that stops it.
                     RecordingPill(recorder: recording.recorder, onStop: {}, onStart: {},
                                   onOpen: { router.serverCapture = ServerCaptureTarget(indicator) },
-                                  zoomsToCapture: indicatorIsZoomSource)
+                                  zoomsToCapture: indicatorIsZoomSource,
+                                  title: accounts.sessions.first { $0.id == indicator.account }?.notes.title(ofNote: indicator.id) ?? "",
+                                  onClose: { recording.stop() })
                         .glassMorph("recording", in: glass)
                         .accessibilityIdentifier("recording-indicator")
                 }
             } ask: {
                 // Until a chat can choose its account, questions across meetings go to the default account.
+                // Chat opens on a new conversation; the one that was open is kept in its history.
                 AskAnythingPill(prominent: true) {
-                    if let account = accounts.defaultSession?.notes.accountID { router.path.append(.serverChat(account, noteID: nil)) }
+                    if let route = ChatNavigation.workspaceChat(accounts) { router.path.append(route) }
                 }.disabled(accounts.defaultSession?.notes.accountIdentity == nil)
             } add: {
                 // While a recording runs, + returns to it and the indicator is what the screen grows out of.
@@ -197,6 +201,12 @@ struct ServerHomeView: View {
             return CalendarSchedule.events(snapshot.events, on: selectedCalendarDay, enabledCalendarIDs: enabledIDs, knownCalendarIDs: Set(snapshot.calendars.map(\.id)))
                 .map { AccountEvent(session: session, account: session.notes.accountID, event: $0) }
         }
+        // Whether today had any events at all, over or not: the empty line says which.
+        let hadEventsToday = dayOffset == 0 && readForDay && ready.contains { session in
+            let snapshot = session.notes.calendarState.snapshot
+            let enabledIDs = Set(snapshot.calendars.filter(\.enabled).map(\.id))
+            return !CalendarSchedule.events(snapshot.events, on: selectedCalendarDay, now: .distantPast, enabledCalendarIDs: enabledIDs, knownCalendarIDs: Set(snapshot.calendars.map(\.id))).isEmpty
+        }
         let failed = ready.contains { if case .failed = $0.notes.calendarState { true } else { false } }
         // Only answers read for this day count. Reading it again keeps what it showed;
         // a day just stepped to stays empty until its own answer, which then fades in.
@@ -235,7 +245,7 @@ struct ServerHomeView: View {
                         Button { Task { await openEvent(item) } } label: {
                             HomeEventsBlock(barColor: calendarColor(event.color)) {
                                 Text(event.title).font(.system(size: HomeMetrics.eventsText, weight: .medium)).foregroundStyle(Theme.textPrimary)
-                                Text(eventTime(event)).font(.system(size: 14)).foregroundStyle(Theme.textSecondary)
+                                EventTimeLabel(pieces: Self.eventTimePieces(event)).foregroundStyle(Theme.textSecondary)
                                 Text(event.calendarName).font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
                                 if let location = event.location, !location.isEmpty { Text(location).font(.caption).foregroundStyle(Theme.textSecondary) }
                             }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
@@ -250,7 +260,7 @@ struct ServerHomeView: View {
                 }
             } else if loaded {
                 if snapshots.contains(where: { $0.personalCalendarsLinked || $0.calendars.contains(where: \.enabled) }) {
-                    HomeEventsEmpty(text: dayOffset == 0 ? "No more events today" : "No events")
+                    HomeEventsEmpty(text: Self.emptyDay(today: dayOffset == 0, hadEvents: hadEventsToday))
                 } else { HomeEventsEmpty(text: "Link calendars to see upcoming meetings") }
             } else if loading {
                 // Holds the block's place while the first calendars load.
@@ -275,10 +285,34 @@ struct ServerHomeView: View {
         return Color(hex: hex.count == 6 ? UInt32(hex, radix: 16) ?? 0x87E5E8 : 0x87E5E8)
     }
 
-    private func eventTime(_ event: CalendarEventDTO) -> String {
-        if event.allDay { return "All day" }
-        guard let start = CalendarSchedule.timestamp(event.startAt), let end = CalendarSchedule.timestamp(event.endAt) else { return "Time unavailable" }
-        return start.formatted(date: .omitted, time: .shortened) + " – " + end.formatted(date: .omitted, time: .shortened)
+    /// The line of a day with nothing left on it, in the desktop's words: "No more" once
+    /// today's events are over, "No events" when it had none, and for any other day.
+    static func emptyDay(today: Bool, hadEvents: Bool) -> String {
+        guard today else { return "No events on this day" }
+        return hadEvents ? "No more events today" : "No events today"
+    }
+
+    /// An event's times as the desktop writes them: "10:30 – 11:00 AM" with a meridiem
+    /// both ends share said once, "11:30 AM – 12:15 PM" otherwise. Each `meridiem` piece
+    /// is set smaller (`EventTimeLabel`). A clock without one is written as it is.
+    static func eventTimePieces(_ event: CalendarEventDTO, locale: Locale = .current, timeZone: TimeZone = .current) -> [(text: String, meridiem: Bool)] {
+        if event.allDay { return [("All day", false)] }
+        guard let start = CalendarSchedule.timestamp(event.startAt), let end = CalendarSchedule.timestamp(event.endAt) else { return [("Time unavailable", false)] }
+        let format = DateFormatter()
+        format.locale = locale; format.timeZone = timeZone
+        format.setLocalizedDateFormatFromTemplate("jmm")
+        let gaps = CharacterSet.whitespaces.union(CharacterSet(charactersIn: "\u{202F}\u{00A0}"))
+        func split(_ date: Date) -> (time: String, half: String?) {
+            let text = format.string(from: date)
+            for symbol in [format.amSymbol, format.pmSymbol].compactMap({ $0 }) where !symbol.isEmpty && text.hasSuffix(symbol) {
+                return (String(text.dropLast(symbol.count)).trimmingCharacters(in: gaps), symbol.uppercased())
+            }
+            return (text, nil)
+        }
+        let (from, fromHalf) = split(start), (to, toHalf) = split(end)
+        guard let fromHalf, let toHalf else { return [("\(format.string(from: start)) – \(format.string(from: end))", false)] }
+        if fromHalf == toHalf { return [("\(from) – \(to)", false), (toHalf, true)] }
+        return [(from, false), (fromHalf, true), (" – \(to)", false), (toHalf, true)]
     }
 
     /// A note from an event belongs to the event's account, and is asked of that account alone.
@@ -535,5 +569,24 @@ enum ServerHomeGrouping {
             return day.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).year())
         }
         return day.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated))
+    }
+}
+
+/// An event's times, each AM/PM as a smaller capital run on the digits' baseline: the
+/// desktop's 8.5 pt beside its 12 pt time, kept in proportion beside this 14 pt one.
+private struct EventTimeLabel: View {
+    let pieces: [(text: String, meridiem: Bool)]
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 0) {
+            ForEach(Array(pieces.enumerated()), id: \.offset) { _, piece in
+                if piece.meridiem {
+                    Text(piece.text).font(.system(size: 10)).padding(.leading, 3)
+                } else {
+                    Text(piece.text).font(.system(size: 14))
+                }
+            }
+        }
+        .lineLimit(1)
+        .accessibilityElement(children: .combine)
     }
 }
