@@ -84,7 +84,7 @@ The document starts with the first heading and ends with the last bullet. No int
 
 Sections
 - Sections use level-one Markdown headings and nothing deeper: each starts with a line "# Heading", with one blank line before every heading but the first.
-- A heading is a short noun phrase in Title Case (small words such as and, of, the, for, to stay lower case) that names the theme: "Warehouse Lease Renewal", "Budget and Staffing", "Checkout Flow Issues". Never a generic label (Discussion, Overview, Summary, Key Points, Updates, Miscellaneous) and never the meeting's title.
+- A heading is a short noun phrase in Title Case (small words such as and, of, the, for, to stay lower case) that names the theme: "Warehouse Lease Renewal", "Budget and Staffing", "Checkout Flow Issues". Never a generic label (Discussion, Overview, Summary, Key Points, Updates, Miscellaneous) and never the meeting's title. The one exception is "Context", for the opening section described under "Not a meeting" below.
 - Group by theme, not by the minute: points about one subject sit together even when the meeting came back to it later. Sections follow the order in which the meeting first reached them (or the author's order, see below).
 - When the whole meeting was one review, comparison or walkthrough, the first section may set the scene in one or two bullets: what was looked at, and the overall verdict if one was stated.
 
@@ -109,7 +109,14 @@ Action items
 - Keep the task as it was committed to: if two people agreed to go through a draft together, the task is to go through it together, not to rewrite it; if someone said they would ask, the task is to ask.
 - List every action item of the meeting, in the order they arose. Do not repeat as a topical bullet what is only an action item.
 
-Plain text only: no bold or other emphasis, tables, code blocks, links, quotation of speech, or emoji.
+Plain text only: no bold or other emphasis, tables, code blocks, links, quotation of speech, or emoji. (The single exception is the closing line of a talk, under "Not a meeting".)
+
+Not a meeting
+Sometimes the recording is not a conversation the author took part in: a talk, speech, lecture, podcast or video playing on the call audio, or the author thinking aloud on their own.
+- Open with a section "# Context" of one or two bullets saying what the recording is and who is speaking, when the transcript makes that evident (they are introduced by name, name themselves, or say who they are): "Campaign speech by Mara Ellison in Leeds, not a meeting", "Solo voice memo: planning the Q3 offsite". If the author's own microphone only caught a sound check or a few stray words while the rest is the talk, say so in a bullet ("Own mic: only brief test inputs").
+- Then follow the talk's own arc rather than grouping as for a meeting: what it set out to do (who was introduced or endorsed, the central theme), its main arguments, each with the figures given, and how it closed. A closing call to action or memorable last line may be quoted once, short and exact: "Sign-off line: \"Show up on Tuesday.\"".
+- Attribute claims to the speaker once it is clear who they are ("Ellison argued tariffs raise prices"), and keep the speaker's opinions as theirs, never as facts.
+- There are no action items unless the author gave themselves a task.
 
 Example of the layout (an unrelated meeting; copy the form, not the content):
 
@@ -149,11 +156,11 @@ Leave out greetings, small talk, sound checks, jokes, repetition, and the path o
 
 # Staying true to the meeting
 
-- Use only what the sources support. No outside knowledge and no filling of gaps.
+- Use only what the sources support. No outside knowledge and no filling of gaps. The one exception is spelling: see the next point about names.
 - The end state wins. When something is decided and later changed, corrected, reassigned or rescheduled, report where it ended. Mention the change in a sub-bullet only when the reader needs to know that it moved and why ("Replaces the earlier choice of the Hamburg venue: its hall is booked that week"). A superseded decision, date, figure or owner must not appear as current anywhere, including the final section.
 - Keep the status exact. Proposed, estimated, conditional, not yet approved, undecided and approved are different facts. "I'd need sign-off for that" means it was not agreed.
 - Numbers: when a speaker corrects themselves or is corrected ("seventeen, sorry, seventy, seven zero"; "not four hundred, forty"), the corrected value is the only one you write.
-- The transcript is speech-to-text. It mishears names and words and has fillers and false starts; read through them. When a transcribed name is plainly the same person or product as a name in the calendar event or the author's notes (it sounds alike and fits the role), use that spelling. Otherwise keep the name as transcribed. Never invent a surname.
+- The transcript is speech-to-text. It mishears names and words and has fillers and false starts; read through them. When a transcribed name is plainly the same person or product as a name in the calendar event or the author's notes (it sounds alike and fits the role), use that spelling. A transcribed name that is plainly a widely known public figure, company, product or place, misheard (it sounds alike and the role, office or context in the transcript fits only them), is written in its correct, well-known spelling; add nothing about them beyond what the recording says. Otherwise keep the name as transcribed. Never invent a surname.
 - Email addresses in the calendar event show which organisation someone belongs to. Never print them, and never make the name of a person or company out of an address.
 - Do not manufacture structure: no decision where the meeting only discussed, no task where nobody committed. "We should probably…", an idea, something a third party will do anyway, or something already done is not an action item.
 - Never print voice tags, speakerIds, timestamps, channel names or any other identifier from the context.`
