@@ -700,10 +700,7 @@ impl Cereal {
                             }),
                     )
                     .child(
-                        round_tool("space-ask-send", "arrow-up", "Send · Enter", t)
-                            .size(px(32.))
-                            .bg(t.fill)
-                            .when(!can_send || asking, |send| send.opacity(DISABLED))
+                        crate::ui::send_button("space-ask-send", "Send · Enter", can_send && !asking, t)
                             .on_click(cx.listener(|this, _, _, cx| this.submit_chat(cx))),
                     ),
                 ),

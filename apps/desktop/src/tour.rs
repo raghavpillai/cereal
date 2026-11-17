@@ -1393,6 +1393,20 @@ fn thinking_steps() -> Vec<Step> {
             view.assistant_open = false;
         }),
         input("p-chatnav-2-pressed", 900, |window, cx| click(window, cx, 60., 128.)),
+        // The send button with something to send, in a note's chat and on
+        // the Chat page. `CEREAL_TOUR=p-send`.
+        step("p-send-1-note", 900, |view, cx| {
+            view.close_chat_surface(cx);
+            view.open_note(1, cx);
+            seed(view, false);
+            view.ask.update(cx, |input, cx| input.set_content("What", cx));
+        }),
+        step("p-send-2-page", 900, |view, cx| {
+            view.close_chat_surface(cx);
+            view.navigate(Screen::Chat, cx);
+            view.clear_chat(cx);
+            view.ask.update(cx, |input, cx| input.set_content("What", cx));
+        }),
         step("p-think-end", 300, |view, cx| {
             view.close_chat_surface(cx);
             view.clear_chat(cx);

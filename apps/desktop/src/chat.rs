@@ -2772,27 +2772,11 @@ impl crate::app::Cereal {
                     .text_color(t.text)
                     .on_click(cx.listener(|this, _, _, cx| this.stop_chat_stream(cx)))
             } else if can_send {
-                round_tool("send-chat-stream", "arrow-up", "Send · Enter", t)
-                    .size(px(32.))
-                    .rounded_full()
-                    .bg(if self.chat_editing.is_some() {
-                        rgb(0x835e00).into()
-                    } else {
-                        t.text
-                    })
-                    .text_color(if self.chat_editing.is_some() {
-                        rgb(0xfcfcf8).into()
-                    } else {
-                        t.bg
-                    })
+                crate::ui::send_button("send-chat-stream", "Send · Enter", true, t)
                     .on_click(cx.listener(|this, _, _, cx| this.submit_chat(cx)))
             } else {
                 // Nothing typed yet: the send arrow, dimmed.
-                round_tool("send-chat-stream-idle", "arrow-up", "Type a question to send", t)
-                .size(px(32.))
-                .rounded_full()
-                .bg(t.hover)
-                .opacity(crate::ui::DISABLED)
+                crate::ui::send_button("send-chat-stream-idle", "Type a question to send", false, t)
             });
         div()
             .id("chat-composer-pill")

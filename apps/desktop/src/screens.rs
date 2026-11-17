@@ -602,11 +602,7 @@ impl Cereal {
                             .text_color(t.bg)
                             .on_click(cx.listener(|this, _, _, cx| this.stop_chat_stream(cx)))
                     } else if can_send {
-                        round_tool("send-chat", "arrow-up", "Send message · Enter", t)
-                            .size(px(32.))
-                            .rounded_full()
-                            .bg(t.text)
-                            .text_color(t.bg)
+                        crate::ui::send_button("send-chat", "Send message · Enter", true, t)
                             .focusable()
                             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
@@ -617,12 +613,7 @@ impl Cereal {
                             .on_click(cx.listener(|this, _, _, cx| this.submit_chat(cx)))
                     } else {
                         // Nothing typed yet: the send arrow, dimmed.
-                        round_tool("send-chat-idle", "arrow-up", "Type a question to send", t)
-                        .size(px(32.))
-                        .rounded_full()
-                        .bg(t.fill)
-                        .cursor(CursorStyle::Arrow)
-                        .opacity(DISABLED)
+                        crate::ui::send_button("send-chat-idle", "Type a question to send", false, t)
                     }),
             )
             .into_any_element()

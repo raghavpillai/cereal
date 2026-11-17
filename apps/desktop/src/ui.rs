@@ -295,6 +295,30 @@ pub fn round_tool(
     )
 }
 
+/// The send button of every composer: a 32 pt disc of the brand's bright
+/// gold with a bold near-black arrow, in both themes (the reference's filled
+/// send, in our colour; the light theme's deeper accent reads brown at this
+/// size). Until there is something to send it is a quiet grey disc.
+pub fn send_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    enabled: bool,
+    t: Theme,
+) -> Stateful<Div> {
+    with_tooltip(
+        tool_shell(id.into(), t, None)
+            .rounded_full()
+            .size(px(32.))
+            .bg(if enabled { rgb(SEND_GOLD).into() } else { t.hover })
+            .when(!enabled, |idle| idle.cursor(CursorStyle::Arrow).opacity(DISABLED))
+            .child(icon("send", 17., if enabled { rgb(0x1d1a12).into() } else { t.muted })),
+        label.into(),
+        t,
+    )
+}
+/// The gold of a send button that can send.
+pub const SEND_GOLD: u32 = 0xe0af2f;
+
 fn tool_shell(id: ElementId, t: Theme, radius: Option<f32>) -> Stateful<Div> {
     let feedback = crate::motion::tactile(t.hover).press(t.border.opacity(0.6));
     div()
