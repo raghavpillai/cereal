@@ -2201,6 +2201,15 @@ impl crate::app::Cereal {
         let keys: Vec<u64> = (0..self.chat_messages.len())
             .map(|index| self.chat_turn_key(index))
             .collect();
+        // A reader at the end of the conversation stays there while it grows:
+        // an answer arriving, its thinking, a new question. One who scrolled
+        // up is left where they are, and nothing moves while the conversation
+        // stands still (opening a fold does not pull the page down).
+        let signature = self.chat_follow_signature();
+        let grew = self.chat_follow.replace(signature) != signature;
+        if (grew || self.chat_stream.is_some()) && chat_at_end(&self.chat_scroll) {
+            self.chat_to_bottom();
+        }
         let (wraps_to, widest) = self.chat_question_width(compact, window);
         crate::lazy::column(
             "chat-turns",
@@ -2250,6 +2259,16 @@ impl crate::app::Cereal {
     /// beside the sidebar, up to 672 px.
     pub(crate) fn chat_column_width(&self, window: &Window) -> f32 {
         (f32::from(window.viewport_size().width) - self.sidebar_inset()).clamp(240., 672.)
+    }
+
+    /// What the conversation holds, for telling when it has grown: its turns
+    /// and the length of the newest one.
+    pub(crate) fn chat_follow_signature(&self) -> u64 {
+        let last = self
+            .chat_messages
+            .last()
+            .map_or(0, |(question, answer)| question.len() + answer.len());
+        ((self.chat_messages.len() as u64) << 40) ^ last as u64
     }
 
     /// Show the newest end of the conversation.
@@ -4783,4 +4802,10 @@ mod account_tests {
         assert_eq!(kept[0].id, "a-10");
     }
 
+}
+
+/// Whether the conversation shows its end: within a few points of the bottom,
+/// as the last frame laid it out. A wheel turn up of any size leaves it.
+pub(crate) fn chat_at_end(scroll: &ScrollHandle) -> bool {
+    scroll.max_offset().height + scroll.offset().y <= px(8.)
 }

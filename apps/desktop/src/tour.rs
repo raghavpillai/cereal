@@ -1182,6 +1182,16 @@ fn thinking_steps() -> Vec<Step> {
         - **Rollout:** the Brambling cash rollout stays paused until the certificate rotation is confirmed. [[S3]]\n\
         - **Owners:** Jules takes the alert; Maya confirms the rotation on Thursday. [[S57]][[S58]]\n\n\
         Nothing else was assigned to you in the last seven days.";
+    fn follow_log(view: &Cereal) {
+        let scroll = &view.chat_scroll;
+        eprintln!(
+            "follow: {:.0} px from the end of {:.0}, answer {} chars, streaming {}",
+            f32::from(scroll.max_offset().height + scroll.offset().y),
+            f32::from(scroll.max_offset().height),
+            view.chat_messages.last().map_or(0, |(_, answer)| answer.len()),
+            view.chat_stream.is_some()
+        );
+    }
     fn seed(view: &mut Cereal, reasoning: bool) {
         view.chat_messages.clear();
         view.chat_annotations.clear();
@@ -1333,6 +1343,47 @@ fn thinking_steps() -> Vec<Step> {
         step("p-think-absorb-2-open", 600, |_, _| {}),
         step("k-absorb-close", 2400, |view, cx| view.close_chat_surface(cx)),
         step("p-think-absorb-3-closed", 600, |_, _| {}),
+        // Following the end of the chat: a long answer arrives in the note's
+        // panel; a reader at the end is kept there, one who scrolls up is
+        // left alone, and scrolling back down picks the answer up again.
+        // `CEREAL_TOUR=k-follow` logs how far the view is from the end.
+        step("k-follow-start", 900, |view, cx| {
+            view.close_chat_surface(cx);
+            view.open_note(1, cx);
+            seed(view, false);
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                for word in "Here is more detail on each open item, with who owns it and when it is due. "
+                    .repeat(40)
+                    .split_inclusive(' ')
+                {
+                    if sender.send(crate::server::ChatStreamEvent::Delta(word.into())).is_err() {
+                        return;
+                    }
+                    std::thread::sleep(slow(Duration::from_millis(8)));
+                }
+                let _ = sender.send(crate::server::ChatStreamEvent::Done);
+            });
+            view.start_scripted_chat("Can you provide more details".into(), receiver, cx);
+        }),
+        windowed("k-follow-tick-00", 250, |view, _, _| follow_log(view)),
+        windowed("k-follow-tick-01", 250, |view, _, _| follow_log(view)),
+        windowed("k-follow-tick-02", 250, |view, _, _| follow_log(view)),
+        windowed("k-follow-tick-03", 250, |view, _, _| follow_log(view)),
+        windowed("k-follow-tick-04", 250, |view, _, _| follow_log(view)),
+        input("k-follow-wheel-up", 250, |window, cx| scroll(window, cx, 500., 420., 300.)),
+        windowed("k-follow-tick-05", 250, |view, _, _| follow_log(view)),
+        windowed("k-follow-tick-06", 250, |view, _, _| follow_log(view)),
+        windowed("k-follow-tick-07", 250, |view, _, _| follow_log(view)),
+        windowed("k-follow-tick-08", 250, |view, _, _| follow_log(view)),
+        windowed("k-follow-tick-09", 250, |view, _, _| follow_log(view)),
+        input("k-follow-wheel-down", 250, |window, cx| scroll(window, cx, 500., 420., -100000.)),
+        windowed("k-follow-tick-10", 250, |view, _, _| follow_log(view)),
+        windowed("k-follow-tick-11", 250, |view, _, _| follow_log(view)),
+        windowed("k-follow-tick-12", 250, |view, _, _| follow_log(view)),
+        windowed("k-follow-tick-13", 250, |view, _, _| follow_log(view)),
+        windowed("k-follow-tick-14", 250, |view, _, _| follow_log(view)),
+        windowed("k-follow-tick-15", 250, |view, _, _| follow_log(view)),
         step("p-think-end", 300, |view, cx| {
             view.close_chat_surface(cx);
             view.clear_chat(cx);

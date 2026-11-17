@@ -224,6 +224,9 @@ pub struct Cereal {
     /// `toggle_chat_model_picker`).
     pub chat_model_picker_closed_at: Option<std::time::Instant>,
     pub chat_scroll: ScrollHandle,
+    /// The conversation as it was last drawn (`chat_follow_signature`), so a
+    /// reader at its end is kept there while it grows (`render_chat_turns`).
+    pub chat_follow: std::cell::Cell<u64>,
     pub chat_archives: Vec<crate::chat::ArchivedChat>,
     /// Each account's saved threads on its server (`chat_sync.rs`).
     pub chat_sync: crate::chat_sync::ChatSync,
@@ -571,6 +574,7 @@ impl Cereal {
             chat_history_closed_at: None,
             chat_model_picker_closed_at: None,
             chat_scroll: ScrollHandle::new(),
+            chat_follow: std::cell::Cell::new(0),
             chat_archives: crate::chat::load_history(),
             chat_sync: Default::default(),
             chat_thread_id: uuid::Uuid::new_v4().to_string(),
