@@ -2666,11 +2666,18 @@ impl crate::app::Cereal {
                     .reach()
                     .on_click(cx.listener(move |this, _, _, cx| this.choose_chat_model(index, cx)))
             }));
-        Some(crate::motion::pop(
-            list,
-            crate::motion::Pop::menu(if below { (0., 0.) } else { (1., 1.) }),
-            picker,
-        ))
+        // Painted after everything else and outside any clipping: Home's
+        // floating chat panel is shorter than the menu while it is empty,
+        // and would otherwise cut its first rows off.
+        Some(
+            deferred(crate::motion::pop(
+                list,
+                crate::motion::Pop::menu(if below { (0., 0.) } else { (1., 1.) }),
+                picker,
+            ))
+            .with_priority(2)
+            .into_any_element(),
+        )
     }
 
     /// The composer pill. `folded` is Home's bar at rest (not focused,
@@ -3529,13 +3536,13 @@ fn linked_inline_with_citations(
         }
     }
     for (range, url) in &links {
-        // A source mark is a quiet chip; a web link is the accent.
-        let source = url.starts_with("minutes-source:");
+        // A source mark is its raised number in the accent, with no fill: a
+        // text background covers the whole line box, so behind digits this
+        // small it drew a tall narrow bar rather than a chip.
         highlights.push((
             range.clone(),
             HighlightStyle {
-                color: Some(if source { theme.muted } else { theme.accent }),
-                background_color: source.then_some(theme.hover),
+                color: Some(theme.accent),
                 ..Default::default()
             },
         ));

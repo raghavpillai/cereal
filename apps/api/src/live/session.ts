@@ -19,12 +19,13 @@ import { Effect } from "effect"
 import type { TranscriptSegmentDTO } from "@meeting-notes/contracts"
 import type { LiveAudioFrame, LiveHelloMessage, LiveMarkMessage, LiveServerMessage, LiveStreamState, LiveTranscriber, LiveTranscriberEvent, LiveTranscriberSession } from "@meeting-notes/contracts/live"
 import { LiveCloseCode } from "@meeting-notes/contracts/live"
-import { liveSpeakerId, liveSpeakerLabel, type Interval, type SpeakerTurn } from "./coverage"
+import { liveSpeakerId, liveSpeakerLabel, liveSpeakerNumber, type Interval, type SpeakerTurn } from "./coverage"
 import { ProviderLink, type LinkKey } from "./link"
 import type { AudioChannelName, LiveRepository, SegmentRelabel } from "./repository"
 import { LiveProviderError } from "./providers/queue"
 import { Timeline } from "./timeline"
-import { normaliseText, normaliseWords } from "./text"
+import { normaliseText, normaliseWords, textScript } from "./text"
+import { trace } from "./trace"
 import { attributeWords, canonicalSpeaker, ME, MIC_OWNER_FLIP_MS, UNKNOWN, type Attribution, type AttributedTurn, type HeardWord } from "./speakers"
 
 export interface LiveSocket {
@@ -52,6 +53,10 @@ export interface LiveConfig {
   forceCommitHardMs: number
   /** Silence this long is confirmed with the provider so coverage moves past it. */
   checkpointMs: number
+  /** A channel whose audio stopped arriving this long ago (a stalled network, a sleeping laptop) has what it
+   * sent made final, even mid-word. A keep-alive carries no audio (providers/elevenlabs-realtime.ts), and the
+   * provider discarded an utterance left uncommitted through a five-minute stall (measured 2026-11-17). */
+  stallCommitMs: number
   /** Audio the provider has not read; beyond this the provider session is dropped. */
   upstreamBufferMs: number
   /** Finals queued for a slow or absent client before it is told to re-read the note. */
@@ -78,7 +83,7 @@ export interface LiveConfig {
 }
 export const DEFAULT_LIVE_CONFIG: LiveConfig = {
   resumeWindowMs: 900_000, detachMs: 20_000, pauseKeepMs: 120_000, keepAliveMs: 5_000, chatFlushIntervalMs: 5_000, chatFlushWaitMs: 400, endWaitMs: 2_000,
-  forceCommitMs: 10_000, forceCommitHardMs: 30_000, checkpointMs: 5_000, upstreamBufferMs: 10_000, maxQueuedFinals: 200, providerGiveUpMs: 60_000,
+  forceCommitMs: 10_000, forceCommitHardMs: 30_000, checkpointMs: 5_000, stallCommitMs: 15_000, upstreamBufferMs: 10_000, maxQueuedFinals: 200, providerGiveUpMs: 60_000,
   reopenDelaysMs: [1_000, 2_000, 4_000, 8_000, 15_000], ackIntervalMs: 1_000, statusIntervalMs: 2_000, tickMs: 500, stopIdleMs: 250, stopGraceMs: 1_500,
   holdMs: 300_000,
 }
@@ -88,7 +93,11 @@ export const DEFAULT_LIVE_CONFIG: LiveConfig = {
  * or a long pause) is told that language, so a short, quiet stretch is not taken for another one. Punctuation
  * the detection gets wrong is put right in text.ts. */
 const LANGUAGE_LOCK_MS = 30_000, LANGUAGE_LOCK_SHARE = 0.8
-/** After this much speech in one language, a stretch shorter than `STRAY_LANGUAGE_MS` detected as another is dropped. */
+/** After this much speech written in one script, a stretch shorter than `STRAY_LANGUAGE_MS` written in another is
+ * dropped. By script, not by the language the provider reports: a mumble came back as "うん。" or "음." labelled
+ * with the recording's own language, and was kept; while a short real sentence in another language that shares
+ * the script ("Muchas gracias a todos." in an English meeting) was dropped (measured 2026-11-17,
+ * `.local/ship/accuracy/`). */
 const MAIN_LANGUAGE_MS = 3_000, STRAY_LANGUAGE_MS = 4_000
 /** The close that hands a recording back to its client after its provider session was lost: the client
  * reconnects at once and replays its backlog from what is stored (1012, "service restart", which every
@@ -109,11 +118,21 @@ export interface LiveHold {
   recentAudio?(channel: AudioChannelName): RecentAudio | undefined
 }
 /** PCM16 of a channel, `fromMs` on the note timeline being its first sample. */
-export interface RecentAudio { readonly fromMs: number; readonly sampleRate: number; readonly pcm: Uint8Array }
+export interface RecentAudio { readonly fromMs: number; readonly sampleRate: number; readonly pcm: Uint8Array
+  /** A stretch of each voice's own stored speech (`VOICE_SAMPLE_MS`), for the primer. */
+  readonly voices?: ReadonlyArray<VoiceSample> }
+/** Audio of one voice of the note: its speaker number, and PCM16 from note-timeline `fromMs`. */
+export interface VoiceSample { readonly number: number; readonly fromMs: number; readonly pcm: Uint8Array }
 /** A new provider session on a channel that already has voices is first played the newest this-much of the
  * audio it already transcribed: its diariser names those voices again, and the stored segments say who they
  * are, so the new ids map onto the note's numbers instead of numbering on. Its text is not stored again. */
 const PRIMER_MS = 20_000
+/** The primer prefers a sample of each known voice, taken from the end of its newest stored segment: the newest
+ * 20 s alone often held no stored voice at all (a provider session lost mid-sentence leaves that sentence
+ * unstored, for the replay), and every voice then got a new number; system-audio attribution fell from 83% to
+ * 53% over two provider drops (measured 2026-11-17, `.local/ship/accuracy/`). At most `PRIMER_VOICES` voices,
+ * the most recently heard, `VOICE_SAMPLE_MS` each, half a second apart, the first of them played again last. */
+const VOICE_SAMPLE_MS = 5_000, VOICE_SAMPLE_MIN_MS = 1_200, PRIMER_VOICES = 5, PRIMER_GAP_MS = 500
 /** The longest an end waits for the provider to work through what it was sent. */
 const SETTLE_MAX_MS = 60_000
 interface Upstream {
@@ -170,11 +189,17 @@ interface Channel {
   statusSent?: LiveStreamState
   /** [wall ms, samples] of recent frames, to tell replay from real time. */
   pace: Array<[number, number]>
+  /** When audio last arrived for this channel. */
+  lastAudioAt: number
+  /** The script and end of the channel's newest stored text, for the stray-script rule. */
+  lastText?: { script: string; endMs: number }
   pendingInterim: boolean
   /** The newest `PRIMER_MS` of audio received, from capture sample `recentFrom`. */
   recent: Uint8Array[]
   recentFrom: number
   recentSamples: number
+  /** System audio: a sample of each voice's speech, by speaker number (`VOICE_SAMPLE_MS`). */
+  voices: Map<number, { fromMs: number; pcm: Uint8Array }>
 }
 export interface LiveTailItem { channel: AudioChannelName; text: string; startMs: number; speakerId?: string }
 export interface LiveSnapshot { asOfMs: number; tail: LiveTailItem[]; state: "live" | "catching_up" | "provider_unavailable" }
@@ -195,6 +220,8 @@ export class LiveSession {
   private lastChatFlushAt = -Infinity
   /** Milliseconds of speech per detected language, for `lockedLanguage`. */
   private readonly languages = new Map<string, number>()
+  /** Milliseconds of speech per script of its text (text.ts `textScript`), for `mainScript`. */
+  private readonly scripts = new Map<string, number>()
   /** The microphone's labels by speaker number ("Me", "Room speaker N"), read from the note when a
    * microphone provider session opens and kept here (speakers.ts, rule 2). */
   private readonly micLabels = new Map<number, string>()
@@ -229,7 +256,9 @@ export class LiveSession {
       const known = ledger.filter(row => row.channel === stream.channel && row.toMs > stream.baseMs).map(row => row.toMs)
       const accept = known.length ? Math.floor((Math.max(...known) - stream.baseMs) * stream.sampleRate / 1000) : stream.resumeFromSample
       session.channels.set(stream.channel, { name: stream.channel, sampleRate: stream.sampleRate, baseMs: stream.baseMs, nextSample: accept, finalThroughMs: session.ms(stream, accept), quietSamples: 0, quietThroughSample: accept,
-        paused: false, pausedAt: 0, reopenAttempt: 0, ackedAt: now, ackedSample: accept, statusAt: 0, pace: [], pendingInterim: false, recent: [], recentFrom: accept, recentSamples: 0 })
+        paused: false, pausedAt: 0, reopenAttempt: 0, ackedAt: now, ackedSample: accept, statusAt: 0, pace: [], lastAudioAt: now, pendingInterim: false, recent: [], recentFrom: accept, recentSamples: 0,
+        // The voice samples of the note's previous live session carry over, so a voice heard only before a reconnect is still known.
+        voices: new Map((input.hold?.recentAudio?.(stream.channel)?.sampleRate === stream.sampleRate ? input.hold.recentAudio(stream.channel)!.voices ?? [] : []).map(sample => [sample.number, { fromMs: sample.fromMs, pcm: sample.pcm }])) })
     }
     const results = await Promise.allSettled([...session.channels.values()].map(channel => session.open(channel)))
     if (results.every(result => result.status === "rejected")) {
@@ -258,6 +287,7 @@ export class LiveSession {
     this.socket = socket; this.detachedAt = undefined; this.backpressured = false; this.finalsWhileBlocked = 0
     if (previous && previous !== socket) closeSocket(previous, LiveCloseCode.replaced, "replaced", "Another connection took over this recording", false)
     const revision = await this.transcriptRevision().catch(() => 0)
+    trace("srv_ready", this.noteId, this.sessionId)
     this.post({ type: "ready", sessionId: this.sessionId, provider: this.transcriber.provider, model: this.transcriber.model,
       streams: [...this.channels.values()].map(channel => ({ channel: channel.name, acceptFromSample: channel.nextSample })), resumeWindowMs: this.config.resumeWindowMs, transcriptRevision: revision })
     // Finals stored while no socket was attached. If there were too many, the revision in `ready`
@@ -331,6 +361,7 @@ export class LiveSession {
     const upstream = channel.upstream
     if (upstream) {
       upstream.timeline.audio(firstSample, samples)
+      trace("srv_first_audio_upstream", this.noteId, this.sessionId)
       upstream.session.send(pcm)
       upstream.lastSendAt = now
     } else channel.unavailableFrom ??= firstSample
@@ -339,6 +370,7 @@ export class LiveSession {
     channel.recent.push(pcm.slice()); channel.recentSamples += samples
     while (channel.recent.length > 1 && channel.recentSamples - (channel.recent[0]!.byteLength >> 1) >= PRIMER_MS * channel.sampleRate / 1000) { const dropped = channel.recent.shift()!.byteLength >> 1; channel.recentFrom += dropped; channel.recentSamples -= dropped }
     channel.pace.push([now, samples])
+    channel.lastAudioAt = now
     while (channel.pace.length > 1 && now - channel.pace[0]![0] > 2000) channel.pace.shift()
     if (upstream) this.pace(channel, upstream, now)
     this.acknowledge(channel, now)
@@ -351,10 +383,14 @@ export class LiveSession {
     if (upstream.pendingFlushes && now - upstream.lastCommitAt > 3000) this.answered(upstream, true)
     if (upstream.pendingFlushes || now - upstream.lastCommitAt < 2000) return
     const pendingMs = (upstream.timeline.upstreamSamples - upstream.finalThrough) * 1000 / channel.sampleRate, quietMs = channel.quietSamples * 1000 / channel.sampleRate
-    if (channel.interim?.text) { if (pendingMs >= this.config.forceCommitHardMs || pendingMs >= this.config.forceCommitMs && quietMs >= PAUSE_MS) this.commit(channel, upstream, now) }
+    // Audio stopped arriving part-way through something (see `stallCommitMs`).
+    // Only with a socket attached (a laptop asleep holds its connection): without one, the session ends after
+    // `detachMs` and stores what it has, and a reconnect before that resumes the word where it stopped.
+    const stalled = pendingMs > 0 && !channel.paused && this.socket !== undefined && now - channel.lastAudioAt >= this.config.stallCommitMs
+    if (channel.interim?.text) { if (pendingMs >= this.config.forceCommitHardMs || pendingMs >= this.config.forceCommitMs && quietMs >= PAUSE_MS || stalled) this.commit(channel, upstream, now) }
     // Nothing is being said: have the provider confirm the silence, so coverage (where a reconnect
     // resumes) moves past it.
-    else if (pendingMs >= this.config.checkpointMs && quietMs >= 500) this.commit(channel, upstream, now)
+    else if (pendingMs >= this.config.checkpointMs && quietMs >= 500 || stalled) this.commit(channel, upstream, now)
   }
   private commit(_channel: Channel | undefined, upstream: Upstream, now: number) {
     upstream.lastCommitAt = now
@@ -405,7 +441,7 @@ export class LiveSession {
   }
   mark(mark: LiveMarkMessage) {
     if (this.ended || this.ending) return
-    if (mark.kind === "end") { void this.end(); return }
+    if (mark.kind === "end") { trace("srv_end_mark", this.noteId, this.sessionId); void this.end(); return }
     const now = performance.now()
     for (const channel of this.channels.values()) {
       if (mark.atSample[channel.name] === undefined && Object.keys(mark.atSample).length) continue
@@ -423,18 +459,49 @@ export class LiveSession {
 
   // ------------------------------------------------------------------ provider
 
-  /** The audio for a new provider session's primer: the newest `PRIMER_MS` before where this channel goes on
-   * (from this live session, or the one before it, kept by the hub), and the stored voices in it. */
-  private async primer(channel: Channel) {
-    const own = channel.recentSamples ? { fromMs: this.ms(channel, channel.recentFrom), sampleRate: channel.sampleRate, pcm: concat(channel.recent) } : this.hold?.recentAudio?.(channel.name)
-    if (!own || own.sampleRate !== channel.sampleRate) return undefined
-    const firstSample = Math.round((own.fromMs - channel.baseMs) * channel.sampleRate / 1000)
+  /** The audio for a new provider session's primer and the voices in it: a sample of each known voice (this live
+   * session's, or the one before it, kept by the hub), else the newest `PRIMER_MS` before where this channel goes
+   * on and the stored voices in it. Pieces are played in order, `gapSamples` of silence after each. */
+  private async primer(channel: Channel): Promise<{ pieces: Array<{ firstSample: number; pcm: Uint8Array }>; gapSamples: number; voices: Array<{ fromMs: number; toMs: number; number: number }> } | undefined> {
+    const rate = channel.sampleRate, kept = this.hold?.recentAudio?.(channel.name)
+    const samples = channel.voices.size ? [...channel.voices.entries()].map(([number, sample]) => ({ number, ...sample })) : kept?.sampleRate === rate ? [...kept.voices ?? []] : []
+    if (samples.length) {
+      const newest = samples.sort((a, b) => b.fromMs - a.fromMs).slice(0, PRIMER_VOICES).sort((a, b) => a.fromMs - b.fromMs)
+      // The first sample once more at the end: a new provider session names no speaker in its first utterance (the
+      // diariser has not formed a voice yet, speakers.ts), so the first voice played would otherwise get no votes.
+      const chosen = newest.length > 1 ? [...newest, newest[0]!] : newest
+      return { gapSamples: Math.round(PRIMER_GAP_MS * rate / 1000),
+        pieces: chosen.map(sample => ({ firstSample: Math.round((sample.fromMs - channel.baseMs) * rate / 1000), pcm: sample.pcm })),
+        voices: chosen.map(sample => ({ fromMs: sample.fromMs, toMs: sample.fromMs + Math.round((sample.pcm.byteLength >> 1) * 1000 / rate), number: sample.number })) }
+    }
+    const own = channel.recentSamples ? { fromMs: this.ms(channel, channel.recentFrom), sampleRate: rate, pcm: concat(channel.recent) } : kept
+    if (!own || own.sampleRate !== rate) return undefined
+    const firstSample = Math.round((own.fromMs - channel.baseMs) * rate / 1000)
     // Only audio before where the stream goes on, so the provider's clock and the capture stay in step.
     const usable = Math.min(own.pcm.byteLength >> 1, channel.nextSample - firstSample)
-    if (firstSample < 0 || usable < channel.sampleRate * 2) return undefined
+    if (firstSample < 0 || usable < rate * 2) return undefined
     const pcm = own.pcm.subarray(0, usable * 2), fromMs = this.ms(channel, firstSample), toMs = this.ms(channel, firstSample + usable)
     const voices = await Effect.runPromise(this.store.voicesBetween(this.noteId, channel.name, fromMs, toMs)).catch(() => [])
-    return voices.length ? { firstSample, pcm, voices } : undefined
+    return voices.length ? { pieces: [{ firstSample, pcm }], gapSamples: 0, voices: [...voices] } : undefined
+  }
+  /** Keeps the end of each newly stored system-audio segment as its voice's sample, while the audio is still at hand. */
+  private sampleVoices(channel: Channel, segments: ReadonlyArray<TranscriptSegmentDTO>) {
+    const rate = channel.sampleRate
+    for (const segment of segments) {
+      const number = liveSpeakerNumber("system", segment.speakerId), endMs = segment.endMs ?? segment.startMs
+      if (number === undefined || endMs - segment.startMs < VOICE_SAMPLE_MIN_MS) continue
+      const fromMs = Math.max(segment.startMs, endMs - VOICE_SAMPLE_MS)
+      const from = Math.round((fromMs - channel.baseMs) * rate / 1000), to = Math.round((endMs - channel.baseMs) * rate / 1000)
+      if (from < channel.recentFrom || to > channel.recentFrom + channel.recentSamples || to <= from) continue
+      const pcm = new Uint8Array((to - from) * 2)
+      let at = channel.recentFrom, written = 0
+      for (const piece of channel.recent) {
+        const count = piece.byteLength >> 1, start = Math.max(from, at), end = Math.min(to, at + count)
+        if (end > start) { pcm.set(piece.subarray((start - at) * 2, (end - at) * 2), (start - from) * 2); written += end - start }
+        at += count
+      }
+      if (written === to - from) channel.voices.set(number, { fromMs, pcm })
+    }
   }
   /** The language nearly all of this recording's speech so far was detected as, once there is enough of it. */
   private lockedLanguage(): string | undefined {
@@ -443,10 +510,10 @@ export class LiveSession {
     return top && total >= LANGUAGE_LOCK_MS && top[1] / total >= LANGUAGE_LOCK_SHARE ? top[0] : undefined
   }
 
-  /** The language this recording is plainly in so far: a few seconds of speech, nearly all of it one language. */
-  private mainLanguage(): string | undefined {
-    const total = [...this.languages.values()].reduce((sum, ms) => sum + ms, 0)
-    const top = [...this.languages.entries()].sort((a, b) => b[1] - a[1])[0]
+  /** The script this recording's text is plainly written in so far: a few seconds of speech, nearly all of it one script. */
+  private mainScript(): string | undefined {
+    const total = [...this.scripts.values()].reduce((sum, ms) => sum + ms, 0)
+    const top = [...this.scripts.entries()].sort((a, b) => b[1] - a[1])[0]
     return top && total >= MAIN_LANGUAGE_MS && top[1] / total >= LANGUAGE_LOCK_SHARE ? top[0] : undefined
   }
 
@@ -459,6 +526,7 @@ export class LiveSession {
       // A provider session the hub held since this note's previous live session knows the voices already.
       const held = this.hold?.take(key)
       const link = held ?? new ProviderLink(await this.transcriber.open({ channel: channel.name, sampleRate: channel.sampleRate, ...(language ? { language } : {}), signal: abort.signal }), abort, key)
+      trace(held ? "srv_provider_held" : "srv_provider_open", this.noteId, this.sessionId)
       if (this.ended) { await link.close(); return }
       const now = performance.now(), timeline = new Timeline(channel.sampleRate)
       // The provider's clock goes on from where the earlier capture left it; nothing before is this capture's audio.
@@ -466,11 +534,12 @@ export class LiveSession {
       const earlier = held ? [] : await Effect.runPromise(this.store.voices(this.noteId, channel.name)).catch(() => [] as ReadonlyArray<number>)
       // System audio with voices already: play the primer first, so the new ids can be mapped (`PRIMER_MS`).
       const primer = !held && channel.name === "system" && earlier.length ? await this.primer(channel) : undefined
-      if (primer) timeline.audio(primer.firstSample, primer.pcm.byteLength >> 1)
-      const origin = link.sent + (primer ? primer.pcm.byteLength >> 1 : 0)
+      const primerAudio = primer ? concat(primer.pieces.flatMap(piece => [piece.pcm, new Uint8Array(primer.gapSamples * 2)])) : undefined
+      for (const piece of primer?.pieces ?? []) { timeline.audio(piece.firstSample, piece.pcm.byteLength >> 1); if (primer!.gapSamples) timeline.silence(piece.firstSample + (piece.pcm.byteLength >> 1), primer!.gapSamples) }
+      const origin = link.sent + (primerAudio ? primerAudio.byteLength >> 1 : 0)
       const upstream: Upstream = { id: crypto.randomUUID(), link, session: link.session, timeline, abort: link.abort, speakers: { ...link.speakers }, origin, attribution: link.attribution, finalThrough: origin, utterances: new Map(), lastSendAt: now, lastCommitAt: now, flushedThrough: origin, pendingFlushes: 0, flushWatchers: [],
         ...(primer ? { primer: { voices: primer.voices, votes: new Map() } } : {}) }
-      if (primer) { link.session.send(primer.pcm); link.session.flush(); upstream.pendingFlushes++ }
+      if (primerAudio) { link.session.send(primerAudio); link.session.flush(); upstream.pendingFlushes++ }
       if (!held) {
         // A new provider session numbers its voices afresh; the note's earlier voices carry over as speakers.ts describes.
         if (channel.name === "mic" && earlier.length) {
@@ -505,6 +574,7 @@ export class LiveSession {
     if (channel.upstream !== upstream || event.endSec * channel.sampleRate <= upstream.origin && event.text.trim()) return
     const text = normaliseText(event.text.trim())
     if (!text && !channel.interim) return
+    if (text) trace("srv_first_interim", this.noteId, this.sessionId)
     let utteranceId = upstream.utterances.get(event.utterance)
     if (!utteranceId) { if (!text) return; utteranceId = crypto.randomUUID(); upstream.utterances.set(event.utterance, utteranceId) }
     const previous = channel.interim?.utteranceId === utteranceId ? channel.interim : undefined
@@ -543,16 +613,24 @@ export class LiveSession {
     this.mapPrimerVoices(upstream)
     let spokenMs = heard.length ? heard.at(-1)!.endMs - heard[0]!.startMs : 0
     // A mumble or a filler in a recording that is plainly in one language is sometimes detected as another and
-    // written in its script ("uh… hey hey hey" as Chinese). A short stretch like that is dropped; a long one is kept.
-    const main = this.mainLanguage()
-    if (event.language && main && event.language !== main && spokenMs < STRAY_LANGUAGE_MS) { heard.length = 0; spokenMs = 0 }
+    // written in its script ("uh… hey hey hey" as Chinese, "hmm" as "うん。"). A short stretch in another script is
+    // dropped; a long one is kept, and so is a short one in the same script (a Spanish "gracias" in English).
+    // Not when a flush cut it (a pause, a stall, Stop: how long it would have been is unknown), nor when it goes
+    // on from the channel's previous final in the same script (a passage the provider committed in pieces).
+    const script = textScript(heard.map(item => item.text).join("")), main = this.mainScript()
+    const continues = heard.length > 0 && channel.lastText?.script === script && heard[0]!.startMs - channel.lastText!.endMs < 2000
+    if (script && main && script !== main && spokenMs < STRAY_LANGUAGE_MS && !event.flushed && !continues) { heard.length = 0; spokenMs = 0 }
+    if (script && heard.length) channel.lastText = { script, endMs: heard.at(-1)!.endMs }
+    if (script && spokenMs > 0) this.scripts.set(script, (this.scripts.get(script) ?? 0) + spokenMs)
     if (event.language && spokenMs > 0) this.languages.set(event.language, (this.languages.get(event.language) ?? 0) + spokenMs)
     heard.splice(0, heard.length, ...normaliseWords(heard))
     const speakers = { ...upstream.speakers }
     const attributed = heard.length ? attributeWords(channel.name, upstream.attribution, heard, speakers) : { turns: [] as AttributedTurn[], trusted: [] as string[] }
     const turns = attributed.turns
     upstream.speakers = speakers
-    timeline.prune(through)
+    // Not while the provider is still answering for the primer: its later finals need the primer's anchors to say
+    // when each word was spoken (pruned at the first one, only that final's words were ever matched to a voice).
+    if (!upstream.primer || event.finalThroughSec * rate >= upstream.origin) timeline.prune(through)
     const utteranceId = upstream.utterances.get(event.utterance) ?? crypto.randomUUID()
     upstream.utterances.delete(event.utterance)
     const stored = await this.write(() => this.append(channel, upstream, turns, coverage))
@@ -567,6 +645,7 @@ export class LiveSession {
     for (const interval of coverage) channel.finalThroughMs = Math.max(channel.finalThroughMs, interval.toMs)
     for (const segment of stored.segments) this.post({ type: "final", utteranceId, transcriptRevision: stored.transcriptRevision, segment })
     this.acknowledge(channel, performance.now(), stored.segments.length > 0)
+    if (channel.name === "system") this.sampleVoices(channel, stored.segments)
     if (channel.name === "mic" && stored.segments.length) await this.settleMicVoices(channel, upstream, turns, attributed.trusted, stored.segments)
   }
   /** Gives each diariser id heard over the primer the note's number it was heard over most (at least 60% of
@@ -663,6 +742,8 @@ export class LiveSession {
     if (from === to) return
     const merged = await this.write(() => Effect.runPromise(this.store.mergeSpeakers(this.noteId, channel.name, from, to, this.label(channel.name, to))).catch(() => false))
     if (merged) this.post({ type: "speakers", merges: [{ from: liveSpeakerId(channel.name, from), to: liveSpeakerId(channel.name, to) }] })
+    const sample = channel.voices.get(from)
+    if (sample) { channel.voices.delete(from); if (!channel.voices.has(to)) channel.voices.set(to, sample) }
     if (channel.interim?.speaker === from) channel.interim = { ...channel.interim, speaker: to }
   }
   private write<A>(task: () => Promise<A>): Promise<A> {
@@ -793,9 +874,11 @@ export class LiveSession {
     const wait = async (work: Promise<void>) => {
       if (waitMs <= 0) return
       let done = false, progress = upstream.finalThrough, idleSince = performance.now()
-      void work.then(() => { done = true })
+      const finished = work.then(() => { done = true })
       for (const deadline = performance.now() + SETTLE_MAX_MS; !done && performance.now() < deadline;) {
-        await new Promise(resolve => setTimeout(resolve, 50))
+        // The answer ends the wait the moment it is stored, not at the next look.
+        await Promise.race([finished, new Promise(resolve => setTimeout(resolve, 50))])
+        if (done) return
         if (upstream.finalThrough > progress) { progress = upstream.finalThrough; idleSince = performance.now() }
         else if (performance.now() - idleSince > waitMs + Math.ceil((upstream.session.queuedSeconds ?? 0) * 1000 / 3)) return
       }
@@ -860,6 +943,7 @@ export class LiveSession {
       const upstreams: Upstream[] = [], settling: Promise<void>[] = []
       for (const channel of this.channels.values()) { clearTimeout(channel.reopenTimer); if (channel.upstream) { upstreams.push(channel.upstream); settling.push(this.settle(channel, channel.upstream, this.config.endWaitMs, abrupt)) } }
       await Promise.all(settling)
+      trace("srv_end_settled", this.noteId, this.sessionId)
       await this.settleWrites(this.config.endWaitMs)
       // An orderly end keeps the provider sessions, and with them the provider's voices, for the note's
       // next live session: a Stop is often followed by a Resume. So does a reconnect the server asked for,
@@ -871,10 +955,11 @@ export class LiveSession {
       await this.settleWrites(1000)
       for (const channel of this.channels.values()) { this.acknowledge(channel, performance.now(), true); channel.upstream = undefined }
       // The newest audio of each channel, for the primer of the note's next live session.
-      for (const channel of this.channels.values()) if (channel.recentSamples) this.hold?.keepAudio?.(channel.name, { fromMs: this.ms(channel, channel.recentFrom), sampleRate: channel.sampleRate, pcm: concat(channel.recent) })
+      for (const channel of this.channels.values()) if (channel.recentSamples) this.hold?.keepAudio?.(channel.name, { fromMs: this.ms(channel, channel.recentFrom), sampleRate: channel.sampleRate, pcm: concat(channel.recent), voices: [...channel.voices.entries()].map(([number, sample]) => ({ number, ...sample })) })
       for (const upstream of kept) { upstream.link.release(); upstream.link.speakers = { ...upstream.speakers }; upstream.link.sent = upstream.timeline.upstreamSamples }
       if (kept.length) this.hold!.park(kept.map(upstream => upstream.link))
       this.ended = true
+      trace("srv_end_closed", this.noteId, this.sessionId)
       const socket = this.socket
       this.socket = undefined
       if (socket) closeSocket(socket, code, error, message, reconnect ? true : error === "provider_unavailable" ? false : undefined)

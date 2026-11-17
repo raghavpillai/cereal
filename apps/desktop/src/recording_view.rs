@@ -122,16 +122,23 @@ impl Cereal {
         self.recording_changed_at = Some(Instant::now());
         let epoch = self.recording.epoch;
         cx.notify();
+        crate::latency::mark("ui_state");
+        crate::latency::on_paint("ui_painted");
         if crate::audio::preview_mode() {
             self.apply_capture_choices();
         }
         if !crate::audio::preview_mode() {
             if crate::server::enabled() {
-                self.server_action(
+                // The live stream starts with the capture and opens its socket
+                // the moment the server answers this (`RecordingSignal`).
+                crate::server::recording_signal(id, crate::server::RecordingSignal::Waiting);
+                if !self.server_action_sent(
                     id,
                     crate::server::Action::Recording(if resumed { "resume" } else { "start" }),
                     cx,
-                );
+                ) {
+                    crate::server::recording_signal_settled(id);
+                }
             }
             if !resumed {
                 let seconds: f64 = self
@@ -194,6 +201,8 @@ impl Cereal {
         if !self.recording.stop() {
             return;
         }
+        crate::latency::mark("ui_state");
+        crate::latency::on_paint("ui_painted");
         if let Some(capture) = self.audio_capture.take() {
             capture.request_stop();
         }
@@ -244,11 +253,13 @@ impl Cereal {
                 return;
             }
         };
+        crate::latency::mark("capture_spawned");
         let monitor = capture.monitor();
         // Start and Resume both begin a new capture; the live transcript
         // stream follows it once the server has the note recording.
         self.live_prepare(id, monitor.clone());
         self.audio_pending.push(monitor.clone());
+        let connect = crate::server::enabled();
         let initial = monitor.snapshot();
         if let Some(note) = self.workspace.note_mut(id) {
             note.audio_captures.push(initial.clone());
@@ -263,12 +274,16 @@ impl Cereal {
         // Persist the immutable session directory association before any speech
         // arrives, so shutdown cannot orphan audio from its owner note.
         self.persist(cx);
+        if connect {
+            self.live_connect(id, cx);
+        }
         cx.spawn(async move |this, cx| {
             let mut held = false;
+            // Once a frame until the first audio has arrived (so the capsule
+            // turns live the frame after), then for the level bars.
+            let mut poll = Duration::from_millis(16);
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(80))
-                    .await;
+                cx.background_executor().timer(poll).await;
                 let snapshot = monitor.snapshot();
                 let completed = snapshot.completed();
                 let Ok(keep) = this.update(cx, |this, cx| {
@@ -303,8 +318,13 @@ impl Cereal {
                         )
                     };
                     let before = shown(this);
+                    if snapshot.stats.has_audio() || completed {
+                        poll = Duration::from_millis(80);
+                    }
                     if current && owner && this.recording.is_active() {
                         if snapshot.stats.has_audio() && this.recording.phase == Phase::Starting {
+                            crate::latency::mark("ui_live");
+                            crate::latency::on_paint("ui_live_painted");
                             this.recording.activate(epoch);
                             this.recording_went_live(id, epoch, snapshot.error_message());
                         }
@@ -320,6 +340,7 @@ impl Cereal {
                         }
                     }
                     if completed {
+                        crate::latency::mark("capture_finished_seen");
                         this.live_capture_finished(&snapshot.capture_id);
                         this.audio_pending
                             .retain(|pending| pending.snapshot().capture_id != snapshot.capture_id);

@@ -13,6 +13,7 @@ import { LIVE_MAX_FRAME_BYTES, LIVE_SAMPLE_RATES, LiveClientMessage, LiveCloseCo
 import type { NotesRepositoryService } from "../repository"
 import type { LiveHub } from "./hub"
 import { closeSocket, LiveSessionRefusal, type LiveSession } from "./session"
+import { trace } from "./trace"
 
 export interface LiveConnection {
   kind: "live"
@@ -77,6 +78,7 @@ export function makeLiveEndpoint(options: LiveEndpointOptions) {
       if (decoded.type === "hello") {
         if (data.session || data.joining) { close(ws, LiveCloseCode.malformed, "hello was sent twice"); return }
         clearTimeout(data.helloTimer)
+        trace("srv_hello", data.noteId)
         const hello = decoded
         data.joining = (async () => {
           try {
@@ -111,6 +113,7 @@ export function makeLiveEndpoint(options: LiveEndpointOptions) {
     match: (path: string) => pattern.exec(path)?.[1]?.toLowerCase() ?? null,
     /** Answers the upgrade request. Returns undefined once the connection has been upgraded. */
     async upgrade(request: Request, server: Server<LiveConnection>, noteId: string): Promise<Response | undefined> {
+      trace("srv_upgrade", noteId)
       if (request.method !== "GET") return new Response(null, { status: 405, headers: { ...headers, Allow: "GET" } })
       // Bearer only. Cookies are never read here, so a web page cannot open the socket with a
       // signed-in browser session, and an untrusted Origin is refused outright.

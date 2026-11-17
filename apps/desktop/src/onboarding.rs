@@ -272,7 +272,7 @@ fn forced() -> Option<bool> {
 /// probes start in the app itself, as they always have.
 pub fn at_launch() -> Option<Flow> {
     if crate::audio::preview_mode()
-        || ["CEREAL_CAPTURE_PROBE", "CEREAL_LIVE_PROBE"]
+        || ["CEREAL_CAPTURE_PROBE", "CEREAL_LIVE_PROBE", "CEREAL_LATENCY_BENCH"]
             .iter()
             .any(|name| crate::environment::var_os(name).is_some())
     {

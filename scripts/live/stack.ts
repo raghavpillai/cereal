@@ -40,6 +40,9 @@ export interface LiveStackOptions {
   /** `LIVE_MAX_SESSIONS` of this stack (the server's default is 20). */
   maxSessions?: number
   vadSilenceSeconds?: number
+  /** Every HTTP request and WebSocket upgrade is answered this much later, to stand in for a server
+   * across a network (the latency bench, scripts/live/latency-bench.ts). */
+  requestDelayMs?: number
 }
 export interface RecordedChat { at: number; noteId: string; context: string; citations: ChatCitationDTO[]; live: unknown }
 /** What the language provider reported for one request. `cachedTokens` is the part of the prompt it served from its cache. */
@@ -121,6 +124,7 @@ export async function startLiveStack(options: LiveStackOptions = {}) {
   const server = Bun.serve<LiveConnection>({
     port: options.port ?? 0, hostname: options.hostname ?? "127.0.0.1", maxRequestBodySize: 29 * 1024 * 1024, idleTimeout: 255, websocket: endpoint.websocket,
     async fetch(request, server) {
+      if (options.requestDelayMs) await new Promise(resolve => setTimeout(resolve, options.requestDelayMs))
       const path = new URL(request.url).pathname, noteId = endpoint.match(path)
       if (noteId) return endpoint.upgrade(request, server, noteId)
       if (path === "/api/v1/ready") return Response.json({ status: "ready" })

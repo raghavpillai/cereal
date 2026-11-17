@@ -136,6 +136,251 @@ fn notes_generation_steps() -> Vec<Step> {
     Vec::new()
 }
 
+/// The real thing, end to end, `a-e2e-…` (debug builds; run with
+/// `CEREAL_AUDIT=1 CEREAL_TOUR=a-e2e` against a throwaway server whose notes
+/// are listed in `CEREAL_E2E_IDS`, a JSON file of kind → server note id).
+/// It generates notes with the server's real model, opens a bullet's source
+/// card, asks about the note and across notes, switches the model and asks
+/// again, then regenerates. Each stretch that streams says on stderr when it
+/// starts (`tour burst <label>`, for an outside tool to take frames) and how
+/// long its first visible text and its end took, as the app saw them.
+#[cfg(debug_assertions)]
+fn e2e_steps() -> Vec<Step> {
+    fn note_of(view: &Cereal, kind: &str) -> Option<u64> {
+        let path = std::env::var("CEREAL_E2E_IDS").ok()?;
+        let ids: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        let server = ids.get(kind)?.as_str()?.to_owned();
+        view.workspace
+            .notes
+            .iter()
+            .find(|note| !note.trashed && note.server_id.as_deref() == Some(server.as_str()))
+            .map(|note| note.id)
+    }
+    fn open(view: &mut Cereal, kind: &str, cx: &mut Context<Cereal>) -> Option<u64> {
+        view.close_chat_surface(cx);
+        view.navigate(Screen::Home, cx);
+        let id = note_of(view, kind);
+        match id {
+            Some(id) => view.open_note(id, cx),
+            None => eprintln!("tour: e2e: no note {kind:?}"),
+        }
+        id
+    }
+    fn stamp() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis())
+    }
+    /// Watch a generation of `id` until it is written out.
+    fn watch_generation(label: &'static str, id: u64, cx: &mut Context<Cereal>) {
+        eprintln!("tour {} burst {label}", stamp());
+        let began = std::time::Instant::now();
+        cx.spawn(async move |this, cx| {
+            let (mut first, mut shown) = (None, None);
+            for _ in 0..12_000 {
+                cx.background_executor().timer(Duration::from_millis(10)).await;
+                let Ok((received, visible, running, draft)) = this.update(cx, |view, _| {
+                    (
+                        view.generation_draft.showing(id),
+                        !view.generation_draft.visible().is_empty(),
+                        view.generation.is_running_for(id),
+                        view.generation_draft.note_id.is_some(),
+                    )
+                }) else {
+                    return;
+                };
+                if received && first.is_none() {
+                    first = Some(began.elapsed().as_millis());
+                }
+                if visible && shown.is_none() {
+                    shown = Some(began.elapsed().as_millis());
+                }
+                if !running && !draft && began.elapsed() > Duration::from_millis(300) {
+                    let chars = this
+                        .update(cx, |view, _| view.workspace.note(id).map_or(0, |note| note.enhanced.chars().count()))
+                        .unwrap_or(0);
+                    eprintln!(
+                        "tour {} e2e {label}: first text received {first:?} ms, first text shown {shown:?} ms, written out {} ms, {chars} chars",
+                        stamp(),
+                        began.elapsed().as_millis()
+                    );
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+    /// Watch the answer being written to the last question on screen.
+    fn watch_answer(label: &'static str, cx: &mut Context<Cereal>) {
+        eprintln!("tour {} burst {label}", stamp());
+        let began = std::time::Instant::now();
+        cx.spawn(async move |this, cx| {
+            let (mut thought, mut first) = (None, None);
+            for _ in 0..12_000 {
+                cx.background_executor().timer(Duration::from_millis(10)).await;
+                let Ok((reasoning, text, streaming, chars)) = this.update(cx, |view, _| {
+                    let index = view.chat_messages.len().saturating_sub(1);
+                    let answer = view.chat_messages.last().map_or("", |(_, answer)| answer.as_str());
+                    (
+                        view.chat_annotations.get(&index).is_some_and(|notes| {
+                            !notes.reasoning.is_empty() || !notes.tools.is_empty()
+                        }),
+                        !answer.trim().is_empty(),
+                        view.chat_stream.is_some(),
+                        answer.chars().count(),
+                    )
+                }) else {
+                    return;
+                };
+                if reasoning && thought.is_none() {
+                    thought = Some(began.elapsed().as_millis());
+                }
+                if text && first.is_none() {
+                    first = Some(began.elapsed().as_millis());
+                }
+                if !streaming && began.elapsed() > Duration::from_millis(300) {
+                    eprintln!(
+                        "tour {} e2e {label}: first thought/lookup {thought:?} ms, first answer text {first:?} ms, done {} ms, {chars} chars",
+                        stamp(),
+                        began.elapsed().as_millis()
+                    );
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+    fn ask(view: &mut Cereal, label: &'static str, question: &str, cx: &mut Context<Cereal>) {
+        view.assistant_open = true;
+        view.submit_chat_question(question.into(), cx);
+        watch_answer(label, cx);
+    }
+    /// The first top-level bullet of the open note's generated notes.
+    fn first_bullet(view: &Cereal) -> Option<(u64, usize, String)> {
+        let id = view.current_note?;
+        let note = view.workspace.note(id)?;
+        let (row, line) = note
+            .enhanced
+            .lines()
+            .enumerate()
+            .find(|(_, line)| line.starts_with("- "))?;
+        Some((id, row, crate::summary::paragraph_text(line)))
+    }
+    fn top(view: &mut Cereal) {
+        view.note_scroll.set_offset(point(px(0.), px(0.)));
+    }
+    let generate = |label: &'static str, kind: &'static str| {
+        move |view: &mut Cereal, cx: &mut Context<Cereal>| {
+            if let Some(id) = view.current_note.filter(|id| Some(*id) == note_of(view, kind)) {
+                view.enhance_note_preview(id, cx);
+                watch_generation(label, id, cx);
+            }
+        }
+    };
+    let mut steps = vec![
+        step("a-e2e-01-stopped", 1500, |view, cx| {
+            open(view, "sales-call", cx);
+        }),
+        step("a-e2e-02-generate-quiet", 30_000, generate("generate", "sales-call")),
+        step("a-e2e-03-finished", 900, |view, _| top(view)),
+        input("a-e2e-04-fade", 900, |window, cx| scroll(window, cx, 500., 400., -90_000.)),
+        // Back at the top first, so the trigger is where it is drawn now.
+        step("a-e2e-05-top-quiet", 900, |view, _| top(view)),
+        step("a-e2e-05-evidence-quiet", 9000, |view, cx| {
+            if let Some((id, row, text)) = first_bullet(view) {
+                let trigger = crate::summary::probe::trigger(id, row)
+                    .unwrap_or_else(|| Bounds::new(point(px(600.), px(260.)), size(px(24.), px(24.))));
+                eprintln!("tour {} burst evidence", stamp());
+                view.open_summary(id, row, text, trigger, cx);
+            }
+        }),
+        step("a-e2e-06-evidence", 900, |_, _| {}),
+        step("a-e2e-07-note-chat-quiet", 40_000, |view, cx| {
+            view.summary.dismiss();
+            ask(view, "note-chat", "What pricing did we discuss, and what are the agreed next steps?", cx);
+        }),
+        step("a-e2e-08-note-chat-answer", 900, |_, _| {}),
+        step("a-e2e-09-note-chat-thoughts", 900, |view, _| {
+            let index = view.chat_messages.len().saturating_sub(1);
+            if let Some(notes) = view.chat_annotations.get_mut(&index) {
+                notes.set_thoughts_open(Some(true));
+            }
+            view.chat_scroll.set_offset(point(px(0.), px(0.)));
+        }),
+        // Home first: leaving the note saves it, and a question is held
+        // back while that request is on its way.
+        step("a-e2e-10-home-quiet", 3000, |view, cx| {
+            view.close_chat_surface(cx);
+            view.navigate(Screen::Home, cx);
+            view.clear_chat(cx);
+        }),
+        step("a-e2e-10-home-chat-quiet", 45_000, |view, cx| {
+            eprintln!("tour {} e2e server requests pending {}", stamp(), view.server_pending);
+            ask(view, "home-chat", "Across my meetings this week, which follow-ups are still open and who owns each one?", cx);
+        }),
+        step("a-e2e-11-home-chat-answer", 900, |_, _| {}),
+        step("a-e2e-12-home-chat-thoughts", 900, |view, _| {
+            let index = view.chat_messages.len().saturating_sub(1);
+            if let Some(notes) = view.chat_annotations.get_mut(&index) {
+                notes.set_thoughts_open(Some(true));
+            }
+            view.chat_scroll.set_offset(point(px(0.), px(0.)));
+        }),
+        step("a-e2e-13-model-picker", 900, |view, cx| {
+            let index = view.chat_messages.len().saturating_sub(1);
+            if let Some(notes) = view.chat_annotations.get_mut(&index) {
+                notes.set_thoughts_open(Some(false));
+            }
+            view.chat_to_bottom();
+            view.toggle_chat_model_picker(cx);
+        }),
+        input("a-e2e-14-model-down-quiet", 400, |window, cx| {
+            press_key(window, cx, "down");
+            press_key(window, cx, "down");
+        }),
+        input("a-e2e-15-model-chosen", 900, |window, cx| press_key(window, cx, "enter")),
+        step("a-e2e-16-home-chat-2-quiet", 45_000, |view, cx| {
+            eprintln!("tour {} e2e model now {:?}", stamp(), view.selected_chat_model);
+            ask(view, "home-chat-2", "Which of those is most urgent, and why?", cx);
+        }),
+        step("a-e2e-17-home-chat-2-answer", 900, |_, _| {}),
+        step("a-e2e-18-standup-quiet", 900, |view, cx| {
+            view.close_chat_surface(cx);
+            view.clear_chat(cx);
+            open(view, "standup", cx);
+        }),
+        step("a-e2e-19-standup-generate-quiet", 30_000, generate("standup", "standup")),
+        step("a-e2e-20-standup", 900, |view, _| top(view)),
+        step("a-e2e-21-long-quiet", 1500, |view, cx| {
+            open(view, "long-meeting", cx);
+        }),
+        step("a-e2e-22-long-regenerate-quiet", 80_000, generate("regenerate-long", "long-meeting")),
+        step("a-e2e-23-long", 900, |view, _| top(view)),
+    ];
+    for name in ["a-e2e-24-long-2", "a-e2e-25-long-3", "a-e2e-26-long-4", "a-e2e-27-long-5", "a-e2e-28-long-6"] {
+        steps.push(input(name, 600, |window, cx| scroll(window, cx, 500., 400., -560.)));
+    }
+    for (name, kind) in [
+        ("a-e2e-30-one-on-one", "one-on-one"),
+        ("a-e2e-31-customer-interview", "customer-interview"),
+        ("a-e2e-32-planning", "planning-decisions"),
+        ("a-e2e-33-recruiting", "recruiting"),
+        ("a-e2e-34-no-content", "no-content"),
+        ("a-e2e-35-mixed-language", "mixed-language"),
+        ("a-e2e-36-crosstalk", "messy-crosstalk"),
+    ] {
+        steps.push(step(name, 900, move |view, cx| {
+            open(view, kind, cx);
+        }));
+    }
+    steps
+}
+
+#[cfg(not(debug_assertions))]
+fn e2e_steps() -> Vec<Step> {
+    Vec::new()
+}
+
 /// States to sit in while an outside tool samples the process (`i-…`): each
 /// holds still for fourteen seconds and then reports how often it rendered.
 fn idle_steps() -> Vec<Step> {
@@ -3331,7 +3576,8 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
             .chain(ask_bar_steps())
             .chain(sidebar_steps())
             .chain(idle_steps())
-            .chain(notes_generation_steps());
+            .chain(notes_generation_steps())
+            .chain(e2e_steps());
         // `CEREAL_TOUR_SIZE=760x580` resizes the window first, and
         // `CEREAL_TOUR_SHOTS=<directory>` holds each still (`p-…`, `a-…`)
         // until `<directory>/<name>.png` exists: an outside tool takes the

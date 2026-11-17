@@ -280,11 +280,10 @@ fn run_capture(state: CaptureMonitor, stop: mpsc::Receiver<()>, options: Capture
         finish(&state, None);
         return;
     }
-    if let Err(error) = write_manifest(&state.snapshot()) {
-        finish(&state, Some(error));
-        return;
-    }
     let directory = state.snapshot().directory;
+    // The devices start first; the manifest (written and synced to disk,
+    // which takes tens of milliseconds) follows while they come up, before
+    // any audio file can hold more than a few frames.
     let mut native = match NativeCapture::start(&directory, options.flags()) {
         Ok(native) => native,
         Err(error) => {
@@ -292,10 +291,26 @@ fn run_capture(state: CaptureMonitor, stop: mpsc::Receiver<()>, options: Capture
             return;
         }
     };
+    if let Err(error) = write_manifest(&state.snapshot()) {
+        drop(native);
+        finish(&state, Some(error));
+        return;
+    }
+    crate::latency::mark("capture_native_started");
     let mut last_checkpoint = Instant::now();
+    // Every 10 ms until the first audio arrives (the window turns live on
+    // it), then every 80 ms.
+    let mut poll = Duration::from_millis(10);
     loop {
         match native.poll(false) {
             Ok(stats) => {
+                if stats.has_audio() {
+                    crate::latency::mark("capture_first_samples");
+                    poll = Duration::from_millis(80);
+                }
+                if stats.mic.voice_isolation == "on" {
+                    crate::latency::mark("voice_isolation_on");
+                }
                 let failed = stats.phase == "failed";
                 state.0.lock().unwrap_or_else(|e| e.into_inner()).stats = stats;
                 if failed {
@@ -317,7 +332,7 @@ fn run_capture(state: CaptureMonitor, stop: mpsc::Receiver<()>, options: Capture
             }
             last_checkpoint = Instant::now();
         }
-        match stop.recv_timeout(Duration::from_millis(80)) {
+        match stop.recv_timeout(poll) {
             Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
@@ -454,7 +469,6 @@ mod fixture {
     }
 
     fn play(state: &CaptureMonitor, stop: &mpsc::Receiver<()>, source: &Path) -> Result<(), String> {
-        write_manifest(&state.snapshot())?;
         let mut tracks = vec![track(state, source, false)?];
         // `CEREAL_CAPTURE_FIXTURE_SYSTEM=<mono WAV>` plays a second file
         // into `system.wav` alongside, as the other side of the meeting.
@@ -464,8 +478,11 @@ mod fixture {
             tracks.push(track(state, Path::new(&system), true)?);
         }
         let both = tracks.len() > 1;
-        let io = |e: std::io::Error| format!("Cannot write the fixture capture: {e}");
+        // As the native capture does: the manifest once the files exist,
+        // while the audio is already being heard.
         let started = Instant::now();
+        write_manifest(&state.snapshot())?;
+        let io = |e: std::io::Error| format!("Cannot write the fixture capture: {e}");
         let mut last_manifest = Instant::now();
         loop {
             let elapsed = started.elapsed().as_millis() as u64;
@@ -490,6 +507,7 @@ mod fixture {
                     track.file.write_all_at(&(frames as u32 * 4).to_le_bytes(), 52).map_err(io)?;
                     track.file.write_all_at(&(frames as u32).to_le_bytes(), 44).map_err(io)?;
                     track.file.write_all_at(&(48 + frames as u32 * 4).to_le_bytes(), 4).map_err(io)?;
+                    crate::latency::mark("capture_first_samples");
                 }
             }
             {
@@ -555,6 +573,7 @@ fn finish(state: &CaptureMonitor, error: Option<String>) {
     }
     let capture_id = manifest.capture_id.clone();
     *state.0.lock().unwrap_or_else(|e| e.into_inner()) = manifest;
+    crate::latency::mark("capture_finished");
     // Final on disk and in memory: from here it is settled.
     running().remove(&capture_id);
 }

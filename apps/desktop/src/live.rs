@@ -2,7 +2,7 @@
 //!
 //! A session thread follows the capture's WAV files as the native writer
 //! grows them (it checkpoints the file after every 10 ms write, so the file is
-//! the buffer), converts them to 16 kHz PCM16 and sends 100–250 ms frames to
+//! the buffer), converts them to 16 kHz PCM16 and sends 50–250 ms frames to
 //! `GET /api/v1/notes/:id/live`. Interim and final text comes back on the
 //! same socket and is handed to the window as [`Event`]s.
 //!
@@ -52,8 +52,10 @@ pub const PROTOCOL: u8 = 1;
 pub const FRAME_HEADER: usize = 12;
 /// The rate every channel is sent at.
 pub const RATE: u32 = 16_000;
-/// 100 ms: a frame is not sent until it holds this much, except to flush.
-pub const FRAME_MIN: usize = RATE as usize / 10;
+/// 50 ms: a frame is not sent until it holds this much, except to flush.
+/// Every word waits for its frame to fill, so this is part of how late the
+/// text is: half of it on average, all of it for the first word.
+pub const FRAME_MIN: usize = RATE as usize / 20;
 /// 250 ms: the most one frame carries.
 pub const FRAME_MAX: usize = RATE as usize / 4;
 /// How much faster than real time a backlog is replayed: at most three
@@ -901,6 +903,10 @@ pub enum Resolved {
     /// Not yet (the server has not answered, an earlier capture is still
     /// being finalised): ask again after the back-off.
     Later,
+    /// The server is being asked to start the recording right now: ask
+    /// again in a moment, without backing off, so the socket opens as soon
+    /// as it may.
+    Pending,
     /// This recording will not be streamed.
     Never,
 }
@@ -1024,6 +1030,7 @@ impl Session {
         resolve: impl FnMut() -> Resolved + Send + 'static,
         alive: impl Fn() -> bool + Send + 'static,
     ) -> Self {
+        crate::latency::mark("stream_spawned");
         let (commands, inbox) = mpsc::channel();
         let (outbox, events) = mpsc::sync_channel(2048);
         let ticket = Arc::new(());
@@ -1366,7 +1373,11 @@ impl Worker {
     fn run(&mut self) {
         loop {
             let now = Instant::now();
-            if now.duration_since(self.synced) >= Duration::from_millis(50)
+            // The running capture's state is in memory: looked at every few
+            // milliseconds, so its end is sent as soon as the capture stops.
+            // Files on disk are read less often.
+            let every = if matches!(self.source, Source::Monitor(_)) { 5 } else { 50 };
+            if now.duration_since(self.synced) >= Duration::from_millis(every)
                 && let Some(capture) = self.source.read()
             {
                 self.synced = now;
@@ -1380,7 +1391,10 @@ impl Worker {
                 match self.commands.try_recv() {
                     Ok(Command::Pause) => self.hold_pending |= !self.paused,
                     Ok(Command::Resume) => self.unpause(),
-                    Ok(Command::End) => self.ending = true,
+                    Ok(Command::End) => {
+                        crate::latency::mark("stream_end_cmd");
+                        self.ending = true
+                    }
                     Ok(Command::Sever) => {
                         if let Some(connection) = &self.connection {
                             let _ = connection.control.shutdown(std::net::Shutdown::Both);
@@ -1438,6 +1452,7 @@ impl Worker {
             return true;
         }
         self.delivered = Some(delivery);
+        crate::latency::mark("delivered");
         self.emit(Event::Delivered(delivery))
     }
 
@@ -1511,9 +1526,14 @@ impl Worker {
             return wait(now + Duration::from_millis(20));
         }
         if self.target.is_none() {
+            crate::latency::mark("stream_dial");
             match (self.resolve)() {
-                Resolved::Ready(target) => self.target = Some(target),
+                Resolved::Ready(target) => {
+                    crate::latency::mark("target_resolved");
+                    self.target = Some(target)
+                }
                 Resolved::Later => return self.back_off(),
+                Resolved::Pending => return wait(now + Duration::from_millis(5)),
                 Resolved::Never => {
                     self.refuse();
                     return Step::Exit;
@@ -1523,6 +1543,7 @@ impl Worker {
         let target = self.target.clone().expect("target was just resolved");
         match connect(&target) {
             Ok((socket, control)) => {
+                crate::latency::mark("ws_open");
                 let mut connection = Connection {
                     socket,
                     control,
@@ -1553,7 +1574,10 @@ impl Worker {
                 self.connection = Some(connection);
                 Step::Continue
             }
-            Err(outcome) => self.settle(outcome),
+            Err(outcome) => {
+                crate::latency::mark_each(&format!("ws_refused {outcome:?}"));
+                self.settle(outcome)
+            }
         }
     }
 
@@ -1717,6 +1741,7 @@ impl Worker {
                 }
                 Ok(Message::Close(frame)) => {
                     let code = frame.map_or(1005, |frame| u16::from(frame.code));
+                    crate::latency::mark_each(&format!("ws_closed {code}"));
                     let _ = connection.socket.flush(); // our half of the close
                     let outcome = if code == 4409
                         && !connection.ready
@@ -1856,6 +1881,7 @@ impl Worker {
                     break;
                 }
                 let count = samples.len();
+                crate::latency::mark("first_frame_sent");
                 let frame = encode_frame(channel, track.cursor(), samples);
                 let sent = Self::send(connection, Message::binary(frame));
                 if sent.is_err() {
@@ -1895,6 +1921,7 @@ impl Worker {
             if Self::send(connection, mark).is_err() {
                 return self.settle(Outcome::Retry);
             }
+            crate::latency::mark("end_mark_sent");
             self.end_sent = Some(now);
         }
         Step::Continue
@@ -1908,6 +1935,7 @@ impl Worker {
                 resume_window_ms,
                 transcript_revision,
             } => {
+                crate::latency::mark("ready");
                 self.resume_window_ms = resume_window_ms;
                 self.attempts = 0;
                 self.unavailable = false;
@@ -1920,7 +1948,9 @@ impl Worker {
                     self.acked[index] = stream.accept_from_sample;
                     self.tracks[index].seek(stream.accept_from_sample);
                 }
-                self.budget = [0.; 2];
+                // What was captured while the socket opened goes out at once,
+                // up to the burst, rather than waiting for the budget to fill.
+                self.budget = [BURST; 2];
                 self.budgeted = Instant::now();
                 if let Some(connection) = self.connection.as_mut() {
                     connection.ready = true;
@@ -1946,7 +1976,9 @@ impl Worker {
                 start_ms,
                 speaker_id,
                 speaker_label,
-            } => self.emit(Event::Interim(Interim {
+            } => {
+                crate::latency::mark("interim_received");
+                self.emit(Event::Interim(Interim {
                 channel,
                 utterance_id,
                 rev,
@@ -1954,16 +1986,20 @@ impl Worker {
                 start_ms,
                 speaker_id,
                 speaker_label,
-            })),
+            }))
+            }
             ServerMessage::Final {
                 utterance_id,
                 transcript_revision,
                 segment,
-            } => self.emit(Event::Final {
+            } => {
+                crate::latency::mark_each("final_received");
+                self.emit(Event::Final {
                 utterance_id,
                 revision: transcript_revision,
                 segment,
-            }),
+            })
+            }
             ServerMessage::Speakers { merges, relabels } => {
                 (merges.is_empty() || self.emit(Event::Speakers(merges)))
                     && (relabels.is_empty() || self.emit(Event::Relabels(relabels)))
@@ -2086,8 +2122,8 @@ pub(crate) mod tests {
         );
         assert_eq!(encode_frame(Channel::Mic, 0, &[])[..2], [1, 0]);
         assert_eq!(encode_frame(Channel::Mic, 7, &[0; 1600]).len(), FRAME_HEADER + 3200);
-        // 100 to 250 ms at 16 kHz, comfortably under the server's 64 KiB limit.
-        assert_eq!((FRAME_MIN, FRAME_MAX), (1_600, 4_000));
+        // 50 to 250 ms at 16 kHz, comfortably under the server's 64 KiB limit.
+        assert_eq!((FRAME_MIN, FRAME_MAX), (800, 4_000));
         assert!(FRAME_HEADER + FRAME_MAX * 2 < 64 * 1024);
     }
 
@@ -3241,6 +3277,58 @@ pub(crate) mod tests {
         assert_eq!(server.connections.load(Ordering::SeqCst), 2);
         assert_eq!(contiguous(&frames(&seen, 0)).len(), 8_000);
         assert_eq!(events.last(), Some(&Event::Status(Phase::Off, 0)));
+    }
+
+    #[test]
+    fn a_stream_waiting_for_its_start_connects_the_moment_it_may_and_sends_from_the_first_sample() {
+        let mut fixture = Fixture::new("pending");
+        let mut mic = fixture.add(Channel::Mic, "mic.wav", 48_000);
+        mic.append(&tone(48_000, 330., 0, 24_000));
+        fixture.finish();
+        let readied: Arc<Mutex<Option<Instant>>> = Arc::default();
+        let server = server({
+            let readied = readied.clone();
+            move |_, stream, seen| {
+                let mut socket = accept(stream, seen);
+                hear(&mut socket, seen).expect("hello");
+                *readied.lock().unwrap() = Some(Instant::now());
+                ready(&mut socket, &[("mic", 0)], 30_000, 0);
+                take_until_end(&mut socket, seen, [0, 0]);
+            }
+        });
+        // The Start is answered 300 ms in: until then the target is pending.
+        let target = target(&server, &fixture);
+        let began = Instant::now();
+        let answered: Arc<Mutex<Option<Instant>>> = Arc::default();
+        let session = Session::start(
+            key(&fixture),
+            fixture.source(),
+            {
+                let answered = answered.clone();
+                move || {
+                    if began.elapsed() < Duration::from_millis(300) {
+                        return Resolved::Pending;
+                    }
+                    answered.lock().unwrap().get_or_insert_with(Instant::now);
+                    Resolved::Ready(target.clone())
+                }
+            },
+            || true,
+        );
+        let seen = until(&server.seen, |seen| matches!(seen, Seen::Frame { .. }));
+        let hello_at = seen.iter().position(|seen| matches!(seen, Seen::Hello(_))).expect("hello");
+        assert_eq!(server.connections.load(Ordering::SeqCst), 1, "no refused attempt, no back-off");
+        let Some(Seen::Frame { first, at, .. }) = seen.last() else { unreachable!() };
+        assert_eq!(*first, 0, "nothing captured before the socket opened is lost");
+        let answered = answered.lock().unwrap().expect("the target was resolved");
+        let readied = readied.lock().unwrap().expect("ready was sent");
+        // A back-off after "not yet" would be half a second.
+        assert!(readied.duration_since(answered) < Duration::from_millis(150), "{:?}", readied.duration_since(answered));
+        // What was captured meanwhile goes out at once, not as the budget fills.
+        assert!(at.duration_since(readied) < Duration::from_millis(60), "{:?}", at.duration_since(readied));
+        assert!(hello_at < seen.len());
+        session.end();
+        let _ = events(&session);
     }
 
     #[test]

@@ -919,27 +919,27 @@ impl Client {
         action: Action,
         progress: Option<&mpsc::Sender<GenerateProgress>>,
     ) -> Result<Reply, String> {
-        let id = self.ensure(note)?;
+        let id = match self.ensure(note) {
+            Ok(id) => id,
+            Err(error) => {
+                if matches!(action, Action::Recording(command) if command != "stop") {
+                    recording_signal(note.id, RecordingSignal::Failed);
+                }
+                return Err(error);
+            }
+        };
         let base = format!("/api/v1/notes/{id}");
+        if let Action::Recording(command) = action {
+            return self.recording(note, &id, &base, command);
+        }
         let saved: NoteDTO = self.request("PATCH", &base, Some(note_update_payload(note)))?;
         let mut answer = None;
         let mut share_url = None;
         let mut untranscribed = false;
         match action {
             Action::Save => {}
-            Action::Recording(command) => {
-                let current: NoteDTO = self.request("GET", &base, None)?;
-                let command = recording_command(command, &current.recording_state);
-                if command == "stop" {
-                    self.stop(note, &base)?;
-                } else {
-                    let _: NoteDTO = self.request(
-                        "POST",
-                        &format!("{base}/recording"),
-                        Some(json!({"command":command})),
-                    )?;
-                }
-            }
+            // Answered above (`Client::recording`).
+            Action::Recording(_) => {}
             Action::Generate => {
                 // A note still recording is stopped first: once the server
                 // answers, the live session has stored its last finals, and
@@ -1092,6 +1092,65 @@ impl Client {
     /// sends this only once the live stream has delivered every captured
     /// sample (`Cereal::live_stop`): the server ends the live session on
     /// Stop, and answers once that session has stored its last finals.
+    /// Start, resume or stop the recording of `note`, in as few round trips
+    /// as it takes: the command goes first (the live stream of a starting
+    /// recording waits for it, see [`recording_signal`]), the note's edits
+    /// after it, and the answer to the last of them is the note as the
+    /// server has it now.
+    fn recording(
+        &mut self,
+        note: &Note,
+        id: &str,
+        base: &str,
+        command: &str,
+    ) -> Result<Reply, String> {
+        let path = format!("{base}/recording");
+        let post = |command: &str| {
+            self.send::<NoteDTO>("POST", &path, Some(json!({ "command": command })), None)
+        };
+        let remote = if command == "stop" {
+            // The edits first, so the note the Stop answers with has them.
+            let _: NoteDTO = self.request("PATCH", base, Some(note_update_payload(note)))?;
+            stop_trace("the stop action has saved the note");
+            let stopped = post("stop").map_err(|error| error.message())?;
+            stop_trace("the server has been told to stop");
+            stopped
+        } else {
+            // Whichever of Start and Resume the server's state takes: a note
+            // stopped on another device is resumed, one never recorded there
+            // is started.
+            let posted = match post(command) {
+                Err(crate::accounts::client::RequestError::Status { code: 400 | 409, .. }) => {
+                    post(if command == "resume" { "start" } else { "resume" })
+                }
+                other => other,
+            };
+            let posted = match posted {
+                Ok(posted) => posted,
+                Err(error) => {
+                    recording_signal(note.id, RecordingSignal::Failed);
+                    return Err(error.message());
+                }
+            };
+            recording_signal(
+                note.id,
+                RecordingSignal::Ready {
+                    server_id: id.to_owned(),
+                    url: self.url.clone(),
+                    offset_ms: transcript_end(&posted),
+                },
+            );
+            self.request("PATCH", base, Some(note_update_payload(note)))?
+        };
+        Ok(Reply {
+            note: remote,
+            url: self.url.clone(),
+            answer: None,
+            share_url: None,
+            untranscribed: false,
+        })
+    }
+
     fn stop(&self, _note: &Note, base: &str) -> Result<(), String> {
         stop_trace("the stop action has saved and read the note");
         let _: NoteDTO = self.request(
@@ -1141,16 +1200,6 @@ impl Client {
     }
 }
 
-fn recording_command<'a>(
-    requested: &'a str,
-    state: &meeting_notes_api_types::RecordingState,
-) -> &'a str {
-    if requested == "start" && *state == meeting_notes_api_types::RecordingState::Stopped {
-        "resume"
-    } else {
-        requested
-    }
-}
 pub fn duration_seconds(text: &str) -> Option<f64> {
     let pieces: Vec<_> = text.split(':').collect();
     if !(2..=3).contains(&pieces.len()) {
@@ -1420,6 +1469,90 @@ pub fn live_target(note: &Note, capture_id: &str) -> crate::live::Resolved {
         }),
         // The server did not answer, or an earlier capture is not final yet.
         Err(_) => Resolved::Later,
+    }
+}
+
+/// Where the server's answer to the Start (or Resume) of a recording
+/// stands, by note: the live stream of that recording opens its socket the
+/// moment the server has the note recording, instead of after the whole
+/// action has been answered and then backing off.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RecordingSignal {
+    /// Asked; no answer yet.
+    Waiting,
+    Ready {
+        server_id: String,
+        url: String,
+        /// Where the note's transcript ended when it started recording.
+        offset_ms: u64,
+    },
+    /// Not started there: the stream finds its way as it always has.
+    Failed,
+}
+
+fn recording_signals() -> std::sync::MutexGuard<'static, HashMap<u64, RecordingSignal>> {
+    static SIGNALS: std::sync::OnceLock<std::sync::Mutex<HashMap<u64, RecordingSignal>>> =
+        std::sync::OnceLock::new();
+    SIGNALS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+pub fn recording_signal(note: u64, signal: RecordingSignal) {
+    recording_signals().insert(note, signal);
+}
+
+/// A Start still waiting for its answer has none coming (its action
+/// failed, or never went): it counts as failed.
+pub fn recording_signal_settled(note: u64) {
+    let mut signals = recording_signals();
+    if signals.get(&note) == Some(&RecordingSignal::Waiting) {
+        signals.insert(note, RecordingSignal::Failed);
+    }
+}
+
+/// The end of a note's transcript, in note-timeline milliseconds.
+fn transcript_end(note: &NoteDTO) -> u64 {
+    note.transcript_segments
+        .iter()
+        .map(|segment| segment.end_ms.unwrap_or(segment.start_ms).max(0) as u64)
+        .max()
+        .unwrap_or(0)
+}
+
+/// [`live_target`] for the stream of a recording that has just started
+/// here: it waits for the server to have the note recording (the Start was
+/// sent at the same moment), and places the capture from the Start's own
+/// answer instead of asking the server again.
+pub fn live_target_started(note: &Note, capture_id: &str) -> crate::live::Resolved {
+    use crate::live::Resolved;
+    let signal = recording_signals().get(&note.id).cloned();
+    match signal {
+        Some(RecordingSignal::Waiting) => Resolved::Pending,
+        Some(RecordingSignal::Ready { server_id, url, offset_ms }) => {
+            let Ok(client) = crate::accounts::client_of_note(note.id) else {
+                return live_target(note, capture_id);
+            };
+            if client.url != url || uuid::Uuid::parse_str(&server_id).is_err() {
+                return live_target(note, capture_id);
+            }
+            let note = Note {
+                server_id: Some(server_id.clone()),
+                server_url: Some(url),
+                ..note.clone()
+            };
+            match client.capture_base_after(&note, &server_id, capture_id, offset_ms) {
+                Ok(base_ms) => Resolved::Ready(crate::live::Target {
+                    endpoint: client.live(&server_id),
+                    capture_id: capture_id.to_owned(),
+                    base_ms,
+                    language: crate::transcript_panel::stream_language(),
+                }),
+                Err(_) => live_target(&note, capture_id),
+            }
+        }
+        _ => live_target(note, capture_id),
     }
 }
 
@@ -2260,6 +2393,13 @@ impl Cereal {
             (None, None)
         };
         let progress_title = submitted_title.clone();
+        let traced = match &action {
+            Action::Recording(command) => Some(format!("action_{command}")),
+            _ => None,
+        };
+        if let Some(name) = &traced {
+            crate::latency::mark(&format!("{name}_sent"));
+        }
         let receiver = self
             .bridges
             .entry(account_id.clone())
@@ -2306,6 +2446,12 @@ impl Cereal {
                 }
             };
             heard(&this, cx);
+            if let Some(name) = &traced {
+                crate::latency::mark(&format!("{name}_answered"));
+            }
+            if matches!(traced.as_deref(), Some("action_start" | "action_resume")) {
+                recording_signal_settled(id);
+            }
             let _ = this.update(cx, |this, cx| {
                 this.server_pending = this.server_pending.saturating_sub(1);
                 if stops {
@@ -3763,6 +3909,71 @@ mod account_tests {
     use std::prelude::v1::test;
     use crate::accounts::client::testing::{Fake, json};
 
+    #[test]
+    fn a_start_is_sent_first_and_its_answer_lets_the_stream_connect() {
+        let spoken = {
+            let mut note: serde_json::Value = serde_json::from_str(&note_json(A, "Standup")).unwrap();
+            note["recordingState"] = "recording".into();
+            note["transcriptSegments"] = serde_json::json!([{"id": "3a49a4af-c660-42e9-a36a-a806fbb41e70", "channel": "mic",
+                "speakerId": "mic:n:1", "speakerLabel": "Me", "startMs": 0, "endMs": 61_500, "text": "Earlier.", "isFinal": true}]);
+            note.to_string()
+        };
+        // The server has this note stopped (it was recorded elsewhere): it
+        // refuses "start" and takes "resume".
+        let server = Fake::start(move |request| {
+            if request.method == "POST" && request.body.contains("start") {
+                return json(400, r#"{"error":"invalid_request","message":"Recording command does not match the current state"}"#);
+            }
+            json(200, spoken.clone())
+        });
+        let root = scratch("start-first");
+        let mut client = Client::for_test(&server.url, TOKEN, Some(&root));
+        let note = Note {
+            id: handle::handle(1, 77).unwrap(),
+            title: "Standup".into(),
+            server_id: Some(A.into()),
+            server_url: Some(server.url.clone()),
+            ..Default::default()
+        };
+        recording_signal(note.id, RecordingSignal::Waiting);
+        client.run(&note, Action::Recording("start")).unwrap();
+        assert_eq!(
+            server.paths(),
+            [
+                format!("POST /api/v1/notes/{A}/recording"),
+                format!("POST /api/v1/notes/{A}/recording"),
+                format!("PATCH /api/v1/notes/{A}"),
+            ]
+        );
+        let bodies: Vec<String> = server.seen.lock().unwrap().iter().map(|seen| seen.body.clone()).collect();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&bodies[1]).unwrap(), serde_json::json!({"command": "resume"}));
+        // The stream's target comes from that answer: no further request.
+        assert_eq!(
+            recording_signals().get(&note.id),
+            Some(&RecordingSignal::Ready { server_id: A.into(), url: server.url.clone(), offset_ms: 61_500 })
+        );
+        recording_signals().remove(&note.id);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_starting_stream_waits_for_the_start_and_a_start_that_never_comes_lets_it_go() {
+        use crate::live::Resolved;
+        let note = Note { id: 9_001, ..Note::default() };
+        recording_signal(note.id, RecordingSignal::Waiting);
+        assert!(matches!(live_target_started(&note, "capture-x"), Resolved::Pending));
+        // An answer that is not a start (the action failed, or never went).
+        recording_signal_settled(note.id);
+        assert_eq!(recording_signals().get(&note.id), Some(&RecordingSignal::Failed));
+        assert!(!matches!(live_target_started(&note, "capture-x"), Resolved::Pending));
+        // A start that was answered is not undone by its reply settling.
+        let ready = RecordingSignal::Ready { server_id: uuid::Uuid::nil().to_string(), url: "http://127.0.0.1:9".into(), offset_ms: 5 };
+        recording_signal(note.id, ready.clone());
+        recording_signal_settled(note.id);
+        assert_eq!(recording_signals().get(&note.id), Some(&ready));
+        recording_signals().remove(&note.id);
+    }
+
     const TOKEN: &str = "fictional-account-note-token-000000000000";
 
     fn note_json(id: &str, title: &str) -> String {
@@ -4249,7 +4460,8 @@ mod account_tests {
                 format!("GET /api/v1/notes/{B}"),
             ]
         );
-        // A Stop on its own (another recording takes over) only stops.
+        // A Stop on its own (another recording takes over) only stops: the
+        // edits, then the Stop, whose answer is the note (two round trips).
         server.seen.lock().unwrap().clear();
         let reply = client.run(&note(1, A), Action::Recording("stop")).unwrap();
         assert!(!reply.untranscribed);
@@ -4257,11 +4469,10 @@ mod account_tests {
             server.paths(),
             [
                 format!("PATCH /api/v1/notes/{A}"),
-                format!("GET /api/v1/notes/{A}"),
                 format!("POST /api/v1/notes/{A}/recording"),
-                format!("GET /api/v1/notes/{A}"),
             ]
         );
+
         assert!(!server.paths().iter().any(|path| path.contains("/audio")));
         let _ = fs::remove_dir_all(root);
     }

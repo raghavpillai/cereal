@@ -159,13 +159,41 @@ const anthropicThinking=(model:string):'adaptive'|'budget'|null=>
  * much when thinking is asked for (an answer cut off at its budget is discarded as a failure). */
 const ADAPTIVE_THINKING_ROOM=8000,THINKING_BUDGET=2048
 
+/** Models that think before answering unless told otherwise (on OpenRouter: Claude 5.x, Gemini 3.x Flash) start
+ * their answer seconds late. Measured 2026-11-17 on a five-meeting question (`.local/ship/core-quality`): first word
+ * after 4.2 s (Claude Haiku 5.5), 4.7 s (Claude Sonnet 5.5), 7.2 s (Gemini 3.8 Flash) by default, against 0.4 s with
+ * reasoning off (Haiku) and 0.5 s and 1.5 s with the least reasoning the other two allow. So a request that does not
+ * set reasoning itself (OpenAI models are sent `reasoning_effort` by `completionSettings`) asks for none; a model
+ * that refuses that ("Reasoning is mandatory") is asked for the minimum from then on. */
+/** The families measured to think by default. Others (OpenAI's are sent `reasoning_effort`) are left alone. */
+const THINKS_BY_DEFAULT=/^(?:anthropic\/claude-|google\/gemini-)/
+const reasoningMandatory=new Set<string>()
+function quickReasoning(transport:typeof fetch):typeof fetch {
+  return Object.assign(async(input:Parameters<typeof fetch>[0],init?:RequestInit)=>{
+    if(String(input)!=='https://openrouter.ai/api/v1/chat/completions'||typeof init?.body!=='string')return transport(input,init)
+    let body:Record<string,unknown>
+    try{body=JSON.parse(init.body)}catch{return transport(input,init)}
+    const model=String(body.model)
+    if(body.reasoning!==undefined||body.reasoning_effort!==undefined||!THINKS_BY_DEFAULT.test(model))return transport(input,init)
+    const send=(reasoning:Record<string,unknown>)=>transport(input,{...init,body:JSON.stringify({...body,reasoning})})
+    if(!reasoningMandatory.has(model)){
+      const response=await send({enabled:false})
+      if(response.status!==400)return response
+      if(!/reasoning is mandatory/i.test(await response.clone().text().catch(()=>'')))return response
+      reasoningMandatory.add(model)
+    }
+    return send({effort:'minimal'})
+  },{preconnect:transport.preconnect}) as typeof fetch
+}
+
+
 /** Adapt the provider wire format once; grounding, output validation and abort
  * handling remain shared by chat, generation, evidence and retrieval tools. `base` is where an OpenAI-compatible
  * server's API starts (already checked); its key is optional and sent only when there is one. `reasoning` marks
  * the requests whose reasoning is shown to the person asking (the chat answer and its research steps): only
  * those are sent in the form that makes OpenAI and Anthropic return it, and every other request is sent as before. */
 export function languageTransport(transport:typeof fetch,provider:LanguageModelSelection['provider'],key:string,base='',options:{reasoning?:boolean}={}):typeof fetch {
-  if(provider==='openrouter')return transport
+  if(provider==='openrouter')return quickReasoning(transport)
   return Object.assign(async(input:Parameters<typeof fetch>[0],init?:RequestInit)=>{
     if(String(input)!=='https://openrouter.ai/api/v1/chat/completions')return transport(input,init)
     const body=JSON.parse(String(init?.body))

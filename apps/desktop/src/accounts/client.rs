@@ -362,7 +362,9 @@ impl AccountClient {
             }
             match child.try_wait() {
                 Ok(Some(status)) => break status,
-                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                // Looked at often: a request on the local network is answered
+                // in a few milliseconds, and each look costs a system call.
+                Ok(None) => std::thread::sleep(Duration::from_millis(2)),
                 Err(_) => {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -375,6 +377,14 @@ impl AccountClient {
             .join()
             .map_err(|_| no_answer.clone())?
             .map_err(|_| no_answer.clone())?;
+        if crate::latency::enabled() {
+            // The path's shape, without the note's ID.
+            let shape: Vec<&str> = path
+                .split(['/', '?'])
+                .map(|part| if part.len() == 36 { ":id" } else { part })
+                .collect();
+            crate::latency::mark_each(&format!("http {method} {}", shape.join("/")));
+        }
         if !status.success() || output.len() > limit + 4 {
             return Err(RequestError::NoAnswer {
                 exit: status.code(),

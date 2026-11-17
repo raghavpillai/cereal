@@ -13,7 +13,9 @@
  *    empty transcript). It is in-band, so it marks exactly how much audio is final. Sent mid-word it
  *    cuts the word in two; the session only flushes in a pause.
  *  - Timestamps count every sample sent, silence included. The service closes a session that receives
- *    no message for 15 seconds, so a keep-alive is 100 ms of silence.
+ *    no message for 15 seconds. An audio chunk with no samples is a message: it kept a session open through
+ *    30 s and 5 min of nothing else, and the sentence the stall cut came back whole (measured 2026-11-17,
+ *    `.local/ship/accuracy/`). So a keep-alive adds nothing to the provider's clock.
  *  - Audio sent at four times real time was transcribed normally. A backlog sent in one burst (26 s in about
  *    100 ms) was not: the service answered with partials for its start, then `queue_overflow`, and dropped the
  *    rest. So audio is forwarded at most `PACE` times real time (plus a short burst), however fast it arrives,
@@ -27,6 +29,8 @@ import { EventQueue, LiveProviderError } from "./queue"
 export const ELEVENLABS_LIVE_MODELS = ["scribe_v3_live", "scribe_v2_realtime"] as const
 /** How much faster than real time audio is forwarded, and how much may go at once. */
 export const PACE = 4, BURST_SECONDS = 1
+/** The least uncommitted audio the service accepts a commit for (with less it closes the session). A margin over its 0.3 s. */
+export const MIN_COMMIT_SECONDS = 0.35
 /** Audio waiting to be forwarded beyond this is a client that does not pace itself: the session is dropped
  * (retryable), and the client replays from what is stored. */
 const MAX_QUEUED_SECONDS = 120
@@ -78,13 +82,18 @@ export function makeElevenLabsRealtime(options: ElevenLabsRealtimeOptions): Live
       type Pending = { utterance: number; index: number | null; text: string; timed?: LiveWord[]; diarized?: LiveWord[]; language?: string; at: number }
       const pending: Pending[] = [], manual: number[] = []
       let sent = 0, commits = 0, finalThrough = 0, closed = false, started = false, overflowed = false
+      // Where the newest commit stands, in samples sent or queued: the service's own (seen when its transcript arrives) or ours.
+      let committedAt = 0
       // Audio (and in-band commits) not forwarded yet, oldest first; `credit` is how many samples may go now.
       const queue: Array<Uint8Array | "commit"> = []
       let queuedSamples = 0, credit = sampleRate * BURST_SECONDS, creditAt = (options.now ?? performance.now.bind(performance))(), pump: ReturnType<typeof setInterval> | undefined
       let last = { text: "", start: 0, end: 0, speaker: undefined as string | undefined }, held: ReturnType<typeof setTimeout> | undefined, sweep: ReturnType<typeof setInterval> | undefined
       const seconds = (samples: number) => samples / sampleRate
       const shut = () => { if (closed) return; closed = true; clearTimeout(held); clearInterval(sweep); clearInterval(pump); queue.length = 0; queuedSamples = 0; events.close(); try { socket.close() } catch { /* already closed */ } }
-      const fail = (error: LiveProviderError) => { if (!closed) { events.push({ type: "error", retryable: error.retryable, reason: error.reason, ...(error.detail ? { detail: error.detail } : {}) }); shut() } }
+      // Why the session ended, so an open refused for being over the account's limit says so (the hub then lets
+      // held sessions of other notes go and tries again, instead of the client waiting out a back-off).
+      let failure: LiveProviderError | undefined
+      const fail = (error: LiveProviderError) => { if (!closed) { failure = error; events.push({ type: "error", retryable: error.retryable, reason: error.reason, ...(error.detail ? { detail: error.detail } : {}) }); shut() } }
       const drain = (force = false) => {
         while (pending.length) {
           const head = pending[0]!
@@ -118,6 +127,7 @@ export function makeElevenLabsRealtime(options: ElevenLabsRealtimeOptions): Live
           if (text && !list.length) held = setTimeout(() => { if (!closed) interim(text, [{ text, startSec: last.text ? last.start : seconds(sent), endSec: seconds(sent) }]) }, 120)
           else if (text || last.text) interim(text, list)
         } else if (type === "committed_transcript" && typeof message.text === "string") {
+          committedAt = Math.max(committedAt, sent)
           clearTimeout(held)
           pending.push({ utterance: commits++, index: typeof message.segment_index === "number" ? message.segment_index : null, text: message.text.trim(), at: performance.now() })
           last = { text: "", start: 0, end: 0, speaker: undefined }
@@ -164,15 +174,16 @@ export function makeElevenLabsRealtime(options: ElevenLabsRealtimeOptions): Live
           try { message = JSON.parse(String(event.data)) } catch { return }
           if (!record(message)) return
           if (!started) {
-            if (message.message_type !== "session_started") { handle(message); if (closed) reject(new LiveProviderError("unavailable", true)); return }
+            if (message.message_type !== "session_started") { handle(message); if (closed) reject(failure ?? new LiveProviderError("unavailable", true)); return }
             started = true; clearTimeout(timer); signal.removeEventListener("abort", abort); resolve(); return
           }
           handle(message)
         }
         // The upgrade failing (bad key, plan without access, network) surfaces here without a body.
-        socket.onerror = () => { if (!started) reject(new LiveProviderError("unavailable", true)) }
+        socket.onerror = () => { if (!started) reject(failure ?? new LiveProviderError("unavailable", true)) }
         socket.onclose = event => {
-          if (!started) reject(new LiveProviderError(event.code === 1008 || event.code === 3000 ? "not_configured" : "unavailable", true))
+          // (Closing it ourselves after a refusal, `failure` says why.)
+          if (!started) reject(failure ?? new LiveProviderError(event.code === 1008 || event.code === 3000 ? "not_configured" : "unavailable", true))
           else if (!closed) { drain(true); fail(new LiveProviderError("unavailable", true, `closed_${event.code}`)) }
         }
       }).catch(error => { shut(); throw error })
@@ -194,16 +205,23 @@ export function makeElevenLabsRealtime(options: ElevenLabsRealtimeOptions): Live
           // Nothing has been sent since the session opened: there is nothing to commit, and the service
           // answers a commit without audio with an error. Confirm it locally instead.
           if (!sent && !queue.length) { events.push({ type: "final", flushed: true, utterance: commits, text: "", words: [], startSec: 0, endSec: 0, finalThroughSec: 0 }); return }
+          // The service closes the session when asked to commit less than 0.3 s of audio ("commit_throttled", measured
+          // 2026-11-17): a held provider session taken over by the note's next live session was lost that way every
+          // time. With that little since the last commit there is nothing to finalise: answered here, claiming nothing (as
+          // no utterance, so the one in progress keeps its interim).
+          const position = sent + queuedSamples
+          if (position - committedAt < sampleRate * MIN_COMMIT_SECONDS) { events.push({ type: "final", flushed: true, utterance: -1, text: "", words: [], startSec: finalThrough, endSec: finalThrough, finalThroughSec: finalThrough }); return }
+          committedAt = position
           // In band, behind the audio still waiting for its pace.
           queue.push("commit"); forward()
         },
         get queuedSeconds() { return queuedSamples / sampleRate },
         keepAlive() {
-          if (closed) return 0
-          // Silence goes in order with the rest: the session places it after everything it has sent.
-          const silence = new Uint8Array(Math.round(sampleRate / 10) * 2)
-          queue.push(silence); queuedSamples += silence.byteLength >> 1; forward()
-          return 0.1
+          // An audio chunk with no samples: the service counts it as a message, and its clock does not move.
+          // Silence would be spliced into whatever was being said when the client's audio stopped (a network
+          // drop mid-word came back as "this- this-"). Audio still waiting for its pace keeps the socket busy.
+          if (!closed && !queue.length) socket.send(JSON.stringify({ message_type: "input_audio_chunk", audio_base_64: "", commit: false, sample_rate: sampleRate }))
+          return 0
         },
         async close() { drain(true); shut() },
       }

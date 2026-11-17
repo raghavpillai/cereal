@@ -809,6 +809,9 @@ impl Cereal {
                 || (self.server_pending == 0 && !note.transcript.trim().is_empty()))
             && note.enhanced.trim().is_empty()
             && (owned || !note.body.trim().is_empty() || !note.transcript.trim().is_empty());
+        if offer_generate {
+            crate::latency::mark("generate_available");
+        }
         let generate =
             self.stage
                 .presence(("generate-notes", id), offer_generate, crate::motion::GOOEY);

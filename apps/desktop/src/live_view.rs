@@ -752,8 +752,9 @@ pub(crate) fn stop_due(note: &Note, delivering: bool) -> Option<PendingStop> {
 }
 
 impl Cereal {
-    /// A capture has started for note `id`. The stream itself starts when the
-    /// server confirms that the note is recording (`live_connect`).
+    /// A capture has started for note `id`. Its stream is started at once
+    /// (`live_connect`) and opens its socket the moment the server has the
+    /// note recording (see `server::RecordingSignal`).
     pub fn live_prepare(&mut self, id: u64, monitor: crate::audio::CaptureMonitor) {
         self.live_end();
         self.live.begin(id);
@@ -765,10 +766,11 @@ impl Cereal {
         });
     }
 
-    /// The server has note `id` in the recording state: follow its capture.
+    /// Follow the capture of note `id`, as soon as it has started here.
     /// Started once per recording; while live transcription is unavailable
     /// the stream keeps trying for as long as the recording runs.
     pub fn live_connect(&mut self, id: u64, cx: &mut Context<Self>) {
+        crate::latency::mark("live_connect");
         if self.recording.note_id != Some(id) || !self.recording.is_active() {
             return;
         }
@@ -801,7 +803,7 @@ impl Cereal {
         let session = Session::start(
             id,
             Source::Monitor(pending.monitor.clone()),
-            move || crate::server::live_target(&note, &capture_id),
+            move || crate::server::live_target_started(&note, &capture_id),
             move || crate::accounts::note_epoch(id) == account,
         );
         self.live.streams += 1;
@@ -977,8 +979,9 @@ impl Cereal {
         }
     }
 
-    /// Look at the streams twenty times a second while there are any. The
-    /// update does nothing, and draws nothing, when nothing has arrived.
+    /// Look at the streams once a frame (60 times a second) while there are
+    /// any, so text is on screen the frame after it arrives. The update does
+    /// nothing, and draws nothing, when nothing has arrived.
     fn live_watch(&mut self, cx: &mut Context<Self>) {
         if std::mem::replace(&mut self.live.watching, true) {
             return;
@@ -986,7 +989,7 @@ impl Cereal {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
-                    .timer(Duration::from_millis(50))
+                    .timer(Duration::from_millis(16))
                     .await;
                 let Ok(keep) = this.update(cx, |this, cx| this.live_drain(cx)) else {
                     break;
@@ -1149,6 +1152,13 @@ impl Cereal {
         } else {
             Applied::Nothing
         };
+        if matches!(applied, Applied::Interim | Applied::Line(_)) {
+            crate::latency::mark("interim_applied");
+            crate::latency::on_paint("interim_painted");
+        }
+        if matches!(applied, Applied::Final(_)) {
+            crate::latency::mark_each("final_applied");
+        }
         match applied {
             Applied::Nothing => Redraw::Nothing,
             Applied::Interim => Redraw::Lines,

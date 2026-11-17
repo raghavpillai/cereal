@@ -14,9 +14,12 @@ mod fetch;
 mod handoff;
 mod home;
 mod input;
+mod latency;
 mod lazy;
 mod link;
 mod live;
+#[cfg(test)]
+mod live_accuracy;
 mod live_view;
 mod login;
 mod meeting;
@@ -50,6 +53,15 @@ mod update_view;
 #[cfg(test)]
 mod validation;
 use gpui::*;
+/// The latency bench was asked to keep its window off the screen
+/// (`CEREAL_LATENCY_BENCH_HIDDEN=1`).
+fn bench_hidden() -> bool {
+    bench() && environment::var("CEREAL_LATENCY_BENCH_HIDDEN").is_ok_and(|value| value == "1")
+}
+/// The latency bench is running: it never takes the focus.
+fn bench() -> bool {
+    cfg!(debug_assertions) && environment::var_os("CEREAL_LATENCY_BENCH").is_some()
+}
 fn main() {
     // `CEREAL_KEYCHAIN_PROBE=1`: milestone P0's check of the Keychain on an
     // installed, signed build (see `accounts::keychain::probe`). It opens
@@ -132,6 +144,9 @@ fn main() {
                     }),
                     window_min_size: Some(size(px(760.), px(580.))),
                     app_id: Some("dev.cereal.desktop".into()),
+                    // The latency bench can run without taking the screen.
+                    show: !bench_hidden(),
+                    focus: !bench(),
                     ..Default::default()
                 },
                 |window, cx| {
@@ -211,7 +226,9 @@ fn main() {
                 },
             )
             .unwrap();
-        cx.activate(true);
+        if !bench() {
+            cx.activate(true);
+        }
         let mode = crate::audio::review_view();
         // `CEREAL_CAPTURE_PROBE=<seconds>` measures a short real capture
         // (see `tour::capture_probe`); the pill is shown throughout so its
@@ -245,6 +262,20 @@ fn main() {
                 "The live probe requires an isolated CEREAL_DATA_DIR and a CEREAL_CAPTURE_FIXTURE"
             );
             tour::live_probe(handle, seconds, cx);
+        }
+        // `CEREAL_LATENCY_BENCH=<rounds>` presses Record and Stop by itself and
+        // writes how long each step takes (see `latency::bench`).
+        #[cfg(debug_assertions)]
+        if let Some(rounds) = crate::environment::var("CEREAL_LATENCY_BENCH")
+            .ok()
+            .and_then(|rounds| rounds.parse::<usize>().ok())
+        {
+            assert!(
+                crate::environment::var_os("CEREAL_DATA_DIR").is_some()
+                    && crate::environment::var_os("CEREAL_CAPTURE_FIXTURE").is_some(),
+                "The latency bench requires an isolated CEREAL_DATA_DIR and a CEREAL_CAPTURE_FIXTURE"
+            );
+            latency::bench(handle, rounds, cx);
         }
         // `CEREAL_FUNCTIONAL_LOG=1` prints what the app is doing as it changes
         // (see `tour::functional_log`); the app is driven from outside.

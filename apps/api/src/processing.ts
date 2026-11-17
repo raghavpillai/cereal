@@ -19,6 +19,7 @@ import {
 import {prepareMeetingChat,checkChatCitations,CitationStreamFilter,withoutSourceMarkers} from "./chat-retrieval";
 import type { LiveHub } from "./live/hub";
 import { liveChatState } from "./live/chat";
+import { trace } from "./live/trace";
 import type { LiveConversationStore } from "./ai/live-conversation";
 import { cleanNoteTitle, isUntitled } from "./ai/note-title";
 import { audioPrefix, makeStorage, type StorageService } from "./storage";
@@ -182,12 +183,14 @@ function makeProcessingServiceBase(
       }),
     recording: (id: string, command: "start" | "stop" | "resume") =>
       Effect.gen(function* () {
+        trace(`srv_recording_${command}`, id);
         yield* getNote(id);
         // Stop first lets the live session store its last words, so the transcript the client reads
         // back (and generates notes from) is complete.
         if (command === "stop" && options.live?.active(id))
           yield* Effect.promise(() => options.live!.end(id).catch(() => undefined));
         const n = yield* persist(repository.recording(id, command));
+        trace(`srv_recording_${command}_done`, id);
         return (
           n ??
           (yield* Effect.fail(

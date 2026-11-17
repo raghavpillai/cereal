@@ -1035,6 +1035,7 @@ impl Focusable for Cereal {
 impl Render for Cereal {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         use crate::motion::{GOOEY, SETTLE};
+        crate::latency::painted();
         // The control that had the focus has gone (the page changed under a
         // shortcut, a row opened its note, a button removed itself). Give
         // the focus back to the window, or the keyboard would be left with

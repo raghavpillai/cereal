@@ -37,3 +37,16 @@ export function normaliseWords<W extends { text: string }>(words: ReadonlyArray<
   })
 }
 export const normaliseText = (text: string) => ANY.test(text) && mostlyLatin(text) ? asciiPunctuation(text) : text
+/** The writing system most letters of `text` are in: "latin", "cjk" (Chinese characters and kana), "hangul",
+ * "cyrillic", "greek", "arabic", "hebrew", "devanagari", "thai", "other"; undefined when it has no letters. */
+export function textScript(text: string): string | undefined {
+  const counts = new Map<string, number>()
+  for (const char of text) {
+    if (!/\p{L}/u.test(char)) continue
+    const script = /\p{Script=Latin}/u.test(char) ? "latin" : /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(char) ? "cjk" : /\p{Script=Hangul}/u.test(char) ? "hangul"
+      : /\p{Script=Cyrillic}/u.test(char) ? "cyrillic" : /\p{Script=Greek}/u.test(char) ? "greek" : /\p{Script=Arabic}/u.test(char) ? "arabic" : /\p{Script=Hebrew}/u.test(char) ? "hebrew"
+      : /\p{Script=Devanagari}/u.test(char) ? "devanagari" : /\p{Script=Thai}/u.test(char) ? "thai" : "other"
+    counts.set(script, (counts.get(script) ?? 0) + 1)
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0]
+}

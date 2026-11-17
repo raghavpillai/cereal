@@ -14,3 +14,9 @@ test("CJK text and text without full-width marks are left exactly as they are", 
   expect(mostlyLatin("Okay, sounds good 好的")).toBe(true)
   expect(mostlyLatin("好的 ok")).toBe(false)
 })
+
+test("the script of a text is the one most of its letters are written in", async () => {
+  const { textScript } = await import("../src/live/text")
+  expect([textScript("Muchas gracias a todos."), textScript("うん。"), textScript("음."), textScript("来週の会議"), textScript("Привет"), textScript("5:00, 99.9%"), textScript("OK うん")])
+    .toEqual(["latin", "cjk", "hangul", "cjk", "cyrillic", undefined, "latin"])
+})

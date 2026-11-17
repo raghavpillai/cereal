@@ -611,6 +611,72 @@ mod tests {
     }
 
     #[test]
+    fn any_burst_of_presses_and_late_callbacks_leaves_a_consistent_state() {
+        // Every sequence of four presses (Record, Stop, Resume, a doubled
+        // press) with the capture's callbacks arriving late, early or for an
+        // old epoch: the session is always in exactly one phase, owned by
+        // its note, and can always be stopped and started again.
+        #[derive(Clone, Copy, Debug)]
+        enum Step {
+            Begin,
+            Stop,
+            Resume,
+            ActivateNow,
+            ActivateStale,
+            FailStale,
+        }
+        use Step::*;
+        let steps = [Begin, Stop, Resume, ActivateNow, ActivateStale, FailStale];
+        let mut sequences = vec![vec![]];
+        for _ in 0..5 {
+            sequences = sequences
+                .into_iter()
+                .flat_map(|sequence: Vec<Step>| {
+                    steps.iter().map(move |step| {
+                        let mut next = sequence.clone();
+                        next.push(*step);
+                        next
+                    })
+                })
+                .collect();
+        }
+        for sequence in sequences {
+            let mut session = Recording::default();
+            let mut stale = session.epoch;
+            for step in &sequence {
+                let before = session.epoch;
+                match step {
+                    Begin => {
+                        session.begin(7);
+                    }
+                    Stop => {
+                        session.stop();
+                    }
+                    Resume => {
+                        session.resume();
+                    }
+                    ActivateNow => {
+                        session.activate(session.epoch);
+                    }
+                    ActivateStale => assert!(!session.activate(stale) || stale == session.epoch),
+                    FailStale => assert!(!session.fail(stale) || stale == session.epoch),
+                }
+                if session.epoch != before {
+                    stale = before;
+                }
+                assert!(session.phase == Phase::Idle || session.note_id == Some(7), "{sequence:?}");
+                assert_eq!(session.is_active(), matches!(session.phase, Phase::Starting | Phase::Live));
+            }
+            // Never wedged: whatever happened, Stop then Record works.
+            session.stop();
+            assert!(!session.is_active(), "{sequence:?}");
+            assert!(session.begin(7) || session.resume(), "{sequence:?}");
+            assert!(session.activate(session.epoch), "{sequence:?}");
+            assert!(session.stop(), "{sequence:?}");
+        }
+    }
+
+    #[test]
     fn elapsed_labels_cover_minutes_and_hours() {
         assert_eq!(elapsed_label(Duration::from_secs(0)), "0:00");
         assert_eq!(elapsed_label(Duration::from_secs(65)), "1:05");

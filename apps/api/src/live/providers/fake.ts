@@ -22,6 +22,8 @@ export interface FakeWord {
   readonly speaker?: string
   /** Length of the whole word in samples. A shorter run was cut (by a flush, a skip or the edge of a part) and is transcribed as `text-`. */
   readonly samples?: number
+  /** The language the fake reports a final in when most of its words carry this one (as a real provider's detection). */
+  readonly language?: string
 }
 export const FAKE_WORD_BASE = 1000
 const wordId = (sample: number, vocabulary: ReadonlyArray<FakeWord>) => sample > FAKE_WORD_BASE && sample - FAKE_WORD_BASE <= vocabulary.length ? sample - FAKE_WORD_BASE : 0
@@ -74,7 +76,7 @@ export function makeFakeTranscriber(options: FakeTranscriberOptions = {}): LiveT
       const events = new EventQueue<LiveTranscriberEvent>(), timers = new Set<ReturnType<typeof setTimeout>>()
       const silenceSamples = Math.round(silenceMs * sampleRate / 1000)
       let position = 0, run = { value: 0, start: 0 }, silent = 0, utterance = 0, lastDue = 0, closed = false, buffered = 0, speech = 0, filler = 0
-      let words: LiveWord[] = []
+      let words: LiveWord[] = [], languages: Array<string | undefined> = []
       const ids = new Map<string, string>()
       const speakerId = (name: string) => options.sessionSpeakers ? ids.get(name) ?? (ids.set(name, `speaker_${ids.size}`), ids.get(name)!) : name
       const later = (event: LiveTranscriberEvent, delay: number) => {
@@ -85,12 +87,16 @@ export function makeFakeTranscriber(options: FakeTranscriberOptions = {}): LiveT
       }
       const interim = () => { if (words.length) later({ type: "interim", utterance, text: words.map(w => w.text).join("").trim(), startSec: words[0]!.startSec, endSec: words.at(-1)!.endSec, ...(words.at(-1)!.speaker ? { speaker: words.at(-1)!.speaker } : {}) }, interimDelay) }
       const heard = (word: FakeWord, start: number, end: number) => {
+        languages.push(word.language)
         words.push({ text: wordText(word, end - start) + " ", startSec: start / sampleRate, endSec: end / sampleRate, ...(word.speaker ? { speaker: speakerId(word.speaker) } : {}) })
         interim()
       }
       const commit = (through: number, delay: number, flushed = false) => {
-        const done = words; words = []
-        later({ type: "final", flushed, utterance, text: done.map(w => w.text).join("").trim(), startSec: done[0]?.startSec ?? through / sampleRate, endSec: done.at(-1)?.endSec ?? through / sampleRate, words: done, finalThroughSec: through / sampleRate }, delay)
+        const done = words, spoken = languages; words = []; languages = []
+        const counts = new Map<string, number>()
+        for (const language of spoken) if (language) counts.set(language, (counts.get(language) ?? 0) + 1)
+        const language = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0]
+        later({ type: "final", flushed, utterance, text: done.map(w => w.text).join("").trim(), startSec: done[0]?.startSec ?? through / sampleRate, endSec: done.at(-1)?.endSec ?? through / sampleRate, words: done, finalThroughSec: through / sampleRate, ...(language ? { language } : {}) }, delay)
         utterance++
       }
       const session: LiveTranscriberSession & { fail(retryable: boolean): void } = {

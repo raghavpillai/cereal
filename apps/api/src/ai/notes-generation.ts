@@ -61,14 +61,16 @@ const elapsedMs=(ms:number)=>{const seconds=Math.max(0,Math.floor(ms/1000)),hour
 export const serializeGenerationContext=(note:ProviderNote)=>JSON.stringify(generationContext(note))
 
 /** Topics the author did not note, when their typed notes are a few fragments.
- * - `commitments` (default): no sections for topics the author ignored, but every
- *   decision and action item of the meeting still appears.
+ * - `commitments`: no sections for topics the author ignored, but every
+ *   decision and action item of the meeting still appears. Measured 2026-11-17 on an
+ *   interview with three typed fragments: one run in three dropped the whole design
+ *   question, the core of the interview (`.local/ship/core-quality`).
  * - `strict`: un-noted topics are left out altogether (the actions section
  *   stays).
- * - `keep`: un-noted topics are still covered briefly after the author's own.
+ * - `keep` (default, as Granola does): un-noted topics are still covered briefly after the author's own.
  * Set NOTES_UNNOTED_TOPICS to choose. */
 export type UnnotedTopicsPolicy="commitments"|"strict"|"keep"
-export const unnotedTopicsPolicy=():UnnotedTopicsPolicy=>{const value=process.env.NOTES_UNNOTED_TOPICS;return value==="strict"||value==="keep"?value:"commitments"}
+export const unnotedTopicsPolicy=():UnnotedTopicsPolicy=>{const value=process.env.NOTES_UNNOTED_TOPICS;return value==="strict"||value==="commitments"?value:"keep"}
 
 const titleCase=(text:string)=>text.replace(/\b[a-z]/g,letter=>letter.toUpperCase())
 
@@ -93,7 +95,7 @@ Bullets
 - Bullets are telegraphic fragments, not sentences: no "The team discussed", no "It was agreed that", no full stop at the end, rarely more than 12 words. Lead with the subject and let a colon do the work of the verb: "Print budget: €18,000, €11,500 spent", "Search field: sits 2px low, needs realigning", "Onboarding email: open rate down to 31%".
 - Do not narrate who said what. State the content. Name a person only where it matters who it was: an owner, the holder of a position in a disagreement, a party's requirement or concern.
 - A decision is the first bullet of its section, stated as the outcome: "Moving payroll from Ardent to Brightside from 1 July", "Approved: second delivery van (€31,000 over 4 years)". Something left open is stated as open: "Logo colour: undecided until printed proofs arrive Tuesday".
-- Write numbers as digits with their unit or symbol: "€42/seat", "27%", "35 min", "$2.6M", "~6 hours/week", "71% vs. 64%". Write dates in digits in the order the speakers used ("May 6", "14 October", "the 22nd", "Monday, June 3"). Never add a month, year or weekday that nobody said.
+- Write numbers as digits with their unit or symbol: "€42/seat", "27%", "35 min", "$2.6M", "~6 hours/week", "71% vs. 64%". Write dates in digits in the order the speakers used ("May 6", "14 October", "the 22nd", "Monday, June 3"). Never add a month, year or weekday that nobody said. Never add a currency or unit that nobody said: "a budget of around forty thousand a year" is "~40,000/year", not "$40,000/year".
 
 Action items
 - An action item is a task a person took on: they said they would do it, or were asked and did not decline. Only these go in one final section, called "Next Steps" unless the author's notes name it differently.

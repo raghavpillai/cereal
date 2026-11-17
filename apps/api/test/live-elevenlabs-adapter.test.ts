@@ -64,3 +64,50 @@ test("after queue_overflow no commit is trusted past its words, and the session 
   for (const event of events) if (event.type === "final") expect(event.finalThroughSec).toBeLessThanOrEqual(0.4)
   await session.close()
 })
+
+test("a keep-alive is an audio chunk with no samples: nothing is spliced into what was being said, and the clock does not move", async () => {
+  // A stream that stops mid-word (a network drop) and resumes: 100 ms of keep-alive silence between the two
+  // halves of the word made the recogniser write it twice, clipped ("this- this-"), measured 2026-11-17.
+  const { session, socket } = await open(4)
+  session.send(tone(RATE / 10, 0))
+  for (const deadline = performance.now() + 2000; socket.audio().length < 1 && performance.now() < deadline;) await Bun.sleep(5)
+  expect(session.keepAlive()).toBe(0)
+  session.send(tone(RATE / 10, RATE / 10))
+  for (const deadline = performance.now() + 2000; socket.audio().filter(item => item.message.audio_base_64).length < 2 && performance.now() < deadline;) await Bun.sleep(5)
+  const chunks = socket.audio().map(item => Buffer.from(String(item.message.audio_base_64), "base64"))
+  expect(chunks.map(chunk => chunk.byteLength)).toEqual([RATE / 10 * 2, 0, RATE / 10 * 2])
+  expect(Buffer.concat(chunks).equals(Buffer.concat([Buffer.from(tone(RATE / 10, 0)), Buffer.from(tone(RATE / 10, RATE / 10))]))).toBe(true)
+  // Audio still waiting for its pace keeps the socket busy: no keep-alive is needed then.
+  const slow = await open(0.001)
+  slow.session.send(tone(RATE * 3, 0))
+  const before = slow.socket.sent.length
+  expect(slow.session.keepAlive()).toBe(0)
+  expect(slow.socket.sent.length).toBe(before)
+  await session.close(); await slow.session.close()
+})
+
+test("a flush with less than 0.3 s of audio since the last commit is answered here: the service would close the session", async () => {
+  // "commit_throttled: only 0.00s of uncommitted audio": a held provider session was lost on every takeover.
+  const { session, socket, events } = await open(1000)
+  session.send(tone(RATE * 2, 0))
+  session.flush()
+  for (const deadline = performance.now() + 2000; !socket.sent.some(item => item.message.commit === true) && performance.now() < deadline;) await Bun.sleep(5)
+  const commits = () => socket.sent.filter(item => item.message.commit === true).length
+  expect(commits()).toBe(1)
+  // Nothing new: answered at once, without a commit.
+  session.flush()
+  await Bun.sleep(20)
+  expect(commits()).toBe(1)
+  expect(events.filter(event => event.type === "final" && event.flushed).length).toBe(1)
+  // 0.2 s more is still too little; a second more is committed.
+  session.send(tone(RATE / 5, 0)); session.flush(); await Bun.sleep(20)
+  expect(commits()).toBe(1)
+  session.send(tone(RATE, 0)); session.flush()
+  for (const deadline = performance.now() + 2000; commits() < 2 && performance.now() < deadline;) await Bun.sleep(5)
+  expect(commits()).toBe(2)
+  // The service's own commit counts too: right after its transcript, a flush has nothing to commit.
+  socket.say({ message_type: "committed_transcript", text: "hello", segment_index: 0 })
+  session.flush(); await Bun.sleep(20)
+  expect(commits()).toBe(2)
+  await session.close()
+})
