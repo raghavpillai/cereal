@@ -1416,6 +1416,21 @@ fn thinking_steps() -> Vec<Step> {
         }),
         step("p-narrow-2-overlay", 900, |view, _| view.toggle_sidebar()),
         input("p-narrow-3-pressed-page", 900, |window, cx| click(window, cx, 700., 500.)),
+        // A note's transcript panel. `CEREAL_TOUR=p-panel`.
+        step("p-panel-transcript", 1500, |view, cx| {
+            view.close_chat_surface(cx);
+            view.open_note(1, cx);
+            view.transcript_open = true;
+            view.transcript_epoch = view.transcript_epoch.wrapping_add(1);
+        }),
+        // The recording's pill in the header while another page is open.
+        // `CEREAL_TOUR=p-session`.
+        step("p-session-start", 600, |view, cx| {
+            view.close_chat_surface(cx);
+            view.open_note(1, cx);
+            view.start_recording_preview(1, cx);
+        }),
+        step("p-session-pill", 1500, |view, cx| view.navigate(Screen::Home, cx)),
         step("p-think-end", 300, |view, cx| {
             view.close_chat_surface(cx);
             view.clear_chat(cx);

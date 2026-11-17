@@ -1101,41 +1101,11 @@ impl Cereal {
             .flex_col()
             .overflow_y_scroll()
             .track_scroll(&self.transcript_scroll);
-        // The spacing around the notice is padding of a wrapper, not margin:
-        // a scroll container measures its content from its first child's box
-        // to its last child's, so a margin above the first child (or below
-        // the last) would be cut from the scroll range and the newest line
-        // of a transcript that is being followed would sit under the footer.
-        body = body.child(div().w_full().flex_shrink_0().pt(px(14.)).pb(px(4.)).child(
-            div()
-                .id("transcript-consent")
-                .h(px(20.))
-                .mx(px(8.))
-                .flex_shrink_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .gap(px(4.))
-                .text_size(px(12.))
-                .line_height(px(16.))
-                .text_color(t.muted)
-                .cursor_pointer()
-                .map(|link| {
-                    crate::motion::dims(link, crate::motion::reveal_key("consent-notice"), 0.25)
-                })
-                .child("Always get consent when transcribing others.")
-                .child(
-                    div()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(t.secondary)
-                        .child("Learn more ›"),
-                )
-                .reach().on_click(cx.listener(|this, _, window, cx| {
-                    this.focus.focus(window);
-                    this.open_menu(Menu::RecordingHelp);
-                    cx.notify();
-                })),
-        ));
+        // The room above the first line is a spacer, not a margin: a scroll
+        // container measures its content from its first child's box to its
+        // last, so a margin above the first child would be cut from the
+        // scroll range.
+        body = body.child(div().w_full().flex_shrink_0().h(px(14.)));
         if rows.is_empty() {
             let label = if crate::server::enabled() && live {
                 "Listening…"

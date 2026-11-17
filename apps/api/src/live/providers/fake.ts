@@ -40,6 +40,9 @@ export interface FakeTranscriberOptions {
   /** Speakers are reported as `speaker_0`, `speaker_1`, ... in the order each provider session first
    * hears them, as a real provider does: the same person can get another id in the next session. */
   sessionSpeakers?: boolean
+  /** A real recogniser hears words in steady low noise ("Yeah.", "Right."): with this set, every 0.6 s of
+   * audio that is neither silence (0) nor a scripted word is heard as this word. */
+  noiseWord?: string
 }
 export interface FakeControl {
   /** Upstream sessions opened so far. */
@@ -76,6 +79,7 @@ export function makeFakeTranscriber(options: FakeTranscriberOptions = {}): LiveT
       const events = new EventQueue<LiveTranscriberEvent>(), timers = new Set<ReturnType<typeof setTimeout>>()
       const silenceSamples = Math.round(silenceMs * sampleRate / 1000)
       let position = 0, run = { value: 0, start: 0 }, silent = 0, utterance = 0, lastDue = 0, closed = false, buffered = 0, speech = 0, filler = 0
+      let noise = 0
       let words: LiveWord[] = [], languages: Array<string | undefined> = []
       const ids = new Map<string, string>()
       const speakerId = (name: string) => options.sessionSpeakers ? ids.get(name) ?? (ids.set(name, `speaker_${ids.size}`), ids.get(name)!) : name
@@ -111,6 +115,9 @@ export function makeFakeTranscriber(options: FakeTranscriberOptions = {}): LiveT
             const sample = view.getInt16(index * 2, true)
             if (options.vocabulary) {
               const value = wordId(sample, options.vocabulary)
+              if (options.noiseWord && !value && sample !== 0) {
+                if (++noise === Math.round(sampleRate * 0.6)) { heard({ text: options.noiseWord, speaker: "speaker_0" }, position + 1 - noise, position + 1); noise = 0 }
+              } else noise = 0
               if (value !== run.value) {
                 if (run.value) heard(options.vocabulary[run.value - 1]!, run.start, position)
                 run = { value, start: position }

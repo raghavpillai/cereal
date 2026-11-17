@@ -161,6 +161,17 @@ impl ChatTurnAnnotations {
         }
     }
 
+    /// Whether the turn went looking (searched or read other meetings), as
+    /// opposed to reasoning over the meeting it was given: the reference says
+    /// "Worked for" then, "Thought for" otherwise. A note's own read is not
+    /// work.
+    fn worked(&self) -> bool {
+        self.tools
+            .iter()
+            .any(|tool| !matches!(tool.name, meeting_notes_api_types::Name::GetMeetingTranscript))
+            || self.tools.len() > 1
+    }
+
     fn has_thoughts(&self) -> bool {
         !self.tools.is_empty() || self.reasoning.iter().any(|item| !item.text.trim().is_empty())
     }
@@ -1260,7 +1271,12 @@ impl crate::app::Cereal {
         } else if stopped {
             (1, "Stopped".to_owned())
         } else if let Some(elapsed) = elapsed {
-            (2, format!("Thought for {}s", (elapsed / 1000).max(1)))
+            let verb = if annotations.is_some_and(ChatTurnAnnotations::worked) {
+                "Worked"
+            } else {
+                "Thought"
+            };
+            (2, format!("{verb} for {}s", (elapsed / 1000).max(1)))
         } else if has_thoughts {
             (3, "Meeting sources".to_owned())
         } else {
@@ -1572,13 +1588,20 @@ impl crate::app::Cereal {
         let weak = cx.weak_entity();
         markdown_with_inline(answer, t, compact, move |text, block| {
             let (text, highlights, links) = linked_inline_with_citations(text, t, &citations);
-            let ranges = links.iter().map(|(range, _)| range.clone()).collect();
+            let ranges: Vec<_> = links.iter().map(|(range, _)| range.clone()).collect();
             let citations = citations.clone();
             let weak = weak.clone();
-            InteractiveText::new(
-                ("chat-sourced-markdown", block),
-                StyledText::new(text).with_highlights(highlights),
-            )
+            let styled = StyledText::new(text).with_highlights(highlights);
+            // Each source's place in the text and its number, for its chip.
+            let marks: Vec<_> = links
+                .iter()
+                .filter_map(|(range, destination)| {
+                    let number = destination.strip_prefix("minutes-source:S")?.parse::<u32>().ok()?;
+                    Some((range.clone(), number))
+                })
+                .collect();
+            let chips = (!marks.is_empty()).then(|| citation_chips(styled.layout().clone(), marks, t));
+            let text = InteractiveText::new(("chat-sourced-markdown", block), styled)
             .on_click(ranges, move |clicked, window, cx| {
                 let Some((_, destination)) = links.get(clicked) else {
                     return;
@@ -1591,7 +1614,8 @@ impl crate::app::Cereal {
                 } else {
                     cx.open_url(destination);
                 }
-            })
+            });
+            div().relative().children(chips).child(text).into_any_element()
         })
     }
 
@@ -3408,16 +3432,68 @@ fn linked_inline(source: &str, theme: Theme) -> LinkedInline {
     linked_inline_with_citations(source, theme, &[])
 }
 
-/// The mark a citation is shown as: its number in small raised digits
-/// (¹³), quiet beside the sentence it supports. Any number can be written
-/// this way, so a long meeting's sixtieth source reads like its first.
-fn citation_mark(number: u32) -> String {
-    const RAISED: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
-    number
-        .to_string()
-        .bytes()
-        .map(|digit| RAISED[usize::from(digit - b'0')])
-        .collect()
+/// The room a citation takes in the text, where its chip is painted
+/// (`citation_chips`): figures one more than its digits, drawn invisible
+/// (`CITATION_ROOM`), a disc for one digit and a capsule for more. Figures
+/// because the text face's spaces are too narrow to be relied on. The number
+/// itself is painted on the chip, smaller than the text, as the reference
+/// sets it.
+fn citation_room(number: u32) -> String {
+    CITATION_ROOM.repeat(number.to_string().len() + 1)
+}
+/// What a citation's room is made of: a figure, drawn in no colour.
+const CITATION_ROOM: &str = "0";
+
+/// The chips of a paragraph's sources: a light grey disc (a capsule for two
+/// or more digits) in the room each one has in the text, centred on its
+/// line, with its number in small grey figures. A text background cannot
+/// draw them (it fills the whole line box) and text cannot change size
+/// within a line, so both are painted where the text laid the room out.
+fn citation_chips(layout: TextLayout, marks: Vec<(std::ops::Range<usize>, u32)>, t: Theme) -> AnyElement {
+    let chip = crate::motion::mix(t.hover, t.text, 0.04);
+    let ink = t.muted;
+    canvas(
+        |_, _, _| (),
+        move |_, _, window, cx| {
+            let line = layout.line_height();
+            let tall = (line * 0.78).min(px(18.));
+            for (range, number) in &marks {
+                let (Some(start), Some(end)) = (
+                    layout.position_for_index(range.start),
+                    layout.position_for_index(range.end),
+                ) else {
+                    continue;
+                };
+                // A mark the line breaks inside is left without a chip.
+                if start.y != end.y {
+                    continue;
+                }
+                let wide = end.x - start.x;
+                let top = start.y + (line - tall) / 2.;
+                window.paint_quad(
+                    fill(Bounds::new(point(start.x, top), size(wide, tall)), chip)
+                        .corner_radii(tall / 2.),
+                );
+                let label = SharedString::from(number.to_string());
+                let run = TextRun {
+                    len: label.len(),
+                    font: gpui::font(crate::ui::FONT),
+                    color: ink,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let shaped = window
+                    .text_system()
+                    .shape_line(label, px(11.), &[run], None);
+                let origin = point(start.x + (wide - shaped.width) / 2., top);
+                let _ = shaped.paint(origin, tall, window, cx);
+            }
+        },
+    )
+    .absolute()
+    .size_full()
+    .into_any_element()
 }
 
 /// Each mark is a small chip: its raised number padded by a thin space on
@@ -3426,8 +3502,9 @@ fn citation_mark(number: u32) -> String {
 /// number.
 fn citation_tokens(source: &str, citations: &[ChatCitationDTO]) -> String {
     rewrite_citation_tokens(source, citations, |id| {
-        let label = citation_mark(id[1..].parse::<u32>().unwrap_or(0));
-        format!("\u{200a}[\u{2009}{label}\u{2009}](minutes-source:{id})")
+        let room = citation_room(id[1..].parse::<u32>().unwrap_or(0));
+        // A word space before each chip, so two side by side stay apart.
+        format!(" [{room}](minutes-source:{id})")
     })
 }
 
@@ -3539,13 +3616,17 @@ fn linked_inline_with_citations(
         }
     }
     for (range, url) in &links {
-        // A source mark is its raised number in the accent, with no fill: a
-        // text background covers the whole line box, so behind digits this
-        // small it drew a tall narrow bar rather than a chip.
+        // A source's room is drawn in no colour: its chip and number are
+        // painted (`citation_chips`). A link to a page is in the accent.
+        let source = url.starts_with("minutes-source:");
         highlights.push((
             range.clone(),
             HighlightStyle {
-                color: Some(theme.accent),
+                // Colours blend over the text's own, so the room is faded out
+                // entirely rather than coloured clear.
+                color: (!source).then_some(theme.accent),
+                fade_out: source.then_some(1.),
+                font_weight: source.then_some(FontWeight::NORMAL),
                 ..Default::default()
             },
         ));
@@ -3566,7 +3647,7 @@ fn markdown_with_inline(
     source: &str,
     theme: Theme,
     compact: bool,
-    render_inline: impl Fn(&str, usize) -> InteractiveText,
+    render_inline: impl Fn(&str, usize) -> AnyElement,
 ) -> Div {
     // Body text is a shade softer than full ink; what is bold (a lead-in,
     // a heading) is full ink, so it carries the eye down the answer.
@@ -3786,7 +3867,7 @@ mod tests {
         assert!(
             linked_inline_with_citations(partial, Theme::new(true), &[citation("S1")])
                 .0
-                .contains('¹')
+                .contains(" 00.")
         );
         let mut annotations = ChatTurnAnnotations::default();
         annotations.error = Some(
@@ -3852,9 +3933,9 @@ mod tests {
             Theme::new(true),
             &citations,
         );
-        assert_eq!(text, "Café 🦊\u{200a}\u{2009}¹\u{2009} and docs.");
+        assert_eq!(text, "Café 🦊 00 and docs.");
         assert_eq!(links.len(), 2);
-        assert_eq!(&text[links[0].0.clone()], "\u{2009}¹\u{2009}");
+        assert_eq!(&text[links[0].0.clone()], "00");
         assert_eq!(links[0].1, "minutes-source:S1");
         assert_eq!(&text[links[1].0.clone()], "docs");
         assert_eq!(links[1].1, "https://example.test");
@@ -3875,14 +3956,14 @@ mod tests {
         // space before each keeps neighbours from running together
         // ("[[S25]][[S26]]" must not read "2526"), and none is ever
         // written out in brackets.
-        assert_eq!([1, 20, 57, 999].map(super::citation_mark), ["¹", "²⁰", "⁵⁷", "⁹⁹⁹"]);
+        assert_eq!([1, 10, 999].map(super::citation_room), ["00", "000", "0000"]);
         let later = vec![citation("S25"), citation("S26"), citation("S51"), citation("S52")];
         let (text, _, links) = linked_inline_with_citations(
             "Moved. [[S25]][[S26]] Later. [[S51]][[S52]]",
             Theme::new(true),
             &later,
         );
-        assert_eq!(text, "Moved.\u{200a}\u{2009}²⁵\u{2009}\u{200a}\u{2009}²⁶\u{2009} Later.\u{200a}\u{2009}⁵¹\u{2009}\u{200a}\u{2009}⁵²\u{2009}");
+        assert_eq!(text, "Moved. 000 000 Later. 000 000");
         assert!(!text.contains('('));
         // With no sources (a conversation about one note) the markers and
         // the space before them go, and nothing is left in their place.

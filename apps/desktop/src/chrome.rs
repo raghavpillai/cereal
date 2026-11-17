@@ -272,7 +272,6 @@ impl Cereal {
         pose: crate::motion::Pose,
         cx: &mut Context<Self>,
     ) -> Div {
-        let t = self.theme();
         let level = pose.value.clamp(0., 1.);
         let width = self.sidebar_span;
         div()
@@ -1040,32 +1039,40 @@ impl Cereal {
                     } else {
                         note.title.clone()
                     };
-                    let width = (title.chars().count() as f32 * 6.6 + 66.).clamp(118., 240.);
-                    let hover = if self.workspace.settings.dark_mode {
-                        rgb(0x414140).into()
+                    // Dark, as in the reference: a near-black capsule with
+                    // the title in white, so it reads as the recording at a
+                    // glance over either theme. Wide enough for the whole
+                    // title up to 240 pt.
+                    let width = (title.chars().count() as f32 * 7.6 + 78.).clamp(124., 240.);
+                    let (fill, hover, ink) = if self.workspace.settings.dark_mode {
+                        (rgb(0x41403c), rgb(0x4b4a46), rgb(0xf6f4ee))
                     } else {
-                        t.hover
+                        (rgb(0x2b2a27), rgb(0x3a3936), rgb(0xfbfaf6))
                     };
                     header.child(crate::motion::pop(
                         div()
                             .id("active-session-pill")
                             .absolute()
-                            .top(px(6.))
+                            .top(px(5.))
                             .left(relative(0.5))
                             .ml(px(-width / 2. - self.sidebar_inset() / 2.))
                             .w(px(width))
-                            .h(px(32.))
-                            .pl(px(10.))
-                            .pr(px(5.))
+                            .h(px(34.))
+                            .pl(px(11.))
+                            .pr(px(6.))
                             .rounded_full()
-                            .border_1()
-                            .border_color(t.border)
-                            .bg(t.card)
+                            .bg(fill)
+                            .shadow(vec![BoxShadow {
+                                color: hsla(0., 0., 0., 0.18),
+                                offset: point(px(0.), px(2.)),
+                                blur_radius: px(8.),
+                                spread_radius: px(0.),
+                            }])
                             .flex()
                             .items_center()
-                            .gap(px(7.))
+                            .gap(px(8.))
                             .cursor(CursorStyle::Arrow)
-                            .child(crate::motion::tactile(hover).round())
+                            .child(crate::motion::tactile(hover.into()).round())
                             .child(crate::recording_view::recording_waveform(
                                 self.recording.audio_level(),
                                 crate::recording_view::WAVEFORM.into(),
@@ -1075,7 +1082,8 @@ impl Cereal {
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
-                                    .text_size(px(13.))
+                                    .text_size(px(14.))
+                                    .text_color(ink)
                                     .child(title),
                             )
                             .reach().on_click(cx.listener(move |this, _, window, cx| {
@@ -1083,8 +1091,15 @@ impl Cereal {
                                 this.focus.focus(window);
                             }))
                             .child(
-                                round_tool("active-session-stop", "close", "Stop transcript", t)
-                                    .size(px(22.))
+                                crate::ui::with_tooltip(div()
+                                    .id("active-session-stop")
+                                    .size(px(24.))
+                                    .rounded_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .hover(|stop| stop.bg(hsla(0., 0., 1., 0.12)))
+                                    .child(icon("close", 13., ink.into())), "Stop transcript".into(), t)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         cx.stop_propagation();
                                         this.focus.focus(window);

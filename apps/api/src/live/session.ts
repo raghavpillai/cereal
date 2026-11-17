@@ -105,6 +105,14 @@ const MAIN_LANGUAGE_MS = 3_000, STRAY_LANGUAGE_MS = 4_000
 export const RECONNECT_CLOSE = 1012
 /** Below this amplitude a sample counts as a pause (about -36 dBFS). */
 const QUIET_AMPLITUDE = 500
+/** Microphone text is kept only where the microphone had sound at speech level (`QUIET_AMPLITUDE`) within this
+ * much of its words. A real recogniser hears words ("Yeah.", "Right.") in the low hiss of a quiet room, and they
+ * appeared as the note owner speaking while nobody did. The audio itself is sent as it is: replacing the quiet
+ * with digital silence made the recogniser drop short words said on their own ("Okay."). System audio is never
+ * filtered: what the call plays is there to be transcribed, however quiet. */
+const MIC_SOUND_MARGIN_MS = 300
+/** How long the record of where the microphone had sound is kept: finals come seconds after their audio. */
+const MIC_SOUND_KEEP_MS = 10 * 60_000
 /** A flush is only sent after this much quiet, so it does not cut a word in two. */
 const PAUSE_MS = 150
 
@@ -174,6 +182,9 @@ interface Channel {
   /** Note-timeline end of audio the live path has stored coverage for. */
   finalThroughMs: number
   quietSamples: number
+  /** Where the channel had sound at speech level, as [fromMs, toMs] on the note's timeline, oldest first
+   * (`MIC_SOUND_MARGIN_MS`). Kept for the microphone only. */
+  sound: Array<[number, number]>
   /** Capture sample at which the most recent pause of at least 300 ms ended: nothing before it is waiting to become text. */
   quietThroughSample: number
   paused: boolean
@@ -255,7 +266,7 @@ export class LiveSession {
       // record of the capture the client's own resume point stands.
       const known = ledger.filter(row => row.channel === stream.channel && row.toMs > stream.baseMs).map(row => row.toMs)
       const accept = known.length ? Math.floor((Math.max(...known) - stream.baseMs) * stream.sampleRate / 1000) : stream.resumeFromSample
-      session.channels.set(stream.channel, { name: stream.channel, sampleRate: stream.sampleRate, baseMs: stream.baseMs, nextSample: accept, finalThroughMs: session.ms(stream, accept), quietSamples: 0, quietThroughSample: accept,
+      session.channels.set(stream.channel, { name: stream.channel, sampleRate: stream.sampleRate, baseMs: stream.baseMs, nextSample: accept, finalThroughMs: session.ms(stream, accept), quietSamples: 0, sound: [], quietThroughSample: accept,
         paused: false, pausedAt: 0, reopenAttempt: 0, ackedAt: now, ackedSample: accept, statusAt: 0, pace: [], lastAudioAt: now, pendingInterim: false, recent: [], recentFrom: accept, recentSamples: 0,
         // The voice samples of the note's previous live session carry over, so a voice heard only before a reconnect is still known.
         voices: new Map((input.hold?.recentAudio?.(stream.channel)?.sampleRate === stream.sampleRate ? input.hold.recentAudio(stream.channel)!.voices ?? [] : []).map(sample => [sample.number, { fromMs: sample.fromMs, pcm: sample.pcm }])) })
@@ -358,6 +369,7 @@ export class LiveSession {
     // Speech resuming after a pause: the silence before it is not speech waiting for text (see `lag`).
     if (quiet < samples && channel.quietSamples >= channel.sampleRate * 0.3) channel.quietThroughSample = firstSample + Math.max(0, samples - quiet - 1)
     channel.quietSamples = quiet
+    if (channel.name === "mic" && quiet < samples) this.heardSound(channel, this.ms(channel, firstSample), this.ms(channel, firstSample + samples))
     const upstream = channel.upstream
     if (upstream) {
       upstream.timeline.audio(firstSample, samples)
@@ -570,6 +582,20 @@ export class LiveSession {
     else if (event.type === "final") await this.final(channel, upstream, event)
     else await this.merge(channel, upstream, event)
   }
+  /** A frame of the microphone with sound at speech level, from `fromMs` to `toMs` (`MIC_SOUND_MARGIN_MS`). */
+  private heardSound(channel: Channel, fromMs: number, toMs: number) {
+    const last = channel.sound.at(-1)
+    if (last && fromMs <= last[1] + 20) last[1] = Math.max(last[1], toMs)
+    else channel.sound.push([fromMs, toMs])
+    while (channel.sound.length > 1 && channel.sound[0]![1] < toMs - MIC_SOUND_KEEP_MS) channel.sound.shift()
+  }
+  /** Whether text from `fromMs` to `toMs` on this channel can have been said: always on system audio; on the
+   * microphone, only with sound at speech level within `MIC_SOUND_MARGIN_MS` of it. */
+  private audible(channel: Channel, fromMs: number, toMs: number) {
+    if (channel.name !== "mic") return true
+    const from = fromMs - MIC_SOUND_MARGIN_MS, to = toMs + MIC_SOUND_MARGIN_MS
+    return channel.sound.some(([start, end]) => start <= to && end >= from)
+  }
   private interim(channel: Channel, upstream: Upstream, event: Extract<LiveTranscriberEvent, { type: "interim" }>) {
     if (channel.upstream !== upstream || event.endSec * channel.sampleRate <= upstream.origin && event.text.trim()) return
     const text = normaliseText(event.text.trim())
@@ -583,6 +609,8 @@ export class LiveSession {
     const speaker = key === undefined ? previous?.speaker : upstream.speakers[key] ?? previous?.speaker
     const startMs = this.ms(channel, upstream.timeline.captureSample(event.startSec)), endMs = Math.max(startMs, this.ms(channel, upstream.timeline.captureSample(event.endSec)))
     if (previous && previous.text === text && previous.speaker === speaker) return
+    // Words heard in a quiet microphone's hiss are not shown, even as a draft (`MIC_SOUND_MARGIN_MS`).
+    if (text && !this.audible(channel, startMs, endMs)) return
     channel.interim = { utteranceId, rev: previous ? previous.rev + 1 : 0, text, startMs, endMs, ...(speaker === undefined ? {} : { speaker }) }
     this.postInterim(channel)
   }
@@ -611,6 +639,10 @@ export class LiveSession {
     }
     else if (event.text.trim() && event.endSec * rate > upstream.origin) heard.push(word(normaliseText(event.text.trim()), event.startSec, event.endSec))
     this.mapPrimerVoices(upstream)
+    // Words heard in a quiet microphone's hiss, with no sound at speech level near their middle, were never said
+    // (`MIC_SOUND_MARGIN_MS`). A real word's middle is in its sound; a soft one inside speech is within the margin
+    // of the words around it.
+    heard.splice(0, heard.length, ...heard.filter(item => { const middle = (item.startMs + item.endMs) / 2; return this.audible(channel, middle, middle) }))
     let spokenMs = heard.length ? heard.at(-1)!.endMs - heard[0]!.startMs : 0
     // A mumble or a filler in a recording that is plainly in one language is sometimes detected as another and
     // written in its script ("uh… hey hey hey" as Chinese, "hmm" as "うん。"). A short stretch in another script is
