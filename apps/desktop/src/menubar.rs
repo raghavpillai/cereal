@@ -182,7 +182,9 @@ fn times(event: &CalendarEventDTO) -> Option<(DateTime<Local>, DateTime<Local>)>
 }
 
 /// The meeting the menu bar counts down to: the one that is on now (the
-/// latest to have started, when several are) or else the next to start.
+/// latest to have started, when several are) or else the next to start
+/// today. A meeting that starts on a later day is not shown there: the menu
+/// bar keeps just the mark, and the meeting waits in the menu's list.
 /// All-day events are never counted down to.
 pub fn next_meeting<'a>(
     events: &[&'a CalendarEventDTO],
@@ -198,7 +200,7 @@ pub fn next_meeting<'a>(
         .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.id.cmp(&a.0.id)))
         .or_else(|| {
             timed()
-                .filter(|(_, start, _)| *start > now)
+                .filter(|(_, start, _)| *start > now && start.date_naive() == now.date_naive())
                 .min_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.id.cmp(&b.0.id)))
         })
         .map(|(event, _, _)| event)
@@ -1265,7 +1267,7 @@ mod tests {
     }
 
     #[test]
-    fn a_meeting_after_midnight_is_counted_down_to_from_the_evening_before() {
+    fn only_todays_meetings_are_counted_down_to() {
         let events = [
             timed("late", at(16, 23, 30, 0), 60, None),
             timed("early", at(17, 0, 10, 0), 30, None),
@@ -1279,12 +1281,14 @@ mod tests {
         assert_eq!(evening.next.as_ref().unwrap().0.id, "late");
         assert_eq!(evening.next.as_ref().unwrap().1, Countdown::Now);
         let events_without_late: Vec<&CalendarEventDTO> = events[1..].to_vec();
+        // A meeting that starts tomorrow is never counted down to, however
+        // close: the menu bar shows only the mark, and the meeting is listed
+        // under Tomorrow.
         let waiting = agenda(&events_without_late, at(16, 23, 50, 0));
-        assert_eq!(
-            waiting.next.as_ref().unwrap().1,
-            Countdown::In("in 20m".into())
-        );
-        assert!(waiting.today.is_empty() && waiting.tomorrow.is_empty());
+        assert!(waiting.next.is_none());
+        assert_eq!(model(&waiting, &around(true)).title, None);
+        assert!(waiting.today.is_empty());
+        assert_eq!(ids(&waiting.tomorrow), ["early"]);
         let midnight = agenda(&events, at(17, 0, 15, 0));
         assert_eq!(midnight.next.as_ref().unwrap().0.id, "early");
         assert_eq!(ids(&midnight.today), ["late"]);
