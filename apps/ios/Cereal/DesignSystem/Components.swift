@@ -129,7 +129,7 @@ private struct AdaptiveGlass<S: Shape>: ViewModifier {
             content
                 .background(tint ?? .clear, in: shape)
                 .background(Theme.surfaceRaised, in: shape)
-                .overlay(shape.stroke(.white.opacity(contrast == .increased ? 0.32 : 0.14), lineWidth: 1))
+                .overlay(shape.stroke(Theme.ink.opacity(contrast == .increased ? 0.32 : 0.14), lineWidth: 1))
         } else if #available(iOS 26.0, *) {
             // A named surface morphs with its neighbours in a GlassChromeGroup.
             // Reduce Motion drops the name, leaving a plain opacity change.
@@ -461,6 +461,9 @@ struct RailScaffold<Content: View, Rail: View, Bottom: View>: View {
     }
 
     @State private var bottomHeight: CGFloat = 0
+    /// Beside an open chat panel (`NoteChatPanel`) the controls are drawn in the content's top row.
+    @Environment(\.railControlsPlacement) private var controlsPlacement
+    private var inlineControls: Bool { controlsPlacement != .toolbar }
 
     var body: some View {
         GeometryReader { proxy in
@@ -473,6 +476,18 @@ struct RailScaffold<Content: View, Rail: View, Bottom: View>: View {
                 content
                     .safeAreaPadding(.leading, metrics.extraLeading)
                     .safeAreaPadding(.trailing, metrics.extraTrailing)
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        if inlineControls {
+                            HStack(spacing: 12) {
+                                leading
+                                Spacer(minLength: 0)
+                                standalone
+                                rail
+                            }
+                            .padding(.horizontal, metrics.gutter - 4).padding(.top, 6).padding(.bottom, 4)
+                            .transition(.opacity)
+                        }
+                    }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 // Text that scrolls up behind the status bar is gone before it reaches the clock.
                 TopFade(height: proxy.safeAreaInsets.top)
@@ -498,11 +513,13 @@ struct RailScaffold<Content: View, Rail: View, Bottom: View>: View {
         .background(SwipeBackEnabler())
         .overlay(alignment: .leading) { EdgeFallbackStrip() }
         .toolbar {
+            if !inlineControls {
             ToolbarItemGroup(placement: .topBarLeading) {
                 leading.environment(\.cerealNativeNavigationChrome, true)
             }
             .cerealAdaptiveAxis()
-            if let standalone {
+            }
+            if !inlineControls, let standalone {
                 // Its own glass shape, apart from the grouped capsule.
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     standalone.environment(\.cerealNativeNavigationChrome, true)
@@ -510,14 +527,14 @@ struct RailScaffold<Content: View, Rail: View, Bottom: View>: View {
                 .cerealAdaptiveAxis()
                 ToolbarSpacer(.fixed, placement: .topBarTrailing)
             }
-            if Rail.self != EmptyView.self {
+            if !inlineControls, Rail.self != EmptyView.self {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     rail.environment(\.cerealNativeNavigationChrome, true)
                 }
                 .cerealAdaptiveAxis()
             }
         }
-        .toolbarVisibility(.visible, for: .navigationBar)
+        .toolbarVisibility(controlsPlacement == .inline(hidesBar: true) ? .hidden : .visible, for: .navigationBar)
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden()
     }
@@ -555,8 +572,10 @@ struct AskAnythingPill: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 5) {
-                Image(systemName: "bubble.left.fill")
-                    .font(.system(size: 20))
+                // The reference's bubble is an oval with its tail at the bottom right.
+                Image(systemName: "message.fill")
+                    .font(.system(size: 19))
+                    .scaleEffect(x: -1)
                     .foregroundStyle(Theme.textPrimary)
                 Text("Ask anything")
                     .font(.system(size: 18))
@@ -567,7 +586,29 @@ struct AskAnythingPill: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.squash)
-        .glassSurface(Capsule(), interactive: true, tint: .white.opacity(prominent ? 0.20 : 0.08))
+        .glassSurface(Capsule(), interactive: true, tint: prominent ? Theme.askPillTint : Theme.fieldTint)
+        // On light the reference's white pill is edged by a faint line.
+        .overlay(Capsule().strokeBorder(Theme.floatingEdge, lineWidth: 1).allowsHitTesting(false))
+    }
+}
+
+/// The dark capsule on an upcoming meeting's page: a waveform and "Start meeting",
+/// 56 pt tall across the text column (#262626 with white type on light).
+struct StartMeetingButton: View {
+    var action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: "waveform").font(.system(size: 16, weight: .semibold))
+                Text("Start meeting").font(.system(size: 18))
+            }
+            .foregroundStyle(Theme.onStartMeeting)
+            .frame(maxWidth: .infinity).frame(height: 56)
+            .background(Theme.startMeeting, in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.squash)
+        .accessibilityIdentifier("start-meeting")
     }
 }
 
@@ -654,6 +695,12 @@ enum HomeMetrics {
     /// From the top of the title's line box to the top of the caption beneath it.
     static let captionOffset: CGFloat = 35
     static let pagerGlyph: CGFloat = 13.5
+    /// The filled circles of the day pager on a day other than today.
+    static let pagerCircle: CGFloat = 40
+    static let dayTitle: CGFloat = 17
+    /// The events block of a day other than today keeps room for about three
+    /// events, so the list beneath does not move as days are stepped through.
+    static let otherDayEventsHeight: CGFloat = 204
     static let eventsText: CGFloat = 15.5
     static let sectionHeader: CGFloat = 15.5
     static let rowTitle: CGFloat = 15
@@ -666,9 +713,16 @@ enum HomeMetrics {
 
 /// "Today" with the day pager. `caption` (the local-demo label) hangs below
 /// the title without moving the list.
+///
+/// On any other day the reference swaps the serif title for the date, centred in
+/// the text column ("Wed, 18 Nov", 17 pt medium), between two 40 pt filled
+/// circles that hold the arrows. The row keeps the title's height, so the
+/// events below stay where they were.
 struct HomeHeader: View {
     let title: String
     var caption: String? = nil
+    /// The date of the day shown when it is not today. Nil on today.
+    var dayTitle: String? = nil
     let canGoBack: Bool
     let back: () -> Void
     let forward: () -> Void
@@ -691,24 +745,69 @@ struct HomeHeader: View {
                             .offset(x: 1, y: HomeMetrics.captionOffset)
                     }
                 }
+                .opacity(dayTitle == nil ? 1 : 0)
+                .accessibilityHidden(dayTitle != nil)
             Spacer()
-            // 33 x 44 pt targets keep the measured 33 pt between the glyph centres.
-            HStack(spacing: 0) {
-                Button(action: back) { Image(systemName: "chevron.left").frame(width: 33, height: 44).contentShape(Rectangle()) }
-                    .disabled(!canGoBack).opacity(canGoBack ? 1 : 0.3).accessibilityLabel("Previous day")
-                Button(action: forward) { Image(systemName: "chevron.right").frame(width: 33, height: 44).contentShape(Rectangle()) }
-                    .accessibilityLabel("Next day")
+            if dayTitle == nil {
+                // 33 x 44 pt targets keep the measured 33 pt between the glyph centres.
+                HStack(spacing: 0) {
+                    Button(action: back) { Image(systemName: "chevron.left").frame(width: 33, height: 44).contentShape(Rectangle()) }
+                        .disabled(!canGoBack).opacity(canGoBack ? 1 : 0.3).accessibilityLabel("Previous day")
+                    Button(action: forward) { Image(systemName: "chevron.right").frame(width: 33, height: 44).contentShape(Rectangle()) }
+                        .accessibilityLabel("Next day")
+                }
+                .font(.system(size: HomeMetrics.pagerGlyph, weight: .medium))
+                .foregroundStyle(Theme.textSecondary)
+                .buttonStyle(SquashButtonStyle(scale: 0.8))
+                // Centred on the title's capitals rather than sitting on its baseline.
+                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + HomeMetrics.titleCapHeight / 2 }
+                .padding(.trailing, -7)
+                .padding(.vertical, -16)
             }
-            .font(.system(size: HomeMetrics.pagerGlyph, weight: .medium))
-            .foregroundStyle(Theme.textSecondary)
-            .buttonStyle(SquashButtonStyle(scale: 0.8))
-            // Centred on the title's capitals rather than sitting on its baseline.
-            .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + HomeMetrics.titleCapHeight / 2 }
-            .padding(.trailing, -7)
-            .padding(.vertical, -16)
+        }
+        .overlay {
+            if let dayTitle {
+                HStack(spacing: 0) {
+                    pagerCircle("chevron.left", label: "Previous day", action: back).disabled(!canGoBack)
+                    Spacer(minLength: 8)
+                    Text(dayTitle)
+                        .font(.system(size: HomeMetrics.dayTitle))
+                        .foregroundStyle(Theme.textPrimary)
+                        .lineLimit(1)
+                        .contentTransition(.opacity)
+                        .accessibilityAddTraits(.isHeader)
+                    Spacer(minLength: 8)
+                    pagerCircle("chevron.right", label: "Next day", action: forward)
+                }
+                .padding(.horizontal, -1)
+            }
         }
         .padding(.top, 35)
         .padding(.bottom, 23)
+    }
+
+    private func pagerCircle(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: HomeMetrics.pagerGlyph, weight: .medium))
+                .foregroundStyle(Theme.textPrimary.opacity(0.8))
+                .frame(width: HomeMetrics.pagerCircle, height: HomeMetrics.pagerCircle)
+                .background(Theme.pagerFill, in: Circle())
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
+        }
+        .buttonStyle(SquashButtonStyle(scale: 0.86))
+        .accessibilityLabel(label)
+    }
+}
+
+/// The date of a Home day other than today, as the reference writes it: "Wed, 18 Nov".
+enum HomeDayTitle {
+    static func string(_ date: Date, calendar: Calendar = .current, locale: Locale = .current) -> String {
+        let format = DateFormatter()
+        format.calendar = calendar; format.timeZone = calendar.timeZone; format.locale = locale
+        format.dateFormat = "EEE, d MMM"
+        return format.string(from: date)
     }
 }
 
@@ -716,7 +815,7 @@ struct HomeHeader: View {
 /// in the measured events text style. It keeps the empty line's height while
 /// loading, so the list below does not move when events arrive.
 struct HomeEventsBlock<Rows: View>: View {
-    var barColor = Color(hex: 0x464640)
+    var barColor = Theme.eventsBar
     @ViewBuilder var rows: Rows
     var body: some View {
         HStack(spacing: 10) {
@@ -794,16 +893,19 @@ enum NoteTile: Equatable {
 
 struct NoteTileView: View {
     let tile: NoteTile
+    /// Search results tint their document tiles with the brand colour, as the
+    /// reference does with its own.
+    var tinted = false
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
         switch tile {
         case .document, .phone:
             Image(systemName: tile == .phone ? "iphone" : "doc.text")
-                .font(.system(size: 19, weight: .light))
-                .foregroundStyle(Theme.textSecondary)
+                .font(.system(size: 19, weight: tinted ? .regular : .light))
+                .foregroundStyle(tinted ? Theme.accentTintGlyph : Theme.tileGlyph)
                 .frame(width: 44, height: 44)
-                .background(Theme.surface, in: shape)
+                .background(tinted ? Theme.accentTint : Theme.surface, in: shape)
                 .overlay(shape.stroke(Theme.stroke, lineWidth: 0.5))
         case .letter(let letter):
             Text(letter)
@@ -820,14 +922,21 @@ struct NoteListRow: View {
     let tile: NoteTile
     let title: String
     let subtitle: String
+    var tinted = false
+    /// The title with matched words marked, for search results.
+    var markedTitle: AttributedString? = nil
+
+    init(tile: NoteTile, title: String, subtitle: String, tinted: Bool = false, markedTitle: AttributedString? = nil) {
+        self.tile = tile; self.title = title; self.subtitle = subtitle; self.tinted = tinted; self.markedTitle = markedTitle
+    }
 
     var body: some View {
         HStack(spacing: 11) {
-            NoteTileView(tile: tile)
+            NoteTileView(tile: tile, tinted: tinted)
                 .accessibilityHidden(tile != .phone)
                 .accessibilityLabel("Recorded on this iPhone")
             VStack(alignment: .leading, spacing: 0) {
-                Text(title).readingFont(.rowTitle)
+                Text(markedTitle ?? AttributedString(title)).readingFont(.rowTitle)
                     .foregroundStyle(Theme.textPrimary).lineLimit(1)
                 Text(subtitle).readingFont(.rowSubtitle)
                     .foregroundStyle(Theme.textSecondary).lineLimit(1)
@@ -843,6 +952,48 @@ struct NoteListRow: View {
     }
 }
 
+/// A note made ahead of a meeting that has not happened yet, under that
+/// meeting's day: an outlined card reading "Draft: <title>" with a pencil at
+/// its trailing edge, 64 pt tall, spanning the text column.
+struct DraftNoteRow: View {
+    let title: String
+    let subtitle: String
+    /// A note whose recording is being turned into notes shows the step in place
+    /// of its subtitle and a spinner in place of the pencil, as in the reference.
+    var working = false
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(working ? title : "Draft: \(title)").readingFont(.rowTitle)
+                    .foregroundStyle(Theme.textPrimary).lineLimit(1)
+                if !subtitle.isEmpty {
+                    Text(subtitle).readingFont(.rowSubtitle)
+                        .foregroundStyle(Theme.textSecondary).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+            if working {
+                ProgressView().controlSize(.small).tint(Theme.textTertiary)
+            } else {
+                Image(systemName: "pencil.line")
+                    .font(.system(size: 17, weight: .light))
+                    .foregroundStyle(Theme.textSecondary)
+                    .accessibilityHidden(true)
+            }
+        }
+        .padding(.leading, 12).padding(.trailing, 16)
+        .frame(minHeight: 64)
+        .background(Theme.surfaceRaised.opacity(0.45), in: shape)
+        .overlay(shape.strokeBorder(Theme.stroke, lineWidth: 1))
+        .padding(.leading, -HomeMetrics.tileOutdent)
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .dynamicTypeSize(...DynamicTypeSize.accessibility1)
+    }
+}
+
 private func railLabel(_ symbol: String) -> String {
     switch symbol {
     case "chevron.left": "Back"
@@ -854,6 +1005,8 @@ private func railLabel(_ symbol: String) -> String {
     case "magnifyingglass": "Search"
     case "gearshape": "Connection settings"
     case "sidebar.left": "Sidebar"
+    case "folder": "Notes and spaces"
+    case "phone": "Phone calls"
     case "ellipsis": "More options"
     default: symbol
     }
@@ -862,8 +1015,9 @@ private func railLabel(_ symbol: String) -> String {
 /// Fades content out under floating bottom chrome.
 struct BottomFade: View {
     var height: CGFloat = 64
-    /// Measured in the reference: the last 50 pt or so of the screen lighten to about #2A2A2A.
-    private static let end = Color(hex: 0x2A2A2A)
+    /// Measured in the reference: the last 50 pt or so of the screen lighten to
+    /// about #2A2A2A on dark and #F6F6F2 on light.
+    private static let end = Theme.bottomFade
     var body: some View {
         LinearGradient(colors: [Self.end.opacity(0), Self.end], startPoint: .top, endPoint: .bottom)
             .frame(height: height)
@@ -932,12 +1086,15 @@ struct NoteMetaChips: View {
     }
 
     private var metadataCapsule: some View {
-        NoteMetaCapsule {
+        // Measured in the reference: a 16 pt calendar glyph 14 pt inside the outline and 6 pt
+        // before the date; without it the date starts 16 pt in.
+        NoteMetaCapsule(leading: showCalendarIcon ? 12 : 15.5) {
             if showCalendarIcon {
-                Image(systemName: "calendar").font(.system(size: 14.5))
+                Image(systemName: "calendar").font(.system(size: 16.5)).padding(.trailing, -3)
             }
             Text(date.noteMetaString)
-            Image(systemName: "person.2").font(.system(size: 14)).padding(.leading, 9)
+            // The reference's people glyph is taller (16 pt) and sits 16 pt after the date, 7 pt before the count.
+            Image(systemName: "person.2").font(.system(size: 16)).padding(.leading, 6).padding(.trailing, -2)
             Text(attendeeCount > 0 ? "+\(attendeeCount)" : "Me")
         }
     }
@@ -946,16 +1103,17 @@ struct NoteMetaChips: View {
 /// The outlined capsule of facts under a note title: 36 pt tall, 14 pt text.
 /// Shared by a note's own page and by a note someone else shared.
 struct NoteMetaCapsule<Content: View>: View {
+    var leading: CGFloat = 15.5
     @ViewBuilder var content: Content
 
     var body: some View {
         HStack(spacing: 6) { content }
             .font(.system(size: 14))
             .foregroundStyle(Theme.textSecondary)
-            .padding(.leading, 14).padding(.trailing, 17)
+            .padding(.leading, leading).padding(.trailing, 17)
             .frame(height: 36)
             .contentShape(Rectangle().inset(by: -4))
-            .overlay(Capsule().strokeBorder(Color.white.opacity(0.10), lineWidth: 1))
+            .overlay(Capsule().strokeBorder(Theme.ink.opacity(0.10), lineWidth: 1))
     }
 }
 
@@ -1015,20 +1173,21 @@ struct CaptureNoteEditor: View {
     private var cramped: Bool { verticalSizeClass == .compact && focused.wrappedValue != nil }
 
     var body: some View {
-        TextField("", text: $title, prompt: Text("Untitled note").foregroundStyle(Theme.textPrimary.opacity(0.45)), axis: .vertical)
-            .font(.noteTitle).foregroundStyle(Theme.textPrimary)
+        TextField("", text: $title, prompt: Text("Untitled note").foregroundStyle(Theme.textSecondary), axis: .vertical)
+            .font(.noteTitle).tracking(Theme.noteTitleTracking).lineSpacing(Theme.noteTitleLineSpacing).foregroundStyle(Theme.textPrimary)
             .focused(focused, equals: .title)
             .submitLabel(.next).onSubmit { focused.wrappedValue = .body }
             .lineLimit(cramped ? 1 : nil)
             .padding(.top, cramped ? 0 : 16).accessibilityIdentifier("\(identifierPrefix)-title")
         if !cramped {
+            // Title baseline to chip 21 pt, chip to the notes 29 pt, as in the reference.
             NoteMetaChips(date: date, attendeeCount: attendeeCount, showCalendarIcon: false, onMetadata: onMetadata)
-                .padding(.top, 14).padding(.bottom, 18)
+                .padding(.top, 13).padding(.bottom, 16.5)
                 .transition(motion.fade)
         }
         ZStack(alignment: .topLeading) {
             if text.isEmpty && focused.wrappedValue != .body {
-                Text("Write notes here...").readingFont(.body).foregroundStyle(Theme.textTertiary)
+                Text("Write notes here...").readingFont(.body).foregroundStyle(Theme.textSecondary)
                     .padding(.top, 8).allowsHitTesting(false)
                     .transition(motion.fade)
             }
@@ -1048,7 +1207,7 @@ struct HideKeyboardButton: View {
                 .foregroundStyle(Theme.textPrimary.opacity(0.85)).frame(width: 48, height: 48)
                 .contentShape(Circle())
         }.buttonStyle(.squash)
-            .glassSurface(Circle(), interactive: true, tint: .black.opacity(0.25))
+            .glassSurface(Circle(), interactive: true, tint: Theme.keyboardButtonTint)
             .accessibilityLabel("Hide keyboard")
     }
 }

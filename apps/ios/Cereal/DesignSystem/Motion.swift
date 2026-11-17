@@ -209,7 +209,7 @@ struct RowPressStyle: ButtonStyle {
         configuration.label
             .background {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color.white.opacity(lit ? 0.06 : 0))
+                    .fill(Theme.ink.opacity(lit ? 0.06 : 0))
                     .padding(.horizontal, -8)
             }
             .scaleEffect(pressed ? MotionResolver.pressScale(reduceMotion: motion.reduceMotion, scale: 0.98) : 1)

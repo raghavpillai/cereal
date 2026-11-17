@@ -56,10 +56,12 @@ targets:
               NSExceptionAllowsInsecureHTTPLoads: true
               NSIncludesSubdomains: true
         UIBackgroundModes: [audio]
-        UILaunchScreen: {}
+        # The page colour of the Theme (#F0F0EA light, #1E1E1E dark), so launch does not flash white.
+        UILaunchScreen:
+          UIColorName: LaunchBackground
         # Lets Core Animation use refresh rates above 60 Hz on ProMotion iPhones.
         CADisableMinimumFrameDurationOnPhone: true
-        UIUserInterfaceStyle: Dark
+        # No fixed style: the Theme setting (Light, Dark, Auto) chooses; Auto follows the system.
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false

@@ -5,6 +5,8 @@ import Contracts
 /// Note-scoped reference chat chrome with actual incremental server output.
 struct ServerChatView: View {
     let noteID: String?
+    /// Set when the chat is a panel beside its note on a wide layout (`NoteChatPanel`).
+    var panel: ChatPanelContext? = nil
     @Environment(ServerNotesModel.self) private var server
     @Environment(AccountsModel.self) private var accounts
     @Environment(\.motion) private var motion
@@ -31,6 +33,8 @@ struct ServerChatView: View {
     @FocusState private var focused: Bool
 
     private var title: String {
+        // Beside its note the panel names the conversation, not the note, as the reference does.
+        if panel != nil { return "New conversation" }
         guard let noteID else { return "Ask anything" }
         let value = server.title(ofNote: noteID) ?? ""
         return value.isEmpty ? "Untitled note" : value
@@ -41,12 +45,91 @@ struct ServerChatView: View {
     private var error: String? { session?.error }
     private var queue: [ServerChatSession.Queued] { session?.queue ?? [] }
     private var selectedModel: String? { model == "Auto" ? nil : model }
-    private var suggestions: [String] {
-        noteID == nil ? ["What are my recent todos?", "What did I commit to this week?", "Summarize my last meeting"] : ["Summarize this meeting", "What are the action items?", "List the open questions"]
-    }
 
     var body: some View {
-        RailScaffold {
+        scaffold
+        .onAppear {
+            restore()
+            // The reference opens a note's empty chat ready to type: the keyboard rises as the screen slides in.
+            if noteID != nil, messages.isEmpty, !Self.qaNoFocus { focused = true }
+        }
+        // Where focus could not be taken during the transition, it is taken once the screen is in place.
+        .task {
+            guard noteID != nil else { return }
+            try? await Task.sleep(for: .milliseconds(panel == nil ? 450 : 380))
+            if messages.isEmpty, !Task.isCancelled, !focused, !Self.qaNoFocus { focused = true }
+        }
+        #if DEBUG
+        // QA only: `-qa.ask "question"` asks it once in a note's chat, for displays simulated touches cannot reach.
+        .task {
+            guard noteID != nil, let question = UserDefaults.standard.string(forKey: "qa.ask"), !question.isEmpty else { return }
+            try? await Task.sleep(for: .seconds(max(1, UserDefaults.standard.double(forKey: "qa.askAfter"))))
+            guard !busy, messages.isEmpty else { return }
+            draft = question; send()
+            // `-qa.queue "question"` types a second one while the first is being answered.
+            if let second = UserDefaults.standard.string(forKey: "qa.queue"), !second.isEmpty {
+                try? await Task.sleep(for: .milliseconds(600))
+                draft = second; send()
+            }
+        }
+        // QA only: `-qa.draft "text"` types a question into the composer without sending it.
+        .task {
+            if let typed = UserDefaults.standard.string(forKey: "qa.draft"), !typed.isEmpty { draft = typed }
+        }
+        // QA only: `-qa.history YES` opens the saved chats once the screen is up.
+        .task {
+            guard UserDefaults.standard.bool(forKey: "qa.history") else { return }
+            try? await Task.sleep(for: .seconds(1.5))
+            showHistory = true
+        }
+        #endif
+        .task(id: server.accountIdentity) {
+            availableModels = []; model = "Auto"
+            if let models = try? await server.chatModels(), !Task.isCancelled { availableModels = models }
+        }
+        .sensoryFeedback(.impact(weight: .light), trigger: session?.sentCount ?? 0)
+        // Another account, or none: this screen lets go of the conversation it showed. Ending the
+        // answers of an account that signed out is `ServerChatSessions.accountChanged`, at the root.
+        .onChange(of: sessionKey) {
+            selectedCitation = nil; choosingMeeting = false; session = nil; draft = ""; restore()
+        }
+        .sheet(isPresented: $showHistory) { historySheet.task { await saved.refresh(server: server, noteID: noteID) } }
+        .sheet(item: $selectedCitation) { ChatCitationTranscriptSheet(selection: $0) }
+        .sheet(isPresented: $choosingMeeting) { ChatMeetingContextPicker(onSelect: selectMeetingContext) }
+    }
+
+    /// QA only: `-qa.noFocus YES` leaves the keyboard down, for screenshots of the whole screen.
+    private static var qaNoFocus: Bool {
+        #if DEBUG
+        UserDefaults.standard.bool(forKey: "qa.noFocus")
+        #else
+        false
+        #endif
+    }
+
+    /// A full screen of its own, or a panel beside its note.
+    @ViewBuilder private var scaffold: some View {
+        if let panel {
+            ChatPanelScaffold(panel: panel, hasMessages: !messages.isEmpty, title: title,
+                              onNew: newConversation, onHistory: { focused = false; showHistory = true }) { column }
+        } else {
+            RailScaffold { column } leading: {
+                // Going back leaves the answer arriving; it is here on return.
+                BackButton()
+            } rail: {
+                RailGroup {
+                    // As in the reference: a new chat is offered once there is a conversation to leave.
+                    if !messages.isEmpty { RailIcon(systemImage: "square.and.pencil") { newConversation() } }
+                    RailIcon(systemImage: "clock.arrow.circlepath") { focused = false; showHistory = true }
+                    // Across notes only: a meeting's own chat has back, new chat and history, as in the reference.
+                    if noteID == nil { RailIcon(systemImage: "doc.text.magnifyingglass") { focused = false; choosingMeeting = true }.accessibilityLabel("Choose a meeting context") }
+                }
+            } bottom: { EmptyView() }
+            .toolbarVisibility(.visible, for: .navigationBar).navigationBarBackButtonHidden()
+        }
+    }
+
+    private var column: some View {
             VStack(alignment: .leading, spacing: 0) {
                 // The splash says hello in its own words; the bar's title is for a conversation.
                 Text(splash ? " " : title).font(.system(size: 15, weight: .semibold))
@@ -56,6 +139,15 @@ struct ServerChatView: View {
                     // A long title ends where the messages do, 16 pt from the edge.
                     .padding(.trailing, ChatColumn.trailing)
                     .accessibilityHidden(splash)
+                    // Beside a note without a rail the panel's controls share the title's row, which is then tall enough for them.
+                    .frame(maxWidth: .infinity, minHeight: panel.map { $0.controlsInRail ? 0 : 52 }, alignment: .leading)
+                    .overlay(alignment: .trailing) {
+                        if let panel, !panel.controlsInRail {
+                            ChatPanelHeaderControls(hasMessages: !messages.isEmpty, onNew: newConversation,
+                                                    onHistory: { focused = false; showHistory = true }, onClose: panel.close)
+                                .padding(.trailing, ChatColumn.trailing)
+                        }
+                    }
                 if noteID == nil && !splash { Text("Across your private notes").font(.caption).foregroundStyle(Theme.textSecondary).padding(.leading, Theme.gutter).padding(.bottom, 8) }
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -136,7 +228,10 @@ struct ServerChatView: View {
                     .safeAreaBar(edge: .bottom, spacing: 0) {
                         GlassChromeGroup(spacing: 16) {
                             ChatComposer(draft: $draft, model: $model, isGenerating: busy, focused: $focused,
-                                onSend: send, onStop: stop, queuesWhileGenerating: true, identifierPrefix: "server-chat")
+                                onSend: send, onStop: stop, queuesWhileGenerating: true, availableModels: availableModels,
+                                identifierPrefix: "server-chat",
+                                recipes: noteID != nil && messages.isEmpty && queue.isEmpty ? ChatRecipes.note : [],
+                                onRecipe: { draft = $0; send() })
                                 .glassMorph("composer", in: glass)
                                 // The control is drawn here so its glass buds off the composer, on a
                                 // zero-height line along the composer's top edge. The bar does not take
@@ -163,55 +258,6 @@ struct ServerChatView: View {
                     }
                 }
             }
-        } leading: {
-            // Going back leaves the answer arriving; it is here on return.
-            BackButton()
-        } rail: {
-            RailGroup {
-                RailIcon(systemImage: "square.and.pencil") { newConversation() }
-                RailIcon(systemImage: "clock.arrow.circlepath") { focused = false; showHistory = true }
-                RailIcon(systemImage: "doc.text.magnifyingglass") { focused = false; choosingMeeting = true }.accessibilityLabel("Choose a meeting context")
-            }
-        } bottom: { EmptyView() }
-        .toolbarVisibility(.visible, for: .navigationBar).navigationBarBackButtonHidden()
-        .onAppear { restore() }
-        #if DEBUG
-        // QA only: `-qa.ask "question"` asks it once in a note's chat, for displays simulated touches cannot reach.
-        .task {
-            guard noteID != nil, let question = UserDefaults.standard.string(forKey: "qa.ask"), !question.isEmpty else { return }
-            try? await Task.sleep(for: .seconds(max(1, UserDefaults.standard.double(forKey: "qa.askAfter"))))
-            guard !busy, messages.isEmpty else { return }
-            draft = question; send()
-            // `-qa.queue "question"` types a second one while the first is being answered.
-            if let second = UserDefaults.standard.string(forKey: "qa.queue"), !second.isEmpty {
-                try? await Task.sleep(for: .milliseconds(600))
-                draft = second; send()
-            }
-        }
-        // QA only: `-qa.draft "text"` types a question into the composer without sending it.
-        .task {
-            if let typed = UserDefaults.standard.string(forKey: "qa.draft"), !typed.isEmpty { draft = typed }
-        }
-        // QA only: `-qa.history YES` opens the saved chats once the screen is up.
-        .task {
-            guard UserDefaults.standard.bool(forKey: "qa.history") else { return }
-            try? await Task.sleep(for: .seconds(1.5))
-            showHistory = true
-        }
-        #endif
-        .task(id: server.accountIdentity) {
-            availableModels = []; model = "Auto"
-            if let models = try? await server.chatModels(), !Task.isCancelled { availableModels = models }
-        }
-        .sensoryFeedback(.impact(weight: .light), trigger: session?.sentCount ?? 0)
-        // Another account, or none: this screen lets go of the conversation it showed. Ending the
-        // answers of an account that signed out is `ServerChatSessions.accountChanged`, at the root.
-        .onChange(of: sessionKey) {
-            selectedCitation = nil; choosingMeeting = false; session = nil; draft = ""; restore()
-        }
-        .sheet(isPresented: $showHistory) { historySheet.task { await saved.refresh(server: server, noteID: noteID) } }
-        .sheet(item: $selectedCitation) { ChatCitationTranscriptSheet(selection: $0) }
-        .sheet(isPresented: $choosingMeeting) { ChatMeetingContextPicker(onSelect: selectMeetingContext) }
     }
 
     private var showsLatest: Bool { ChatTail.showsJumpToLatest(hasMessages: !messages.isEmpty, followsTail: followsTail) }
@@ -272,11 +318,8 @@ struct ServerChatView: View {
             }
             .animation(motion.snappy, value: recents.map(\.id))
             .task { await saved.refresh(server: server, noteID: nil) }
-        } else {
-            VStack(alignment: .leading, spacing: 12) {
-                ChatSuggestionChips(suggestions: suggestions) { draft = $0; send() }
-            }.padding(.top, 8)
         }
+        // A meeting's empty chat is empty: its recipes sit in one row above the composer.
     }
 
     /// The three newest saved chats, for the splash.
@@ -298,62 +341,17 @@ struct ServerChatView: View {
     }
 
     private var historySheet: some View {
-        NavigationStack {
-            List {
-                if let message = ServerChatSessions.shared.persistenceError {
-                    Text(message).font(.footnote).foregroundStyle(Theme.textSecondary)
-                        .listRowBackground(Color.clear)
-                }
-                if let message = saved.error {
-                    Text(message).font(.footnote).foregroundStyle(Theme.textSecondary)
-                        .listRowBackground(Color.clear)
-                }
-                if visibleHistory.isEmpty && saved.listed.isEmpty {
-                    ContentUnavailableView(saved.loading ? "Loading chats" : "No previous chats", systemImage: "bubble.left.and.bubble.right")
-                        .listRowBackground(Color.clear)
-                }
-                ForEach(saved.listed, id: \.id) { thread in
-                    Button { openSaved(thread) } label: {
-                        HStack(alignment: .firstTextBaseline, spacing: 12) {
-                            Text(ChatThreadTurns.title(thread)).lineLimit(1).foregroundStyle(Theme.textPrimary)
-                            Spacer(minLength: 0)
-                            if let at = CalendarSchedule.timestamp(thread.updatedAt) {
-                                Text(ChatThreadTurns.age(of: at)).font(.caption).monospacedDigit()
-                                    .foregroundStyle(Theme.textSecondary)
-                                    .accessibilityLabel(ChatThreadTurns.spokenAge(of: at))
-                            }
-                        }.padding(.vertical, 5)
-                    }
-                    .listRowBackground(Theme.surface)
-                    .accessibilityIdentifier("server-chat-thread")
-                    .swipeActions {
-                        Button("Delete", role: .destructive) { Task { await saved.delete(thread.id, server: server) } }
-                    }
-                }
-                if saved.more > 0 {
-                    Button("Show \(saved.more) more") { Task { await saved.loadMore(server: server, noteID: noteID) } }
-                        .font(.footnote).disabled(saved.loading)
-                        .listRowBackground(Color.clear)
-                        .accessibilityIdentifier("server-chat-more")
-                }
-                ForEach(visibleHistory) { conversation in
-                    Button {
-                        focused = false
-                        session?.select(conversation)
-                        resetScrollPosition()
-                        draft = ""; showHistory = false
-                    } label: {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(conversation.title).lineLimit(1).foregroundStyle(Theme.textPrimary)
-                            Text(conversation.createdAt, style: .time).font(.caption).foregroundStyle(Theme.textSecondary)
-                        }.padding(.vertical, 5)
-                    }.listRowBackground(Theme.surface)
-                }
-            }
-            .scrollContentBackground(.hidden).background(Color.clear)
-            .navigationTitle("Chat history").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showHistory = false } } }
-        }.glassSheet()
+        ChatHistorySheet(saved: saved, local: visibleHistory, error: ServerChatSessions.shared.persistenceError,
+                         onOpen: openSaved,
+                         onOpenLocal: { conversation in
+                             focused = false
+                             session?.select(conversation)
+                             resetScrollPosition()
+                             draft = ""; showHistory = false
+                         },
+                         onDelete: { id in Task { await saved.delete(id, server: server) } },
+                         onMore: { Task { await saved.loadMore(server: server, noteID: noteID) } },
+                         onClose: { showHistory = false })
     }
 
     /// Sends the question, or queues it behind the answer that is arriving.
@@ -515,16 +513,18 @@ struct QueuedQuestionRow: View {
                     guard let server else { throw APIClientError.unauthorized }
                     return try server.chatThreadEvents(create: create, turn: turn, replace: replace, message: message, model: model)
                 },
-                currentAccount: { [weak server] in server?.accountIdentity }, background: .application)
+                currentAccount: { [weak server] in server?.accountIdentity }, background: .application, activity: .system)
     }
 
     func session(for key: String, accountIdentity: String, noteID: String?, events: @escaping ServerChatSession.Events,
                  threadEvents: ServerChatSession.ThreadEvents? = nil,
-                 currentAccount: @escaping @MainActor () -> String?, background: ChatBackgroundTime = .none) -> ServerChatSession {
+                 currentAccount: @escaping @MainActor () -> String?, background: ChatBackgroundTime = .none,
+                 activity: ChatActivityHooks = .none) -> ServerChatSession {
         liveOrder.removeAll { $0 == key }; liveOrder.append(key)
         if let existing = live[key] { return existing }
         let session = ServerChatSession(key: key, accountIdentity: accountIdentity, noteID: noteID, state: load(for: key),
-                                        events: events, threadEvents: threadEvents, currentAccount: currentAccount, background: background) { [weak self] session in
+                                        events: events, threadEvents: threadEvents, currentAccount: currentAccount, background: background,
+                                        activity: activity) { [weak self] session in
             self?.save(messages: session.messages, history: session.history, threadID: session.threadID, for: session.key)
         }
         live[key] = session

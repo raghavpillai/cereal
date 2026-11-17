@@ -1,68 +1,80 @@
 import ActivityKit
+import AppIntents
 import SwiftUI
 import WidgetKit
 
 @main
 struct CerealRecordingWidgets: WidgetBundle {
-    var body: some Widget { CerealRecordingActivity() }
+    var body: some Widget {
+        CerealRecordingActivity()
+        CerealChatActivity()
+    }
 }
 
+/// The recording outside the app, drawn as the reference's "Taking notes..."
+/// activity: the app's mark, what the recording is doing over its clock, and End.
 struct CerealRecordingActivity: Widget {
     /// The app's `Theme.accent` (0xE3B025), which this extension cannot import.
     private let accent = Color(red: 0xE3 / 255, green: 0xB0 / 255, blue: 0x25 / 255)
+    /// The reference's End and camera keys: dark grey rounded squares on the island's black.
+    private let key = Color(white: 0.17)
 
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: RecordingActivityAttributes.self) { context in
-            HStack(spacing: 14) {
-                indicator(context)
-                    .font(.system(size: 24, weight: .medium))
-                    .frame(width: 36)
-                VStack(alignment: .leading, spacing: 4) {
-                    // A titled note is named, with what the recording is doing beneath it.
-                    // A note with no title yet says what the recording is doing.
-                    // A title keeps to one line; what the recording is doing may take two
-                    // ("Open to check recording" does not fit beside the timer on one).
-                    Text(context.state.title ?? status(context)).font(.headline).lineLimit(context.state.title == nil ? 2 : 1)
-                    Text(context.state.title != nil ? status(context) : context.attributes.isPreview ? "Preview · No audio" : "Cereal · On-device audio")
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            HStack(spacing: 12) {
+                mark(size: 44)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(headline(context)).font(.system(size: 17, weight: .semibold)).lineLimit(1)
+                    HStack(spacing: 6) {
+                        timer(context).monospacedDigit()
+                        // A titled note is named beside its clock.
+                        if let title = context.state.title { Text("· \(title)").lineLimit(1) }
+                    }
+                    .font(.system(size: 15)).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 8)
-                timer(context).font(.title3.monospacedDigit()).frame(maxWidth: 90, alignment: .trailing)
+                endButton(context)
             }
-            .padding(20)
+            .padding(.horizontal, 18).padding(.vertical, 16)
             // The host supplies its native material on the Lock Screen.
             .activityBackgroundTint(nil)
             .activitySystemActionForegroundColor(accent)
             .widgetURL(context.attributes.recordingURL)
-            .accessibilityElement(children: .combine)
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Label(context.attributes.isPreview ? "Preview" : "Cereal", systemImage: context.attributes.isPreview ? "play.circle" : "mic.fill").foregroundStyle(accent)
+                    HStack(spacing: 12) {
+                        mark(size: 40)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(headline(context)).font(.system(size: 17, weight: .medium)).foregroundStyle(.white).lineLimit(1)
+                            timer(context).monospacedDigit().font(.system(size: 15)).foregroundStyle(.white.opacity(0.55))
+                        }
+                    }
+                    .padding(.leading, 6)
+                    .frame(maxHeight: .infinity)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    timer(context).monospacedDigit().frame(width: 80)
-                }
-                DynamicIslandExpandedRegion(.bottom) {
-                    HStack(alignment: .lastTextBaseline) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            if let title = context.state.title { Text(title).font(.subheadline.weight(.semibold)).lineLimit(1) }
-                            Text(status(context)).font(context.state.title == nil ? .subheadline : .caption)
-                                .foregroundStyle(context.state.title == nil ? .primary : .secondary)
-                        }
-                        Spacer(minLength: 8)
-                        Text(context.attributes.isPreview ? "Preview · No audio" : "Open recording").font(.caption).foregroundStyle(accent)
-                    }
+                    endButton(context).padding(.trailing, 4).frame(maxHeight: .infinity)
                 }
             } compactLeading: {
-                indicator(context).foregroundStyle(accent)
+                mark(size: 22)
             } compactTrailing: {
-                timer(context).monospacedDigit().frame(width: 52)
+                timer(context).monospacedDigit().foregroundStyle(.white).frame(width: 46)
             } minimal: {
-                indicator(context).foregroundStyle(accent)
+                mark(size: 22)
             }
             .widgetURL(context.attributes.recordingURL)
             .keylineTint(accent)
+        }
+    }
+
+    /// "Taking notes...", as in the reference, while recording.
+    private func headline(_ context: ActivityViewContext<RecordingActivityAttributes>) -> String {
+        if context.isStale || context.attributes.isPreview { return status(context) }
+        switch context.state.phase {
+        case .recording: return "Taking notes..."
+        case .paused: return "Paused"
+        case .ended: return "Recording ended"
         }
     }
 
@@ -70,11 +82,26 @@ struct CerealRecordingActivity: Widget {
         context.state.status(isStale: context.isStale, isPreview: context.attributes.isPreview)
     }
 
-    private func indicator(_ context: ActivityViewContext<RecordingActivityAttributes>) -> some View {
-        // Inherit the Lock Screen's semantic foreground. Island call sites
-        // apply the gold accent explicitly against the system's dark shell.
-        Image(systemName: context.state.symbol(isStale: context.isStale, isPreview: context.attributes.isPreview))
-            .accessibilityLabel(status(context))
+    /// The app's mark: its icon, as a small rounded square.
+    private func mark(size: CGFloat) -> some View {
+        Image("CerealMark").resizable().interpolation(.high)
+            .frame(width: size, height: size)
+            .clipShape(RoundedRectangle(cornerRadius: size * 0.24, style: .continuous))
+            .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private func endButton(_ context: ActivityViewContext<RecordingActivityAttributes>) -> some View {
+        // A preview has nothing to end; a finished recording neither.
+        if !context.attributes.isPreview, context.state.phase != .ended {
+            Button(intent: EndRecordingIntent(noteID: context.attributes.noteID)) {
+                Text("End").font(.system(size: 17, weight: .medium)).foregroundStyle(.white)
+                    .frame(width: 70, height: 44)
+                    .background(key, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("End recording")
+        }
     }
 
     @ViewBuilder
@@ -82,7 +109,7 @@ struct CerealRecordingActivity: Widget {
         // The stopped time is written as the running one is, so pausing does not
         // change how the number looks or where it sits.
         if context.state.runsTimer(isStale: context.isStale) {
-            Text(timerInterval: context.state.timerAnchor...Date.distantFuture, countsDown: false).multilineTextAlignment(.trailing)
+            Text(timerInterval: context.state.timerAnchor...Date.distantFuture, countsDown: false)
         } else {
             Text(Duration.seconds(context.state.elapsed).formatted(.time(pattern: context.state.elapsed >= 3600 ? .hourMinuteSecond : .minuteSecond)))
         }

@@ -44,7 +44,7 @@ struct ChatView: View {
                     ScrollView {
                         // Not lazy, for the reason given in `ServerChatView`: exact heights.
                         VStack(alignment: .leading, spacing: 22) {
-                            if messages.isEmpty { emptyState.transition(motion.fade) }
+                            if messages.isEmpty && note == nil { emptyState.transition(motion.fade) }
                             ForEach(messages) { msg in
                                 ChatMessageView(message: msg).equatable().id(msg.id)
                                     .transition(msg.role == .user ? motion.pop(anchor: .bottomTrailing) : motion.rise)
@@ -77,7 +77,9 @@ struct ChatView: View {
                     // under its glass instead of being cut off above it.
                     .safeAreaBar(edge: .bottom, spacing: 0) {
                         ChatComposer(draft: $draft, model: $model, isGenerating: isGenerating, focused: $focused,
-                                 onSend: send, onStop: stop)
+                                 onSend: send, onStop: stop,
+                                 recipes: note != nil && messages.isEmpty ? ChatRecipes.note : [],
+                                 onRecipe: { draft = $0; send() })
                             .chatBarBackdrop()
                     }
                 }
@@ -582,7 +584,9 @@ struct ChatComposer: View {
     var queuesWhileGenerating = false
     var availableModels: [LanguageModelSelection] = []
     var identifierPrefix = "chat"
-    @State private var unavailableAction: String?
+    /// Recipe chips shown in one row just above the composer (an empty conversation).
+    var recipes: [String] = []
+    var onRecipe: ((String) -> Void)? = nil
     @Environment(\.motion) private var motion
     @Environment(\.railMetrics) private var rail
     @Environment(\.verticalSizeClass) private var verticalSizeClass
@@ -593,6 +597,22 @@ struct ChatComposer: View {
     private var sends: Bool { action == .send }
 
     var body: some View {
+        VStack(spacing: 12) {
+            if !recipes.isEmpty, let onRecipe {
+                // The row is as wide as the composer and cut at its edges, as in the reference.
+                ChatRecipeChips(recipes: recipes, margin: 2, onSelect: onRecipe)
+                    .padding(.leading, rail.composerLeading).padding(.trailing, rail.composerTrailing)
+                    .transition(motion.fade)
+            }
+            card
+        }
+        .animation(motion.snappy, value: recipes.isEmpty)
+        // The bar is wider than the text column and sits 12 pt above the
+        // keyboard or the home indicator. Both chat screens get the same margins.
+        .padding(.bottom, verticalSizeClass == .compact ? 6 : RailMetrics.composerBottom)
+    }
+
+    private var card: some View {
         // Insets measured from the reference: the text sits 19 pt in, 18 pt
         // from the top and 20 pt above the controls; the controls sit 7 pt from the
         // sides and 8 pt from the bottom, 4 pt apart.
@@ -600,6 +620,7 @@ struct ChatComposer: View {
             TextField("", text: $draft, prompt: Text("Ask anything").foregroundStyle(Theme.textTertiary), axis: .vertical)
                 .font(.system(size: 16))
                 .foregroundStyle(Theme.chatText)
+                .tint(Theme.accent)
                 .lineLimit(1...5)
                 .focused(focused)
                 .submitLabel(.send)
@@ -610,79 +631,49 @@ struct ChatComposer: View {
                 .padding(.top, RailMetrics.composerFieldInsets(compact: verticalSizeClass == .compact).top)
                 .padding(.bottom, RailMetrics.composerFieldInsets(compact: verticalSizeClass == .compact).bottom)
             HStack(spacing: 4) {
-                Button {
-                    unavailableAction = "File attachments are not supported by this instance yet. Your note and transcript are already included in the conversation."
-                } label: {
-                    Image(systemName: "paperclip")
-                        .font(.system(size: 19))
-                        .foregroundStyle(Theme.textSecondary)
-                        .frame(width: 40, height: 40)
-                        .background(Theme.bgTop, in: Circle())
-                }
-                .buttonStyle(SquashButtonStyle())
-                .accessibilityLabel("Attach a file")
-                Menu {
-                    Button("Auto", systemImage: model == "Auto" ? "checkmark" : "circle") { model = "Auto" }
-                    ForEach(Array(availableModels.enumerated()), id: \.offset) { _, choice in
-                        let key = choice.provider.rawValue + ":" + choice.model
-                        Button(choice.model + " · " + choice.provider.rawValue, systemImage: model == key ? "checkmark" : "circle") { model = key }
-                    }
-                    Button("About chat") {
-                        unavailableAction = "Auto uses the model configured on your server."
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        Text(availableModels.first(where: { $0.provider.rawValue + ":" + $0.model == model })?.model ?? model)
-                        Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold))
-                    }
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(Theme.textSecondary)
-                    .padding(.leading, 16).padding(.trailing, 12.5)
-                    .frame(height: 40)
-                    .background(Theme.bgTop, in: Capsule())
-                }
+                // No attachments in chat: the model control leads the row.
+                ChatModelMenu(model: $model, available: availableModels)
                 Spacer()
-                // As on the desktop: a gold disc with a bold dark arrow that sends; the
-                // same arrow on a dimmed grey disc until there is something to send; a
-                // quiet disc with a square while an answer arrives, which holds the eye.
-                Button {
-                    if stops { onStop() } else if sends { onSend() }
-                } label: {
-                    Image(systemName: stops ? "stop.fill" : "arrow.up")
-                        .font(.system(size: stops ? 13 : 18, weight: stops ? .semibold : .bold))
-                        .foregroundStyle(stops ? Theme.chatText : sends ? Theme.sendGlyph : Theme.textSecondary)
-                        .contentTransition(motion.symbolReplace)
-                        .frame(width: 40, height: 40)
-                        .background(sends ? Theme.sendGold : Theme.quietFill, in: Circle())
-                        .opacity(action == .idle ? 0.45 : 1)
-                        // Send and stop are one droplet: it dips and springs
-                        // back as the glyph and colour change.
-                        .keyframeAnimator(initialValue: 1.0, trigger: action) { content, scale in
-                            content.scaleEffect(motion.reduceMotion ? 1 : scale)
-                        } keyframes: { _ in
-                            SpringKeyframe(0.84, duration: 0.11, spring: .snappy)
-                            SpringKeyframe(1.0, duration: 0.42, spring: Spring(duration: 0.42, bounce: 0.34))
-                        }
-                }
-                .buttonStyle(SquashButtonStyle())
-                .disabled(action == .idle)
-                .accessibilityLabel(stops ? "Stop answer" : sends ? (isGenerating ? "Queue message" : "Send message") : "Send message")
-                .accessibilityHint(action == .idle ? "Type a question to send" : "")
-                .accessibilityIdentifier("\(identifierPrefix)-send")
+                actionButton
             }
             .padding(.horizontal, 7)
             .padding(.bottom, verticalSizeClass == .compact ? 6 : 8)
         }
-        // One material for the composer; its inset controls do not add nested glass.
-        .glassSurface(RoundedRectangle(cornerRadius: 24, style: .continuous), tint: Theme.chatComposerTint)
+        // An opaque card, as in the reference: white on the light page, a lifted grey on the dark one.
+        .background(Theme.chatComposer, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .shadow(color: Theme.chatComposerShadow, radius: 14, y: 3)
         .animation(motion.snappy, value: action)
-        // The bar is wider than the text column and sits 12 pt above the
-        // keyboard or the home indicator. Both chat screens get the same margins.
         .padding(.leading, rail.composerLeading)
         .padding(.trailing, rail.composerTrailing)
-        .padding(.bottom, verticalSizeClass == .compact ? 6 : RailMetrics.composerBottom)
-        .alert("Chat", isPresented: Binding(get: { unavailableAction != nil }, set: { if !$0 { unavailableAction = nil } })) {
-            Button("OK", role: .cancel) { unavailableAction = nil }
-        } message: { Text(unavailableAction ?? "") }
+    }
+
+    /// One round button: a gold disc with a bold dark arrow that sends, the same disc with
+    /// a square that stops an answer arriving, and a quiet grey disc until there is
+    /// something to send (where the reference has a microphone; chat takes no dictation).
+    private var actionButton: some View {
+        Button {
+            if stops { onStop() } else if sends { onSend() }
+        } label: {
+            Image(systemName: stops ? "stop.fill" : "arrow.up")
+                .font(.system(size: stops ? 13 : 18, weight: .bold))
+                .foregroundStyle(stops || sends ? Theme.sendGlyph : Theme.textSecondary)
+                .contentTransition(motion.symbolReplace)
+                .frame(width: 40, height: 40)
+                .background(stops || sends ? Theme.sendGold : Theme.quietFill, in: Circle())
+                .opacity(action == .idle ? 0.45 : 1)
+                // Send and stop are one droplet: it dips and springs
+                // back as the glyph and colour change.
+                .keyframeAnimator(initialValue: 1.0, trigger: action) { content, scale in
+                    content.scaleEffect(motion.reduceMotion ? 1 : scale)
+                } keyframes: { _ in
+                    SpringKeyframe(0.84, duration: 0.11, spring: .snappy)
+                    SpringKeyframe(1.0, duration: 0.42, spring: Spring(duration: 0.42, bounce: 0.34))
+                }
+        }
+        .buttonStyle(SquashButtonStyle())
+        .disabled(action == .idle)
+        .accessibilityLabel(stops ? "Stop answer" : sends ? (isGenerating ? "Queue message" : "Send message") : "Send message")
+        .accessibilityHint(action == .idle ? "Type a question to send" : "")
+        .accessibilityIdentifier("\(identifierPrefix)-send")
     }
 }

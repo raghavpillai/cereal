@@ -45,7 +45,8 @@ enum NoteSearch {
             let line = (lines + people).first { !$0.isEmpty && $0.localizedStandardContains(query) }
             guard inTitle || line != nil else { return nil }
             return SearchHit(route: .note(note.id), tile: note.tile(currentUser: currentUser),
-                             title: note.displayTitle, subtitle: note.rowSubtitle, excerpt: inTitle ? nil : line)
+                             title: note.displayTitle, subtitle: subtitle(note.createdAt, attendees: note.attendees.count),
+                             excerpt: inTitle ? nil : line)
         }
     }
 
@@ -60,9 +61,35 @@ enum NoteSearch {
             let ref = NoteRef(account: account, id: hit.id)
             return SearchHit(route: .serverNote(ref), tile: onThisPhone(ref) ? .phone : ServerHomeGrouping.tile(for: hit.row),
                       title: title.isEmpty ? "Untitled note" : title,
-                      subtitle: (Date.serverTimestamp(hit.row.createdAt) ?? .distantPast).formatted(date: .omitted, time: .shortened),
+                      subtitle: subtitle(Date.serverTimestamp(hit.row.createdAt) ?? .distantPast, attendees: hit.row.attendeeTotal),
                       excerpt: hit.excerpt.map { $0.map(\.text).joined() }, excerptParts: hit.excerpt)
         }
+    }
+
+    /// A result's line, as the reference writes it: the day ("Tue 17 Nov"), then
+    /// "4 attendees" for a meeting with others.
+    static func subtitle(_ date: Date, attendees: Int, calendar: Calendar = .current) -> String {
+        let format = DateFormatter()
+        format.calendar = calendar; format.timeZone = calendar.timeZone
+        format.dateFormat = calendar.component(.year, from: date) == calendar.component(.year, from: .now) ? "EEE d MMM" : "EEE d MMM yyyy"
+        let day = format.string(from: date)
+        return attendees >= 2 ? "\(day)  •  \(attendees) attendees" : day
+    }
+
+    /// The title with each word of the query marked by the brand's highlight, as
+    /// the reference marks matches in result titles.
+    static func markedTitle(_ title: String, query: String) -> AttributedString {
+        var text = AttributedString(title)
+        let words = normalized(query).split(whereSeparator: \.isWhitespace).map(String.init).filter { !$0.isEmpty }
+        for word in words {
+            var searchStart = text.startIndex
+            while searchStart < text.endIndex,
+                  let range = text[searchStart...].range(of: word, options: [.caseInsensitive, .diacriticInsensitive]) {
+                text[range].backgroundColor = Theme.accentHighlight
+                searchStart = range.upperBound
+            }
+        }
+        return text
     }
 
     /// The matching line with its matched words in the primary text colour. Size and weight do not change.
@@ -95,6 +122,7 @@ struct SearchView: View {
     /// Server mode only: sends the query after a pause in typing and drops answers to older ones.
     @State private var search: ServerNoteSearch?
     @FocusState private var focused: Bool
+    @State private var recent = RecentSearchStore.load()
 
     private var hits: [SearchHit] {
         mode.isDemo
@@ -132,16 +160,25 @@ struct SearchView: View {
     var body: some View {
         RailScaffold {
             SearchResults(query: NoteSearch.normalized(query), hits: hits, progress: progress,
-                          retry: { search?.retry() }, more: { Task { await search?.loadMore() } }) { hit in
+                          retry: { search?.retry() }, more: { Task { await search?.loadMore() } }, open: { hit in
                 focused = false
+                RecentSearchStore.remember(query)
+                recent = RecentSearchStore.load()
                 router.path.append(hit.route)
-            }
+            }, recent: recent, pickRecent: { query = $0 })
         } leading: {
             BackButton()
         } bottom: {
-            SearchBar(query: $query, focused: $focused)
+            SearchBar(query: $query, focused: $focused) {
+                RecentSearchStore.remember(query)
+                recent = RecentSearchStore.load()
+            }
         }
         .task {
+            #if DEBUG
+            // QA only: `-qa.searchQuery <words>` opens search with words already typed.
+            if let words = UserDefaults.standard.string(forKey: "qa.searchQuery") { query = words }
+            #endif
             begin()
             search?.update(query)
             // The keyboard rises with the push instead of after it.
@@ -165,12 +202,17 @@ private struct SearchResults: View {
     var retry: () -> Void = {}
     var more: () -> Void = {}
     let open: (SearchHit) -> Void
+    var recent: [String] = []
+    var pickRecent: (String) -> Void = { _ in }
+    @State private var showsAll = false
     @Environment(\.motion) private var motion
+    /// Rows shown before "View all".
+    static let firstShown = 20
 
     var body: some View {
         Group {
             if query.isEmpty || progress == .idle {
-                prompt(symbol: "magnifyingglass", title: "Search your notes", detail: "Search by title, notes, or people.")
+                RecentSearches(searches: recent, pick: pickRecent)
             } else if case .failed(let message) = progress, hits.isEmpty {
                 prompt(symbol: "magnifyingglass", title: "Search could not finish", detail: message, action: retry)
             } else if hits.isEmpty, progress == .searching {
@@ -180,18 +222,25 @@ private struct SearchResults: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(hits) { hit in
+                        // As in the reference: a "Previous meetings" header with "View all", then the rows.
+                        HStack {
+                            Text("Previous meetings").font(.system(size: 15)).foregroundStyle(Theme.textSecondary)
+                                .accessibilityAddTraits(.isHeader)
+                            Spacer()
+                            if hits.count > Self.firstShown && !showsAll {
+                                Button("View all") { withAnimation(motion.snappy) { showsAll = true }; more() }
+                                    .font(.system(size: 14)).foregroundStyle(Theme.textPrimary)
+                                    .padding(.horizontal, 14).frame(height: 32)
+                                    .overlay(Capsule().strokeBorder(Theme.ink.opacity(0.12), lineWidth: 1))
+                                    .contentShape(Capsule())
+                                    .buttonStyle(.squash)
+                            }
+                        }
+                        .padding(.bottom, 6)
+                        ForEach(showsAll ? hits : Array(hits.prefix(Self.firstShown))) { hit in
                             Button { open(hit) } label: {
-                                VStack(alignment: .leading, spacing: 0) {
-                                    NoteListRow(tile: hit.tile, title: hit.title, subtitle: hit.subtitle)
-                                    if let excerpt = hit.excerpt {
-                                        Text(hit.excerptParts.map(NoteSearch.marked) ?? (try? AttributedString(markdown: excerpt)) ?? AttributedString(excerpt))
-                                            .readingFont(.rowSubtitle).foregroundStyle(Theme.textSecondary)
-                                            .lineLimit(2).padding(.leading, 62).padding(.bottom, 8)
-                                            // It grows with the row above it, to the same limit.
-                                            .dynamicTypeSize(...DynamicTypeSize.accessibility1)
-                                    }
-                                }
+                                NoteListRow(tile: hit.tile, title: hit.title, subtitle: hit.subtitle,
+                                            tinted: true, markedTitle: NoteSearch.markedTitle(hit.title, query: query))
                             }
                             .buttonStyle(RowPressStyle())
                             .transition(motion.fade)
@@ -217,6 +266,7 @@ private struct SearchResults: View {
         .animation(motion.snappy, value: query.isEmpty)
         .animation(motion.snappy, value: hits.isEmpty)
         .animation(motion.snappy, value: progress)
+        .onChange(of: query) { showsAll = false }
     }
 
     /// Centred in the space above the search field. When the keyboard leaves
@@ -256,12 +306,63 @@ private struct SearchResults: View {
     }
 }
 
+/// Searches made on this iPhone, newest first. They never leave the device.
+enum RecentSearchStore {
+    static let key = "search.recent"
+    static let limit = 6
+    static func load(_ defaults: UserDefaults = .standard) -> [String] { defaults.stringArray(forKey: key) ?? [] }
+    static func remember(_ query: String, in defaults: UserDefaults = .standard) {
+        let query = NoteSearch.normalized(query)
+        guard !query.isEmpty else { return }
+        var list = load(defaults).filter { $0.caseInsensitiveCompare(query) != .orderedSame }
+        list.insert(query, at: 0)
+        defaults.set(Array(list.prefix(limit)), forKey: key)
+    }
+}
+
+/// "Recent searches" at the top of an empty search: each earlier query in
+/// quotes beside a history glyph. Nothing is drawn before the first search.
+private struct RecentSearches: View {
+    let searches: [String]
+    let pick: (String) -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                if !searches.isEmpty {
+                    Text("Recent searches").font(.system(size: 15)).foregroundStyle(Theme.textSecondary)
+                        .accessibilityAddTraits(.isHeader)
+                        .padding(.bottom, 6)
+                    ForEach(searches, id: \.self) { search in
+                        Button { pick(search) } label: {
+                            HStack(spacing: 14) {
+                                Image(systemName: "arrow.counterclockwise").font(.system(size: 15))
+                                    .foregroundStyle(Theme.textSecondary)
+                                Text("\u{201C}\(search)\u{201D}").font(.system(size: 16)).foregroundStyle(Theme.textPrimary)
+                                    .lineLimit(1)
+                                Spacer(minLength: 0)
+                            }
+                            .frame(minHeight: 44).contentShape(Rectangle())
+                        }
+                        .buttonStyle(RowPressStyle())
+                    }
+                }
+            }
+            .padding(.leading, Theme.gutter).padding(.trailing, 8).padding(.top, 20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .scrollIndicators(.hidden)
+        .scrollDismissesKeyboard(.interactively)
+    }
+}
+
 /// The field and its keyboard-dismiss control share one glass group, so the
 /// small button buds off the field when the keyboard rises and is drawn back
 /// into it when the keyboard goes.
 private struct SearchBar: View {
     @Binding var query: String
     var focused: FocusState<Bool>.Binding
+    var submit: () -> Void = {}
     @Environment(\.motion) private var motion
     @Namespace private var glass
 
@@ -271,13 +372,13 @@ private struct SearchBar: View {
                 HStack(spacing: 10) {
                     Image(systemName: "magnifyingglass").font(.system(size: 17))
                         .foregroundStyle(Theme.textSecondary)
-                    TextField("", text: $query, prompt: Text("Search").foregroundStyle(Theme.textTertiary))
-                        .font(.system(size: 17)).foregroundStyle(Theme.textPrimary)
+                    TextField("", text: $query, prompt: Text("Search by title, notes, or people").foregroundStyle(Theme.textTertiary))
+                        .font(.system(size: 15)).foregroundStyle(Theme.textPrimary)
                         .focused(focused)
                         .submitLabel(.search)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
-                        .onSubmit { focused.wrappedValue = false }
+                        .onSubmit { focused.wrappedValue = false; submit() }
                         .accessibilityIdentifier("search-field")
                     if !query.isEmpty {
                         Button { query = "" } label: {
@@ -292,12 +393,21 @@ private struct SearchBar: View {
                 }
                 .padding(.leading, 16).padding(.trailing, 10)
                 .frame(height: 50)
-                .glassSurface(Capsule(), tint: .white.opacity(0.08))
+                .glassSurface(Capsule(), tint: Theme.fieldTint)
+                .overlay(Capsule().strokeBorder(Theme.floatingEdge, lineWidth: 1).allowsHitTesting(false))
                 .glassMorph("field", in: glass)
-                if focused.wrappedValue {
-                    HideKeyboardButton { focused.wrappedValue = false }
-                        .glassMorph("keyboard", in: glass)
+                // As in the reference, a keyboard button stays beside the field: it lowers the
+                // keyboard while it is up and raises it again when it is down.
+                Button { focused.wrappedValue.toggle() } label: {
+                    Image(systemName: "keyboard").font(.system(size: 17))
+                        .foregroundStyle(Theme.textPrimary.opacity(0.85)).frame(width: 50, height: 50)
+                        .contentShape(Circle())
                 }
+                .buttonStyle(.squash)
+                .glassSurface(Circle(), interactive: true, tint: Theme.fieldTint)
+                .overlay(Circle().strokeBorder(Theme.floatingEdge, lineWidth: 1).allowsHitTesting(false))
+                .glassMorph("keyboard", in: glass)
+                .accessibilityLabel(focused.wrappedValue ? "Hide keyboard" : "Show keyboard")
             }
         }
         .animation(motion.animation(.gooey, entering: focused.wrappedValue), value: focused.wrappedValue)

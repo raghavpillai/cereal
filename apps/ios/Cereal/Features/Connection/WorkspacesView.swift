@@ -31,7 +31,7 @@ struct WorkspacesView: View {
                         }.accessibilityIdentifier("workspace-details-\(organization.id)")
                         if model.activeOrganizationID == organization.id {
                             Label("Selected workspace", systemImage: "checkmark.circle.fill")
-                                .font(.caption).foregroundStyle(Theme.accent)
+                                .font(.caption).foregroundStyle(Theme.accentText)
                         } else {
                             Button("Switch to workspace") { Task { await model.activate(id: organization.id) } }
                                 .font(.subheadline).accessibilityIdentifier("workspace-select-\(organization.id)")

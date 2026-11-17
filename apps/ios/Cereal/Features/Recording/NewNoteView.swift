@@ -504,19 +504,31 @@ struct WaveformBars: View {
     let levels: [Float]
     let active: Bool
     var color: Color = Theme.onAccent
+    /// `.bar`: the recording bar's meter, as in the reference: slightly heavier
+    /// bars that rest as round dots while the recording is paused.
+    var style: Style = .pill
+    enum Style { case pill, bar }
     @Environment(\.motion) private var motion
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: style == .bar ? 2.2 : 2) {
             ForEach(levels.indices, id: \.self) { i in
                 Capsule()
                     .fill(color)
-                    .frame(width: 2.5, height: 4 + 12 * CGFloat(active ? levels[i] : 0.1))
+                    .frame(width: style == .bar ? 2.8 : 2.5, height: height(i))
             }
         }
         .frame(height: 16)
         // Runs only while the recorder publishes new levels.
         .animation(motion.waveform, value: levels)
         .animation(motion.waveform, value: active)
+    }
+
+    private func height(_ i: Int) -> CGFloat {
+        switch style {
+        case .pill: 4 + 12 * CGFloat(active ? levels[i] : 0.1)
+        // Even a quiet room shows a little movement; paused, every bar is a dot.
+        case .bar: active ? 5 + 9 * CGFloat(min(1, max(0, levels[i]))) : 2.8
+        }
     }
 }

@@ -287,6 +287,11 @@ final class ServerRecordingController {
             transcriptOwner = ref
             recorder.startSegment(noteID: uuid, title: freshNote.title)
             followTitle(of: ref)
+            // The Live Activity's End stops this recording, as End on the recording screen does.
+            RecordingActivityActions.endHandler = { [weak self] id in
+                guard let self, let active = self.active, UUID(uuidString: active.id) == id, self.recorder.isCapturing else { return }
+                self.stop()
+            }
             if case .failed(let message) = recorder.state {
                 scheduleStop(ref, current: nil)
                 error = message
@@ -321,6 +326,26 @@ final class ServerRecordingController {
         let wasShown = active == ref
         try? forgetDeletedNote(ref)
         if wasShown { error = nil }
+        return true
+    }
+
+    /// Cancel, offered for the first seconds of a recording made for a new note:
+    /// the capture stops and, once its Stop has reached the server, the note is
+    /// deleted with what little it caught, so it never appears on Home. A note
+    /// in which something was typed is kept, and its notes are written as after
+    /// End. True when the note is gone.
+    @discardableResult
+    func cancel(_ ref: NoteRef?, typedTitle: String = "", typedText: String = "") async -> Bool {
+        guard let ref, active == ref, let record = accounts[ref.account], !record.closed else { return false }
+        let typed = !Self.isUntitled(typedTitle) || !typedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard !typed else { stop(); return false }
+        let finished = recorder.stopSegment()
+        if finished == nil { scheduleStop(ref, current: endLive(atSample: recorder.capturedFrames)) }
+        _ = await record.controlTasks[ref.id]?.value
+        guard !record.closed, !isRecording(ref) else { return false }
+        do { try await record.server.delete(id: ref.id) } catch { return false }
+        try? forgetDeletedNote(ref)
+        error = nil
         return true
     }
 
@@ -585,7 +610,9 @@ final class ServerRecordingController {
         defer { generatingNotes.remove(ref) }
         guard Self.hasTranscript(note), note.generatedRevision != note.transcriptRevision else { return }
         do {
-            _ = try await record.server.generate(noteID: ref.id, expectedTranscriptRevision: note.transcriptRevision)
+            let written = try await record.server.generate(noteID: ref.id, expectedTranscriptRevision: note.transcriptRevision)
+            // Asked for from the note's "Notify me"; sent only while the app is in the background.
+            await NotesReadyNotifications.notesReady(title: written.title, noteID: ref.id)
         } catch is CancellationError {
         } catch let failure as APIClientError where failure == .httpStatus(400) {
             // The server found nothing to write from.

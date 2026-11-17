@@ -228,7 +228,7 @@ private struct SidebarPanel: View {
         // Rows fade out at the panel's lower edge instead of being cut by it.
         .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: 0.93), .init(color: .clear, location: 1)],
                              startPoint: .top, endPoint: .bottom))
-        .glassSurface(RoundedRectangle(cornerRadius: 28, style: .continuous), tint: .black.opacity(0.3))
+        .glassSurface(RoundedRectangle(cornerRadius: 28, style: .continuous), tint: Theme.sidebarTint)
         .onAppear { focusedOnOpen = true }
     }
 
@@ -245,10 +245,10 @@ private struct SidebarPanel: View {
                     .multilineTextAlignment(.leading)
                 Spacer(minLength: 0)
             }
-            .foregroundStyle(selected ? Theme.accent : Theme.textPrimary.opacity(0.9))
+            .foregroundStyle(selected ? Theme.accentText : Theme.textPrimary.opacity(0.9))
             .padding(.horizontal, 12).padding(.vertical, 11)
             .frame(minHeight: 44)
-            .background(Color.white.opacity(selected ? 0.07 : 0), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(Theme.ink.opacity(selected ? 0.07 : 0), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .contentShape(Rectangle())
         }
         .buttonStyle(RowPressStyle())

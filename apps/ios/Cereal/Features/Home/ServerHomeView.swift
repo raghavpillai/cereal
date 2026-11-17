@@ -81,7 +81,7 @@ struct ServerHomeView: View {
                         VStack(alignment: .leading, spacing: 0) {
                             Text("More notes could not load. " + failure.localizedDescription).font(.footnote)
                             Button("Retry") { loadMore() }
-                                .foregroundStyle(Theme.accent)
+                                .foregroundStyle(Theme.accentText)
                                 .frame(minHeight: 44).contentShape(Rectangle())
                         }.foregroundStyle(Theme.textSecondary).transition(motion.fade)
                     }
@@ -92,13 +92,12 @@ struct ServerHomeView: View {
                     .animation(motion.snappy, value: statusKind)
             }.scrollIndicators(.hidden).refreshable { await refresh() }
             .onChange(of: listSignature, initial: true) { regroup() }
-        } standalone: {
-            GlassCircleButton(systemImage: "sidebar.left") { SidebarModel.shared.open() }
+        } leading: {
+            // As in the reference: the notes library leads the bar on a phone and heads the
+            // rail on a Duo; phone calls, search and the account trail it in one capsule.
+            HomeNavigation.Notes()
         } rail: {
-            RailGroup {
-                RailIcon(systemImage: "magnifyingglass") { router.path.append(.search) }
-                RailAvatar(name: "Me") { router.showConnection = true }
-            }
+            HomeNavigation.Group(name: accounts.defaultSession?.notes.accountIdentity.map { _ in "Me" } ?? "Me")
         } bottom: {
             HomeBottomBar {
                 // The recording carries on while the user is here. The indicator is the
@@ -131,6 +130,10 @@ struct ServerHomeView: View {
             }
         }
         .toolbarVisibility(.visible, for: .navigationBar)
+        #if DEBUG
+        // QA only: `-qa.dayOffset 1` opens Home on another day, for screenshots of the day pager.
+        .onAppear { if let offset = Int(UserDefaults.standard.string(forKey: "qa.dayOffset") ?? "") { dayOffset = offset } }
+        #endif
         .task(id: "\(accounts.signature)/\(dayOffset)") { await refreshCalendars() }
         .onChange(of: accounts.sessions.map(\.id)) {
             openingEvent = nil
@@ -177,6 +180,20 @@ struct ServerHomeView: View {
             for session in accounts.sessions where session.isReady { group.addTask { await session.notes.refreshCalendars(from: start, to: end) } }
         }
         if !Task.isCancelled, day == dayOffset { calendarsReadFor = day }
+        if day == 0, UpcomingMeetingNotifications.isEnabled { await scheduleReminders() }
+    }
+
+    /// Settings › Notifications › Upcoming meetings: a lock-screen reminder as each of today's meetings starts.
+    private func scheduleReminders() async {
+        let today = Date.now
+        let events = accounts.sessions.filter(\.isReady).flatMap { session -> [(id: String, title: String, start: Date)] in
+            let snapshot = session.notes.calendarState.snapshot
+            let enabled = Set(snapshot.calendars.filter(\.enabled).map(\.id))
+            return CalendarSchedule.events(snapshot.events, on: today, enabledCalendarIDs: enabled, knownCalendarIDs: Set(snapshot.calendars.map(\.id)))
+                .filter { !$0.allDay }
+                .compactMap { event in CalendarSchedule.timestamp(event.startAt).map { (id: "\(session.key)-\(event.id)", title: event.title, start: $0) } }
+        }
+        await UpcomingMeetingNotifications.schedule(events)
     }
 
     /// An event with the account it was read through. An event id of one account is never sent to another.
@@ -243,19 +260,16 @@ struct ServerHomeView: View {
                     let event = item.event
                     HStack(alignment: .center, spacing: 8) {
                         Button { Task { await openEvent(item) } } label: {
+                            // As in the reference: the title, then "15:30 – 16:30 · 14 attendees".
                             HomeEventsBlock(barColor: calendarColor(event.color)) {
-                                Text(event.title).font(.system(size: HomeMetrics.eventsText, weight: .medium)).foregroundStyle(Theme.textPrimary)
-                                EventTimeLabel(pieces: Self.eventTimePieces(event)).foregroundStyle(Theme.textSecondary)
-                                Text(event.calendarName).font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
-                                if let location = event.location, !location.isEmpty { Text(location).font(.caption).foregroundStyle(Theme.textSecondary) }
+                                Text(event.title).font(.system(size: HomeMetrics.eventsText, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                                    .lineLimit(1)
+                                Text(Self.eventSubtitle(event)).font(.system(size: 14)).foregroundStyle(Theme.textSecondary)
+                                    .lineLimit(1)
                             }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                         }.buttonStyle(.plain).disabled(openingEvent != nil || creating)
                             .accessibilityLabel("Open note for \(event.title), \(event.calendarName)")
                         if openingEvent != nil, openingEvent == item.ref { ProgressView() }
-                        if let url = CalendarSchedule.meetingURL(event.meetingUrl) {
-                            Link("Join", destination: url).font(.footnote).foregroundStyle(Theme.accent)
-                                .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
-                        }
                     }
                 }
             } else if loaded {
@@ -267,7 +281,7 @@ struct ServerHomeView: View {
                 HomeEventsEmpty(text: "Loading calendars…")
             }
         }
-        .frame(minHeight: 36.7, alignment: .topLeading)
+        .frame(minHeight: dayOffset == 0 ? 36.7 : HomeMetrics.otherDayEventsHeight, alignment: .topLeading)
         // A day's events arrive after its page has stepped in; they fade in rather than appear.
         .animation(motion.snappy, value: UpcomingSignature(events: events.map(\.id), loaded: loaded, loading: loading, failed: failed))
         .accessibilityElement(children: .contain).accessibilityLabel("Upcoming calendar events")
@@ -288,31 +302,23 @@ struct ServerHomeView: View {
     /// The line of a day with nothing left on it, in the desktop's words: "No more" once
     /// today's events are over, "No events" when it had none, and for any other day.
     static func emptyDay(today: Bool, hadEvents: Bool) -> String {
-        guard today else { return "No events on this day" }
+        guard today else { return "No events" }
         return hadEvents ? "No more events today" : "No events today"
     }
 
-    /// An event's times as the desktop writes them: "10:30 – 11:00 AM" with a meridiem
-    /// both ends share said once, "11:30 AM – 12:15 PM" otherwise. Each `meridiem` piece
-    /// is set smaller (`EventTimeLabel`). A clock without one is written as it is.
-    static func eventTimePieces(_ event: CalendarEventDTO, locale: Locale = .current, timeZone: TimeZone = .current) -> [(text: String, meridiem: Bool)] {
-        if event.allDay { return [("All day", false)] }
-        guard let start = CalendarSchedule.timestamp(event.startAt), let end = CalendarSchedule.timestamp(event.endAt) else { return [("Time unavailable", false)] }
-        let format = DateFormatter()
-        format.locale = locale; format.timeZone = timeZone
-        format.setLocalizedDateFormatFromTemplate("jmm")
-        let gaps = CharacterSet.whitespaces.union(CharacterSet(charactersIn: "\u{202F}\u{00A0}"))
-        func split(_ date: Date) -> (time: String, half: String?) {
-            let text = format.string(from: date)
-            for symbol in [format.amSymbol, format.pmSymbol].compactMap({ $0 }) where !symbol.isEmpty && text.hasSuffix(symbol) {
-                return (String(text.dropLast(symbol.count)).trimmingCharacters(in: gaps), symbol.uppercased())
-            }
-            return (text, nil)
+    /// The line under an event's title, as the reference writes it: a 24-hour
+    /// "15:30 – 16:30", then " · 14 attendees" when others are invited.
+    static func eventSubtitle(_ event: CalendarEventDTO, timeZone: TimeZone = .current) -> String {
+        var time = "Time unavailable"
+        if event.allDay { time = "All day" }
+        else if let start = CalendarSchedule.timestamp(event.startAt), let end = CalendarSchedule.timestamp(event.endAt) {
+            let format = DateFormatter()
+            format.locale = Locale(identifier: "en_US_POSIX"); format.timeZone = timeZone
+            format.dateFormat = "HH:mm"
+            time = "\(format.string(from: start)) – \(format.string(from: end))"
         }
-        let (from, fromHalf) = split(start), (to, toHalf) = split(end)
-        guard let fromHalf, let toHalf else { return [("\(format.string(from: start)) – \(format.string(from: end))", false)] }
-        if fromHalf == toHalf { return [("\(from) – \(to)", false), (toHalf, true)] }
-        return [(from, false), (fromHalf, true), (" – \(to)", false), (toHalf, true)]
+        guard let count = event.attendeeCount, count > 1 else { return time }
+        return "\(time) · \(count) attendees"
     }
 
     /// A note from an event belongs to the event's account, and is asked of that account alone.
@@ -353,7 +359,8 @@ struct ServerHomeView: View {
     }
 
     private var header: some View {
-        HomeHeader(title: dayOffset == 0 ? "Today" : (Calendar.current.date(byAdding: .day, value: dayOffset, to: .now) ?? .now).formatted(.dateTime.weekday(.wide)),
+        HomeHeader(title: "Today",
+                   dayTitle: dayOffset == 0 ? nil : HomeDayTitle.string(selectedCalendarDay),
                    canGoBack: dayOffset > 0,
                    back: { steppedForward = false; withAnimation(motion.snappy) { dayOffset = max(0, dayOffset - 1) } },
                    forward: { steppedForward = true; withAnimation(motion.snappy) { dayOffset += 1 } })
@@ -393,7 +400,7 @@ struct ServerHomeView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     Text("Connect to your instance to read and edit its notes.")
                     Button("Connection settings") { router.showConnection = true }
-                        .foregroundStyle(Theme.accent)
+                        .foregroundStyle(Theme.accentText)
                         .frame(minHeight: 44).contentShape(Rectangle())
                 }.foregroundStyle(Theme.textSecondary)
             }
@@ -435,7 +442,7 @@ struct ServerHomeView: View {
             Text(text)
             if let detail { Text(detail).font(.footnote).padding(.top, 10) }
             Button(action, action: perform)
-                .foregroundStyle(Theme.accent)
+                .foregroundStyle(Theme.accentText)
                 .frame(minHeight: 44).contentShape(Rectangle())
         }.foregroundStyle(Theme.textSecondary).padding(.bottom, 6)
     }
@@ -460,9 +467,17 @@ private struct ServerHomeNoteRow: View {
     @Environment(ServerRecordingController.self) private var recording
 
     var body: some View {
-        // The note being recorded on this phone comes first; otherwise a meeting shows the other party's initial.
-        NoteListRow(tile: recording.isActive(item.ref) ? .phone : item.tile,
-                    title: item.title, subtitle: item.subtitle)
+        if item.isDraft {
+            DraftNoteRow(title: item.title, subtitle: item.subtitle)
+        } else if let step = recording.isFinishingTranscript(item.ref) ? "Uploading transcript..."
+                    : recording.isGeneratingNotes(item.ref) ? "Generating notes..." : nil {
+            // While a stopped recording becomes notes, its row says which step it is at.
+            DraftNoteRow(title: item.title, subtitle: step, working: true)
+        } else {
+            // The note being recorded on this phone comes first; otherwise a meeting shows the other party's initial.
+            NoteListRow(tile: recording.isActive(item.ref) ? .phone : item.tile,
+                        title: item.title, subtitle: item.subtitle)
+        }
     }
 }
 
@@ -475,6 +490,8 @@ struct AccountNoteRow: HomeListNote {
     var date: String { row.date }
     var createdAt: String { row.createdAt }
     var homeAttendee: String? { row.firstAttendee }
+    var homeAttendeeTotal: Int { row.attendeeTotal }
+    var homeHasRecording: Bool { row.transcriptRevision > 0 }
     var homeAccount: AccountID? { account }
 }
 
@@ -498,6 +515,9 @@ struct ServerHomeRow: Identifiable, Equatable {
     let tile: NoteTile
     /// Position in the whole list, for the entrance stagger.
     let order: Int
+    /// A note made ahead of a meeting that has not happened yet. The reference
+    /// lists it under the meeting's day as an outlined "Draft:" card.
+    var isDraft = false
 }
 
 /// What Home needs from a note to place and show its row. A list row has it,
@@ -509,15 +529,27 @@ protocol HomeListNote {
     var createdAt: String { get }
     /// The other party of a meeting, when there is one.
     var homeAttendee: String? { get }
+    /// Everyone invited, the account holder included.
+    var homeAttendeeTotal: Int { get }
+    /// False until something was recorded into the note.
+    var homeHasRecording: Bool { get }
     /// The account the note was read through.
     var homeAccount: AccountID? { get }
 }
-extension HomeListNote { var homeAccount: AccountID? { nil } }
-extension ServerNoteRow: HomeListNote { var homeAttendee: String? { firstAttendee } }
+extension HomeListNote {
+    var homeAccount: AccountID? { nil }
+    var homeAttendeeTotal: Int { 0 }
+    var homeHasRecording: Bool { true }
+}
+extension ServerNoteRow: HomeListNote {
+    var homeAttendee: String? { firstAttendee }
+    var homeAttendeeTotal: Int { attendeeTotal }
+    var homeHasRecording: Bool { transcriptRevision > 0 }
+}
 extension NoteDTO: HomeListNote { var homeAttendee: String? { nil } }
 
 /// A note with its dates parsed once. (A generic function cannot declare its own type.)
-private struct DatedHomeNote<Item: HomeListNote> { let note: Item; let created: Date; let timeline: Date }
+private struct DatedHomeNote<Item: HomeListNote> { let note: Item; let created: Date; let timeline: Date; var draft = false }
 
 enum ServerHomeGrouping {
     /// Rows from the end of the loaded list at which the next page is asked for.
@@ -533,9 +565,17 @@ enum ServerHomeGrouping {
         typealias Dated = DatedHomeNote<Item>
         var dated: [Dated] = []
         dated.reserveCapacity(notes.count)
+        let today = calendar.startOfDay(for: now)
         for note in notes {
             let created: Date = Date.serverTimestamp(note.createdAt) ?? .distantPast
-            let timeline: Date = MeetingPresentation.timelineDate(noteDate: note.date, createdAt: note.createdAt) ?? created
+            // A note dated after today with nothing recorded yet was made ahead of its meeting:
+            // as in the reference, it waits on that day as a draft. Anything recorded keeps the
+            // day it was made (`MeetingPresentation.timelineDate`).
+            if !note.homeHasRecording, let day = CalendarSchedule.dateOnly(note.date, calendar: calendar), day > today {
+                dated.append(Dated(note: note, created: created, timeline: day, draft: true))
+                continue
+            }
+            let timeline: Date = MeetingPresentation.timelineDate(noteDate: note.date, createdAt: note.createdAt, calendar: calendar) ?? created
             dated.append(Dated(note: note, created: created, timeline: timeline))
         }
         dated.sort { (left: Dated, right: Dated) -> Bool in
@@ -552,41 +592,31 @@ enum ServerHomeGrouping {
                 id: item.note.id,
                 account: item.note.homeAccount,
                 title: item.note.title.isEmpty ? "Untitled note" : item.note.title,
-                subtitle: item.created.formatted(date: .omitted, time: .shortened),
+                subtitle: subtitle(time: item.draft ? nil : item.created.formatted(date: .omitted, time: .shortened),
+                                   attendees: item.note.homeAttendeeTotal),
                 tile: tile(for: item.note),
-                order: index))
+                order: index,
+                isDraft: item.draft))
         }
         return order.map { day in
             ServerHomeSection(id: day, title: title(for: day, now: now, calendar: calendar), rows: groups[day] ?? [])
         }
     }
 
+    /// "7:30 PM • 4 attendees" for a meeting with others, the time alone otherwise.
+    static func subtitle(time: String?, attendees: Int) -> String {
+        let people = attendees >= 2 ? "\(attendees) attendees" : nil
+        return [time, people].compactMap { $0 }.joined(separator: " • ")
+    }
+
+    /// "Earlier today", "Yesterday", then the reference's "Fri 13 Nov".
     static func title(for day: Date, now: Date, calendar: Calendar) -> String {
         if calendar.isDate(day, inSameDayAs: now) { return "Earlier today" }
         if let yesterday = calendar.date(byAdding: .day, value: -1, to: now), calendar.isDate(day, inSameDayAs: yesterday) { return "Yesterday" }
+        let format = DateFormatter()
+        format.calendar = calendar; format.timeZone = calendar.timeZone
         // Notes from another year say so, and are never merged with this year's.
-        if calendar.component(.year, from: day) != calendar.component(.year, from: now) {
-            return day.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).year())
-        }
-        return day.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated))
-    }
-}
-
-/// An event's times, each AM/PM as a smaller capital run on the digits' baseline: the
-/// desktop's 8.5 pt beside its 12 pt time, kept in proportion beside this 14 pt one.
-private struct EventTimeLabel: View {
-    let pieces: [(text: String, meridiem: Bool)]
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 0) {
-            ForEach(Array(pieces.enumerated()), id: \.offset) { _, piece in
-                if piece.meridiem {
-                    Text(piece.text).font(.system(size: 10)).padding(.leading, 3)
-                } else {
-                    Text(piece.text).font(.system(size: 14))
-                }
-            }
-        }
-        .lineLimit(1)
-        .accessibilityElement(children: .combine)
+        format.dateFormat = calendar.component(.year, from: day) != calendar.component(.year, from: now) ? "EEE d MMM yyyy" : "EEE d MMM"
+        return format.string(from: day)
     }
 }

@@ -77,7 +77,7 @@ final class NoteStore {
             let title: String
             if cal.isDateInToday(day) { title = "Earlier today" }
             else if cal.isDateInYesterday(day) { title = "Yesterday" }
-            else { title = day.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated)) }
+            else { title = ServerHomeGrouping.title(for: day, now: .now, calendar: cal) }
             return (title, notes.sorted { $0.createdAt > $1.createdAt })
         }
     }

@@ -7,9 +7,10 @@ import UIKit
 /// (OKLCH, lightness and chroma of the old lime kept, hue moved to gold), so the
 /// contrast each colour had in its role is the contrast it still has.
 struct ThemePaletteTests {
-    private func hex(_ color: Color) -> UInt32 {
+    /// The colour as drawn in the dark theme, or in `style`.
+    private func hex(_ color: Color, _ style: UIUserInterfaceStyle = .dark) -> UInt32 {
         var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
-        UIColor(color).getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        UIColor(color).resolvedColor(with: UITraitCollection(userInterfaceStyle: style)).getRed(&red, green: &green, blue: &blue, alpha: &alpha)
         return UInt32((red * 255).rounded()) << 16 | UInt32((green * 255).rounded()) << 8 | UInt32((blue * 255).rounded())
     }
 
@@ -47,6 +48,29 @@ struct ThemePaletteTests {
         #expect(contrast(hex(Theme.accent), hex(Theme.surfaceRaised)) > 6)
         // The send arrow on its gold disc.
         #expect(contrast(hex(Theme.sendGlyph), hex(Theme.sendGold)) > 7)
+    }
+
+    @Test func theLightThemeIsTheReferencesWarmOffWhiteAndGoldTextStaysReadableOnIt() {
+        // Measured from the reference recordings.
+        #expect(hex(Theme.bgTop, .light) == 0xF0F0EA)
+        #expect(hex(Theme.surface, .light) == 0xE7E4DC)
+        #expect(hex(Theme.textPrimary, .light) == 0x1C1C17)
+        #expect(hex(Theme.textSecondary, .light) == 0x5D5D57)
+        #expect(contrast(hex(Theme.textPrimary, .light), hex(Theme.bgTop, .light)) > 14)
+        #expect(contrast(hex(Theme.textSecondary, .light), hex(Theme.bgTop, .light)) > 5.5)
+        // Gold as text is darkened on light; on dark it is the brand gold.
+        #expect(contrast(hex(Theme.accentText, .light), hex(Theme.bgTop, .light)) > 4.5)
+        #expect(hex(Theme.accentText) == hex(Theme.accent))
+        // The dark theme did not move.
+        #expect(hex(Theme.bgTop) == 0x1E1E1E && hex(Theme.textPrimary) == 0xF2F2F2)
+        // The send button and the + are the same gold on both.
+        #expect(hex(Theme.sendGold, .light) == hex(Theme.sendGold) && hex(Theme.accent, .light) == hex(Theme.accent))
+    }
+
+    @Test func theThemeSettingDefaultsToAutoAndAutoFollowsTheSystem() {
+        #expect(ThemePreference(rawValue: UserDefaults(suiteName: "theme-\(UUID())")?.string(forKey: ThemePreference.storageKey) ?? "auto") == .auto)
+        #expect(ThemePreference.auto.colorScheme == nil && ThemePreference.light.colorScheme == .light && ThemePreference.dark.colorScheme == .dark)
+        #expect(ThemePreference.allCases.map(\.title) == ["Light", "Dark", "Auto"])
     }
 
     @Test func noLetterTileIsGreen() {

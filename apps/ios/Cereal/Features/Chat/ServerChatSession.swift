@@ -80,6 +80,9 @@ enum ChatHistoryRule {
     @ObservationIgnored private let currentAccount: @MainActor () -> String?
     @ObservationIgnored private let persist: @MainActor (ServerChatSession) -> Void
     @ObservationIgnored private let background: ChatBackgroundTime
+    /// The Live Activity of the answer arriving (`ChatLiveActivity.swift`).
+    @ObservationIgnored private let activity: ChatActivityHooks
+    @ObservationIgnored private var activityID: String?
     @ObservationIgnored private var request: Task<Void, Never>?
     @ObservationIgnored private var requestID: UUID?
     @ObservationIgnored private var deltaBuffer: ChatDeltaBuffer?
@@ -87,10 +90,10 @@ enum ChatHistoryRule {
 
     init(key: String, accountIdentity: String, noteID: String?, state: ServerChatSessions.ConversationState,
          events: @escaping Events, threadEvents: ThreadEvents? = nil, currentAccount: @escaping @MainActor () -> String?,
-         background: ChatBackgroundTime = .none, persist: @escaping @MainActor (ServerChatSession) -> Void) {
+         background: ChatBackgroundTime = .none, activity: ChatActivityHooks = .none, persist: @escaping @MainActor (ServerChatSession) -> Void) {
         self.key = key; self.accountIdentity = accountIdentity; self.noteID = noteID
         messages = state.messages; history = state.history; threadID = state.threadID
-        self.events = events; self.threadEvents = threadEvents; self.currentAccount = currentAccount; self.background = background; self.persist = persist
+        self.events = events; self.threadEvents = threadEvents; self.currentAccount = currentAccount; self.background = background; self.activity = activity; self.persist = persist
     }
 
     static let maximumQuestionLength = 10_000
@@ -186,6 +189,11 @@ enum ChatHistoryRule {
         // The question is on disk before its answer starts; a streaming answer is saved as interrupted.
         persist(self)
         let token = background.begin()
+        // Stop in the Live Activity ends this answer; questions waiting behind it then go out.
+        activityID = activity.begin { [weak self] in
+            guard let self, requestID == id else { return }
+            cancelRequest(); askNextQueued()
+        }
         #if DEBUG
         let timing = ChatTimingLog(question: text)
         #endif
@@ -199,6 +207,7 @@ enum ChatHistoryRule {
                 #endif
                 // The first text ends the thinking: its line says how long that took.
                 markThought(index, since: asked)
+                if let activityID { activity.writing(activityID) }
             }
             messages[index].text += delta
         }
@@ -270,6 +279,7 @@ enum ChatHistoryRule {
             markInterruptedReply()
         }
         finishReply(); busy = false; requestID = nil; request = nil; deltaBuffer = nil
+        endActivity(finished: failure == nil)
         history = ServerChatSessions.archive(messages, in: history, threadID: threadID)
         persist(self)
         askNextQueued()
@@ -290,10 +300,17 @@ enum ChatHistoryRule {
         deltaBuffer = nil
         markInterruptedReply()
         request?.cancel(); request = nil; requestID = nil; busy = false
+        endActivity(finished: false)
         finishReply()
         guard saving else { return }
         history = ServerChatSessions.archive(messages, in: history, threadID: threadID)
         persist(self)
+    }
+
+    private func endActivity(finished: Bool) {
+        guard let id = activityID else { return }
+        activityID = nil
+        activity.end(id, finished)
     }
 
     private func markInterruptedReply() {

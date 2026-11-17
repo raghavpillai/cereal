@@ -41,13 +41,12 @@ struct HomeView: View {
                 .animation(motion.snappy, value: store.persistenceError)
             }
             .scrollIndicators(.hidden)
-        } standalone: {
-            GlassCircleButton(systemImage: "sidebar.left") { SidebarModel.shared.open() }
+        } leading: {
+            // As in the reference: the notes library leads the bar on a phone and heads the
+            // rail on a Duo; phone calls, search and the account trail it in one capsule.
+            HomeNavigation.Notes()
         } rail: {
-            RailGroup {
-                RailIcon(systemImage: "magnifyingglass") { router.path.append(.search) }
-                RailAvatar(name: store.currentUser.name) { router.showConnection = true }
-            }
+            HomeNavigation.Group(name: store.currentUser.name)
         } bottom: {
             HomeBottomBar {
                 AskAnythingPill(prominent: true) { router.path.append(.chat(noteID: nil)) }
@@ -56,37 +55,54 @@ struct HomeView: View {
             }
         }
         .toolbarVisibility(.visible, for: .navigationBar)
+        #if DEBUG
+        // QA only: `-qa.dayOffset 1` opens Home on another day, for screenshots of the day pager.
+        .onAppear {
+            if let offset = Int(UserDefaults.standard.string(forKey: "qa.dayOffset") ?? "") { dayOffset = offset }
+            // `-qa.demoEvent 1` puts one meeting on tomorrow's calendar.
+            if UserDefaults.standard.bool(forKey: "qa.demoEvent"), store.events.isEmpty,
+               let day = Calendar.current.date(byAdding: .day, value: 1, to: .now),
+               let start = Calendar.current.date(bySettingHour: 15, minute: 30, second: 0, of: day) {
+                store.events = [CalendarEvent(title: "Design review", start: start, end: start.addingTimeInterval(3600))]
+            }
+        }
+        #endif
         .sensoryFeedback(.success, trigger: copyCount)
     }
 
     private var header: some View {
-        HomeHeader(title: dayOffset == 0 ? "Today" : dayTitle, caption: "Local demo", canGoBack: dayOffset > 0,
+        HomeHeader(title: "Today", caption: dayOffset == 0 ? "Local demo" : nil,
+                   dayTitle: dayOffset == 0 ? nil : HomeDayTitle.string(Calendar.current.date(byAdding: .day, value: dayOffset, to: .now) ?? .now),
+                   canGoBack: dayOffset > 0,
                    back: { steppedForward = false; withAnimation(motion.snappy) { dayOffset = max(0, dayOffset - 1) } },
                    forward: { steppedForward = true; withAnimation(motion.snappy) { dayOffset += 1 } })
             .sensoryFeedback(.selection, trigger: dayOffset)
     }
 
-    private var dayTitle: String {
-        let d = Calendar.current.date(byAdding: .day, value: dayOffset, to: .now)!
-        if Calendar.current.isDateInTomorrow(d) { return "Tomorrow" }
-        if Calendar.current.isDateInYesterday(d) { return "Yesterday" }
-        return d.formatted(.dateTime.weekday(.wide))
+    /// The demo's events on the day shown.
+    private var dayEvents: [CalendarEvent] {
+        let day = Calendar.current.date(byAdding: .day, value: dayOffset, to: .now) ?? .now
+        return store.events.filter { Calendar.current.isDate($0.start, inSameDayAs: day) }.sorted { $0.start < $1.start }
     }
 
     @ViewBuilder private var eventsBlock: some View {
         Group {
-            if store.events.isEmpty {
+            if dayEvents.isEmpty {
                 HomeEventsEmpty(text: dayOffset == 0 ? "No more events today" : "No events")
             } else {
-                HomeEventsBlock {
-                    ForEach(store.events) { e in
-                        Text(e.title).font(.system(size: HomeMetrics.eventsText, weight: .medium)).foregroundStyle(Theme.textPrimary)
-                        Text(e.start.formatted(date: .omitted, time: .shortened))
-                            .font(.rowSubtitle).foregroundStyle(Theme.textSecondary)
+                // One block per event, as on the server Home: the title, then "15:30 – 16:30".
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(dayEvents) { e in
+                        HomeEventsBlock(barColor: Color(hex: 0x87E5E8)) {
+                            Text(e.title).font(.system(size: HomeMetrics.eventsText, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                            Text("\(Self.clock.string(from: e.start)) – \(Self.clock.string(from: e.end))")
+                                .font(.system(size: 14)).foregroundStyle(Theme.textSecondary)
+                        }
                     }
                 }
             }
         }
+        .frame(minHeight: dayOffset == 0 ? 0 : HomeMetrics.otherDayEventsHeight, alignment: .topLeading)
         // The day's block arrives from the side the user stepped towards.
         .id(dayOffset)
         .transition(motion.step(forward: steppedForward))
@@ -115,6 +131,12 @@ struct HomeView: View {
             }
         }
     }
+
+    private static let clock: DateFormatter = {
+        let format = DateFormatter()
+        format.locale = Locale(identifier: "en_US_POSIX"); format.dateFormat = "HH:mm"
+        return format
+    }()
 
     private func startNewNote() {
         Task {

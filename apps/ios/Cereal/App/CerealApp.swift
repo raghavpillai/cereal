@@ -9,6 +9,7 @@ struct CerealApp: App {
     @State private var connectionMode = ConnectionMode()
     @State private var serverRecording = ServerRecordingController(outboxRoot: AppAccounts.outboxRoot)
     @State private var sharedHistory = SharedNoteHistory()
+    @AppStorage(ThemePreference.storageKey) private var theme: ThemePreference = .auto
 
     var body: some Scene {
         WindowGroup {
@@ -19,8 +20,10 @@ struct CerealApp: App {
                 .environment(connectionMode)
                 .environment(serverRecording)
                 .environment(sharedHistory)
-                .preferredColorScheme(.dark)
-                .tint(Theme.accent)
+                .preferredColorScheme(theme.colorScheme)
+                // Sheets, covers and alerts follow too, and Auto hands the choice back to the system.
+                .onChange(of: theme, initial: true) { _, theme in ThemeWindows.apply(theme) }
+                .tint(Theme.accentText)
                 #if DEBUG
                 .task { FrameLog.shared.start() }
                 #endif
@@ -84,6 +87,8 @@ enum Route: Hashable {
     case sharedNote(SharedNoteLink)
     /// The shared notes opened on this device.
     case sharedWithMe
+    /// Settings and the pages under it.
+    case settings(SettingsPage)
     /// A link to a note on a server this app is not signed in to.
     case noteElsewhere(NoteLink)
 }
@@ -172,6 +177,9 @@ struct RootView: View {
                     case .search: SearchView()
                     case .sharedNote(let link): SharedNoteView(link: link)
                     case .sharedWithMe: SharedWithMeView()
+                    case .settings(.main): SettingsView()
+                    case .settings(.profile): ProfileSettingsView()
+                    case .settings(.notifications): NotificationSettingsView()
                     case .noteElsewhere(let link): NoteElsewhereView(link: link)
                     }
                 }
@@ -417,6 +425,8 @@ extension RootView {
             let account = try? await accounts.connect(instance: environment["CEREAL_QA_INSTANCE_URL"] ?? "", token: environment["CEREAL_QA_OWNER_TOKEN"] ?? "")
             if let account, let id = environment["CEREAL_QA_NOTE_ID"], UUID(uuidString: id) != nil {
                 router.path = [.serverNote(NoteRef(account: account, id: id))]
+                // `CEREAL_QA_CHAT=note` goes on to the note's chat (the panel beside it on a wide layout: `-qa.chatPanel YES`).
+                if environment["CEREAL_QA_CHAT"] == "note" { router.path.append(.serverChat(account, noteID: id)) }
             } else if let account, environment["CEREAL_QA_CHAT"] == "workspace" {
                 // The chat across all notes, for checking saved chats.
                 router.path = [.serverChat(account, noteID: nil)]
@@ -485,8 +495,8 @@ extension RootView {
         let args = ProcessInfo.processInfo.arguments
         guard let i = args.firstIndex(of: "-screen"), i + 1 < args.count else { return }
         let target = args[i + 1]
-        guard ["home", "note", "chat", "search", "sidebar", "new", "mic", "regenerate"].contains(target) else { return }
-        guard isFirst || ["note", "chat", "search", "sidebar"].contains(target) else { return }
+        guard ["home", "note", "chat", "search", "sidebar", "new", "mic", "regenerate", "settings", "settings-profile", "settings-notifications"].contains(target) else { return }
+        guard isFirst || ["note", "chat", "search", "sidebar", "settings", "settings-profile", "settings-notifications"].contains(target) else { return }
         connectionMode.isDemo = true
         let first = store.activeNotes.first { !$0.sections.isEmpty }?.id
         switch target {
@@ -494,6 +504,9 @@ extension RootView {
         case "chat":
             if let first { router.path = [.note(first), .chat(noteID: first)] }
         case "search": router.path = [.search]
+        case "settings": router.path = [.settings(.main)]
+        case "settings-profile": router.path = [.settings(.main), .settings(.profile)]
+        case "settings-notifications": router.path = [.settings(.main), .settings(.notifications)]
         case "sidebar": router.path = []; SidebarModel.shared.open()
         case "new": router.newNoteID = store.createNote().id
         case "mic": router.showMicSheet = true

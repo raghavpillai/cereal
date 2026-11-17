@@ -96,7 +96,7 @@ extension Route {
         switch self {
         case .serverNote(let ref), .serverNoteSource(let ref, _): ref.account
         case .serverChat(let account, _): account
-        case .note, .chat, .search, .sharedNote, .sharedWithMe, .noteElsewhere: nil
+        case .note, .chat, .search, .sharedNote, .sharedWithMe, .noteElsewhere, .settings: nil
         }
     }
 
@@ -104,7 +104,7 @@ extension Route {
     /// demo: it stays whatever happens to the accounts, and shows what they may see.
     var belongsToNoAccount: Bool {
         switch self {
-        case .sharedNote, .sharedWithMe, .noteElsewhere: true
+        case .sharedNote, .sharedWithMe, .noteElsewhere, .settings: true
         case .note, .chat, .serverNote, .serverNoteSource, .serverChat, .search: false
         }
     }

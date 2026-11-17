@@ -69,6 +69,16 @@ struct ServerCaptureView: View {
     /// Typed text that has not reached the server yet.
     @State private var unsaved = false
     @State private var width: CGFloat = 0
+    /// The bar has replaced the "Let people know" hint (after the first second of a new recording).
+    @State private var barRevealed = false
+    /// The screen opened on a recording already running: the bar is there from the start.
+    @State private var revealedAtOpen = false
+    /// End or Cancel was chosen: the screen is on its way out.
+    @State private var leaving = false
+    /// The recording began on this screen, in a note made for it, with nothing recorded before.
+    @State private var freshRecording = false
+    /// The start this screen asked for has finished, one way or the other.
+    @State private var startSettled = false
     @Environment(\.layoutDirection) private var layoutDirection
     @FocusState private var focus: CaptureEditorField?
     private var note: NoteDTO? { server.state.notes.first { $0.id == noteID } ?? initial }
@@ -90,7 +100,7 @@ struct ServerCaptureView: View {
                 if let message = error ?? (ownsCapture ? recording.error : nil) {
                     Text(message).font(.system(size: 13)).foregroundStyle(Theme.danger).multilineTextAlignment(.center)
                         .transition(motion.fade)
-                } else if active, let live = recording.transcript(for: ref) {
+                } else if active, recording.recorder.state != .paused, let live = recording.transcript(for: ref) {
                     // While recording, the only status is the live stream's, and only when
                     // it has something to say. The line follows the stream by itself.
                     LiveStatusLine(live: live, font: .system(size: 13), color: Theme.textSecondary)
@@ -110,45 +120,31 @@ struct ServerCaptureView: View {
                     Text(missing).font(.system(size: 13)).foregroundStyle(Theme.danger).multilineTextAlignment(.center)
                         .transition(motion.fade)
                 }
-                if focus == nil && active {
-                    Text("Let people know you're using Cereal").font(.system(size: 16)).foregroundStyle(Theme.textSecondary)
-                        .multilineTextAlignment(.center).transition(motion.giveWay)
-                }
-                GlassChromeGroup(spacing: 12) {
-                    HStack(spacing: 12) {
-                        RecordingPill(recorder: recording.recorder, onStop: stop, onStart: start,
-                            onResumeFromPause: { recording.recorder.resumeFromPause() })
-                            .disabled(recording.isBusy || generating)
-                            .glassMorph("pill", in: glass)
-                        if showsGenerate, let note {
-                            GenerateButton(title: note.generatedRevision == note.transcriptRevision ? "View notes" : note.generatedRevision == nil ? "Generate notes" : "Regenerate notes",
-                                           busy: generating || writingNotes) { generate() }
-                                .glassMorph("generate", in: glass)
-                        }
-                        if active && focus == nil {
-                            // The note's own way into chat, while the meeting is still going.
-                            // It gives its place to the keyboard control while typing.
-                            AskAnythingPill { ask() }
-                                .disabled(saving)
-                                .accessibilityIdentifier("server-capture-ask")
-                                .glassMorph("ask", in: glass)
-                        } else {
-                            Spacer(minLength: 0)
-                        }
-                        if focus != nil {
-                            HideKeyboardButton { focus = nil }
-                                .glassMorph("keyboard", in: glass)
-                        }
+                // As in the reference: while a new recording gets going, the hint stands where
+                // the bar will be; the bar takes its place once the clock has run a second.
+                // With the keyboard up the bar is a small chip beside the keyboard's control.
+                // As in the reference (8.0 s, 30 fps): the gold capsule is there at once behind the
+                // hint; the hint fades out and the controls fade in over about 0.2 s.
+                ZStack {
+                    if !showsHint {
+                        RecordingBar(recorder: recording.recorder, compact: focus != nil,
+                                     cancelWindow: offersCancel ? Self.cancelWindow : 0,
+                                     fadesIn: !revealedAtOpen,
+                                     onPauseToggle: pauseToggle, onCancel: cancel, onEnd: end,
+                                     onHideKeyboard: { focus = nil })
+                            .disabled(recording.isBusy || generating || leaving)
+                            .transition(.identity)
                     }
-                    // Without the keyboard the row is as tall as its tallest control (Ask and
-                    // Generate, 64 pt) whether or not one is showing. The pill dropped 8 pt when
-                    // a recording stopped and rose again when Generate arrived.
-                    .frame(minHeight: focus == nil ? 64 : nil)
+                    if showsHint {
+                        RecordingConsentHint().transition(.opacity.animation(motion.reduceMotion ? nil : .easeOut(duration: 0.2))).zIndex(1)
+                    }
                 }
-            }.padding(.leading, rail.captureBarLeading).padding(.trailing, 20).padding(.bottom, 12)
+            }.padding(.horizontal, rail.captureBarLeading)
+                // The bar ends 30 pt above the screen's edge, as in the reference, over the home
+                // indicator's inset; the chip rides 12 pt above the keyboard.
+                .padding(.bottom, focus == nil && rail.bottomInset < RailMetrics.keyboardInsetThreshold ? RecordingBar.Metrics.screenEdge - rail.bottomInset : 12)
                 .animation(settled ? motion.animation(.gooey, entering: focus != nil) : nil, value: focus)
                 .animation(settled ? motion.gooey : nil, value: active)
-                .animation(settled ? motion.animation(.gooey, entering: showsGenerate) : nil, value: showsGenerate)
                 .animation(settled ? motion.snappy : nil, value: statusLine)
                 }
         }
@@ -162,15 +158,14 @@ struct ServerCaptureView: View {
                                           rightToLeft: layoutDirection == .rightToLeft, keyboardUp: focus != nil) { close() }
         })
         .captureChrome(close: close) {
-            if recording.transcript(for: ref) != nil {
-                // One tap from the recording to what has been said so far.
-                RailIcon(systemImage: "text.alignleft") { focus = nil; showingTranscript = true }
-                    .accessibilityLabel("View transcript")
-                    .accessibilityIdentifier("server-capture-transcript")
-            }
+            // As in the reference: the attachment control and the menu, in one capsule.
             RailIcon(systemImage: "paperclip") { unsupportedAttachment = true }
             Menu {
-                if active { Button("Stop recording", systemImage: "stop.circle") { stop() } }
+                if recording.transcript(for: ref) != nil {
+                    // One tap from the recording to what has been said so far.
+                    Button("View transcript", systemImage: "text.alignleft") { focus = nil; showingTranscript = true }
+                        .accessibilityIdentifier("server-capture-transcript")
+                }
                 Button("View notes", systemImage: "doc.text") { viewNotes() }
             } label: {
                 RailGlyph(systemImage: "ellipsis")
@@ -203,8 +198,12 @@ struct ServerCaptureView: View {
                 initial = value; title = value.title; serverTitle = value.title; text = value.body; loaded = true
                 // Returning to a recording in progress neither restarts it nor raises the keyboard.
                 let returning = active
+                if returning { barRevealed = true; revealedAtOpen = true }
+                // Nothing recorded into this note before: the first seconds offer Cancel.
+                freshRecording = !returning && discardsIfEmpty && value.transcriptRevision == 0
                 if !returning { await recording.start(note: value, in: account) }
-                if text.isEmpty && !returning { focus = .body }
+                startSettled = true
+                // The reference opens on the page, not the keyboard: a tap on the text raises it.
                 meetingContext = try? await server.noteContext(id: noteID)
             } catch { if let shown = ErrorText.shown(error) { self.error = shown } }
         }
@@ -228,11 +227,76 @@ struct ServerCaptureView: View {
             if title == serverTitle { title = new }
             serverTitle = new
         }
+        // Stopped from elsewhere (the Live Activity's End, the note's menu): the page
+        // goes to the note, where its notes are being written, as End does.
+        .onChange(of: writingNotes) { _, writing in if writing && !active { endToNote() } }
+        .task(id: active) { await revealBar() }
         // Leaving this screen, by any route, does not stop the recording. What was
         // typed is sent on its way out.
         .onDisappear { saveTask?.cancel(); flushUnsaved() }
         .alert("Attachments", isPresented: $unsupportedAttachment) { Button("OK", role: .cancel) {} }
             message: { Text("File attachments are not supported by this instance yet.") }
+    }
+
+    /// Cancel is offered for this long at the start of a new recording, as in the reference.
+    static let cancelWindow: TimeInterval = 5
+    private var offersCancel: Bool { freshRecording && ownsCapture }
+    private var showsHint: Bool { !barRevealed && focus == nil && error == nil && recording.error == nil }
+
+    /// The hint gives way to the bar once the recording's clock has run a second
+    /// (at once when the recording stopped or failed, so its controls are there).
+    private func revealBar() async {
+        while !barRevealed, !Task.isCancelled {
+            let state = recording.recorder.state
+            let running = state == .recording || state == .paused
+            if (running && recording.recorder.elapsed >= 1) || (startSettled && !running) {
+                withAnimation(motion.reduceMotion ? nil : .easeOut(duration: 0.2)) { barRevealed = true }
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+    }
+
+    private func pauseToggle() {
+        switch recording.recorder.state {
+        case .recording: recording.recorder.pause()
+        case .paused: recording.recorder.resumeFromPause()
+        case .idle, .stopped, .failed: start()
+        }
+    }
+
+    /// End: the recording stops and the screen goes to the note, where its
+    /// transcript is handed over and its notes written.
+    private func end() {
+        guard active else { viewNotes(); return }
+        stop()
+        endToNote()
+    }
+
+    /// Cancel: the screen closes at once and the note made for this recording
+    /// is removed. A note something was typed in is kept, as after End.
+    private func cancel() {
+        guard active, !leaving else { return }
+        let typedTitle = title == serverTitle ? "" : title
+        guard typedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { end(); return }
+        leaving = true; focus = nil; saveTask?.cancel(); unsaved = false
+        let recording = recording, ref = ref
+        Task { await recording.cancel(ref) }
+        router.serverCapture = nil
+        dismiss()
+    }
+
+    /// Closes the screen over the note's own page.
+    private func endToNote() {
+        guard !leaving else { return }
+        leaving = true; focus = nil
+        if let ref {
+            let target = CaptureNavigation.pathAfterClosing(from: router.path, note: ref, recording: false)
+            if router.path != target { router.path = target }
+        }
+        router.serverCapture = nil
+        dismiss()
     }
 
     /// After Stop, until they are written: the notes this recording's Stop is writing.
@@ -243,10 +307,6 @@ struct ServerCaptureView: View {
     private var missing: String? {
         guard ownsCapture, !active, let live = recording.transcript(for: ref) else { return nil }
         return TranscriptPresentation.untranscribedText(live.gaps)
-    }
-    private var showsGenerate: Bool {
-        guard !active, let note else { return false }
-        return writingNotes || note.transcriptRevision > 0
     }
     /// The line under the editor once the recording has stopped.
     private var afterStopLine: String? {
@@ -336,23 +396,5 @@ struct ServerCaptureView: View {
     }
     private func viewNotes() {
         leave { ref.map { CaptureNavigation.pathAfterClosing(from: router.path, note: $0, recording: false) } ?? router.path }
-    }
-    private func ask() {
-        leave { ref.map { CaptureNavigation.pathForChat(from: router.path, note: $0) } ?? router.path }
-    }
-    private func generate() {
-        guard !active, !generating, !writingNotes, let note else { return }
-        if note.generatedRevision == note.transcriptRevision { close(); return }
-        generating = true; focus = nil; saveTask?.cancel()
-        Task {
-            defer { generating = false }
-            do {
-                try await save()
-                _ = try await server.generate(noteID: noteID, expectedTranscriptRevision: note.transcriptRevision)
-                router.path = ref.map { CaptureNavigation.pathAfterClosing(from: router.path, note: $0, recording: false) } ?? router.path
-                router.serverCapture = nil
-                dismiss()
-            } catch { if let shown = ErrorText.shown(error) { self.error = shown } }
-        }
     }
 }

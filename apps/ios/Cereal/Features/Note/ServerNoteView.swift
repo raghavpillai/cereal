@@ -53,6 +53,7 @@ struct ServerNoteView: View {
     @State private var editingTitle = false
     @State private var titleDraft = ""
     @State private var sharing = false
+    @State private var sharePopover = false
     @State private var transcript = false
     @State private var showMine = false
     @State private var confirmDelete = false
@@ -63,8 +64,13 @@ struct ServerNoteView: View {
     @State private var generating = false
     @State private var generatedCount = 0
     @State private var copiedCount = 0
+    /// "Get notified when your notes are ready" is offered (notifications never asked for).
+    @State private var offersNotify = false
     @Environment(\.motion) private var motion
     @Namespace private var glass
+    /// On a wide layout the note's chat opens beside it (`NoteChatPanel`) instead of over it.
+    @State private var chatPanel = false
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     init(noteID: String, showMineInitially: Bool = false) {
         self.noteID = noteID
@@ -73,24 +79,49 @@ struct ServerNoteView: View {
 
     private var note: NoteDTO? { loaded ?? server.state.notes.first { $0.id == noteID } }
 
+    /// The note's chat: beside the note on a wide layout, over it otherwise.
+    private func openChat() {
+        if sizeClass == .regular { withAnimation(motion.settle) { chatPanel = true } }
+        else if let account { router.path.append(.serverChat(account, noteID: noteID)) }
+    }
+
     var body: some View {
         let _ = PerfProbe.hit("ServerNoteView.body")
         RailScaffold {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     if let note {
+                        // An untitled note's title is the placeholder, drawn as the editor draws it.
                         Text(note.title.isEmpty ? "Untitled note" : note.title)
-                            .font(.noteTitle).lineSpacing(4).foregroundStyle(Theme.textPrimary).padding(.top, 18)
+                            .font(.noteTitle).tracking(Theme.noteTitleTracking).lineSpacing(Theme.noteTitleLineSpacing).foregroundStyle(note.title.isEmpty ? Theme.textSecondary : Theme.textPrimary).padding(.top, 18)
                             .accessibilityAddTraits(.isHeader)
                         NoteMetaChips(date: MeetingPresentation.metadataDate(createdAt: note.createdAt, fallbackDate: note.date, meeting: meetingContext?.meeting) ?? .distantPast,
                             attendeeCount: meetingContext?.meeting.map { MeetingPresentation.people($0).count } ?? 0,
                             onMetadata: { showingMeeting = true })
                             .padding(.top, 14).padding(.bottom, 17)
                         if let error { errorView(error).transition(motion.fade) }
+                        // After End, as in the reference: the step the recording is at, in a row under the chips.
+                        if !showMine, let step = NoteProgressRow.text(finishing: finishingHere, generating: generatingHere) {
+                            VStack(alignment: .leading, spacing: 12) {
+                                if offersNotify {
+                                    NotifyWhenReadyCard(onNotify: { offersNotify = false; Task { await NotesReadyNotifications.request() } },
+                                                        onDismiss: { offersNotify = false; NotesReadyNotifications.dismiss() })
+                                        .transition(motion.fade)
+                                }
+                                NoteProgressRow(text: step)
+                            }
+                            .padding(.bottom, 16)
+                            .padding(.top, -1)
+                            .transition(.opacity)
+                            .task { offersNotify = await NotesReadyNotifications.shouldOffer() }
+                        }
                         let content = showMine ? note.body : note.enhanced
                         // The two documents cross-fade. Large text never animates its layout.
                         Group {
-                            if content.isEmpty {
+                            if content.isEmpty && !showMine && (finishingHere || generatingHere) {
+                                // The row above says it.
+                                EmptyView()
+                            } else if content.isEmpty {
                                 Text(emptyText(note))
                                     .foregroundStyle(Theme.textTertiary).readingFont(.body)
                             } else if !showMine {
@@ -109,9 +140,10 @@ struct ServerNoteView: View {
                             // While recording, the live stream's line, when it has something to say; after Stop, while
                             // the stream hands over the rest, that it is finishing; then any problem.
                             VStack(alignment: .leading, spacing: 8) {
-                                if capturingHere || finishingHere, let live = recording.transcript(for: ref) {
+                                // After Stop the row under the title says it ("Uploading transcript..."), unless "My notes" is shown.
+                                if capturingHere || finishingHere && showMine, let live = recording.transcript(for: ref) {
                                     LiveStatusLine(live: live, finishing: finishingHere)
-                                } else if finishingHere {
+                                } else if finishingHere && showMine {
                                     Text(LiveStatusText.finishing).font(.footnote)
                                 }
                                 if let message = recording.error {
@@ -130,6 +162,7 @@ struct ServerNoteView: View {
                 .animation(motion.snappy, value: recording.error)
                 .animation(motion.snappy, value: generatingHere)
                 .animation(motion.snappy, value: finishingHere)
+                .animation(motion.snappy, value: offersNotify)
                 .animation(motion.snappy, value: note?.generatedRevision)
             }
             .refreshable { await load() }
@@ -144,7 +177,14 @@ struct ServerNoteView: View {
         } leading: {
             BackButton()
         } standalone: {
-            GlassCircleButton(systemImage: "square.and.arrow.up") { sharing = true }
+            // As in the reference: a popover of Share via, Copy link and QR code; "Manage links…" opens the full sheet.
+            GlassCircleButton(systemImage: "square.and.arrow.up") { sharePopover = true }
+                .popover(isPresented: $sharePopover) {
+                    NoteSharePopover(noteID: noteID) {
+                        sharePopover = false
+                        Task { try? await Task.sleep(for: .milliseconds(400)); sharing = true }
+                    }
+                }
                 .disabled(note == nil || busy).accessibilityLabel("Share a read-only snapshot")
         } rail: {
             Menu {
@@ -187,20 +227,17 @@ struct ServerNoteView: View {
                     // The button stays through the request and shows its own
                     // busy state, so one glass surface lasts the whole operation.
                     // After a Stop the notes are being written already, and it shows that.
-                    if canGenerate || generating || generatingHere {
+                    // After End the row under the title says the notes are being written (as in the reference).
+                    if canGenerate || generating {
                         GenerateButton(title: note?.generatedRevision == nil ? "Generate notes" : "Regenerate notes", busy: generating || generatingHere) { generate() }
                             .glassMorph("generate", in: glass)
                     }
                     HStack(alignment: .center, spacing: 12) {
-                        if showsScheduledStart, let meeting = meetingContext?.meeting, let label = MeetingPresentation.startLabel(meeting) {
-                            Menu {
-                                Button("Start recording now", systemImage: "mic") { openCapture() }
-                                Button("Meeting details", systemImage: "calendar") { showingMeeting = true }
-                            } label: {
-                                HStack(spacing: 7) { Image(systemName: "waveform"); Text(label); Image(systemName: "chevron.up").font(.caption2) }
-                                    .font(.system(size: 13)).foregroundStyle(Theme.textSecondary).padding(.horizontal, 14).frame(height: 48)
-                                    .glassSurface(Capsule(), interactive: true)
-                            }.accessibilityLabel("Scheduled meeting recording options")
+                        if showsScheduledStart, let meeting = meetingContext?.meeting, MeetingPresentation.startLabel(meeting) != nil {
+                            // As in the reference, an upcoming meeting's page offers one dark
+                            // "Start meeting" capsule in place of the Ask pill.
+                            StartMeetingButton { openCapture() }
+                                .accessibilityHint("Starts recording this meeting now")
                                 .glassMorph("scheduled", in: glass)
                         }
                         if indicatorHere {
@@ -212,8 +249,10 @@ struct ServerNoteView: View {
                             .accessibilityIdentifier("server-recording-control")
                             .glassMorph("recording", in: glass)
                         }
-                        AskAnythingPill { if let account { router.path.append(.serverChat(account, noteID: noteID)) } }.accessibilityIdentifier("server-chat-open")
-                            .glassMorph("ask", in: glass)
+                        if !(chatPanel && sizeClass == .regular), !showsScheduledStart {
+                            AskAnythingPill { openChat() }.accessibilityIdentifier("server-chat-open")
+                                .glassMorph("ask", in: glass)
+                        }
                     }
                 }
             }
@@ -222,17 +261,23 @@ struct ServerNoteView: View {
             // through the keyboard's glass underneath it.
             .opacity(editingTitle ? 0 : 1)
             .animation(motion.snappy, value: editingTitle)
-            .animation(motion.animation(.gooey, entering: canGenerate || generating || generatingHere), value: canGenerate || generating || generatingHere)
+            .animation(motion.animation(.gooey, entering: canGenerate || generating), value: canGenerate || generating)
             .sensoryFeedback(.success, trigger: generatedCount)
             .sensoryFeedback(.success, trigger: copiedCount)
             .animation(motion.animation(.gooey, entering: indicatorHere), value: indicatorHere)
             .animation(motion.animation(.gooey, entering: showsScheduledStart), value: showsScheduledStart)
         }
-        .navigationBarBackButtonHidden().toolbarVisibility(.visible, for: .navigationBar)
+        .navigationBarBackButtonHidden()
         .capturesDismiss(into: dismiss)
         // This page has no field of its own. The keyboard here belongs to the
         // "Edit title" alert, and the bar must not ride up underneath that alert.
         .ignoresSafeArea(.keyboard, edges: .bottom)
+        // Outside the line above: the chat panel's composer rides on the keyboard.
+        .noteChatPanel(noteID: noteID, isPresented: $chatPanel) { if let account { router.path.append(.serverChat(account, noteID: noteID)) } }
+        #if DEBUG
+        // QA only: `-qa.chatPanel YES` opens the chat panel beside the note on a wide layout.
+        .task { if UserDefaults.standard.bool(forKey: "qa.chatPanel") { try? await Task.sleep(for: .seconds(1)); openChat() } }
+        #endif
         .task(id: "\(server.accountIdentity ?? "")/\(noteID)") { await load() }
         .sheet(isPresented: $showingMeeting) { MeetingContextSheet(noteID: noteID, initial: meetingContext) {
             meetingContext = $0
@@ -410,26 +455,26 @@ struct ServerNoteMarkdown: View {
         let blocks = ChatMarkdownCache.blocks(text)
         // Lazy: a note of several thousand lines lays out the screenful being read.
         LazyVStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+            ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
                 switch block {
                 case .heading(let value):
                     Text(inline(value)).readingFont(.heading).accessibilityAddTraits(.isHeader)
-                        .foregroundStyle(Theme.textPrimary).padding(.top, 10)
+                        .foregroundStyle(Theme.textPrimary).padding(.top, index == 0 ? 0 : 16)
                 case .list(let marker, let value, let depth):
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    HStack(alignment: .firstTextBaseline, spacing: Self.markerGap(marker)) {
                         // A number keeps its own width, so the text of a wrapped item hangs clear of it.
                         // A sub-bullet is a hollow circle, as on the desktop and web.
-                        Text(Self.marker(marker, depth: depth)).foregroundStyle(Theme.textTertiary).monospacedDigit()
+                        Self.markerView(marker, depth: depth).foregroundStyle(Self.isBullet(marker) ? Theme.textSecondary : Theme.textTertiary)
                         Text(inline(value)).frame(maxWidth: .infinity, alignment: .leading)
-                    }.padding(.leading, CGFloat(min(4, depth) * 14))
+                    }.padding(.leading, Self.indent(marker, depth: depth))
                 // An indented plain line continues the item above it (a next step's deadline and detail): it
                 // starts where that item's text does, drawn 4 pt up under it, as on the desktop and web. The
                 // item's marker holds the same room, unseen, so a number's width is matched too.
                 case .continuation(let marker, let value, let depth):
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Text(Self.marker(marker, depth: depth)).monospacedDigit().hidden().accessibilityHidden(true)
+                    HStack(alignment: .firstTextBaseline, spacing: Self.markerGap(marker)) {
+                        Self.markerView(marker, depth: depth).hidden().accessibilityHidden(true)
                         Text(inline(value)).frame(maxWidth: .infinity, alignment: .leading)
-                    }.padding(.leading, CGFloat(min(4, depth) * 14)).padding(.top, -4)
+                    }.padding(.leading, Self.indent(marker, depth: depth)).padding(.top, -4)
                 // A Markdown rule (the one above the chat link at the foot of generated notes) is a hairline, as on the desktop and web.
                 case .paragraph(let value) where ["---", "***", "___"].contains(value.trimmingCharacters(in: .whitespaces)):
                     Rectangle().fill(Theme.textTertiary.opacity(0.35)).frame(height: 1).padding(.vertical, 10).accessibilityHidden(true)
@@ -455,6 +500,21 @@ struct ServerNoteMarkdown: View {
 
     /// A list marker as the note draws it: a sub-bullet is a hollow circle.
     static func marker(_ marker: String, depth: Int) -> String { marker == "•" && depth % 2 == 1 ? "◦" : marker }
+
+    /// Bullets as in the reference: a solid round dot, a hollow ring one level in, centred
+    /// in a 14 pt column 3 pt inside the text column; the item's words start 24 pt in,
+    /// and each level is 24 pt deeper. A number keeps its own width.
+    static func isBullet(_ marker: String) -> Bool { marker == "•" }
+    @ViewBuilder static func markerView(_ marker: String, depth: Int) -> some View {
+        if isBullet(marker) {
+            Text(depth % 2 == 1 ? "○" : "●").font(.system(size: depth % 2 == 1 ? 8.5 : 7.5)).baselineOffset(2.5)
+                .frame(width: 14).accessibilityHidden(true)
+        } else {
+            Text(marker).monospacedDigit()
+        }
+    }
+    static func markerGap(_ marker: String) -> CGFloat { isBullet(marker) ? 7 : 10 }
+    static func indent(_ marker: String, depth: Int) -> CGFloat { CGFloat(min(4, depth)) * 24 + (isBullet(marker) ? 3 : 0) }
 
     private func inline(_ text: String) -> AttributedString {
         ChatMarkdownCache.inline(text, context: "note") {

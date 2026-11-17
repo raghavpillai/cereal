@@ -132,7 +132,9 @@ struct ChatThoughtsView: View {
     private var open: Bool { hasThoughts && (expanded ?? thinking) }
 
     var body: some View {
-        if let label = ChatThoughts.status(annotations, thinking: thinking, stopped: stopped) {
+        // As in the reference's iPhone chat, an answer with nothing to unfold (no reasoning, no
+        // lookups) has no line above it once it arrives: "Thinking", then just the answer.
+        if let label = ChatThoughts.status(annotations, thinking: thinking, stopped: stopped), thinking || stopped || hasThoughts {
             VStack(alignment: .leading, spacing: 0) {
                 Button {
                     guard hasThoughts else { return }
@@ -140,8 +142,9 @@ struct ChatThoughtsView: View {
                 } label: {
                     HStack(spacing: 6) {
                         if thinking {
-                            Image(systemName: "rays").symbolEffect(.rotate, options: .repeating, isActive: !motion.reduceMotion)
-                                .transition(motion.fade)
+                            // The reference's turning spiral.
+                            // Darker than the words beside it, as measured (#797975 against #A4A49E on light).
+                            ThinkingIndicator(size: 13).foregroundStyle(Theme.textSecondary.opacity(0.8)).transition(motion.fade)
                         }
                         ZStack(alignment: .leading) {
                             if thinking { SheenLabel(text: label).id(label).transition(motion.swap) }
@@ -294,7 +297,8 @@ struct SheenLabel: View {
         Text(text)
             .overlay {
                 GeometryReader { geometry in
-                    LinearGradient(colors: [.clear, .white.opacity(0.5), .clear], startPoint: .leading, endPoint: .trailing)
+                    // The theme's ink: a bright sheen over grey on the dark page, a dark one on the light page.
+                    LinearGradient(colors: [.clear, Theme.textPrimary.opacity(0.55), .clear], startPoint: .leading, endPoint: .trailing)
                         .frame(width: 50, height: geometry.size.height)
                         .offset(x: phase * (geometry.size.width + 50))
                 }

@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import Contracts
+import APIClient
 @testable import Cereal
 
 /// The desktop's behaviour of 17 Nov, as the iPhone keeps it.
@@ -41,22 +42,49 @@ import Contracts
     @Test func theCalendarSaysWhetherTodayHadEvents() {
         #expect(ServerHomeView.emptyDay(today: true, hadEvents: false) == "No events today")
         #expect(ServerHomeView.emptyDay(today: true, hadEvents: true) == "No more events today")
-        #expect(ServerHomeView.emptyDay(today: false, hadEvents: false) == "No events on this day")
+        #expect(ServerHomeView.emptyDay(today: false, hadEvents: false) == "No events")
     }
 
-    @Test func aSharedMeridiemIsSaidOnce() throws {
-        func event(_ start: String, _ end: String) throws -> CalendarEventDTO {
-            let json = ##"{"id":"e","calendarId":"c","calendarName":"Work","title":"Sync","startAt":"\##(start)","endAt":"\##(end)","startDate":"","endDate":"","allDay":false,"color":"#87E5E8","status":"confirmed"}"##
+    @Test func anEventSaysItsTimesOnATwentyFourHourClockAndWhoIsInvited() throws {
+        func event(_ start: String, _ end: String, attendees: Int? = nil, allDay: Bool = false) throws -> CalendarEventDTO {
+            let count = attendees.map { ",\"attendeeCount\":\($0)" } ?? ""
+            let json = ##"{"id":"e","calendarId":"c","calendarName":"Work","title":"Sync","startAt":"\##(start)","endAt":"\##(end)","startDate":"","endDate":"","allDay":\##(allDay),"color":"#87E5E8","status":"confirmed"\##(count)}"##
             return try JSONDecoder().decode(CalendarEventDTO.self, from: Data(json.utf8))
         }
-        let us = Locale(identifier: "en_US"), utc = TimeZone(identifier: "UTC")!
-        let same = ServerHomeView.eventTimePieces(try event("2026-11-17T10:30:00Z", "2026-11-17T11:00:00Z"), locale: us, timeZone: utc)
-        #expect(same.map(\.text) == ["10:30 – 11:00", "AM"] && same.map(\.meridiem) == [false, true])
-        let across = ServerHomeView.eventTimePieces(try event("2026-11-17T11:30:00Z", "2026-11-17T12:15:00Z"), locale: us, timeZone: utc)
-        #expect(across.map(\.text) == ["11:30", "AM", " – 12:15", "PM"])
-        // A 24-hour clock has nothing to set smaller.
-        let day = ServerHomeView.eventTimePieces(try event("2026-11-17T14:00:00Z", "2026-11-17T15:00:00Z"), locale: Locale(identifier: "de_DE"), timeZone: utc)
-        #expect(day.count == 1 && !day[0].meridiem)
+        let utc = TimeZone(identifier: "UTC")!
+        // As in the reference: "15:30 – 16:30 · 14 attendees".
+        #expect(ServerHomeView.eventSubtitle(try event("2026-11-18T15:30:00Z", "2026-11-18T16:30:00Z", attendees: 14), timeZone: utc) == "15:30 – 16:30 · 14 attendees")
+        #expect(ServerHomeView.eventSubtitle(try event("2026-11-18T09:05:00Z", "2026-11-18T09:35:00Z"), timeZone: utc) == "09:05 – 09:35")
+        // Only the account holder: no count.
+        #expect(ServerHomeView.eventSubtitle(try event("2026-11-18T09:05:00Z", "2026-11-18T09:35:00Z", attendees: 1), timeZone: utc) == "09:05 – 09:35")
+        #expect(ServerHomeView.eventSubtitle(try event("2026-11-18T00:00:00Z", "2026-11-19T00:00:00Z", attendees: 3, allDay: true), timeZone: utc) == "All day · 3 attendees")
+    }
+
+    @Test func homeDaysAreWrittenAsInTheReference() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        let wednesday = try #require(Date.serverTimestamp("2026-11-18T12:00:00Z"))
+        #expect(HomeDayTitle.string(wednesday, calendar: calendar, locale: Locale(identifier: "en_US")) == "Wed, 18 Nov")
+        let now = try #require(Date.serverTimestamp("2026-11-17T12:00:00Z"))
+        let friday = try #require(Date.serverTimestamp("2026-11-13T00:00:00Z"))
+        #expect(ServerHomeGrouping.title(for: friday, now: now, calendar: calendar) == "Fri 13 Nov")
+    }
+
+    @Test func aNoteMadeAheadOfItsMeetingWaitsOnThatDayAsADraft() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        let now = try #require(Date.serverTimestamp("2026-11-17T16:00:00Z"))
+        let draft = ServerNoteRow(id: "d", title: "Design review", date: "2026-11-18", createdAt: "2026-11-17T15:50:00Z", updatedAt: "2026-11-17T15:50:00Z",
+                                  attendeeNames: ["Sam"], attendeeTotal: 14)
+        let recorded = ServerNoteRow(id: "r", title: "Planning", date: "2026-11-19", createdAt: "2026-11-17T10:00:00Z", updatedAt: "2026-11-17T10:00:00Z",
+                                     transcriptRevision: 2)
+        let today = ServerNoteRow(id: "t", title: "Standup", date: "2026-11-17", createdAt: "2026-11-17T09:00:00Z", updatedAt: "2026-11-17T09:00:00Z")
+        let sections = ServerHomeGrouping.sections([draft, recorded, today], now: now, calendar: calendar)
+        #expect(sections.map(\.title) == ["Wed 18 Nov", "Earlier today"])
+        #expect(sections[0].rows.map(\.id) == ["d"] && sections[0].rows[0].isDraft)
+        #expect(sections[0].rows[0].subtitle == "14 attendees")
+        // Something recorded keeps the day it was made, and is an ordinary row.
+        #expect(sections[1].rows.map(\.id) == ["r", "t"] && !sections[1].rows.contains(where: \.isDraft))
     }
 
     @Test func chatInNavigationOpensANewConversationAndKeepsTheOldOne() {
