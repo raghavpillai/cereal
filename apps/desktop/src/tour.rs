@@ -1320,6 +1320,19 @@ fn thinking_steps() -> Vec<Step> {
             view.open_note(1, cx);
             seed(view, true);
         }),
+        // A note's chat over a running recording: the record capsule goes
+        // into the pill as the panel opens and comes back out as it folds.
+        // `CEREAL_TOUR=p-think-absorb,k-absorb`; the `k-` steps are held
+        // for a burst of captures while they move.
+        step("p-think-absorb-1-bar", 1200, |view, cx| {
+            view.close_chat_surface(cx);
+            view.open_note(1, cx);
+            view.start_recording_preview(1, cx);
+        }),
+        step("k-absorb-open", 2400, |view, _| seed(view, false)),
+        step("p-think-absorb-2-open", 600, |_, _| {}),
+        step("k-absorb-close", 2400, |view, cx| view.close_chat_surface(cx)),
+        step("p-think-absorb-3-closed", 600, |_, _| {}),
         step("p-think-end", 300, |view, cx| {
             view.close_chat_surface(cx);
             view.clear_chat(cx);

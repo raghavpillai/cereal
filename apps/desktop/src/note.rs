@@ -1821,13 +1821,33 @@ impl Cereal {
                     .flex_shrink_0()
                     .px(px(crate::motion::ASK_INSET - 1.))
                     .pb(px(crate::motion::ASK_INSET - 1.))
+                    .relative()
                     .flex()
                     .items_center()
-                    .gap(px(8.))
-                    // Over a note the record capsule stays where it stood in
+                    // Over a note the record capsule starts where it stood in
                     // the bar, beside the pill: the panel grows out of both.
-                    .when_some(capsule, |row, (id, _)| {
-                        row.child(self.render_recording_control(id, cx))
+                    // As they run together the pill flows left over it and
+                    // takes it in, so the open panel's composer spans the
+                    // panel, as in the reference; folding back, the pill
+                    // gives it up again. The capsule stays put under the
+                    // pill's moving edge, so nothing inside it reflows.
+                    .when_some(capsule, |row, (id, width)| {
+                        let absorb = crate::motion::capsule_absorb(level);
+                        let row = row.child(div().flex_shrink_0().w(px((width + 8.) * (1. - absorb))));
+                        if absorb >= 1. {
+                            return row;
+                        }
+                        row.child(
+                            div()
+                                .absolute()
+                                .left(px(crate::motion::ASK_INSET - 1.))
+                                .top_0()
+                                .bottom(px(crate::motion::ASK_INSET - 1.))
+                                .flex()
+                                .items_center()
+                                .opacity(1. - absorb * absorb)
+                                .child(self.render_recording_control(id, cx)),
+                        )
                     })
                     .child(
                         div().flex_1().min_w_0().child(
@@ -1906,7 +1926,9 @@ impl Cereal {
             .child(frame)
             .when_some(capsule, |panel, (_, capsule)| {
                 panel.child(crate::motion::ask_bridge(
-                    crate::motion::ASK_INSET + capsule + 4.,
+                    crate::motion::ASK_INSET
+                        + capsule * (1. - crate::motion::capsule_absorb(level))
+                        + 4.,
                     pill,
                     reached,
                     level,

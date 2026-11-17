@@ -1365,6 +1365,17 @@ pub fn bridge_level(level: f32) -> f32 {
     x * x * (3. - 2. * x)
 }
 
+/// How far a note's Ask pill has taken in the record capsule beside it at
+/// panel level `level`: 0 is two capsules side by side, 1 the pill alone at
+/// the full width of the panel (the reference's open chat has no record
+/// control). It begins as the two drops run together and is done before the
+/// panel lands, so the open panel's composer rests at full width; folding
+/// back, the capsule comes out of the pill before the two split.
+pub fn capsule_absorb(level: f32) -> f32 {
+    let x = if level.is_finite() { ((level - 0.35) / 0.55).clamp(0., 1.) } else { 1. };
+    x * x * (3. - 2. * x)
+}
+
 /// The open part of the gap at `bridge` (see [`bridge_level`]): how far the
 /// gap still reaches in from the row's top and bottom edges, of a row
 /// `height` tall. It closes from the middle outwards, like two drops
@@ -3098,6 +3109,21 @@ mod tests {
             fade: fade_for(value),
             visible: true,
             settled: false,
+        }
+    }
+
+    #[test]
+    fn the_open_note_chat_has_taken_in_the_record_capsule() {
+        assert_eq!(capsule_absorb(0.), 0.);
+        assert_eq!(capsule_absorb(0.3), 0.);
+        assert_eq!(capsule_absorb(0.9), 1.);
+        assert_eq!(capsule_absorb(1.08), 1.);
+        assert_eq!(capsule_absorb(f32::NAN), 1.);
+        let mut last = 0.;
+        for step in 0..=100 {
+            let now = capsule_absorb(step as f32 / 100.);
+            assert!(now >= last);
+            last = now;
         }
     }
 
