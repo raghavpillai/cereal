@@ -1,9 +1,57 @@
 name: Checks
-on: [push, pull_request]
+# Pushes to main, and pull requests. A branch with an open PR is checked once, not twice.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
+  pull-requests: read
+# A newer push to the same branch or PR cancels the run it replaces.
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
+  # Each job below runs only when its part of the repo changed. Generated contracts are committed into
+  # crates/ and apps/ios/, so a contract change reaches the apps that use it through those paths.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      server: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.server }}
+      desktop: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.desktop }}
+      ios: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.ios }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            ci: &ci
+              - .github/workflows/**
+            server:
+              - *ci
+              - apps/api/**
+              - apps/web/**
+              - packages/**
+              - crates/**
+              - scripts/**
+              - package.json
+              - bun.lock
+              - tsconfig*.json
+            desktop:
+              - *ci
+              - apps/desktop/**
+              - crates/**
+              - Cargo.toml
+              - Cargo.lock
+            ios:
+              - *ci
+              - apps/ios/**
+              - scripts/select-ios-simulator.py
   server:
+    needs: changes
+    if: needs.changes.outputs.server == 'true'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -52,6 +100,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test -p meeting-notes-api-types --locked
   desktop:
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
     runs-on: macos-26
     timeout-minutes: 40
     env:
@@ -69,18 +119,17 @@ jobs:
       - run: cargo test -p cereal --locked
       # Release builds leave out debug-only code; a call into it compiles in tests and fails only here.
       - run: cargo build -p cereal --release --locked
-  swift-packages:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: swift test --package-path apps/ios/Packages/APIClient
-  ios-app:
+  # The Swift package tests and the app tests share one macOS runner.
+  ios:
+    needs: changes
+    if: needs.changes.outputs.ios == 'true'
     runs-on: macos-26
-    timeout-minutes: 35
+    timeout-minutes: 40
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
     steps:
       - uses: actions/checkout@v4
+      - run: swift test --package-path apps/ios/Packages/APIClient
       - name: Install project generator
         run: brew install xcodegen
       - name: Generate app and widget project
