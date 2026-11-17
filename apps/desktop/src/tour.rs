@@ -1384,6 +1384,15 @@ fn thinking_steps() -> Vec<Step> {
         windowed("k-follow-tick-13", 250, |view, _, _| follow_log(view)),
         windowed("k-follow-tick-14", 250, |view, _, _| follow_log(view)),
         windowed("k-follow-tick-15", 250, |view, _, _| follow_log(view)),
+        // The sidebar's Chat opens a new conversation's splash; the one that
+        // was open is kept in Recents. `CEREAL_TOUR=p-chatnav`.
+        step("p-chatnav-1-conversation", 900, |view, cx| {
+            view.close_chat_surface(cx);
+            view.navigate(Screen::Chat, cx);
+            seed(view, false);
+            view.assistant_open = false;
+        }),
+        input("p-chatnav-2-pressed", 900, |window, cx| click(window, cx, 60., 128.)),
         step("p-think-end", 300, |view, cx| {
             view.close_chat_surface(cx);
             view.clear_chat(cx);

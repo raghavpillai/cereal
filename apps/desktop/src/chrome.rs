@@ -825,7 +825,16 @@ impl Cereal {
             // label, so the words lead and the glyphs mark the rows.
             .child(icon(symbol, NAV_GLYPH, t.muted))
             .child(div().flex_1().min_w_0().truncate().child(label))
-            .reach().on_click(cx.listener(move |this, _, _, cx| this.navigate(screen, cx)))
+            .reach().on_click(cx.listener(move |this, _, _, cx| {
+                this.navigate(screen, cx);
+                // Chat opens on a new conversation, as in the reference: the
+                // one that was open is kept in Recents (an answer still
+                // arriving for it goes on off screen).
+                if screen == Screen::Chat && !this.chat_messages.is_empty() {
+                    this.park_chat_stream();
+                    this.clear_chat(cx);
+                }
+            }))
     }
 
     pub fn render_header(&self, cx: &mut Context<Self>) -> Div {
