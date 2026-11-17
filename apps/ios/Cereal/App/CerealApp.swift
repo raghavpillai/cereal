@@ -196,7 +196,9 @@ struct RootView: View {
         }
         .task {
             // Clearing stale Live Activities must not hold up restoring the session.
-            async let orphans: Void = RecordingLiveActivityController.endOrphanedActivities()
+            // Taken before anything else here can start one, so only what an earlier launch left is ended.
+            let leftovers = RecordingLiveActivityController.leftoverActivities()
+            let orphans = Task { await RecordingLiveActivityController.end(leftovers) }
             #if DEBUG
             // QA only: `-qa.openURL <url>` hands the app a URL as the system does when a
             // link starts it, before the saved session is back. For a simulator in which
@@ -215,7 +217,7 @@ struct RootView: View {
                 guard accounts.showsAccountLabels, let session = accounts.session(id) else { return nil }
                 return (accounts.label(for: id), session.host)
             }
-            if await configureQAIfRequested() { restoring = false; openPendingLink(); await orphans; return }
+            if await configureQAIfRequested() { restoring = false; openPendingLink(); await orphans.value; return }
             let interval = Signpost.ui.beginInterval("Launch.Restore")
             await accounts.restoreAll()
             Signpost.ui.endInterval("Launch.Restore", interval)
@@ -223,7 +225,7 @@ struct RootView: View {
             openPendingLink()
             // The app needs a server. With no account it opens on the sign-in screen.
             if accounts.sessions.isEmpty, LaunchContext.asksForServer, !connectionMode.isDemo, router.path.isEmpty { router.showConnection = true }
-            await orphans
+            await orphans.value
         }
         .fullScreenCover(item: $router.serverCapture) { target in
             RailMetricsReader { NavigationStack { AccountScope(target.ref.account) { ServerCaptureView(noteID: target.ref.id, discardsIfEmpty: target.createdForRecording) } } }

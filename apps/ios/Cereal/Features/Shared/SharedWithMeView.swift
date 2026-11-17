@@ -100,7 +100,7 @@ private struct SharedVisitList: View {
                 .buttonStyle(RowPressStyle())
                 .listRowInsets(Self.insets).listRowSeparator(.hidden).listRowBackground(Color.clear)
                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                    Button(role: .destructive) { remove(visit) } label: { Label("Remove", systemImage: "trash") }
+                    Button(role: .destructive) { Haptics.shared.play(.destructive); remove(visit) } label: { Label("Remove", systemImage: "trash") }
                         .tint(Theme.danger)
                 }
                 .accessibilityIdentifier("shared-visit")

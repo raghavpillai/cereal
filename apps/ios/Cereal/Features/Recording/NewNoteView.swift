@@ -28,6 +28,8 @@ struct NewNoteView: View {
 
 
     private var note: Note? { store.note(noteID) }
+    /// Whose End the Live Activity's End is while this screen records (see `RecordingActivityActions`).
+    static let activityOwner = "demo-capture"
 
     var body: some View {
         let _ = PerfProbe.hit("NewNoteView.body")
@@ -62,6 +64,14 @@ struct NewNoteView: View {
                 captureStore.finishCapture(captureID, segment: segment)
             }
             recorder.prepare(existing: note.captureSegments)
+            Haptics.shared.prepare()
+            // The Live Activity's End stops this screen's recording, as Stop does.
+            let liveRecorder = recorder
+            RecordingActivityActions.setHandler(owner: Self.activityOwner) { id in
+                guard id == captureID, liveRecorder.isCapturing else { return false }
+                liveRecorder.stopSegment()
+                return true
+            }
             if connectionMode.isDemo { startSegment() }
             // Long enough for the cover to start arriving, short enough that
             // the keyboard rises with it.
@@ -85,6 +95,7 @@ struct NewNoteView: View {
             save()
             store.flush()
             recorder.onSegmentFinished = nil
+            RecordingActivityActions.clearHandler(owner: Self.activityOwner)
         }
         .alert("Attachments", isPresented: $unsupportedAttachment) {
             Button("OK", role: .cancel) {}
@@ -101,7 +112,9 @@ struct NewNoteView: View {
                     Button("Stop recording", systemImage: "stop.circle") { stopSegment() }
                 }
                 Button("Delete note", systemImage: "trash", role: .destructive) {
-                    recorder.stopSegment()
+                    // A recording in progress is felt as cancelled, once; otherwise the delete itself.
+                    if !recorder.isCapturing { Haptics.shared.play(.destructive) }
+                    recorder.stopSegment(activity: .discard)
                     store.trash(noteID)
                     dismiss()
                 }
@@ -194,8 +207,10 @@ struct NewNoteView: View {
         focus = nil
         generating = true
         generationTask = Task {
+            let needed = store.note(noteID)?.needsGeneration ?? false
             await store.generateNotes(noteID) // no-op when notes already match the transcript revision
             guard !Task.isCancelled, !recorder.isCapturing, connectionMode.isDemo else { return }
+            if needed, store.note(noteID)?.needsGeneration == false { Haptics.shared.play(.notesReady) }
             generating = false
             generationTask = nil
             openNote()
@@ -321,11 +336,8 @@ struct RecordingPill: View {
                         .accessibilityLabel("Resume recording")
                 }
             }
-            // The user is usually looking at the meeting, not the screen.
-            // As an indicator it stays quiet: the recording screen's own pill speaks.
-            .sensoryFeedback(trigger: recorder.state) { old, new in
-                onOpen == nil ? RecordingFeedback.feedback(from: old, to: new) : nil
-            }
+            // Recording changes are felt from the recorder itself (`Recorder.playHaptic`),
+            // once each, so neither this pill nor the indicator plays its own.
     }
 
     @ViewBuilder private var pill: some View {
@@ -418,15 +430,51 @@ struct RecordingPill: View {
     }
 }
 
+/// What a change of the recording feels like. The recorder plays one of these
+/// for each change, wherever it was asked for: the recording screen, the note's
+/// menu, the Live Activity's End (felt only when the app is in front).
+enum RecordingHaptic: Equatable, Sendable {
+    case started, paused, resumed, ended, discarded
+    /// A call or Siri took the audio.
+    case interrupted
+    /// The microphone went away (a headset disconnected).
+    case inputLost
+    /// The recording could not start, resume or carry on.
+    case failed
+
+    static func stopped(by cause: Recorder.FailureCause) -> RecordingHaptic {
+        switch cause {
+        case .interruption: .interrupted
+        case .inputLost: .inputLost
+        case .failure: .failed
+        }
+    }
+}
+
 /// Haptics for recording state changes.
 enum RecordingFeedback {
-    static func feedback(from old: Recorder.State, to new: Recorder.State) -> SensoryFeedback? {
-        switch (old, new) {
-        case (_, .recording) where old != .recording: .impact(weight: .medium)
-        case (.recording, .paused): .impact(weight: .light)
-        case (.recording, .stopped), (.paused, .stopped): .success
-        case (_, .failed): .error
-        default: nil
+    enum Output: Equatable { case signature(SignatureHaptic), feedback(HapticFeedback) }
+
+    /// - Start: the signature breath into a tick, the one moment worth a pattern of its own.
+    /// - Pause: a soft, low tap; Resume: a firmer one, so the two are told apart without looking.
+    /// - End: the signature close. Cancel: a rigid tap, as the note goes with it.
+    /// - Stopped by a call or a lost headset: a warning; by a failure: an error.
+    static func output(_ haptic: RecordingHaptic) -> Output {
+        switch haptic {
+        case .started: .signature(.recordingStarted)
+        case .paused: .feedback(.impact(.soft, intensity: 0.7))
+        case .resumed: .feedback(.impact(.solid, intensity: 0.9))
+        case .ended: .signature(.recordingEnded)
+        case .discarded: .feedback(.destructive)
+        case .interrupted, .inputLost: .feedback(.warning)
+        case .failed: .feedback(.error)
+        }
+    }
+
+    @MainActor static func play(_ haptic: RecordingHaptic) {
+        switch output(haptic) {
+        case .signature(let signature): Haptics.shared.play(signature)
+        case .feedback(let feedback): Haptics.shared.play(feedback)
         }
     }
 }

@@ -191,7 +191,11 @@ private struct WorkspaceDetailView: View {
         }
         .confirmationDialog("Remove \(removing?.name ?? "member") from this workspace?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), titleVisibility: .visible) {
             if let member = removing {
-                Button("Remove member", role: .destructive) { removing = nil; Task { await model.removeMember(id: organizationID, memberID: member.id) } }
+                Button("Remove member", role: .destructive) {
+                    removing = nil
+                    Haptics.shared.play(.destructive)
+                    Task { await model.removeMember(id: organizationID, memberID: member.id) }
+                }
             }
             Button("Cancel", role: .cancel) { removing = nil }
         }
@@ -222,6 +226,8 @@ private struct WorkspaceInviteSheet: View {
                     Button("Invite") {
                         Task {
                             await server.workspaces.invite(id: organizationID, email: email.trimmingCharacters(in: .whitespacesAndNewlines), asAdmin: canAssignAdmin && asAdmin)
+                            // The invitation is sent, or it was refused.
+                            Haptics.shared.play(server.workspaces.error == nil ? .done : .error)
                             if server.workspaces.error == nil { dismiss() }
                         }
                     }.disabled(!valid || server.workspaces.busy)

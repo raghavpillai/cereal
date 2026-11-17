@@ -75,7 +75,7 @@ struct RecordingBar: View {
             withAnimation(motion.reduceMotion ? nil : .easeOut(duration: 0.22)) { contentShown = true }
         }
         .task(id: TaskKey(state: recorder.state, window: cancelWindow)) { await watchCancelWindow() }
-        .sensoryFeedback(trigger: recorder.state) { old, new in RecordingFeedback.feedback(from: old, to: new) }
+        // Pause, resume, End and Cancel are felt from the recorder (`Recorder.playHaptic`), once each.
     }
 
     private var bar: some View {

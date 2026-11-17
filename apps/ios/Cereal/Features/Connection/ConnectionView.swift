@@ -177,12 +177,15 @@ struct ConnectionView: View {
                 #endif
                 // A note that was waiting for this sign-in opens; otherwise Home.
                 router.path = LinkNavigation.pathAfterSignIn(router.path, account: accounts.linkAccounts.first { $0.id == account })
+                // Signed in: the sheet goes as this is felt.
+                Haptics.shared.play(.done)
                 dismiss()
             } catch BrowserSignInError.cancelled {
             } catch is CancellationError {
             } catch {
                 password = ""; token = ""
                 self.error = error.localizedDescription
+                Haptics.shared.play(.error)
             }
         }
     }
@@ -205,9 +208,11 @@ struct ConnectionView: View {
 
     private func leave(_ item: Leaving, erase: Bool) {
         busy = true; error = nil
+        // Signing out and erasing are confirmed in an alert first; this is that confirmation.
+        Haptics.shared.play(.destructive)
         Task {
             do { if erase { try await accounts.erase(item.id) } else { try await accounts.signOut(item.id) } }
-            catch { self.error = error.localizedDescription }
+            catch { self.error = error.localizedDescription; Haptics.shared.play(.error) }
             if accounts.sessions.isEmpty { router.path = [] }
             busy = false
         }
@@ -395,7 +400,8 @@ struct ConnectionView: View {
             } message: { item in Text(AccountRemovalText.eraseMessage(item.summary, host: item.host)) }
             .alert("Erase this data from this iPhone?", isPresented: Binding(get: { erasingSaved != nil }, set: { if !$0 { erasingSaved = nil } }), presenting: erasingSaved) { item in
                 Button(AccountRemovalText.eraseButton(item.summary), role: .destructive) {
-                    do { try accounts.eraseSaved(item) } catch { self.error = error.localizedDescription }
+                    Haptics.shared.play(.destructive)
+                    do { try accounts.eraseSaved(item) } catch { self.error = error.localizedDescription; Haptics.shared.play(.error) }
                 }
                 Button("Cancel", role: .cancel) {}
             } message: { item in

@@ -115,8 +115,9 @@ struct MeetingContextSheet: View {
             let input = ManualParticipantInput(displayName: displayName, email: email.isEmpty ? nil : email, familyName: nil, givenName: nil, id: manualID)
             accept(try await server.addNoteParticipant(id: noteID, input: input))
             name = ""; self.email = ""; manualID = UUID().uuidString.lowercased()
+            Haptics.shared.play(.done)
         } catch is CancellationError { }
-        catch { self.error = error.localizedDescription }
+        catch { self.error = error.localizedDescription; Haptics.shared.play(.error) }
     }
 }
 
@@ -178,9 +179,14 @@ struct MeetingEventPicker: View {
         guard !selecting else { return }
         selecting = true; error = nil
         defer { selecting = false }
-        do { let context = try await server.updateNoteContext(id: noteID, eventID: eventID); onUpdate(context); dismiss() }
+        do {
+            let context = try await server.updateNoteContext(id: noteID, eventID: eventID)
+            // An event chosen for the note (or removed from it): a selection, made.
+            Haptics.shared.play(eventID == nil ? .destructive : .selection)
+            onUpdate(context); dismiss()
+        }
         catch is CancellationError { }
-        catch { self.error = error.localizedDescription }
+        catch { self.error = error.localizedDescription; Haptics.shared.play(.error) }
     }
     private func eventDate(_ event: CalendarEventDTO) -> String {
         guard let date = event.allDay ? CalendarSchedule.dateOnly(event.startDate) : CalendarSchedule.timestamp(event.startAt) else { return "Time unavailable" }

@@ -184,6 +184,8 @@ struct ServerCaptureView: View {
         }
         .task {
             guard !loaded else { return }
+            // Warm the haptic engine while the note loads, so the start is felt as it happens.
+            Haptics.shared.prepare()
             do {
                 // A read that was superseded (the account's connection was renewed under it) is asked again.
                 var value: NoteDTO?
@@ -234,6 +236,9 @@ struct ServerCaptureView: View {
         // Leaving this screen, by any route, does not stop the recording. What was
         // typed is sent on its way out.
         .onDisappear { saveTask?.cancel(); flushUnsaved() }
+        // This screen's own failures (saving what was typed, opening the note). The recording's
+        // are felt from the recorder, so they are not felt twice.
+        .haptic(.error, trigger: error) { old, new in new != nil && new != old }
         .alert("Attachments", isPresented: $unsupportedAttachment) { Button("OK", role: .cancel) {} }
             message: { Text("File attachments are not supported by this instance yet.") }
     }

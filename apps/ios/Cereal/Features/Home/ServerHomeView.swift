@@ -146,7 +146,9 @@ struct ServerHomeView: View {
                 Task { await accounts.retryUnreachable(); await refreshCalendars() }
             }
         }
-        .sensoryFeedback(.selection, trigger: dayOffset)
+        .haptic(.selection, trigger: dayOffset)
+        // A meeting that could not be opened or made: felt as the error it is.
+        .haptic(.error, trigger: creationError) { old, new in new != nil && new != old }
         .sheet(isPresented: $requestingMic) {
             MicPermissionSheet(onGranted: { Task { await createMeeting() } })
                 .presentationDetents([.height(MicPermissionSheet.detentHeight)]).presentationDragIndicator(.visible).presentationCornerRadius(32)

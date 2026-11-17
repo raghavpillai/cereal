@@ -110,11 +110,11 @@ struct ChatModelMenu: View {
             Section("Chat model") {
                 ForEach(Array(available.enumerated()), id: \.offset) { _, choice in
                     let key = ChatModelName.key(choice)
-                    Toggle(isOn: Binding(get: { model == key }, set: { if $0 { model = key } })) {
+                    Toggle(isOn: Binding(get: { model == key }, set: { if $0 { choose(key) } })) {
                         Label(ChatModelName.display(choice), systemImage: ChatModelName.symbol(choice))
                     }
                 }
-                Toggle(isOn: Binding(get: { model == "Auto" }, set: { if $0 { model = "Auto" } })) {
+                Toggle(isOn: Binding(get: { model == "Auto" }, set: { if $0 { choose("Auto") } })) {
                     Label("Auto (default)", systemImage: ChatModelName.autoSymbol)
                 }
             }
@@ -133,6 +133,13 @@ struct ChatModelMenu: View {
         // Monochrome glyphs, as in the reference, not the app's gold.
         .tint(Theme.textPrimary)
         .accessibilityLabel("Chat model, \(label)")
+    }
+
+    /// A different model chosen from the menu is felt as a selection; the same one again is not.
+    private func choose(_ key: String) {
+        guard key != model else { return }
+        model = key
+        Haptics.shared.play(.selection)
     }
 }
 
@@ -235,6 +242,8 @@ struct NoteChatPanel: ViewModifier {
             }
             .animation(motion.animation(.settle, entering: open), value: open)
         }
+        // The panel settling in beside the note, or leaving it; not when a fold closes it.
+        .haptic(.snap, trigger: isPresented) { _, _ in sizeClass == .regular }
         .onChange(of: sizeClass) { _, now in
             if now == .compact, isPresented { isPresented = false; onCompact() }
         }
@@ -345,6 +354,7 @@ struct ChatHistorySheet: View {
     let onMore: () -> Void
     let onClose: () -> Void
     @State private var query = ""
+    @State private var detent = PresentationDetent.medium
 
     private struct Row: Identifiable {
         let id: String
@@ -414,7 +424,9 @@ struct ChatHistorySheet: View {
                                 .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
                                 .accessibilityIdentifier("server-chat-thread")
                                 .swipeActions {
-                                    if let thread = row.thread { Button("Delete", role: .destructive) { onDelete(thread.id) } }
+                                    if let thread = row.thread {
+                                        Button("Delete", role: .destructive) { Haptics.shared.play(.destructive); onDelete(thread.id) }
+                                    }
                                 }
                             }
                         } header: {
@@ -439,7 +451,9 @@ struct ChatHistorySheet: View {
             .safeAreaInset(edge: .top, spacing: 0) { header }
             .toolbar(.hidden, for: .navigationBar)
         }
-        .presentationDetents([.medium, .large])
+        .presentationDetents([.medium, .large], selection: $detent)
+        // Pulled up to full height or back to half: felt as the detent it is.
+        .haptic(.selection, trigger: detent)
         .glassSheet()
     }
 

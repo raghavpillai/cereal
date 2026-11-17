@@ -72,7 +72,11 @@ final class RecordingAccount {
 /// ends, and then stops the note and writes its notes.
 @MainActor @Observable
 final class ServerRecordingController {
-    private(set) var recorder = Recorder(simulateCapture: false)
+    private(set) var recorder: Recorder
+    /// The recording's Live Activity, the same one from recording to recording:
+    /// each new recorder reports to it, so a new recording replaces what is left
+    /// of the last one ("Writing notes...") instead of standing beside it.
+    @ObservationIgnored private let liveActivity: RecordingLiveActivityController
     /// The note being recorded, or just recorded, with the account it belongs to.
     private(set) var active: NoteRef?
     private(set) var isBusy = false
@@ -101,7 +105,11 @@ final class ServerRecordingController {
 
     /// The parameters replace storage, audio input and the live socket in tests.
     /// A recording is always one continuous capture, the only kind its live stream can read.
-    init(outboxRoot: URL? = nil, makeBackend: (@MainActor () -> any ContinuousCaptureBackend)? = nil, makeLiveClient: LiveClientFactory? = nil) {
+    init(outboxRoot: URL? = nil, makeBackend: (@MainActor () -> any ContinuousCaptureBackend)? = nil, makeLiveClient: LiveClientFactory? = nil,
+         liveActivity: RecordingLiveActivityController? = nil) {
+        let liveActivity = liveActivity ?? RecordingLiveActivityController()
+        self.liveActivity = liveActivity
+        recorder = Recorder(simulateCapture: false, activity: liveActivity)
         self.outboxRoot = outboxRoot
         self.makeBackend = makeBackend ?? { CaptureEnginePolicy.makeContinuousBackend() }
         self.makeLiveClient = makeLiveClient ?? { server, noteID, source, configuration in
@@ -155,7 +163,9 @@ final class ServerRecordingController {
         for (id, record) in accounts where present[id] !== record.server {
             // A recording cannot outlive its account. Removal is refused while one runs; this is the backstop.
             if active?.account == id {
-                recorder.stopSegment()
+                // Its activity goes with it: nothing more will be said about that account's note.
+                recorder.stopSegment(activity: .discard)
+                liveActivity.end(ending: .discard)
                 live?.cancel(); live = nil; liveFile = nil
                 transcript = nil; transcriptOwner = nil
                 active = nil
@@ -207,7 +217,7 @@ final class ServerRecordingController {
                       record.histories[id]?.needsNotes == true else { return }
                 record.histories[id]?.needsNotes = nil
                 try? record.saveHistories()
-                await writeNotes(ref, from: note, record)
+                await writeNotes(ref, from: note, record, followed: false)
             }
         }
     }
@@ -267,7 +277,7 @@ final class ServerRecordingController {
             guard !record.closed else { throw CancellationError() }
             live?.cancel(); live = nil
             let makeBackend = makeBackend
-            recorder = Recorder(simulateCapture: false, recordingRoot: record.recordingsRoot, backend: { makeBackend() })
+            recorder = Recorder(simulateCapture: false, recordingRoot: record.recordingsRoot, backend: { makeBackend() }, activity: liveActivity)
             let shown = accountPresentation?(account)
             recorder.activityAccount = RecordingActivityAccount(id: account.raw, label: shown?.label, host: shown?.host)
             active = ref
@@ -288,9 +298,10 @@ final class ServerRecordingController {
             recorder.startSegment(noteID: uuid, title: freshNote.title)
             followTitle(of: ref)
             // The Live Activity's End stops this recording, as End on the recording screen does.
-            RecordingActivityActions.endHandler = { [weak self] id in
-                guard let self, let active = self.active, UUID(uuidString: active.id) == id, self.recorder.isCapturing else { return }
+            RecordingActivityActions.setHandler(owner: Self.activityOwner) { [weak self] id in
+                guard let self, let active = self.active, UUID(uuidString: active.id) == id, self.recorder.isCapturing else { return false }
                 self.stop()
+                return true
             }
             if case .failed(let message) = recorder.state {
                 scheduleStop(ref, current: nil)
@@ -339,7 +350,8 @@ final class ServerRecordingController {
         guard let ref, active == ref, let record = accounts[ref.account], !record.closed else { return false }
         let typed = !Self.isUntitled(typedTitle) || !typedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         guard !typed else { stop(); return false }
-        let finished = recorder.stopSegment()
+        // The note is about to go: so does its activity, at once.
+        let finished = recorder.stopSegment(activity: .discard)
         if finished == nil { scheduleStop(ref, current: endLive(atSample: recorder.capturedFrames)) }
         _ = await record.controlTasks[ref.id]?.value
         guard !record.closed, !isRecording(ref) else { return false }
@@ -382,7 +394,8 @@ final class ServerRecordingController {
     /// server has stopped it. `beforeNotes` runs first, after the Stop: the
     /// recording screen saves what was typed, which the notes are written with.
     func stop(beforeNotes: (@MainActor () async -> Void)? = nil) {
-        let finished = recorder.stopSegment()
+        // The activity says "Writing notes..." until they are written, and then "Notes ready".
+        let finished = recorder.stopSegment(activity: .writingNotes)
         guard let ref = active else { return }
         // A capture that holds nothing still needs a server Stop. A stream still open here belongs
         // to it; after an interruption the stream already ended and there is none.
@@ -595,32 +608,56 @@ final class ServerRecordingController {
             let stopped = await stopping?.value ?? nil
             await beforeNotes?()
             guard let self else { return }
-            guard let stopped, !record.closed else { generatingNotes.remove(ref); return }
+            guard let stopped, !record.closed else {
+                generatingNotes.remove(ref)
+                // The Stop is kept and sent again; the notes are written after it, in the app.
+                notesFinished(ref, .deferred)
+                return
+            }
             record.histories[ref.id]?.needsNotes = nil
             try? record.saveHistories()
-            await writeNotes(ref, from: stopped, record)
+            await writeNotes(ref, from: stopped, record, followed: true)
         }
     }
 
     /// Writes the note's notes from its transcript. Nothing is asked of the
     /// server when there is no transcript (the note then says so) or when its
     /// notes already cover this transcript.
-    private func writeNotes(_ ref: NoteRef, from note: NoteDTO, _ record: RecordingAccount) async {
+    /// `followed`: the notes of a Stop made in this launch, which its Live
+    /// Activity is waiting on and which are felt when they are ready.
+    private func writeNotes(_ ref: NoteRef, from note: NoteDTO, _ record: RecordingAccount, followed: Bool) async {
         generatingNotes.insert(ref)
         defer { generatingNotes.remove(ref) }
-        guard Self.hasTranscript(note), note.generatedRevision != note.transcriptRevision else { return }
+        guard Self.hasTranscript(note) else { notesFinished(ref, .noTranscript); return }
+        // Notes that already cover this transcript are ready as they are.
+        guard note.generatedRevision != note.transcriptRevision else { notesFinished(ref, .ready); return }
         do {
             let written = try await record.server.generate(noteID: ref.id, expectedTranscriptRevision: note.transcriptRevision)
+            notesFinished(ref, .ready)
+            if followed, !record.closed { Haptics.shared.play(.notesReady) }
             // Asked for from the note's "Notify me"; sent only while the app is in the background.
             await NotesReadyNotifications.notesReady(title: written.title, noteID: ref.id)
         } catch is CancellationError {
+            notesFinished(ref, .deferred)
         } catch let failure as APIClientError where failure == .httpStatus(400) {
             // The server found nothing to write from.
+            notesFinished(ref, .noTranscript)
             if !record.closed { self.error = Self.noTranscript }
         } catch {
+            notesFinished(ref, .failed)
             if !record.closed { self.error = "Notes could not be generated. \(error.localizedDescription)" }
         }
     }
+
+    /// Tells the recording's Live Activity how its notes turned out. It listens
+    /// only while it says "Writing notes..." for this note.
+    private func notesFinished(_ ref: NoteRef, _ outcome: RecordingNotesOutcome) {
+        guard let id = UUID(uuidString: ref.id) else { return }
+        liveActivity.notesFinished(noteID: id, outcome: outcome)
+    }
+
+    /// Whose End the Live Activity's End is (see `RecordingActivityActions`).
+    static let activityOwner = "server-recording"
 
     static func hasTranscript(_ note: NoteDTO) -> Bool {
         note.transcriptRevision > 0 && note.transcriptSegments.contains { $0.isFinal && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }

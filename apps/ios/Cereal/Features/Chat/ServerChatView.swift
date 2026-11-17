@@ -87,7 +87,9 @@ struct ServerChatView: View {
             availableModels = []; model = "Auto"
             if let models = try? await server.chatModels(), !Task.isCancelled { availableModels = models }
         }
-        .sensoryFeedback(.impact(weight: .light), trigger: session?.sentCount ?? 0)
+        .haptic(.tap, trigger: session?.sentCount ?? 0)
+        // An answer that failed: the one outcome of a question that is felt. Text streaming in never is.
+        .haptic(.error, trigger: error) { old, new in new != nil && new != old }
         // Another account, or none: this screen lets go of the conversation it showed. Ending the
         // answers of an account that signed out is `ServerChatSessions.accountChanged`, at the root.
         .onChange(of: sessionKey) {

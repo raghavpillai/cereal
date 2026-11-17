@@ -52,6 +52,7 @@ struct NoteView: View {
                             generating = true
                             Task {
                                 await store.generateNotes(note.id)
+                                if store.note(note.id)?.needsGeneration == false { Haptics.shared.play(.notesReady) }
                                 withAnimation(motion.settle) {
                                     generating = false
                                     mode = .enhanced
@@ -94,6 +95,7 @@ struct NoteView: View {
                 Button(mode == .enhanced ? "Show my notes" : "Show enhanced notes",
                        systemImage: mode == .enhanced ? "text.viewfinder" : "sparkles") {
                     withAnimation(motion.snappy) { mode = mode == .enhanced ? .mine : .enhanced }
+                    Haptics.shared.play(.selection)
                 }
                 Button("Copy notes", systemImage: "doc.on.doc") {
                     UIPasteboard.general.string = note.plainText
@@ -105,6 +107,7 @@ struct NoteView: View {
                 }
                 Divider()
                 Button("Move to trash", systemImage: "trash", role: .destructive) {
+                    Haptics.shared.play(.destructive)
                     store.trash(note.id)
                     dismiss()
                 }
@@ -123,7 +126,7 @@ struct NoteView: View {
         .navigationBarBackButtonHidden()
         // The keyboard here belongs to the "Edit title" alert; the bar stays where it is.
         .ignoresSafeArea(.keyboard, edges: .bottom)
-        .sensoryFeedback(.success, trigger: copied)
+        .haptic(.done, trigger: copied)
         .sheet(isPresented: $showTranscript) { TranscriptView(note: note) }
         .sheet(isPresented: $editingNotes) { EditNotesSheet(note: note) }
         .alert("Edit title", isPresented: $editingTitle) {

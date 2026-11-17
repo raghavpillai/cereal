@@ -92,6 +92,8 @@ struct MicPermissionSheet: View {
                 if let onGranted { onGranted() }
                 else { router.newNoteID = store.createNote().id }
             } else {
+                // Recording cannot start: the sheet turns to "Open Settings", felt as a warning.
+                Haptics.shared.play(.warning)
                 withAnimation(motion.settle) { denied = true }
             }
         }

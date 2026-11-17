@@ -7,6 +7,7 @@ struct HomeView: View {
     @State private var entrance = EntranceGate()
     @State private var steppedForward = true
     @State private var copyCount = 0
+    @State private var trashCount = 0
     @Environment(\.motion) private var motion
 
     var body: some View {
@@ -67,7 +68,8 @@ struct HomeView: View {
             }
         }
         #endif
-        .sensoryFeedback(.success, trigger: copyCount)
+        .haptic(.done, trigger: copyCount)
+        .haptic(.destructive, trigger: trashCount)
     }
 
     private var header: some View {
@@ -76,7 +78,7 @@ struct HomeView: View {
                    canGoBack: dayOffset > 0,
                    back: { steppedForward = false; withAnimation(motion.snappy) { dayOffset = max(0, dayOffset - 1) } },
                    forward: { steppedForward = true; withAnimation(motion.snappy) { dayOffset += 1 } })
-            .sensoryFeedback(.selection, trigger: dayOffset)
+            .haptic(.selection, trigger: dayOffset)
     }
 
     /// The demo's events on the day shown.
@@ -122,6 +124,7 @@ struct HomeView: View {
                             Button("Copy notes", systemImage: "doc.on.doc") { UIPasteboard.general.string = note.plainText; copyCount += 1 }
                             Button("Move to trash", systemImage: "trash", role: .destructive) {
                                 withAnimation(motion.exit(.settle)) { store.trash(note.id) }
+                                trashCount += 1
                             }
                         }
                         .staggeredEntrance(order[note.id] ?? 0, gate: entrance)

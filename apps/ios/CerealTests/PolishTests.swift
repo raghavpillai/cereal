@@ -350,13 +350,11 @@ struct ServerHomeGroupingTests {
 
 struct RecordingPolishTests {
     @Test func hapticsFollowRecordingStateChanges() {
-        #expect(RecordingFeedback.feedback(from: .idle, to: .recording) != nil)
-        #expect(RecordingFeedback.feedback(from: .paused, to: .recording) != nil)
-        #expect(RecordingFeedback.feedback(from: .recording, to: .paused) != nil)
-        #expect(RecordingFeedback.feedback(from: .recording, to: .stopped) != nil)
-        #expect(RecordingFeedback.feedback(from: .recording, to: .failed("x")) != nil)
-        #expect(RecordingFeedback.feedback(from: .recording, to: .recording) == nil)
-        #expect(RecordingFeedback.feedback(from: .idle, to: .stopped) == nil)
+        #expect(RecordingFeedback.output(.started) == .signature(.recordingStarted))
+        #expect(RecordingFeedback.output(.ended) == .signature(.recordingEnded))
+        #expect(RecordingFeedback.output(.paused) != RecordingFeedback.output(.resumed))
+        #expect(RecordingFeedback.output(.failed) == .feedback(.error))
+        #expect(RecordingFeedback.output(.interrupted) == .feedback(.warning))
     }
 }
 

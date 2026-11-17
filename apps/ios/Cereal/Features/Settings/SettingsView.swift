@@ -81,6 +81,7 @@ struct SettingsView: View {
                 }
                 SettingsSection("Appearance") {
                     ThemeRow(theme: $theme)
+                    HapticsRow()
                 }
                 SettingsSection("Support") {
                     SettingsRow("Send feedback", systemImage: "envelope") { openURL(SettingsLinks.feedback) }
@@ -123,6 +124,33 @@ private struct ThemeRow: View {
         }
         .accessibilityIdentifier("settings-theme")
         .accessibilityValue(theme.title)
+        .haptic(.selection, trigger: theme)
+    }
+}
+
+/// Haptics: on unless turned off. Off silences the app's own haptics, the
+/// recording's signatures included; the system's own (keyboard, menus) follow
+/// iOS's System Haptics setting as they always do.
+private struct HapticsRow: View {
+    @AppStorage(HapticGate.storageKey) private var enabled = true
+
+    var body: some View {
+        Toggle(isOn: $enabled) {
+            HStack(spacing: 14) {
+                Image(systemName: "iphone.radiowaves.left.and.right")
+                    .font(.system(size: 16))
+                    .foregroundStyle(Theme.textPrimary.opacity(0.85))
+                    .frame(width: SettingsMetrics.iconTile, height: SettingsMetrics.iconTile)
+                    .background(Theme.iconTile, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                Text("Haptics").font(.system(size: SettingsMetrics.label)).foregroundStyle(Theme.textPrimary)
+            }
+        }
+        .tint(Color(hex: 0x34C759))
+        .padding(.leading, 11).padding(.trailing, 18)
+        .frame(minHeight: SettingsMetrics.rowHeight)
+        // Turned on, it says so in the hand.
+        .haptic(.selection, trigger: enabled) { _, on in on }
+        .accessibilityIdentifier("settings-haptics")
     }
 }
 
@@ -166,6 +194,7 @@ struct ProfileSettingsView: View {
                                 Picker("User Type", selection: $userType) {
                                     ForEach(Self.userTypes, id: \.self) { Text($0).tag($0) }
                                 }
+                                .haptic(.selection, trigger: userType)
                             } label: {
                                 HStack(spacing: 4) {
                                     Text(userType)
@@ -291,6 +320,8 @@ struct NotificationSettingsView: View {
                 }
                 .tint(Color(hex: 0x34C759))
                 .accessibilityIdentifier("notifications-upcoming")
+                // Asked for and refused: the line under it says how to turn them on.
+                .haptic(.warning, trigger: denied) { _, now in now }
                 .padding(.horizontal, 6).padding(.top, 4)
                 if denied {
                     Button("Notifications are off for Cereal. Turn them on in Settings.") {

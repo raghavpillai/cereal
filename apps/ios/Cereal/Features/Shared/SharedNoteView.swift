@@ -84,7 +84,7 @@ struct SharedNoteView: View {
         } bottom: {
             EmptyView()
         }
-        .sensoryFeedback(.success, trigger: copiedCount)
+        .haptic(.done, trigger: copiedCount)
     }
 
     @ViewBuilder private func failure(_ error: SharedNoteError) -> some View {

@@ -9,6 +9,9 @@ import APIClient
     /// 0 is closed, 1 is fully open. Follows the finger while dragging.
     private(set) var progress: CGFloat = 0
     private(set) var isDragging = false
+    /// Counts the times a drag let go and the panel snapped open or shut, which is felt.
+    /// A tap that opens or closes it is felt as the tap it was, not again here.
+    private(set) var snaps = 0
     @ObservationIgnored var width: CGFloat = 300
     @ObservationIgnored var openAnimation: Animation = Motion(reduceMotion: false).settle
     @ObservationIgnored var closeAnimation: Animation = Motion(reduceMotion: false).exit(.settle)
@@ -52,7 +55,15 @@ import APIClient
             try? await Task.sleep(for: .milliseconds(250))
             if !Task.isCancelled { self?.suppressesRowTaps = false }
         }
-        settle(open: Self.shouldOpen(progress: progress, velocity: velocity))
+        let open = Self.shouldOpen(progress: progress, velocity: velocity)
+        // Felt only when the panel moves to a side it was not already resting on.
+        if Self.snapIsFelt(from: dragStart, open: open) { snaps &+= 1 }
+        settle(open: open)
+    }
+
+    /// A drag that ends where it began (a peek let go) settles silently.
+    nonisolated static func snapIsFelt(from start: CGFloat, open: Bool) -> Bool {
+        open ? start < 0.999 : start > 0.001
     }
 
     func open() { clearDrag(); settle(open: true) }
@@ -138,6 +149,7 @@ struct SidebarDrawer: View {
             )
             // A cancelled gesture never reaches onEnded; the gesture state still resets.
             .onChange(of: closing) { _, active in if !active { model.cancelDrag() } }
+            .haptic(.snap, trigger: model.snaps)
             .onChange(of: width, initial: true) { _, new in model.width = new + 16 }
         }
         .allowsHitTesting(model.isVisible)

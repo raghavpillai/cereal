@@ -14,6 +14,10 @@ struct ServerShareView: View {
     @State private var busy = false
     @State private var error: String?
     @Environment(\.motion) private var motion
+    /// What the person asked for, as felt: a link copied, a link revoked, an action that failed.
+    @State private var copies = 0
+    @State private var revocations = 0
+    @State private var failures = 0
 
     var body: some View {
         NavigationStack {
@@ -30,7 +34,7 @@ struct ServerShareView: View {
                                 url = try await server.createShare(noteID: noteID, includeBody: includeBody, includeEnhanced: includeEnhanced, expiresAt: expiry)
                                 shares = try await server.shares(noteID: noteID)
                             } catch is CancellationError { }
-                            catch { self.error = error.localizedDescription }
+                            catch { self.error = error.localizedDescription; failures += 1 }
                             busy = false
                         }
                     }.buttonStyle(.glassProminent).tint(Theme.accent)
@@ -43,7 +47,7 @@ struct ServerShareView: View {
                 if let url {
                     Section {
                         ShareLink(item: url) { Label("Share link", systemImage: "square.and.arrow.up") }
-                        Button("Copy link", systemImage: "doc.on.doc") { UIPasteboard.general.string = url.absoluteString }
+                        Button("Copy link", systemImage: "doc.on.doc") { UIPasteboard.general.string = url.absoluteString; copies += 1 }
                     } footer: { Text("The link is only available here after creation. It is not saved to app preferences.") }
                 }
                 if busy { Section { InlineProgress(text: "Updating shared links…") } }
@@ -59,7 +63,7 @@ struct ServerShareView: View {
                                 Text(share.expiresAt.map { "Expires \(Self.day($0))" } ?? "No expiration")
                                     .font(.caption).foregroundStyle(Theme.textTertiary)
                                 Button("Revoke link", role: .destructive) {
-                                    busy = true; error = nil
+                                    busy = true; error = nil; revocations += 1
                                     Task {
                                         do {
                                             try await server.revokeShare(id: share.id)
@@ -68,7 +72,7 @@ struct ServerShareView: View {
                                             url = nil
                                             shares = try await server.shares(noteID: noteID)
                                         } catch is CancellationError { }
-                                        catch { self.error = error.localizedDescription }
+                                        catch { self.error = error.localizedDescription; failures += 1 }
                                         busy = false
                                     }
                                 }.disabled(busy)
@@ -86,6 +90,11 @@ struct ServerShareView: View {
             .animation(motion.settle, value: url)
             .animation(motion.settle, value: shares.map(\.id))
             .animation(motion.snappy, value: error)
+            // A new link made, copied, revoked; a request that failed. Loading the list is not felt.
+            .haptic(.done, trigger: url) { _, new in new != nil }
+            .haptic(.done, trigger: copies)
+            .haptic(.destructive, trigger: revocations)
+            .haptic(.error, trigger: failures)
             .navigationTitle("Share note").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.disabled(busy) } }
             .interactiveDismissDisabled(busy)

@@ -49,6 +49,9 @@ struct NoteSharePopover: View {
         .animation(motion.snappy, value: showingQR)
         .animation(motion.snappy, value: copied)
         .animation(motion.snappy, value: error)
+        // The link is on the clipboard; making it failed.
+        .haptic(.done, trigger: copied) { _, now in now }
+        .haptic(.error, trigger: error) { old, new in new != nil && new != old }
         .presentationCompactAdaptation(.popover)
         .sheet(item: $sharing) { ActivitySheet(items: [$0.url]).ignoresSafeArea() }
     }

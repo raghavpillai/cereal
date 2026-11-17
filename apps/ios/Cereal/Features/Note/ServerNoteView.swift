@@ -62,7 +62,10 @@ struct ServerNoteView: View {
     @State private var showingMeeting = false
     /// True only for a Generate request; `busy` also covers saving and deleting.
     @State private var generating = false
-    @State private var generatedCount = 0
+    /// Something the person asked for failed (generate, delete, a new title): felt as an error.
+    @State private var failures = 0
+    /// Delete was confirmed: felt as the firm tap of something that cannot be undone.
+    @State private var deletions = 0
     @State private var copiedCount = 0
     /// "Get notified when your notes are ready" is offered (notifications never asked for).
     @State private var offersNotify = false
@@ -262,8 +265,10 @@ struct ServerNoteView: View {
             .opacity(editingTitle ? 0 : 1)
             .animation(motion.snappy, value: editingTitle)
             .animation(motion.animation(.gooey, entering: canGenerate || generating), value: canGenerate || generating)
-            .sensoryFeedback(.success, trigger: generatedCount)
-            .sensoryFeedback(.success, trigger: copiedCount)
+            .haptic(.done, trigger: copiedCount)
+            .haptic(.error, trigger: failures)
+            .haptic(.destructive, trigger: deletions)
+            .haptic(.selection, trigger: showMine)
             .animation(motion.animation(.gooey, entering: indicatorHere), value: indicatorHere)
             .animation(motion.animation(.gooey, entering: showsScheduledStart), value: showsScheduledStart)
         }
@@ -310,6 +315,7 @@ struct ServerNoteView: View {
             Button("Delete", role: .destructive) {
                 loadRevision &+= 1
                 busy = true
+                deletions += 1
                 Task {
                     do {
                         let account = server.accountIdentity
@@ -319,7 +325,7 @@ struct ServerNoteView: View {
                         dismiss()
                     }
                     catch is CancellationError { }
-                    catch { self.error = error.localizedDescription }
+                    catch { self.error = error.localizedDescription; failures += 1 }
                     busy = false
                 }
             }
@@ -336,7 +342,7 @@ struct ServerNoteView: View {
                     do {
                         loaded = try await server.update(id: noteID, NoteEditorContent.titleUpdate(titleDraft))
                     }
-                    catch { self.error = error.localizedDescription }
+                    catch { self.error = error.localizedDescription; failures += 1 }
                 }
             }.disabled(titleDraft.count > 500)
         }
@@ -378,10 +384,11 @@ struct ServerNoteView: View {
             defer { busy = false; generating = false }
             do {
                 loaded = try await server.generate(noteID: noteID, expectedTranscriptRevision: note.transcriptRevision)
-                generatedCount += 1
+                // The notes have arrived: the signature that also follows a recording's End.
+                Haptics.shared.play(.notesReady)
             }
             catch is CancellationError { }
-            catch { self.error = error.localizedDescription }
+            catch { self.error = error.localizedDescription; failures += 1 }
         }
     }
 
@@ -576,6 +583,8 @@ struct ServerNoteEditor: View {
                 }
             }
             .interactiveDismissDisabled(saving)
+            // Saving failed: the one thing on this sheet worth feeling.
+            .haptic(.error, trigger: error) { old, new in new != nil && new != old }
         }.glassSheet()
     }
 

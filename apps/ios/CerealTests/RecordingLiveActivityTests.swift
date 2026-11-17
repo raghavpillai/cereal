@@ -19,7 +19,17 @@ import APIClient
     var operations: [String] = []
     var staleDates: [Date?] = []
     var beforeEnd: (() async -> Void)?
+    var dismissals: [RecordingActivityDismissal] = []
+    var alerts: [RecordingActivityAlert?] = []
     init(noteID: UUID, state: RecordingActivityAttributes.ContentState) { self.noteID = noteID; self.state = state }
+    func update(_ state: RecordingActivityAttributes.ContentState, staleDate: Date?, alert: RecordingActivityAlert?) async {
+        alerts.append(alert)
+        await update(state, staleDate: staleDate)
+    }
+    func end(_ state: RecordingActivityAttributes.ContentState, dismissal: RecordingActivityDismissal) async {
+        dismissals.append(dismissal)
+        await end(state)
+    }
     func update(_ state: RecordingActivityAttributes.ContentState, staleDate: Date?) async {
         operations.append("update-\(state.phase.rawValue)"); staleDates.append(staleDate); self.state = state
     }
@@ -46,9 +56,26 @@ import APIClient
         sessions.append(session); requestedStaleDates.append(staleDate)
         return session
     }
-    func controller(clock: ActivityTestClock) -> RecordingLiveActivityController {
-        RecordingLiveActivityController(backend: self, now: { clock.date }, uptime: { clock.uptime })
+    func controller(clock: ActivityTestClock, background: ActivityTestBackgroundTime = ActivityTestBackgroundTime(),
+                    appActive: Bool = false) -> RecordingLiveActivityController {
+        RecordingLiveActivityController(backend: self, backgroundTime: background, now: { clock.date }, uptime: { clock.uptime },
+                                        appActive: { appActive }, readyHold: .zero)
     }
+}
+
+/// Background time the test hands out and takes back, and can run out.
+@MainActor final class ActivityTestBackgroundTime: RecordingActivityBackgroundTime {
+    var begun: [Int] = []
+    var ended: [Int] = []
+    private var expirations: [Int: @MainActor () -> Void] = [:]
+    func begin(expiration: @escaping @MainActor () -> Void) -> Int? {
+        let token = begun.count + 1
+        begun.append(token); expirations[token] = expiration
+        return token
+    }
+    func end(_ token: Int) { ended.append(token); expirations[token] = nil }
+    var holding: Bool { begun.count > ended.count }
+    func expire() { for (_, expiration) in expirations { expiration() } }
 }
 
 /// A deterministic ActivityKit boundary, never a fake claim of OS recording.
@@ -432,4 +459,229 @@ import APIClient
     }
     #endif
 
+
+    // MARK: After End
+
+    @Test func endThenNotesReadySaysWritingThenReadyAndLingersAFewMinutes() async throws {
+        let backend = ActivityTestBackend(), clock = ActivityTestClock(), background = ActivityTestBackgroundTime()
+        let controller = backend.controller(clock: clock, background: background), id = UUID()
+        controller.start(noteID: id, title: "Design review", elapsed: 0)
+        clock.advance(30)
+        controller.end(elapsed: 30, ending: .writingNotes)
+        #expect(controller.phase == .writing)
+        #expect(background.holding)
+        // Heartbeats belong to a running clock, never to the notes being written.
+        clock.advance(40); controller.heartbeat(elapsed: 999)
+        await controller.finishPendingUpdates()
+        let session = try #require(backend.sessions.first)
+        #expect(session.operations == ["update-writing"])
+        #expect(session.staleDates == [clock.date.addingTimeInterval(-40 + RecordingActivityTiming.writingStaleAfter)])
+        #expect(!session.state.runsTimer(isStale: false) && session.state.elapsed == 30)
+        clock.advance(5)
+        controller.notesFinished(noteID: id, outcome: .ready)
+        await controller.finishPendingUpdates()
+        #expect(session.operations == ["update-writing", "update-ready", "end"])
+        #expect(session.state.phase == .ready && session.state.title == "Design review")
+        #expect(session.dismissals == [.after(clock.date.addingTimeInterval(RecordingActivityTiming.readyLingers))])
+        #expect(session.alerts.allSatisfy { $0 == nil })
+        #expect(!background.holding && controller.phase == nil)
+    }
+
+    @Test func notesThatAreNotWrittenNeverSayReady() async throws {
+        for outcome in [RecordingNotesOutcome.failed, .noTranscript, .deferred] {
+            let backend = ActivityTestBackend(), clock = ActivityTestClock(), background = ActivityTestBackgroundTime()
+            let controller = backend.controller(clock: clock, background: background), id = UUID()
+            controller.start(noteID: id, title: "", elapsed: 0)
+            controller.end(elapsed: 12, ending: .writingNotes)
+            controller.notesFinished(noteID: id, outcome: outcome)
+            await controller.finishPendingUpdates()
+            let session = try #require(backend.sessions.first)
+            #expect(!session.operations.contains("update-ready"))
+            #expect(session.state.phase == .ended && session.state.hint == outcome.hint && session.state.hint != nil)
+            #expect(session.dismissals == [.after(clock.date.addingTimeInterval(RecordingActivityTiming.hintLingers))])
+            #expect(!background.holding)
+        }
+    }
+
+    @Test func notesOfAnotherNoteOrBeforeEndAreIgnored() async throws {
+        let backend = ActivityTestBackend(), clock = ActivityTestClock()
+        let controller = backend.controller(clock: clock), id = UUID()
+        controller.start(noteID: id, title: "", elapsed: 0)
+        controller.notesFinished(noteID: id, outcome: .ready) // still recording
+        controller.end(elapsed: 3, ending: .writingNotes)
+        controller.notesFinished(noteID: UUID(), outcome: .ready)
+        await controller.finishPendingUpdates()
+        #expect(backend.sessions[0].operations == ["update-writing"])
+        #expect(controller.phase == .writing)
+    }
+
+    @Test func losingTheBackgroundBeforeTheNotesSaysTheyAreInTheApp() async throws {
+        let backend = ActivityTestBackend(), clock = ActivityTestClock(), background = ActivityTestBackgroundTime()
+        let controller = backend.controller(clock: clock, background: background), id = UUID()
+        controller.start(noteID: id, title: "", elapsed: 0)
+        controller.end(elapsed: 8, ending: .writingNotes)
+        background.expire()
+        controller.notesFinished(noteID: id, outcome: .ready) // too late: the activity has moved on
+        await controller.finishPendingUpdates()
+        let session = try #require(backend.sessions.first)
+        #expect(session.operations == ["update-writing", "end"])
+        #expect(session.state.phase == .ended && session.state.hint == .notesInApp)
+        #expect(session.state.headline(isStale: false) == "Recording ended" && session.state.detail == "Open Cereal for your notes")
+    }
+
+    @Test func resumingWhileNotesAreWrittenKeepsTheSameActivityRecording() async throws {
+        let backend = ActivityTestBackend(), clock = ActivityTestClock(), background = ActivityTestBackgroundTime()
+        let controller = backend.controller(clock: clock, background: background), id = UUID()
+        controller.start(noteID: id, title: "", elapsed: 0)
+        controller.end(elapsed: 20, ending: .writingNotes)
+        clock.advance(3)
+        controller.start(noteID: id, title: "", elapsed: 20)
+        await controller.finishPendingUpdates()
+        #expect(backend.requests == 1 && !background.holding)
+        #expect(backend.sessions[0].operations == ["update-writing", "update-recording"])
+        #expect(backend.sessions[0].state.timerAnchor == clock.date.addingTimeInterval(-20))
+    }
+
+    @Test func aNewRecordingReplacesWhatIsLeftOfTheLastButNeverARunningOne() async throws {
+        let backend = ActivityTestBackend(), clock = ActivityTestClock()
+        let earlier = backend.controller(clock: clock), running = backend.controller(clock: clock)
+        earlier.start(noteID: UUID(), title: "", elapsed: 0)
+        earlier.end(elapsed: 5, ending: .writingNotes)
+        running.start(noteID: UUID(), title: "", elapsed: 0)
+        await earlier.finishPendingUpdates(); await running.finishPendingUpdates()
+        let next = backend.controller(clock: clock)
+        next.start(noteID: UUID(), title: "", elapsed: 0)
+        await next.finishPendingUpdates()
+        #expect(backend.sessions[0].state.phase == .ended && backend.sessions[0].dismissals == [.immediate])
+        #expect(backend.sessions[1].state.phase == .recording && backend.sessions[1].operations.isEmpty)
+        #expect(backend.sessions[2].state.phase == .recording)
+    }
+
+    @Test func aPlainEndLingersBrieflyAndCancelVanishes() async throws {
+        let backend = ActivityTestBackend(), clock = ActivityTestClock()
+        let controller = backend.controller(clock: clock)
+        controller.start(noteID: UUID(), title: "", elapsed: 0)
+        controller.end(elapsed: 4)
+        controller.start(noteID: UUID(), title: "", elapsed: 0)
+        controller.end(elapsed: 1, ending: .discard)
+        await controller.finishPendingUpdates()
+        #expect(backend.sessions[0].dismissals == [.after(clock.date.addingTimeInterval(RecordingActivityTiming.endedLingers))])
+        #expect(backend.sessions[1].dismissals == [.immediate])
+    }
+
+    // MARK: Stopped on its own
+
+    @Test func aStopOutOfTheAppStaysOffersTheNoteAndAlertsOnlyForAFailure() async throws {
+        for cause in [RecordingActivityAlert.Cause.failure, .interruption] {
+            let backend = ActivityTestBackend(), clock = ActivityTestClock()
+            let controller = backend.controller(clock: clock, appActive: false), id = UUID()
+            controller.start(noteID: id, title: "", elapsed: 0)
+            clock.advance(61)
+            controller.interrupt(elapsed: 61, cause: cause)
+            await controller.finishPendingUpdates()
+            let session = try #require(backend.sessions.first)
+            #expect(session.operations == ["update-interrupted"])
+            #expect(session.staleDates == [nil])
+            #expect(session.state.hint == .openToResume && session.state.offersOpen && !session.state.isLive)
+            #expect((session.alerts.first ?? nil) == (cause == .failure ? RecordingActivityAlert.forStop(.failure, appActive: false) : nil))
+            // Back in the app, where the screen says so: the activity has done its job.
+            controller.appBecameActive(isCapturing: false)
+            await controller.finishPendingUpdates()
+            #expect(session.operations.last == "end" && session.dismissals == [.immediate])
+        }
+    }
+
+    @Test func aStopSeenInTheAppEndsWithAShortNote() async throws {
+        let backend = ActivityTestBackend(), clock = ActivityTestClock()
+        let controller = backend.controller(clock: clock, appActive: true)
+        controller.start(noteID: UUID(), title: "", elapsed: 0)
+        controller.interrupt(elapsed: 9, cause: .failure)
+        await controller.finishPendingUpdates()
+        let session = try #require(backend.sessions.first)
+        #expect(session.operations == ["end"] && session.alerts.isEmpty)
+        #expect(session.state.phase == .ended && session.state.hint == .openToResume)
+        #expect(session.dismissals == [.after(clock.date.addingTimeInterval(RecordingActivityTiming.hintLingers))])
+    }
+
+    @Test func resumingAfterAStopReturnsTheSameActivityToRecording() async throws {
+        let backend = ActivityTestBackend(), clock = ActivityTestClock()
+        let controller = backend.controller(clock: clock, appActive: false), id = UUID()
+        controller.start(noteID: id, title: "", elapsed: 0)
+        controller.interrupt(elapsed: 15, cause: .interruption)
+        controller.appBecameActive(isCapturing: true) // resumed before the app noticed: nothing to end
+        controller.start(noteID: id, title: "", elapsed: 15)
+        await controller.finishPendingUpdates()
+        #expect(backend.requests == 1)
+        #expect(backend.sessions[0].operations == ["update-interrupted", "update-recording"])
+    }
+
+    // MARK: Pure rules
+
+    @Test func dismissalNeverOutlastsAFewMinutes() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        func state(_ phase: RecordingActivityAttributes.ContentState.Phase, _ hint: RecordingActivityAttributes.ContentState.Hint? = nil) -> RecordingActivityAttributes.ContentState {
+            var state = RecordingActivityAttributes.ContentState(phase: phase, elapsed: 1, timerAnchor: now, updatedAt: now)
+            state.hint = hint
+            return state
+        }
+        #expect(RecordingActivityDismissal.forEnding(state(.ready), discarded: true, now: now) == .immediate)
+        #expect(RecordingActivityDismissal.forEnding(state(.ready), discarded: false, now: now) == .after(now + 180))
+        #expect(RecordingActivityDismissal.forEnding(state(.ended), discarded: false, now: now) == .after(now + 30))
+        #expect(RecordingActivityDismissal.forEnding(state(.ended, .notesFailed), discarded: false, now: now) == .after(now + 120))
+        for phase in [RecordingActivityAttributes.ContentState.Phase.recording, .paused, .writing] {
+            #expect(RecordingActivityDismissal.forEnding(state(phase), discarded: false, now: now) == .immediate)
+        }
+        #expect(RecordingActivityTiming.readyLingers <= 5 * 60 && RecordingActivityTiming.hintLingers <= 5 * 60)
+    }
+
+    @Test func eachPhaseSaysWhatIsTrueAndOnlyReadySaysReady() {
+        typealias State = RecordingActivityAttributes.ContentState
+        let all: [State.Phase] = [.recording, .paused, .ended, .interrupted, .writing, .ready]
+        for phase in all {
+            let state = State(phase: phase, elapsed: 5, timerAnchor: .now, updatedAt: .now)
+            #expect(state.headline(isStale: false).contains("ready") == (phase == .ready))
+            #expect(state.runsTimer(isStale: false) == (phase == .recording))
+            #expect(state.isLive == (phase == .recording || phase == .paused))
+            #expect(state.staleDate(from: .now) == nil || phase == .recording || phase == .writing)
+            #expect(state.status(isStale: false, isPreview: true).lowercased().contains("preview"))
+            #expect(state.badge(isStale: true) == "exclamationmark")
+        }
+        #expect(State(phase: .recording, elapsed: 0, timerAnchor: .now, updatedAt: .now).headline(isStale: false) == "Taking notes...")
+        #expect(State(phase: .writing, elapsed: 0, timerAnchor: .now, updatedAt: .now).status(isStale: true) == "Open Cereal for your notes")
+        #expect(State(phase: .recording, elapsed: 0, timerAnchor: .now, updatedAt: .now).badge(isStale: false) == nil)
+        #expect(State(phase: .paused, elapsed: 0, timerAnchor: .now, updatedAt: .now).badge(isStale: false) == "pause.fill")
+        // The recording outranks what is left after it, and both outrank an ended one.
+        let scores = [State.Phase.recording, .writing, .ready, .ended].map { State(phase: $0, elapsed: 0, timerAnchor: .now, updatedAt: .now).relevance }
+        #expect(scores == scores.sorted(by: >) && Set(scores).count == scores.count)
+        var titled = State(phase: .recording, elapsed: 0, timerAnchor: .now, updatedAt: .now, title: "Standup")
+        #expect(titled.secondary == "Standup")
+        titled.hint = .openToResume
+        #expect(titled.secondary == "Open to resume")
+    }
+
+    @Test func contentFromBeforeHintsAndNewPhasesDecode() throws {
+        let anchor = Date(timeIntervalSince1970: 1_800_000_000)
+        let old = try JSONDecoder().decode(RecordingActivityAttributes.ContentState.self, from: Data(
+            "{\"phase\":\"recording\",\"elapsed\":3,\"timerAnchor\":\(anchor.timeIntervalSinceReferenceDate),\"updatedAt\":\(anchor.timeIntervalSinceReferenceDate)}".utf8))
+        #expect(old.phase == .recording && old.hint == nil && old.title == nil)
+        var state = old
+        state.phase = .writing; state.hint = .notesInApp
+        let back = try JSONDecoder().decode(RecordingActivityAttributes.ContentState.self, from: JSONEncoder().encode(state))
+        #expect(back == state)
+    }
+
+    @Test func alertsAreOnlyForAFailureOutOfTheApp() {
+        #expect(RecordingActivityAlert.forStop(.failure, appActive: false) != nil)
+        #expect(RecordingActivityAlert.forStop(.failure, appActive: true) == nil)
+        #expect(RecordingActivityAlert.forStop(.interruption, appActive: false) == nil)
+    }
+
+    @Test func endOnTheActivityGoesToItsOwnerOrRemovesALeftover() {
+        let id = UUID().uuidString
+        #expect(RecordingActivityActions.route(noteID: id, hasHandler: true) == .handler)
+        #expect(RecordingActivityActions.route(noteID: id, hasHandler: false) == .orphan)
+        #expect(RecordingActivityActions.route(noteID: "not a note", hasHandler: true) == .invalid)
+        #expect(RecordingActivityExclusivity.givesWay(.writing) && RecordingActivityExclusivity.givesWay(.interrupted))
+        #expect(!RecordingActivityExclusivity.givesWay(.recording) && !RecordingActivityExclusivity.givesWay(.paused))
+    }
 }

@@ -99,7 +99,7 @@ struct ChatView: View {
         .onDisappear {
             if ChatStreamPolicy.shouldCancelOnDisappear(path: router.path, route: .chat(noteID: noteID)) { stop() }
         }
-        .sensoryFeedback(.impact(weight: .light), trigger: sentCount)
+        .haptic(.tap, trigger: sentCount)
         .sheet(isPresented: $showHistory) {
             NavigationStack {
                 List {
@@ -263,7 +263,7 @@ struct ChatMessageView: View {
                                 .symbolEffect(.bounce, value: feedback == false).chatActionTarget()
                         }
                             .accessibilityLabel("Mark answer unhelpful").accessibilityAddTraits(feedback == false ? .isSelected : [])
-                    }.font(.system(size: 15)).foregroundStyle(Theme.textTertiary).buttonStyle(SquashButtonStyle(scale: 0.86)).sensoryFeedback(.success, trigger: copyCount)
+                    }.font(.system(size: 15)).foregroundStyle(Theme.textTertiary).buttonStyle(SquashButtonStyle(scale: 0.86)).haptic(.done, trigger: copyCount)
                         .padding(.leading, -11).padding(.vertical, -14)
                         // The tick confirms the copy, then gives the control back.
                         .task(id: copyCount) {

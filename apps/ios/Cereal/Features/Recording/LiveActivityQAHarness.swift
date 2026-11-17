@@ -5,7 +5,7 @@ import Observation
 /// Explicit OS-presentation QA. This model never constructs a Recorder, requests
 /// microphone permission, opens a WAV, connects to an account, or calls an API.
 @MainActor @Observable final class LiveActivityQAModel {
-    enum Phase: String { case idle, running, paused, ended }
+    enum Phase: String { case idle, running, paused, interrupted, writing, ended }
     private(set) var phase = Phase.idle
     private(set) var elapsed: TimeInterval = 0
     private(set) var systemState = "none"
@@ -14,12 +14,17 @@ import Observation
     private(set) var error: String?
     private let noteID = UUID()
     private let controller: RecordingLiveActivityController
+    /// QA only: `-qa.liveActivityLook YES` draws the activity as a real recording's
+    /// (no "Preview" wording), for checking how each state looks. Still no audio.
+    let looksGenuine: Bool
     private var clock = RecordingClock()
     private let uptime: () -> TimeInterval
 
     init(controller: RecordingLiveActivityController? = nil,
          uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
-        self.controller = controller ?? RecordingLiveActivityController(presentation: .preview)
+        let genuine = controller == nil && UserDefaults.standard.bool(forKey: "qa.liveActivityLook")
+        looksGenuine = genuine
+        self.controller = controller ?? RecordingLiveActivityController(presentation: genuine ? nil : .preview)
         self.uptime = uptime
         refreshStatus()
     }
@@ -28,7 +33,7 @@ import Observation
         // Finish the previous End before requesting another actual OS activity.
         await controller.finishPendingUpdates()
         clock.prepare(durations: []); clock.start(at: uptime()); elapsed = 0
-        controller.start(noteID: noteID, title: "", elapsed: 0)
+        controller.start(noteID: noteID, title: looksGenuine ? "Design review" : "", elapsed: 0)
         if controller.hasActivity { phase = .running }
         else { _ = clock.stop(at: uptime()); phase = .idle }
         refreshStatus()
@@ -57,9 +62,54 @@ import Observation
         }
         controller.end(elapsed: elapsed); phase = .ended; refreshStatus()
     }
+    /// End as a server recording ends: "Writing notes..." until `notesReady`.
+    func endWritingNotes() async {
+        guard phase == .running || phase == .paused else { return }
+        _ = clock.stop(at: uptime()); elapsed = clock.completed
+        controller.end(elapsed: elapsed, ending: .writingNotes); phase = .writing
+        await controller.finishPendingUpdates(); refreshStatus()
+    }
+    func notesFinished(_ outcome: RecordingNotesOutcome) async {
+        guard phase == .writing else { return }
+        controller.notesFinished(noteID: noteID, outcome: outcome); phase = .ended
+        await controller.finishPendingUpdates(); refreshStatus()
+    }
+    /// A recording that stopped on its own (a lost headset), as the activity shows it out of the app.
+    func interrupt() async {
+        guard phase == .running || phase == .paused else { return }
+        _ = clock.stop(at: uptime()); elapsed = clock.completed
+        controller.interrupt(elapsed: elapsed, cause: .failure); phase = .interrupted
+        await controller.finishPendingUpdates(); refreshStatus()
+    }
+    /// Steps: start, pause, resume, rotate, end, writing, ready, failed, interrupt, cleanup, wait:<seconds>.
+    func run(script: String) async {
+        for step in script.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }) {
+            if step.hasPrefix("wait:"), let seconds = Double(step.dropFirst(5)) {
+                // The clock is kept up to date while the script waits.
+                let until = uptime() + seconds
+                while uptime() < until { try? await Task.sleep(for: .milliseconds(500)); tick() }
+                continue
+            }
+            switch step {
+            case "start": await start()
+            case "pause": await pause()
+            case "resume": await resume()
+            case "rotate": await rotate()
+            case "end": end()
+            case "writing": await endWritingNotes()
+            case "ready": await notesFinished(.ready)
+            case "failed": await notesFinished(.failed)
+            case "interrupt": await interrupt()
+            case "cleanup": await cleanup()
+            default: continue
+            }
+        }
+    }
+
     func cleanup() async {
         end(); await controller.finishPendingUpdates()
-        await controller.endPreviewActivities()
+        if looksGenuine { await RecordingLiveActivityController.endOrphanedActivities() }
+        else { await controller.endPreviewActivities() }
         refreshStatus()
     }
     func tick() {
@@ -80,6 +130,8 @@ struct LiveActivityQAHarness: View {
     @Environment(\.dismiss) private var dismiss
     @State private var model = LiveActivityQAModel()
     @State private var busy = false
+    /// Runs the next control 6 s later, with time to leave the app and watch it land.
+    @State private var delayed = false
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -109,6 +161,15 @@ struct LiveActivityQAHarness: View {
                         .disabled(model.phase != .running).accessibilityIdentifier("live-activity-qa-rotate")
                     Button("End preview", systemImage: "stop", role: .destructive) { model.end() }
                         .disabled(model.phase != .running && model.phase != .paused).accessibilityIdentifier("live-activity-qa-end")
+                    Button("End, then write notes", systemImage: "sparkles") { run { await model.endWritingNotes() } }
+                        .disabled(model.phase != .running && model.phase != .paused).accessibilityIdentifier("live-activity-qa-writing")
+                    Button("Notes ready", systemImage: "checkmark.circle") { run { await model.notesFinished(.ready) } }
+                        .disabled(model.phase != .writing).accessibilityIdentifier("live-activity-qa-ready")
+                    Button("Notes failed", systemImage: "xmark.circle") { run { await model.notesFinished(.failed) } }
+                        .disabled(model.phase != .writing).accessibilityIdentifier("live-activity-qa-failed")
+                    Button("Stop on its own (headset lost)", systemImage: "exclamationmark.triangle") { run { await model.interrupt() } }
+                        .disabled(model.phase != .running && model.phase != .paused).accessibilityIdentifier("live-activity-qa-interrupt")
+                    Toggle("Run the next control in 6 s", isOn: $delayed).accessibilityIdentifier("live-activity-qa-delay")
                     Button("End all preview activities", systemImage: "checkmark.circle") { run { await model.cleanup() } }
                         .accessibilityIdentifier("live-activity-qa-cleanup")
                 } header: { Text("Preview controls") } footer: {
@@ -125,13 +186,34 @@ struct LiveActivityQAHarness: View {
                 }
             }
             .onChange(of: scenePhase) { _, phase in if phase == .active { model.tick() } }
+            // QA only: `-qa.liveActivityScript "start,wait:3,pause,wait:20,resume"` drives the
+            // controls in order, so each state can be inspected out of the app without tapping.
+            .task {
+                guard let script = UserDefaults.standard.string(forKey: "qa.liveActivityScript") else { return }
+                let token = UIApplication.shared.beginBackgroundTask(withName: "Live Activity QA script")
+                await model.run(script: script)
+                UIApplication.shared.endBackgroundTask(token)
+            }
             .onDisappear { model.end() }
             .interactiveDismissDisabled(busy)
         }
     }
     private func run(_ action: @escaping @MainActor () async -> Void) {
         busy = true
-        Task { await action(); busy = false }
+        let wait = delayed
+        delayed = false
+        Task {
+            if wait {
+                // Kept running while it waits out of the app.
+                let token = UIApplication.shared.beginBackgroundTask(withName: "Live Activity QA")
+                try? await Task.sleep(for: .seconds(6))
+                await action()
+                UIApplication.shared.endBackgroundTask(token)
+            } else {
+                await action()
+            }
+            busy = false
+        }
     }
 }
 #endif

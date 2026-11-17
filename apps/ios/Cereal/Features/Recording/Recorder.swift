@@ -50,7 +50,10 @@ final class Recorder {
     @ObservationIgnored private let makeBackend: @MainActor () -> any CaptureBackend
     @ObservationIgnored private var meterTask: Task<Void, Never>?
     @ObservationIgnored private let observers = RecordingObservers()
-    @ObservationIgnored private var activity = RecordingLiveActivityController()
+    @ObservationIgnored private let activity: RecordingLiveActivityController
+    /// Plays what each change of the recording feels like. Called once per change,
+    /// whichever screen or control asked for it, so nothing is felt twice.
+    @ObservationIgnored var playHaptic: @MainActor (RecordingHaptic) -> Void = RecordingFeedback.play
     @ObservationIgnored private var activityNoteID: UUID?
     private var clock = RecordingClock()
     private var segmentIndex = 0
@@ -87,9 +90,13 @@ final class Recorder {
         activity.setTitle(title)
     }
 
+    /// `activity`: the Live Activity this recorder reports to. A recording owner that
+    /// makes a new recorder for each recording passes the same one, so its activity
+    /// lasts from one recording to the next and is never doubled.
     init(simulateCapture: Bool = Recorder.allowsSimulatedCapture, recordingRoot: URL? = nil,
-         backend: (@MainActor () -> any CaptureBackend)? = nil) {
+         backend: (@MainActor () -> any CaptureBackend)? = nil, activity: RecordingLiveActivityController? = nil) {
         self.recordingRoot = recordingRoot
+        self.activity = activity ?? RecordingLiveActivityController()
         makeBackend = backend ?? { CaptureEnginePolicy.makeBackend() }
         #if DEBUG && targetEnvironment(simulator)
         isSimulated = simulateCapture
@@ -129,7 +136,7 @@ final class Recorder {
                 }
                 backend.onFailure = { [weak self, weak backend] message in
                     guard let self, let backend, self.backend === backend, isCapturing else { return }
-                    fail(message)
+                    fail(message, cause: .failure)
                 }
                 self.backend = backend
                 usesInjectedAudio = !backend.usesMicrophone
@@ -148,6 +155,8 @@ final class Recorder {
             if !title.isEmpty { activityTitle = title }
             if advertisesCapture { activity.start(noteID: noteID, title: activityTitle, elapsed: elapsed, account: activityAccount) }
             startMetering()
+            if !continuesRecording { playHaptic(.started) }
+            continuesRecording = false
         } catch {
             let continuous = backend is any ContinuousCaptureBackend
             _ = backend?.stop()
@@ -158,8 +167,9 @@ final class Recorder {
             currentFileURL = nil
             activityNoteID = nil
             deactivateSession()
-            activity.end()
+            activity.end(ending: .discard)
             state = .failed((error as? RecorderError)?.localizedDescription ?? "Recording could not start. Check your microphone and try again.")
+            playHaptic(.failed)
         }
     }
 
@@ -175,6 +185,7 @@ final class Recorder {
         if advertisesCapture { activity.pause(elapsed: elapsed) }
         deactivateSession()
         onPauseChanged?(true)
+        playHaptic(.paused)
     }
 
     func resumeFromPause() {
@@ -189,20 +200,47 @@ final class Recorder {
             if advertisesCapture, let noteID = activityNoteID { activity.start(noteID: noteID, title: activityTitle, elapsed: elapsed, account: activityAccount) }
             startMetering()
             onPauseChanged?(false)
+            playHaptic(.resumed)
         } catch {
-            fail("Recording could not resume. Your captured audio has been kept.")
+            fail("Recording could not resume. Your captured audio has been kept.", cause: .failure)
         }
     }
 
-    /// Returns and delivers the segment once. Every subsequent Stop is a no-op.
-    @discardableResult
-    func stopSegment(keepingLiveActivity: Bool = false) -> (segment: CaptureSegment, file: URL)? {
-        finalize(failure: nil, keepingLiveActivity: keepingLiveActivity)
+    /// Why a recording stopped without being asked to.
+    enum FailureCause: Equatable, Sendable {
+        /// A call or Siri took the audio session.
+        case interruption
+        /// The microphone went away: a headset disconnected and no input is left.
+        case inputLost
+        /// The audio system or the capture failed.
+        case failure
     }
 
-    private func finalize(failure: String?, keepingLiveActivity: Bool = false) -> (segment: CaptureSegment, file: URL)? {
+    /// Returns and delivers the segment once. Every subsequent Stop is a no-op.
+    /// `activity` says what the Live Activity does next: "Recording ended", "Writing
+    /// notes..." while the owner writes them, or gone at once for a cancelled recording.
+    @discardableResult
+    func stopSegment(activity ending: RecordingActivityEnding = .ended) -> (segment: CaptureSegment, file: URL)? {
+        finalize(failure: nil, ending: ending)
+    }
+
+    /// An internal boundary of one recording (a new part follows at once): the
+    /// Live Activity is left as it is and nothing is felt.
+    @discardableResult
+    func stopSegment(keepingLiveActivity: Bool) -> (segment: CaptureSegment, file: URL)? {
+        let finished = finalize(failure: nil, ending: keepingLiveActivity ? nil : .ended)
+        continuesRecording = keepingLiveActivity && finished != nil
+        return finished
+    }
+    /// The last stop was an internal boundary: the next start is the same recording going on.
+    @ObservationIgnored private var continuesRecording = false
+
+    /// `ending`: nil leaves the Live Activity alone (an internal boundary).
+    private func finalize(failure: String?, cause: FailureCause = .failure, ending: RecordingActivityEnding? = .ended) -> (segment: CaptureSegment, file: URL)? {
         guard isCapturing, let url = currentFileURL else {
-            if !keepingLiveActivity { activity.end(elapsed: elapsed) }
+            // A stop after the recording had already stopped (an interruption, then End)
+            // still moves the activity on; it never starts a new one.
+            if failure == nil, let ending { activity.end(elapsed: elapsed, ending: ending) }
             return nil
         }
         meterTask?.cancel()
@@ -216,10 +254,16 @@ final class Recorder {
         currentFileURL = nil
         activityNoteID = nil
         deactivateSession()
-        if !keepingLiveActivity { activity.end(elapsed: clock.completed) }
+        if failure != nil {
+            activity.interrupt(elapsed: clock.completed, cause: cause == .interruption ? .interruption : .failure)
+        } else if let ending {
+            activity.end(elapsed: clock.completed, ending: ending)
+        }
         elapsed = clock.completed
         levels = Self.restingLevels
         state = failure.map(State.failed) ?? .stopped
+        if failure != nil { playHaptic(RecordingHaptic.stopped(by: cause)) }
+        else if let ending { playHaptic(ending == .discard ? .discarded : .ended) }
         // Failed zero-length starts must not create transcript revisions.
         guard duration > 0.01 else {
             if continuous != nil, lastCapturedFrames == 0 { Self.discardEmptyCapture(url) }
@@ -231,7 +275,7 @@ final class Recorder {
         return (segment, url)
     }
 
-    private func fail(_ message: String) { _ = finalize(failure: message) }
+    private func fail(_ message: String, cause: FailureCause) { _ = finalize(failure: message, cause: cause) }
 
     private func startMetering() {
         meterTask?.cancel()
@@ -253,14 +297,14 @@ final class Recorder {
                 // headset goes) and carries on in the same file. A route can take a moment
                 // to settle, so it is asked for about a second before the capture is given up.
                 guard let continuous = backend as? any ContinuousCaptureBackend else {
-                    fail("Recording stopped unexpectedly. Your captured audio has been kept. Tap to resume.")
+                    fail("Recording stopped unexpectedly. Your captured audio has been kept. Tap to resume.", cause: .failure)
                     return
                 }
-                if let message = continuous.failureMessage { fail(message); return }
+                if let message = continuous.failureMessage { fail(message, cause: .failure); return }
                 guard continuous.restartInput() else {
                     inputRetries += 1
                     if inputRetries >= Self.inputRetryLimit {
-                        fail("The microphone disconnected. Your audio has been kept. Choose an input and tap to resume.")
+                        fail("The microphone disconnected. Your audio has been kept. Choose an input and tap to resume.", cause: .inputLost)
                     }
                     return
                 }
@@ -278,7 +322,7 @@ final class Recorder {
     private func observeSession() {
         observe(AVAudioSession.interruptionNotification, valueKey: AVAudioSessionInterruptionTypeKey) { [weak self] raw in
             if raw == AVAudioSession.InterruptionType.began.rawValue {
-                self?.fail("Recording was interrupted. Your audio has been kept. Tap to resume when ready.")
+                self?.fail("Recording was interrupted. Your audio has been kept. Tap to resume when ready.", cause: .interruption)
             }
         }
         observe(AVAudioSession.routeChangeNotification, valueKey: AVAudioSessionRouteChangeReasonKey) { [weak self] reason in
@@ -286,11 +330,11 @@ final class Recorder {
             if RouteChangePolicy.endsCapture(inputDeviceRemoved: reason == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue,
                                              noInputAvailable: AVAudioSession.sharedInstance().currentRoute.inputs.isEmpty,
                                              continuous: backend is any ContinuousCaptureBackend) {
-                fail("The microphone disconnected. Your audio has been kept. Choose an input and tap to resume.")
+                fail("The microphone disconnected. Your audio has been kept. Choose an input and tap to resume.", cause: .inputLost)
             }
         }
         observe(AVAudioSession.mediaServicesWereResetNotification) { [weak self] _ in
-            self?.fail("The audio system restarted. Your audio has been kept. Tap to resume.")
+            self?.fail("The audio system restarted. Your audio has been kept. Tap to resume.", cause: .failure)
         }
         observe(UIApplication.didBecomeActiveNotification) { [weak self] _ in
             guard let self else { return }
@@ -300,6 +344,8 @@ final class Recorder {
                 // backgrounding. Retrying the indicator never restarts audio.
                 activity.start(noteID: noteID, title: activityTitle, elapsed: elapsed, account: activityAccount)
             }
+            // A recording that stopped on its own is now said on its screen.
+            activity.appBecameActive(isCapturing: isCapturing)
         }
         observe(UIApplication.willTerminateNotification) { [weak self] _ in self?.stopSegment() }
     }
