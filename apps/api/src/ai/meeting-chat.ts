@@ -44,6 +44,8 @@ import {transcriptPassage} from "../meeting-search"
 import type {MeetingChatOptions,PreparedChat} from "./retrieval"
 import {noteChatBasePrompt,chatAnswerInstructions,chatMessageLayout,type LanguageMessage,type LanguageRequestParameters} from "./shared"
 import {forContext} from "../transcript-link"
+import {createRetrievalSession} from "./retrieval"
+import {researchMeetings,selectWorkspaceContext} from "./workspace-chat"
 import {copyState,liveConversations,type LiveConversation,type LiveConversationMatch,type LiveConversationStore,type LiveState,type LiveTurn,type ShownSegment} from "./live-conversation"
 
 /** A finished note: follow-up questions come within minutes, so the short cache lifetime is enough. */
@@ -768,7 +770,13 @@ export const MEETING_CHAT_SHARED_PROMPT=`
 The most damaging mistake is to say something was not discussed when it was. Before saying so, look through the whole transcript, not only where you expect the topic, and allow for different wording and misheard words; then check the notes.
 - If it truly is not there, say so in one plain sentence, and add the closest thing that was said if there is one.
 - If <status> says passages are not shown, something missing from what you can see may still have been said: say you can only see part of the meeting rather than that it was not discussed.
-- Never fill a gap with general knowledge or a guess presented as something from the meeting. A question that is not about the meeting at all (general knowledge, help with wording) can simply be answered.`
+- Never fill a gap with general knowledge or a guess presented as something from the meeting. A question that is not about the meeting at all (general knowledge, help with wording) can simply be answered.
+
+# Other meetings
+This chat is about one meeting, but the person's other meetings can be searched. When a question reaches beyond this meeting (other notes, earlier meetings, a person or topic across meetings, a period such as last week), the app searches them first and adds what it found to the question under <other_meetings>.
+- Answer from <other_meetings> for those questions, and say which meeting a fact comes from by its title and date. Keep it apart from what was said in this meeting.
+- If <other_meetings> found nothing that answers the question, say so in one sentence and name what was searched.
+- Never say there are no other notes or that you cannot see other meetings. If a question needs other meetings and there is no <other_meetings>, say you can look through their other meetings and ask what to look for.`
 export const MEETING_CHAT_FINISHED_PROMPT=`
 
 # The meeting has ended
@@ -856,6 +864,24 @@ export function meetingChatDocument(messages:ReadonlyArray<LanguageMessage>):str
   return [...blocks("meeting",all).slice(0,1).map(text=>`<meeting>\n${text}\n</meeting>`),`<transcript>\n${blocks("transcript",all).join("\n")}\n</transcript>`,rest].join("\n\n")
 }
 
+/** Whether a question in a chat about one meeting reaches beyond it: it names other notes or meetings, a period
+ * or an earlier occasion, or asks to search; or the previous answer offered to look through other meetings and
+ * this is the reply. Most questions are about the meeting itself and get no search, so they stay as quick as before. */
+const KINDS="notes?|meetings?|calls?|conversations?|syncs?|standups?|stand-ups?|sessions?|transcripts?|chats?|1:1s?|one-on-ones?"
+const PLURAL="notes|meetings|calls|conversations|syncs|standups|stand-ups|sessions|transcripts|chats"
+const BEYOND=[
+  new RegExp(`\\b(?:other|previous|earlier|past|prior|older|another|recent|last)\\s+(?:\\w+\\s+)?(?:${KINDS})\\b`,"i"),
+  new RegExp(`\\b(?:across|through|search|all)\\s+(?:of\\s+)?(?:my|our)\\s+(?:${PLURAL})\\b`,"i"),
+  /\b(?:last|this past|previous)\s+(?:week|month|quarter|year|time|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i,
+  /\b(?:yesterday|last time|before today|earlier this week|a while ago|we (?:met|talked|spoke) (?:before|last)|search (?:for|my|our|the)|look (?:up|through|across|for|into|at) (?:my|our|the other|other))\b/i,
+]
+const OFFERED=/\b(?:other|previous|earlier) (?:notes|meetings)\b|\blook (?:for|through)\b[^.?!]*\b(?:notes|meetings)\b/i
+export const reachesBeyondMeeting=(input:Pick<ChatInput,"message"|"history">):boolean=>{
+  if(BEYOND.some(pattern=>pattern.test(input.message)))return true
+  const previous=input.history.at(-1)
+  return previous?.role==="assistant"&&/\?\s*$/.test(previous.content.trim())&&OFFERED.test(previous.content)
+}
+
 /** Read the open note once and build its context. Replaces the session read
  * used by workspace chat: that path caps a read at 160,000 characters of JSON,
  * which an hour of transcript exceeds. The limits that apply here instead are
@@ -879,6 +905,14 @@ export async function prepareMeetingNoteChat(options:MeetingChatOptions,noteId:s
   const context=assembleMeetingChat(note,input,{citable:sources&&!!options.labelledLines,now:options.now??null,
     ...(options.liveConversations?{conversations:options.liveConversations}:{}),...(options.conversationScope?{scope:options.conversationScope}:{}),...(options.onLiveThreadRebuilt?{onThreadRebuilt:options.onLiveThreadRebuilt}:{})})
   emit("completed","Looked deeper into 1 note",[{noteId:note.id,title:note.title,date:note.date}])
+  // A question about other meetings: the same research workspace chat runs, its findings added to this one
+  // answer's question only. The thread that is kept (a live one) holds the plain question, so the next request
+  // repeats exactly what the provider has cached and does not carry the search forward.
+  const other=reachesBeyondMeeting(input)?await researchMeetings(createRetrievalSession(options,selectWorkspaceContext)).then(found=>found.retrieved.replace(/\[S\d+\] ?/g,""),()=>{signal.throwIfAborted();return null}):null
+  if(other){
+    const last=context.messages.at(-1)
+    if(last?.role==="user")Object.assign(context,{messages:[...context.messages.slice(0,-1),{...last,content:`${last.content}\n\n<other_meetings>\nWhat a search of the person's other meetings found for this question. It is not part of this meeting.\n${other}\n</other_meetings>`}]})
+  }
   // The note handed on holds exactly what the model is shown.
   const prepared:MeetingChatNote={...note,body:context.shownNotes,enhanced:context.shownSummary,transcriptSegments:[...context.shown,...note.transcriptSegments.filter(segment=>!segment.isFinal&&segment.text.trim()&&!context.shown.includes(segment))],meetingChat:context}
   // A thread on a meeting in progress is measured as it is sent; a finished note by its JSON form, as before.
