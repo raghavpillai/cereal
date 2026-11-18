@@ -2,9 +2,40 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNo
 import { X } from 'lucide-react'
 import { AdminClientError } from '../../lib/client-error'
 import { cssMilliseconds } from '../../lib/css-time'
+import { reducedMotion } from './update-motion'
 
 export function Notice({ children, error = false }: { children: ReactNode; error?: boolean }) {
   return <div className={`admin-notice${error ? ' is-error' : ''}`} role={error ? 'alert' : 'status'}>{children}</div>
+}
+/** Something that is on the page or is not (a notice, an error under a field, a provider's editor). It opens into
+ * its place and closes out of it, so what follows is carried instead of jumping. What it held stays, lifeless, for
+ * the moment it takes to close. Shown from the start, it is simply there: only a change moves. With reduced motion
+ * it is there or gone at once, and nothing ever waits for the closing to end to be usable. */
+export function Reveal({ children, className = '', onExited, abrupt = false }: { children: ReactNode; className?: string; /** Called as the closed content is taken out, in the same update. */ onExited?: () => void; /** Goes at once instead of closing: something else is opening in its stead. */ abrupt?: boolean }) {
+  const present = children !== null && children !== undefined && children !== false && children !== ''
+  const kept = useRef<ReactNode>(null), exited = useRef(onExited)
+  if (present) kept.current = children
+  exited.current = onExited
+  const [phase, setPhase] = useState<'gone' | 'entering' | 'shown' | 'leaving'>(present ? 'shown' : 'gone')
+  if (present && (phase === 'gone' || phase === 'leaving')) setPhase(reducedMotion() ? 'shown' : 'entering')
+  if (!present && (phase === 'shown' || phase === 'entering')) setPhase(abrupt || reducedMotion() ? 'gone' : 'leaving')
+  useEffect(() => {
+    if (phase !== 'entering' && phase !== 'leaving') return
+    const tokens = getComputedStyle(document.documentElement)
+    const wait = phase === 'entering' ? cssMilliseconds(tokens.getPropertyValue('--dur-snappy'), 280) : cssMilliseconds(tokens.getPropertyValue('--dur-snappy-exit'), 180)
+    const timer = window.setTimeout(() => { setPhase(phase === 'entering' ? 'shown' : 'gone'); if (phase === 'leaving') exited.current?.() }, wait)
+    return () => window.clearTimeout(timer)
+  }, [phase])
+  if (!present && phase !== 'leaving') return null
+  return <div className={`reveal ${className}`.trim()} data-phase={present && phase === 'gone' ? 'shown' : phase} inert={phase === 'leaving' && !present}><div className="reveal-inner">{present ? children : kept.current}</div></div>
+}
+/** Words that change: the new ones rise in as the old ones leave, in the same place. `initial` is what was there
+ * before this was drawn at all (the line a save row said just before it was drawn again). */
+export function Swap({ text, children, initial }: { text: string; children?: ReactNode; initial?: string }) {
+  const [pair, setPair] = useState<{ now: string; before: string | null }>({ now: text, before: initial !== undefined && initial !== text ? initial : null })
+  if (pair.now !== text) setPair({ now: text, before: pair.now })
+  const before = pair.now === text ? pair.before : pair.now
+  return <span className="swap"><span key={text} className={before !== null ? 'swap-now is-arriving' : 'swap-now'}>{children ?? text}</span>{before !== null && <span key={`was ${before}`} className="swap-was" aria-hidden="true">{before}</span>}</span>
 }
 export function Empty({ title, children }: { title: string; children: ReactNode }) {
   return <div className="admin-empty"><h3>{title}</h3><p>{children}</p></div>

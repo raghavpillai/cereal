@@ -1,10 +1,11 @@
-import {useCallback,useState} from 'react'
+import {useCallback,useRef,useState} from 'react'
 import type {UserDTO} from '@meeting-notes/contracts'
 import type {AdminClient} from '../../lib/admin-client'
 import {Button} from '../ui/button'
 import {Badge} from '../ui/badge'
 import {Card,CardContent,CardHeader,CardTitle} from '../ui/card'
-import {Modal,Notice,useAdminTask,useResource} from './shared'
+import {Modal,Notice,Reveal,useAdminTask,useResource} from './shared'
+import {useFlow} from './settings-motion'
 import {Plus,ShieldCheck} from 'lucide-react'
 
 export function AdministratorsPanel(props:{client:AdminClient;viewer:UserDTO;expired:()=>void}){
@@ -14,21 +15,27 @@ function OwnerAdministrators({client,viewer,expired}:{client:AdminClient;viewer:
  const load=useCallback((signal:AbortSignal)=>client.listUsers(signal),[client]),resource=useResource(load,expired),tasks=useAdminTask(expired)
  const[adding,setAdding]=useState(false),[revoking,setRevoking]=useState<UserDTO|null>(null),[notice,setNotice]=useState<string|null>(null)
  const users=resource.data?.users??[],busy=tasks.pending.size>0
+ // The list takes the place of "Loading…" and the card goes to its height, instead of both jumping (./settings-motion).
+ const body=useRef<HTMLDivElement>(null)
+ useFlow(body)
  async function promote(userId:string){const result=await tasks.run('admin',signal=>client.updateUserRole(userId,{role:'admin'},signal));if(result.ok){setAdding(false);setNotice('Administrator added.');await resource.reload()}}
  async function revoke(user:UserDTO){const result=await tasks.run('admin',signal=>client.updateUserRole(user.id,{role:'user'},signal));if(result.ok){setRevoking(null);setNotice('Administrator access revoked.');await resource.reload()}}
  return <>
   <Card className="administrators-card"><CardHeader className="section-with-action"><div><CardTitle>Administrators</CardTitle><span className="section-caption">Only you can manage admin access.</span></div><Button type="button" variant="outline" size="sm" disabled={busy||!resource.data} onClick={()=>{tasks.clearError();setAdding(true);void resource.reload()}}><Plus/>Add admin</Button></CardHeader><CardContent>
-   {notice&&<p className="admin-inline-notice" role="status">{notice}</p>}
-   {resource.error&&<Notice error>{resource.error}<Button type="button" variant="ghost" size="sm" onClick={()=>void resource.reload()}>Retry</Button></Notice>}
-   {!resource.data&&!resource.error?<p className="settings-help">Loading administrators…</p>:<AdministratorsList users={users} viewer={viewer} busy={busy} revoke={user=>{tasks.clearError();setRevoking(user)}}/>}
+   <Reveal>{notice&&<p key={notice} className="admin-inline-notice" role="status">{notice}</p>}</Reveal>
+   <Reveal>{resource.error&&<Notice error>{resource.error}<Button type="button" variant="ghost" size="sm" onClick={()=>void resource.reload()}>Retry</Button></Notice>}</Reveal>
+   <div className="administrators-body" ref={body}>{!resource.data&&!resource.error?<p key="loading" className="settings-help">Loading administrators…</p>:<AdministratorsList key="list" users={users} viewer={viewer} busy={busy} revoke={user=>{tasks.clearError();setRevoking(user)}}/>}</div>
   </CardContent></Card>
   {adding&&<AddAdministrator users={users} busy={busy} loading={resource.busy} error={tasks.error??resource.error} close={()=>setAdding(false)} promote={promote} refresh={resource.reload}/>}
   {revoking&&<Modal title="Revoke admin access?" busy={busy} close={()=>setRevoking(null)}><div className="admin-dialog-body"><p><strong>{revoking.email}</strong> will lose instance-settings access. Their notes are kept.</p>{tasks.error&&<Notice error>{tasks.error}</Notice>}</div><div className="admin-dialog-actions"><Button type="button" variant="outline" disabled={busy} onClick={()=>setRevoking(null)}>Cancel</Button><Button type="button" variant="destructive" disabled={busy} data-busy={busy?'':undefined} onClick={()=>void revoke(revoking)}>{busy?'Revoking…':'Revoke admin'}</Button></div></Modal>}
  </>
 }
 export function AdministratorsList({users,viewer,busy,revoke}:{users:readonly UserDTO[];viewer:UserDTO;busy:boolean;revoke:(user:UserDTO)=>void}){
+ // A row travels when someone is added above it or taken out, and the one that goes fades where it was.
+ const list=useRef<HTMLDivElement>(null)
+ useFlow(list)
  if(viewer.role!=='owner')return null
- return <div className="administrators-list">{users.filter(user=>user.role==='owner'||user.role==='admin').map(user=><div className="administrator-row" key={user.id}><div className="administrator-avatar" aria-hidden="true">{user.name.trim().slice(0,1).toUpperCase()||'A'}</div><span className="administrator-person"><strong>{user.name}{user.id===viewer.id&&<small>you</small>}</strong><span>{user.email}</span></span>{user.role==='owner'?<Badge variant="secondary"><ShieldCheck size={11}/>Owner</Badge>:<Button type="button" variant="ghost" size="sm" disabled={busy} aria-label={`Revoke admin access for ${user.email}`} onClick={()=>revoke(user)}>Revoke</Button>}</div>)}</div>
+ return <div className="administrators-list" ref={list}>{users.filter(user=>user.role==='owner'||user.role==='admin').map(user=><div className="administrator-row" key={user.id}><div className="administrator-avatar" aria-hidden="true">{user.name.trim().slice(0,1).toUpperCase()||'A'}</div><span className="administrator-person"><strong>{user.name}{user.id===viewer.id&&<small>you</small>}</strong><span>{user.email}</span></span>{user.role==='owner'?<Badge variant="secondary"><ShieldCheck size={11}/>Owner</Badge>:<Button type="button" variant="ghost" size="sm" disabled={busy} aria-label={`Revoke admin access for ${user.email}`} onClick={()=>revoke(user)}>Revoke</Button>}</div>)}</div>
 }
 export function AddAdministrator({users,busy,loading=false,error,close,promote,refresh}:{users:readonly UserDTO[];busy:boolean;loading?:boolean;error:string|null;close:()=>void;promote:(id:string)=>Promise<void>;refresh:()=>Promise<void>}){
  const[selected,setSelected]=useState('')

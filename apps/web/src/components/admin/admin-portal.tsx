@@ -11,7 +11,7 @@ import {Onboarding} from '../onboarding/onboarding'
 import {AdministratorsPanel} from './administrators-panel'
 import {SettingsPanel} from './settings-panel'
 import {UpdatesPanel} from './updates-panel'
-import {Loading,Notice,useAdminTask,useResource} from './shared'
+import {Loading,Notice,Reveal,Swap,useAdminTask,useResource} from './shared'
 import {Button} from '../ui/button'
 import {ArrowUpRight,LogOut} from 'lucide-react'
 import '../../admin.css'
@@ -52,17 +52,22 @@ function LoadWorkspace({session,client,expired,signOut,arrival,transport}:{sessi
  if(!loaded)return <Page><section className="admin-card">{resource.error?<Notice error>{resource.error}<button onClick={()=>void resource.reload()}>Retry</button></Notice>:<Loading label="Loading instance settings…"/>}</section></Page>
  // While setup is unfinished it is all this page shows: there is no way to the settings except through it.
  if(needsOnboarding(loaded))return <Onboarding client={client} viewerEmail={session.user.email} initial={{kind:'ready',settings:loaded}} expired={expired} finished={settings=>setOpened({settings,celebrate:true})}/>
- return <Page settled arriving={opened?.celebrate??false}><Workspace key={opened?.settings.onboarding?.completedAt??'loaded'} session={session} client={client} initialSettings={loaded} transport={transport} expired={expired} signOut={signOut} restart={settings=>setSetup({settings,fromStart:true})}/></Page>
+ return <Page settled arriving={opened?.celebrate??false}><Workspace key={opened?.settings.onboarding?.completedAt??'loaded'} arriving={opened?.celebrate??false} session={session} client={client} initialSettings={loaded} transport={transport} expired={expired} signOut={signOut} restart={settings=>setSetup({settings,fromStart:true})}/></Page>
 }
-function Workspace({session,client,initialSettings,transport,expired,signOut,restart}:{session:AuthSessionDTO;client:AdminClient;initialSettings:AdminSettingsDTO;transport:Transport|undefined;expired:()=>void;signOut:()=>Promise<void>;restart:(settings:AdminSettingsDTO)=>void}){
+function Workspace({session,client,initialSettings,transport,expired,signOut,restart,arriving}:{/** Just out of setup: the page settles in as one (onboarding.css), not part by part. */arriving:boolean;session:AuthSessionDTO;client:AdminClient;initialSettings:AdminSettingsDTO;transport:Transport|undefined;expired:()=>void;signOut:()=>Promise<void>;restart:(settings:AdminSettingsDTO)=>void}){
  const[settings,setSettings]=useState(initialSettings),[notice,setNotice]=useState<string|null>(null),tasks=useAdminTask(expired)
- async function save(patch:UpdateAdminSettingsInput){const result=await tasks.run('settings',signal=>client.updateSettings(patch,signal));if(result.ok){setSettings(result.value);setNotice('Instance settings saved.')}}
+ // Why the form is being drawn. The first time, the page arrives part by part (admin.css, "Arriving"); the form is drawn
+ // again after every save, and then nothing arrives: only the save row says what happened.
+ const[drawn,setDrawn]=useState<'first'|'loaded'|'saved'>(arriving?'loaded':'first')
+ useEffect(()=>{const timer=window.setTimeout(()=>setDrawn(now=>now==='first'?'loaded':now),1400);return()=>window.clearTimeout(timer)},[])
+ async function save(patch:UpdateAdminSettingsInput){const result=await tasks.run('settings',signal=>client.updateSettings(patch,signal));if(result.ok){setDrawn('saved');setSettings(result.value);setNotice('Instance settings saved.')}}
  async function runSetupAgain(){const result=await tasks.run('setup',signal=>client.restartOnboarding(signal));if(result.ok)restart(result.value)}
  return <>
-  <div className="instance-heading"><div><h1>Instance settings</h1><p>{settings.instanceName}</p></div><span className="instance-owner">{session.user.role==='owner'?'Owner':'Administrator'}</span></div>
+  <div className="instance-heading" data-entrance={drawn==='first'?'':undefined}><div><h1>Instance settings</h1><p><Swap text={settings.instanceName}/></p></div><span className="instance-owner">{session.user.role==='owner'?'Owner':'Administrator'}</span></div>
   <TransportWarning transport={transport}/>
-  {notice&&<Notice>{notice}</Notice>}{tasks.error&&<Notice error>{tasks.error}</Notice>}
-  <SettingsPanel key={settings.updatedAt??'initial'} viewerEmail={session.user.email} settings={settings} client={client} expired={expired} busy={tasks.pending.has('settings')} save={save} replace={next=>{setSettings(next);setNotice('Sign-in method changed.')}} extra={session.user.role==='owner'?[{id:'administrators',label:'Administrators',content:<AdministratorsPanel client={client} viewer={session.user} expired={expired}/>},{id:'updates',label:'Updates',content:<UpdatesPanel expired={expired}/>}]:[]}/>
-  <div className="instance-footer"><span>Signed in as {session.user.email}{transport==='private'&&<span className="instance-transport"> · {PRIVATE_TRANSPORT_LINE}</span>}</span><div>{session.user.role==='owner'&&settings.onboarding&&<button type="button" className="instance-setup-again" disabled={tasks.pending.has('setup')} onClick={()=>void runSetupAgain()}>Run setup again</button>}<a href="/account">Google Calendar <ArrowUpRight size={12}/></a><Button variant="ghost" size="sm" onClick={()=>void signOut()}><LogOut/>Sign out</Button></div></div>
+  {/* A notice opens into its place and closes out of it, so the page under it is carried rather than pushed. */}
+  <Reveal>{notice&&<Notice>{notice}</Notice>}</Reveal><Reveal>{tasks.error&&<Notice error>{tasks.error}</Notice>}</Reveal>
+  <SettingsPanel key={settings.updatedAt??'initial'} drawn={drawn} viewerEmail={session.user.email} settings={settings} client={client} expired={expired} busy={tasks.pending.has('settings')} save={save} replace={next=>{setDrawn('loaded');setSettings(next);setNotice('Sign-in method changed.')}} extra={session.user.role==='owner'?[{id:'administrators',label:'Administrators',content:<AdministratorsPanel client={client} viewer={session.user} expired={expired}/>},{id:'updates',label:'Updates',content:<UpdatesPanel expired={expired}/>}]:[]}/>
+  <div className="instance-footer" data-entrance={drawn==='first'?'':undefined}><span>Signed in as {session.user.email}{transport==='private'&&<span className="instance-transport"> · {PRIVATE_TRANSPORT_LINE}</span>}</span><div>{session.user.role==='owner'&&settings.onboarding&&<button type="button" className="instance-setup-again" disabled={tasks.pending.has('setup')} onClick={()=>void runSetupAgain()}>Run setup again</button>}<a href="/account">Google Calendar <ArrowUpRight size={12}/></a><Button variant="ghost" size="sm" onClick={()=>void signOut()}><LogOut/>Sign out</Button></div></div>
  </>
 }

@@ -58,26 +58,111 @@
 /* Wider than the other admin pages by the width of the list, so a section's card is as wide as it was. */
 :root .instance-settings:has(.settings-layout){max-width:calc(70rem + 2 * var(--gutter))}
 .settings-layout{display:grid;grid-template-columns:176px minmax(0,1fr);gap:32px;align-items:start}
-.settings-pane{min-width:0}
+/* The section's own place. What is leaving it is laid over it for a moment (.settings-ghost), so it is the frame for that. */
+.settings-pane{position:relative;min-width:0}
+.settings-stage{min-width:0}
 /* Stays in view while a long section scrolls. Its items are 8px in on each side, taken back here so their words
    start on the page's left edge, under the title. */
 .settings-nav{position:sticky;top:16px;display:grid;gap:2px;margin:0 -8px}
-.settings-nav a{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:32px;padding:0 8px;border-radius:var(--control-radius);font-size:var(--text-control);line-height:18px;color:var(--muted-foreground);text-decoration:none;white-space:nowrap;transition:background-color var(--dur-hover-in) var(--ease-fade),color var(--dur-hover-in) var(--ease-fade)}
-.settings-nav a:hover{background:var(--wash);color:var(--foreground)}
+.settings-nav a{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:32px;padding:0 8px;border-radius:var(--control-radius);font-size:var(--text-control);line-height:18px;color:var(--muted-foreground);text-decoration:none;white-space:nowrap;transition:background-color var(--dur-hover-out) var(--ease-fade),border-color var(--dur-hover-out) var(--ease-fade),color var(--dur-hover-out) var(--ease-fade)}
+.settings-nav a:hover{background:var(--wash);color:var(--foreground);transition-duration:var(--dur-hover-in)}
 .settings-nav a:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
-.settings-nav a[aria-current]{background:var(--wash-strong);color:var(--foreground);font-weight:500}
-/* A section with an edit that is not saved yet. */
-.settings-nav-unsaved{flex-shrink:0;width:6px;height:6px;border-radius:50%;background:var(--brand)}
+.settings-nav a[aria-current]{color:var(--foreground)}
+/* One highlight for the whole list. It travels from the section that was chosen to the one that is: the edge
+   facing where it goes arrives first on the snappy spring and the other lets go a moment later on the gooey one,
+   so it stretches towards the new section and catches up (the segmented control does the same, styles/base.css).
+   Where it stands is measured (components/admin/settings-panel.tsx); it only travels on a change of section. */
+.settings-nav-thumb{position:absolute;z-index:0;top:var(--thumb-top,0);right:var(--thumb-right,0);bottom:var(--thumb-bottom,0);left:var(--thumb-left,0);border-radius:var(--control-radius);background:var(--wash-strong);opacity:0;pointer-events:none}
+.settings-nav[data-ready] .settings-nav-thumb{opacity:1}
+.settings-nav[data-ready][data-dir=forward] .settings-nav-thumb{transition:bottom calc(var(--dur-gooey) * .6) var(--spring-snappy),right calc(var(--dur-gooey) * .6) var(--spring-snappy),top calc(var(--dur-gooey) * .84) var(--spring-gooey) calc(var(--dur-gooey) * .16),left calc(var(--dur-gooey) * .84) var(--spring-gooey) calc(var(--dur-gooey) * .16)}
+.settings-nav[data-ready][data-dir=backward] .settings-nav-thumb{transition:top calc(var(--dur-gooey) * .6) var(--spring-snappy),left calc(var(--dur-gooey) * .6) var(--spring-snappy),bottom calc(var(--dur-gooey) * .84) var(--spring-gooey) calc(var(--dur-gooey) * .16),right calc(var(--dur-gooey) * .84) var(--spring-gooey) calc(var(--dur-gooey) * .16)}
+/* Until it has been measured, and under the chosen name once it has, a hover adds nothing. */
+.settings-nav:not([data-ready]) a[aria-current]{background:var(--wash-strong)}
+.settings-nav[data-ready] a[aria-current]{background:transparent}
+/* The name, above the highlight. It is written twice, regular and medium, one over the other: choosing a section
+   fades one into the other, and since the medium one always takes its room the row never changes width. */
+.settings-nav-label{position:relative;z-index:1;display:inline-grid;transition:transform var(--dur-snappy) var(--spring-snappy)}
+.settings-nav-label>span{grid-area:1/1;transition:opacity var(--dur-hover-out) var(--ease-fade)}
+.settings-nav-label>span:last-child{font-weight:500;opacity:0}
+.settings-nav a[aria-current] .settings-nav-label>span:first-child{opacity:0}
+.settings-nav a[aria-current] .settings-nav-label>span:last-child{opacity:1}
+.settings-nav a:hover:not([aria-current]) .settings-nav-label{transform:translateX(2px)}
+.settings-nav a:active .settings-nav-label{transform:scale(var(--squash));transition-duration:var(--dur-press)}
+/* A section with an edit that is not saved yet: the mark pops in, and shrinks away once the edit is saved or undone. */
+.settings-nav-unsaved{position:relative;z-index:1;flex-shrink:0;width:6px;height:6px;border-radius:50%;background:var(--brand);opacity:0;transform:scale(0);transition:transform var(--dur-snappy-exit) var(--ease-exit),opacity var(--dur-snappy-exit) var(--ease-fade),width var(--dur-snappy-exit) var(--ease-exit),margin var(--dur-snappy-exit) var(--ease-exit)}
+.settings-nav-unsaved[data-on]{opacity:1;transform:scale(1);transition:transform var(--dur-gooey) var(--spring-gooey),opacity var(--dur-hover-in) var(--ease-fade),width var(--dur-snappy) var(--spring-snappy),margin var(--dur-snappy) var(--spring-snappy)}
 @media(max-width:820px){
  /* No room for a column: the sections become one row above the chosen one, scrolling sideways inside itself
     (the page never does). It runs to the screen's edges so a cut-off name shows there is more. */
  .settings-layout{grid-template-columns:minmax(0,1fr);gap:var(--section-gap)}
- .settings-nav{position:static;display:flex;gap:4px;margin:0 calc(-1 * var(--gutter));padding:0 var(--gutter);overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:none}
+ .settings-nav{position:relative;display:flex;gap:4px;margin:0 calc(-1 * var(--gutter));padding:0 var(--gutter);overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:none}
  .settings-nav::-webkit-scrollbar{display:none}
- .settings-nav a{flex-shrink:0;justify-content:flex-start;gap:6px;min-height:var(--control-h-sm);padding:0 12px;border:1px solid var(--border);border-radius:999px;background:var(--background)}
+ .settings-nav a{flex-shrink:0;justify-content:flex-start;gap:0;min-height:var(--control-h-sm);padding:0 12px;border:1px solid var(--border);border-radius:999px;background:var(--background)}
+ /* The highlight travels across the row here, as a pill; the chosen name gives up its own outline to it. */
+ .settings-nav-thumb{border-radius:999px}
  .settings-nav a[aria-current]{border-color:transparent}
+ .settings-nav a:hover:not([aria-current]) .settings-nav-label{transform:none}
+ /* The mark takes no room in the row until there is something to mark. */
+ .settings-nav-unsaved{width:0;margin-left:0}
+ .settings-nav-unsaved[data-on]{width:6px;margin-left:6px}
 }
-.instance-form .admin-fieldset{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--section-gap)}
+.instance-form .admin-fieldset{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--section-gap);transition:opacity var(--dur-hover-out) var(--ease-fade)}
+
+/* ── A change of section (components/admin/settings-motion.ts) ─────────────────────────────────────────────
+   The card is the section's frame and stays: it goes to the new section's height on a spring while its rows
+   arrive one after another, from the side the list was travelled. What it held before is copied here, without
+   a frame of its own, and fades where it was, quickly, so old and new are never both readable. The save row
+   and the footer are carried by the layout as the frame changes. */
+.settings-ghost{position:absolute;z-index:1;overflow:clip;pointer-events:none}
+.settings-ghost *{animation:none!important;transition:none!important}
+:root .instance-settings .settings-ghost>.is-ghost{border-color:transparent;background:transparent;box-shadow:none}
+
+/* ── Arriving: the first time the page is shown ─────────────────────────────────────────────────────────────
+   The title, then who is signed in as what, then the sections one after another, the card and (from
+   settings-motion.ts) its rows, and last what is under it. Nothing waits for it: it is all there to be used. */
+.instance-heading[data-entrance] h1{animation:fade-in var(--dur-snappy) var(--ease-fade) backwards,rise var(--dur-settle) var(--spring-settle) backwards}
+.instance-heading[data-entrance] p{animation:fade-in var(--dur-snappy) var(--ease-fade) 60ms backwards,rise var(--dur-settle) var(--spring-settle) 60ms backwards}
+.instance-heading[data-entrance] .instance-owner{animation:fade-in var(--dur-snappy) var(--ease-fade) 120ms backwards,pop-in var(--dur-gooey) var(--spring-gooey) 120ms backwards}
+.settings-layout[data-entrance] .settings-nav a{animation:fade-in var(--dur-snappy) var(--ease-fade) calc(90ms + var(--i,0) * var(--stagger-step)) backwards,rise var(--dur-settle) var(--spring-settle) calc(90ms + var(--i,0) * var(--stagger-step)) backwards}
+.settings-layout[data-entrance] .settings-nav-thumb{animation:fade-in var(--dur-snappy) var(--ease-fade) 90ms backwards,rise var(--dur-settle) var(--spring-settle) 90ms backwards}
+.settings-layout[data-entrance] .settings-stage [data-slot=card]{animation:fade-in var(--dur-snappy) var(--ease-fade) 160ms backwards,rise var(--dur-settle) var(--spring-settle) 160ms backwards}
+.settings-layout[data-entrance] .instance-save{animation:fade-in var(--dur-settle) var(--ease-fade) 360ms backwards}
+.instance-footer[data-entrance]{animation:fade-in var(--dur-settle) var(--ease-fade) 420ms backwards}
+
+/* ── Things that come and go (Reveal, components/admin/shared.tsx) ──────────────────────────────────────────
+   A notice, an error under a field, a provider's editor, the parts of a form that depend on a choice: each opens
+   into its place and closes out of it, so what follows is carried there. One row of a grid that goes from
+   nothing to its content's height; the content is clipped top and bottom only while it moves, so a focus ring
+   at its edge is whole the rest of the time. */
+.reveal{display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:1fr;min-width:0}
+.reveal>.reveal-inner{display:flow-root;min-width:0;min-height:0}
+.reveal:is([data-phase=entering],[data-phase=leaving])>.reveal-inner{overflow-y:clip}
+.reveal[data-phase=entering]{animation:reveal-open var(--dur-snappy) var(--spring-snappy) backwards}
+.reveal[data-phase=entering]>.reveal-inner{animation:fade-in var(--dur-snappy) var(--ease-fade) backwards}
+.reveal[data-phase=leaving]{pointer-events:none;animation:reveal-close var(--dur-snappy-exit) var(--ease-exit) forwards}
+.reveal[data-phase=leaving]>.reveal-inner{animation:fade-out calc(var(--dur-snappy-exit) * .7) var(--ease-fade) forwards}
+@keyframes reveal-open{from{grid-template-rows:0fr}}
+@keyframes reveal-close{to{grid-template-rows:0fr}}
+/* In a column of rows held apart by a gap, the gap belongs to what comes and goes: it opens and closes with it. */
+.reveal:is(.reveal-row,.reveal-error){margin-top:calc(-1 * var(--row-gap))}
+.reveal-row>.reveal-inner::before{content:'';display:block;height:var(--row-gap)}
+.reveal-error>.reveal-inner::before{content:'';display:block;height:var(--label-gap)}
+.instance-settings .reveal-error .settings-error{margin-top:0}
+/* A part of a card that depends on a choice (the bucket, the Google settings): ruled off from the part above it. */
+.reveal-part>.reveal-inner>:is(.model-section,.admin-google-only){margin-top:var(--section-gap);padding-top:var(--section-gap);border-top:1px solid var(--border)}
+/* Its own opening is enough: the editor does not also rise. */
+.instance-settings .reveal .provider-editor{animation:none}
+
+/* Words that change (Swap): the new ones rise in as the old ones leave upwards, in the same place; the old are
+   gone before the new are there to be read. */
+.swap{position:relative;display:inline-block;min-width:0}
+.swap-now.is-arriving{display:inline-block;animation:fade-in var(--dur-snappy) var(--ease-fade) var(--dur-press) backwards,rise var(--dur-settle) var(--spring-settle) var(--dur-press) backwards}
+.swap-was{position:absolute;top:0;left:0;max-width:calc(100vw - 2 * var(--gutter) - 24px);overflow:hidden;white-space:nowrap;opacity:0;pointer-events:none;animation:swap-leave var(--dur-hover-in) var(--ease-fade) both}
+@keyframes swap-leave{from{opacity:1}to{opacity:0;transform:translateY(calc(var(--rise) * -1))}}
+
+/* Lists whose rows travel (useFlow): a row that was taken out fades where it stood, placed from the list's own corner. */
+.provider-list,.chat-model-list,.allowed-list,.administrators-list,.administrators-body{position:relative}
+[data-flow-ghost],[data-flow-ghost] *{animation:none!important;transition:none!important}
 
 /* ── Cards ────────────────────────────────────────────────────────────── */
 .instance-settings [data-slot=card]{min-width:0;border-style:solid;box-shadow:none}
@@ -104,12 +189,20 @@
  display:block;width:100%;min-width:0;height:var(--control-h);min-height:var(--control-h);padding:0 var(--control-px);
  border:1px solid var(--input);border-radius:var(--control-radius);background:var(--background);color:var(--foreground);
  font:var(--text-control)/1.4 var(--font-ui);box-shadow:none;
+ transition:border-color var(--dur-hover-out) var(--ease-fade),box-shadow var(--dur-hover-out) var(--ease-fade),background-color var(--dur-hover-out) var(--ease-fade),opacity var(--dur-hover-out) var(--ease-fade);
 }
+/* A field answers the pointer before it is clicked, and its focus ring grows out of its edge instead of appearing. */
+.instance-settings input:not([type=checkbox]):not([type=file]):not([type=color]):not([type=radio]):hover:not(:disabled):not(:focus-visible),
+.instance-settings .model-select-trigger:hover:not(:disabled):not(:focus-visible){border-color:color-mix(in srgb,var(--field-line) 55%,var(--foreground));transition-duration:var(--dur-hover-in)}
+.instance-settings input:not([type=checkbox]):not([type=file]):not([type=color]):not([type=radio]):focus-visible{transition-duration:var(--dur-hover-in)}
 .instance-settings input:not([type=checkbox]):not([type=file]):not([type=color]):not([type=radio]):focus-visible,
 .instance-settings .admin-dialog .admin-account-select:focus-visible,
 .instance-settings .model-select-trigger:focus-visible{outline:none;border-color:var(--focus);box-shadow:0 0 0 3px color-mix(in srgb,var(--focus) 28%,transparent)}
 .instance-settings input[type=file].sr-only{position:absolute;width:1px;min-width:0;min-height:0;height:1px;padding:0;border:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
-.instance-settings input:is([type=checkbox],[type=radio]){width:16px;height:16px;min-width:0;min-height:0;margin:0;padding:0;flex:0 0 16px;accent-color:var(--primary)}
+.instance-settings input:is([type=checkbox],[type=radio]){width:16px;height:16px;min-width:0;min-height:0;margin:0;padding:0;flex:0 0 16px;accent-color:var(--primary);cursor:pointer;transition:transform var(--dur-gooey) var(--spring-gooey)}
+/* Pressed, a box or a dot gives; let go, it springs back as it changes. */
+.instance-settings :is(.live-toggle,.remove-key):active input:is([type=checkbox],[type=radio]):not(:disabled),.instance-settings input:is([type=checkbox],[type=radio]):active:not(:disabled){transform:scale(.84);transition-duration:var(--dur-press)}
+.instance-settings input:is([type=checkbox],[type=radio]):disabled{cursor:not-allowed}
 
 .instance-settings [data-slot=button],.instance-select [data-slot=button]{height:var(--control-h);padding:0 14px;gap:6px;border-style:solid;border-radius:var(--control-radius);font:500 var(--text-control)/1 var(--font-ui);box-shadow:none}
 .instance-settings [data-slot=button][data-size=sm],.instance-select [data-slot=button][data-size=sm]{height:var(--control-h-sm);padding:0 10px;font-size:var(--text-label)}
@@ -121,14 +214,15 @@
    While its request runs it keeps its colour, as Continue does in setup: data-busy, a spinner inside it, or the save row's spinner. */
 .instance-settings [data-slot=button]:is([data-variant=default],[data-variant=destructive]):disabled:not([data-busy]):not(:has(.animate-spin)):not(.instance-save:has(.animate-spin)>*){border-color:transparent;background:var(--wash-strong);color:var(--ink-faint);opacity:1}
 
-.instance-settings [data-slot=badge]{flex-shrink:0;height:20px;padding:0 6px;gap:4px;border-style:solid;border-radius:6px;font:400 var(--text-badge)/1 var(--font-ui);white-space:nowrap}
+.instance-settings [data-slot=badge]{flex-shrink:0;height:20px;padding:0 6px;gap:4px;border-style:solid;border-radius:6px;font:400 var(--text-badge)/1 var(--font-ui);white-space:nowrap;transition:background-color var(--dur-snappy) var(--ease-fade),border-color var(--dur-snappy) var(--ease-fade),color var(--dur-snappy) var(--ease-fade)}
 .instance-settings [data-slot=badge] svg{width:11px;height:11px}
 
 /* A checkbox and its sentence: as tall as any other row, so a group reads as one column of rows. */
 /* The box sits on the first line, so a sentence that wraps on a phone keeps its box beside its start; one line is still a control tall. */
 .instance-settings .live-toggle{display:flex;flex-direction:row;justify-content:flex-start;align-items:flex-start;gap:8px;min-height:var(--control-h);padding:calc((var(--control-h) - 18px) / 2) 0;font-size:var(--text-control);line-height:18px;color:var(--foreground);cursor:pointer}
 .instance-settings .live-toggle>input{margin-top:1px}
-.instance-settings .remove-key{display:flex;flex-direction:row;align-items:center;gap:8px;min-height:20px;font-size:var(--text-label);line-height:16px;color:var(--muted-foreground);cursor:pointer}
+.instance-settings .remove-key{display:flex;flex-direction:row;align-items:center;gap:8px;min-height:20px;font-size:var(--text-label);line-height:16px;color:var(--muted-foreground);cursor:pointer;transition:color var(--dur-hover-out) var(--ease-fade)}
+.instance-settings .remove-key:hover{color:var(--foreground);transition-duration:var(--dur-hover-in)}
 
 /* ── Identity ─────────────────────────────────────────────────────────── */
 .identity-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:32px;align-items:start}
@@ -136,12 +230,17 @@
 .logo-control>div:nth-child(2){min-height:var(--control-h)}
 .team-logo-preview{display:grid;place-items:center;flex-shrink:0;width:var(--control-h);height:var(--control-h);border:1px solid var(--border);border-radius:var(--control-radius);background:var(--secondary)}
 .team-logo-preview>img{max-width:26px;max-height:26px;object-fit:contain}
+/* A logo chosen just now pops into its frame; the one the form was drawn with is simply there. */
+.team-logo-preview>img.is-new{animation:fade-in var(--dur-hover-in) var(--ease-fade) backwards,pop-in var(--dur-gooey) var(--spring-gooey) backwards}
 .logo-control>div:nth-child(2){display:flex;align-items:center;gap:10px;min-width:0}
 .instance-settings .logo-control .settings-help{margin:0}
 
 /* ── AI providers ─────────────────────────────────────────────────────── */
 .provider-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--row-gap)}
-.provider-entry{min-width:0;border:1px solid var(--border);border-radius:var(--control-radius)}
+.provider-entry{min-width:0;border:1px solid var(--border);border-radius:var(--control-radius);transition:border-color var(--dur-hover-out) var(--ease-fade)}
+.provider-entry:hover,.provider-entry:has(.provider-editor){border-color:var(--line-strong);transition-duration:var(--dur-hover-in)}
+/* "Not connected", "Key ready", "Connected": the word fades in as the badge changes colour. */
+.provider-status{animation:fade-in var(--dur-snappy) var(--ease-fade) backwards}
 .provider-entry:has(.provider-editor){grid-column:1/-1}
 /* The logo sits 4px inside its 28px box and "Manage" has 8px of its own padding: both ends of a row are 16px in. */
 .provider-row{display:flex;align-items:center;gap:10px;min-height:52px;padding:0 8px 0 var(--control-px)}
@@ -156,8 +255,8 @@
 .provider-details strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .provider-name-short{display:none}
 .settings-optional{margin-left:4px;font-weight:400;color:var(--muted-foreground)}
-.provider-editor .settings-help+.settings-label{margin-top:var(--row-gap)}
-.provider-connected>span,.provider-disconnected>span{display:block;width:5px;height:5px;border-radius:50%;background:currentColor}
+.provider-editor .settings-help+.settings-label,.provider-editor .reveal-inner>.settings-label:first-child{margin-top:var(--row-gap)}
+.provider-connected>span:first-child,.provider-disconnected>span:first-child{display:block;width:5px;height:5px;border-radius:50%;background:currentColor;transition:background-color var(--dur-snappy) var(--ease-fade)}
 .instance-settings .provider-row>[data-slot=button]{flex-shrink:0;padding:0 8px;gap:4px;font-weight:400}
 .provider-security{display:flex;align-items:center;gap:6px;margin:var(--row-gap) 0 0;font-size:var(--text-help);line-height:16px;color:var(--muted-foreground)}
 .provider-editor{margin:0 var(--control-px) var(--control-px);padding:var(--control-px);border:1px solid var(--border);border-radius:var(--control-radius);background:var(--secondary)}
@@ -185,6 +284,8 @@
 .chat-model-row>.model-picker{min-width:0}
 .instance-settings .chat-model-row>.default-model{justify-self:stretch;justify-content:center}
 .chat-model-row>[data-slot=button]{justify-self:center}
+/* The first row is the default: its badge pops in when a row is made the default, as the row travels to the top. */
+.instance-settings .chat-model-row>.default-model.is-new{animation:fade-in var(--dur-hover-in) var(--ease-fade) backwards,pop-in var(--dur-gooey) var(--spring-gooey) backwards}
 
 .instance-settings .model-select-trigger{
  display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;height:var(--control-h);padding:0 var(--control-px);
@@ -210,7 +311,7 @@
 .allowed-list{display:flex;flex-wrap:wrap;gap:6px;margin:0;padding:0;list-style:none}
 .allowed-chip{display:inline-flex;align-items:center;gap:2px;max-width:100%;min-height:26px;padding:0 2px 0 10px;border:1px solid var(--border);border-radius:var(--control-radius);background:var(--secondary);font-size:var(--text-label);line-height:16px}
 .allowed-chip>span{min-width:0;padding:4px 0;overflow-wrap:anywhere}
-.allowed-chip>button{display:grid;place-items:center;flex-shrink:0;width:22px;height:22px;padding:0;border-radius:6px;color:var(--ink-faint)}
+.allowed-chip>button{display:grid;place-items:center;flex-shrink:0;width:22px;height:22px;padding:0;border-radius:6px;color:var(--ink-faint);cursor:pointer}
 .allowed-chip>button:hover{background:var(--danger-soft);color:var(--danger)}
 .allowed-chip>button svg{width:12px;height:12px}
 /* One above the other: a client ID is some seventy characters and should be readable in full. */
@@ -220,8 +321,11 @@
 .environment-note{margin:0;padding:12px;border:1px solid var(--border);border-radius:8px;font-size:var(--text-control);line-height:18px;color:var(--muted-foreground);overflow-wrap:anywhere}
 .environment-note code{font-size:12px;color:var(--foreground)}
 /* Storage: the same one-column field stack as the Google client; the test button and its result share a row when there is room. */
-/* Only when the section appears because of a choice just made, not when the form is drawn again after a Save. */
-.instance-settings .storage-bucket.just-chosen,.instance-settings .admin-google-only.just-chosen{animation:fade-in var(--dur-snappy) var(--ease-fade) backwards,rise var(--dur-settle) var(--spring-settle) backwards}
+/* The bucket and the Google settings open when their choice is made (Reveal, above), not when the form is drawn again after a Save. */
+.storage-test-line{display:inline-flex;align-items:flex-start;gap:5px;min-width:0}
+.storage-test-line>svg{flex-shrink:0;margin-top:2px}
+/* "Copy" becomes "Copied" and back. */
+.copy-label{display:inline-flex;align-items:center;gap:6px}
 .storage-fields{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--section-gap)}
 .storage-choice{display:grid;grid-template-columns:minmax(0,1fr);gap:0}
 :root .instance-settings .storage-choice input[type=radio]{display:inline-block;width:16px;height:16px;min-height:0;min-width:0;padding:0;border:0}
@@ -491,9 +595,24 @@
 
 /* ── Save bar and footer ──────────────────────────────────────────────── */
 .instance-save{display:flex;align-items:center;justify-content:space-between;gap:var(--section-gap);min-height:var(--control-h);margin-top:var(--section-gap)}
-.instance-save>span{display:flex;align-items:center;gap:6px;min-width:0;font-size:var(--text-label);line-height:16px;color:var(--muted-foreground)}
-.instance-save>span>svg{flex-shrink:0}
+.save-status{display:flex;align-items:center;gap:6px;min-width:0;font-size:var(--text-label);line-height:16px;color:var(--muted-foreground)}
 .instance-save>button{flex-shrink:0}
+/* The mark beside the words is the state's own: a gold dot for an edit that waits (the same dot as in the list of
+   sections), a spinner while saving, a check once saved, a warning for something that has to be put right first.
+   They share one box, so the words never move sideways. A row that is simply there (.is-lively is absent) is still. */
+.save-mark{display:grid;place-items:center;flex:none;width:14px;height:14px;color:var(--accent-ink)}
+.save-mark>*{grid-area:1/1}
+.save-dot{width:6px;height:6px;border-radius:50%;background:var(--brand)}
+.save-check{display:block;width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.save-check path{stroke-dasharray:1}
+.is-lively .save-mark>:not(.animate-spin){animation:fade-in var(--dur-hover-in) var(--ease-fade) backwards,pop-in var(--dur-gooey) var(--spring-gooey) backwards}
+/* Saved: the check draws itself, from its short stroke to the end of its long one. */
+.is-lively .save-check path{animation:save-draw var(--dur-gooey) var(--ease-fade) 70ms backwards}
+@keyframes save-draw{from{stroke-dashoffset:1}}
+/* "Save changes" takes its colour as soon as there is something to save and gives it back afterwards (the
+   colours fade, styles/pages.css); waking, it also gives a little, like a button that has just been let go. */
+.instance-save.is-lively>[data-slot=button]:not(:disabled){animation:save-wake var(--dur-gooey) var(--spring-snappy)}
+@keyframes save-wake{from{transform:scale(.95)}}
 .instance-footer{display:flex;align-items:center;justify-content:space-between;gap:var(--section-gap);margin-top:var(--section-gap);padding-top:var(--section-gap);border-top:1px solid var(--border);font-size:var(--text-help);color:var(--muted-foreground)}
 .instance-footer>div{display:flex;flex-wrap:wrap;align-items:center;gap:4px var(--section-gap)}
 /* Three links of one kind: the same size and colour, no frame and no underline until hovered, 16px apart. */
@@ -559,6 +678,8 @@
  .provider-key-row>button{align-self:flex-start}
  .model-section{grid-template-columns:minmax(0,1fr);gap:var(--row-gap)}
  .model-section-heading{flex-direction:row;align-items:baseline;justify-content:space-between;gap:10px;min-height:0}
+ /* The note beside a part's name ends at the right edge here, so the words it replaces leave from there. */
+ .model-section-heading .swap-was{right:0;left:auto}
  .chat-model-row{grid-template-columns:minmax(0,1fr) 52px var(--control-h-sm);gap:6px}
  .instance-settings .selected-provider{display:none}
  .redirect-uri{flex-wrap:wrap;gap:0 8px;padding:6px 2px 2px var(--control-px)}

@@ -21,6 +21,10 @@ export type StageKind = 'launch' | 'settle' | 'resize' | 'extend'
 type Transition = { finished: Promise<unknown> }
 type Starter = (update: () => void) => Transition
 
+/** Called just before a change is staged. The rest of the page (./settings-motion) finishes whatever it is still
+ * moving, so the two pictures the browser draws are of a page at rest. */
+export const beforeStage = new Set<() => void>()
+
 let turn = 0
 /** Makes `update` inside a view transition of that kind. Returns a function that gives the wait up. */
 export function stage(kind: StageKind, update: () => void): () => void {
@@ -29,6 +33,7 @@ export function stage(kind: StageKind, update: () => void): () => void {
   let timer: number | undefined, cancelled = false
   const go = () => {
     if (cancelled) return
+    for (const settle of beforeStage) settle()
     const mine = String(++turn)
     root.dataset.updateStage = kind; root.dataset.updateTurn = mine
     const clear = () => { if (root.dataset.updateTurn === mine) { delete root.dataset.updateStage; delete root.dataset.updateTurn } }

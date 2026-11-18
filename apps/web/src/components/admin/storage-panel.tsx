@@ -4,6 +4,7 @@ import {bucketReady,storageProblem,storageTestInput,type StorageDraft} from '../
 import {Button} from '../ui/button'
 import {Input} from '../ui/input'
 import {Card,CardContent,CardHeader,CardTitle} from '../ui/card'
+import {Reveal,Swap} from './shared'
 import {Check,Loader2,PlugZap,TriangleAlert} from 'lucide-react'
 
 /** Where recorded audio and published app builds are kept: this server's disk or an S3-compatible bucket.
@@ -12,8 +13,6 @@ import {Check,Loader2,PlugZap,TriangleAlert} from 'lucide-react'
 export function StorageSettings({draft,saved,change,test}:{draft:StorageDraft;saved:StorageSettingsDTO;change:(next:StorageDraft)=>void;test:(input:StorageTestInput,signal:AbortSignal)=>Promise<StorageTestDTO>}){
  const[result,setResult]=useState<StorageTestDTO|{ok:false;message:string}|null>(null),[testing,setTesting]=useState(false)
  const running=useRef<AbortController|null>(null)
- /** Whether the person changed the choice since the form was drawn: only then does the Bucket section animate in. */
- const[chosen,setChosen]=useState(false)
  useEffect(()=>()=>running.current?.abort(),[])
  const problem=storageProblem(draft,saved.secretAccessKeySet),ready=bucketReady(draft,saved.secretAccessKeySet),s3=draft.backend==='s3'
  // A result describes the settings that were tried: any edit makes it stale.
@@ -28,23 +27,24 @@ export function StorageSettings({draft,saved,change,test}:{draft:StorageDraft;sa
  // Testing the disk needs no settings, so the test sits with the choice; for S3 it sits under the bucket it tries.
  const testRow=<>
    <div className="storage-test"><Button type="button" variant="outline" disabled={testing||!!problem&&!(draft.backend==='local')} onClick={()=>void run()}>{testing?<Loader2 className="animate-spin"/>:<PlugZap/>}Test connection</Button>
-    <p className={result&&!result.ok?'settings-error storage-test-result':'settings-help storage-test-result'} role="status" aria-live="polite">{testing?'Writing, reading and deleting a small test file…':result?<>{result.ok?<Check size={12}/>:<TriangleAlert size={12}/>}{result.message}</>:s3||ready?'Tries these settings as they are on screen, before you save them.':'Checks that the server can write to its disk.'}</p>
+    {/* What the test says rises in as it changes; the line that is simply there when the form is drawn does not. */}
+    <p className={result&&!result.ok?'settings-error storage-test-result':'settings-help storage-test-result'} role="status" aria-live="polite">{testing?<span key="testing" className="storage-test-line swap-in">Writing, reading and deleting a small test file…</span>:result?<span key="result" className="storage-test-line swap-in">{result.ok?<Check size={12}/>:<TriangleAlert size={12}/>}{result.message}</span>:s3||ready?'Tries these settings as they are on screen, before you save them.':'Checks that the server can write to its disk.'}</p>
    </div>
    </>
  return <Card><CardHeader><CardTitle>Storage</CardTitle></CardHeader><CardContent>
-  <div className="model-section"><div className="model-section-heading"><h3>Files</h3><span>{s3?'S3-compatible':'Local disk'}</span></div><div className="model-controls sign-in-block">
+  <div className="model-section"><div className="model-section-heading"><h3>Files</h3><span><Swap text={s3?'S3-compatible':'Local disk'}/></span></div><div className="model-controls sign-in-block">
    <div role="radiogroup" aria-label="Where files are kept" className="storage-choice">
-    <label className="live-toggle sign-in-method"><input type="radio" name="storage-backend" checked={!s3} onChange={()=>{setChosen(true);set({backend:'local'})}}/>Local disk</label>
-    <label className="live-toggle sign-in-method"><input type="radio" name="storage-backend" checked={s3} onChange={()=>{setChosen(true);set({backend:'s3'})}}/>S3-compatible storage</label>
+    <label className="live-toggle sign-in-method"><input type="radio" name="storage-backend" checked={!s3} onChange={()=>set({backend:'local'})}/>Local disk</label>
+    <label className="live-toggle sign-in-method"><input type="radio" name="storage-backend" checked={s3} onChange={()=>set({backend:'s3'})}/>S3-compatible storage</label>
    </div>
    <p className="settings-help">Recorded audio and the app builds this server offers. New files go to the storage chosen here; files already stored stay where they are and keep working. Nothing is moved.</p>
    {saved.source==='environment'&&<p className="settings-help">These settings come from the server’s environment. Saving here replaces them.</p>}
-   {!s3&&testRow}
+   <Reveal className="reveal-row">{!s3&&testRow}</Reveal>
   </div></div>
   {/* The bucket is only asked for, checked and saved when S3 is chosen; what was typed stays in the draft if the
-      choice changes back before saving. It rises in only when someone picks S3 here, not each time the form is
-      drawn again (after every Save). */}
-  {s3&&<div className={chosen?'model-section storage-bucket just-chosen':'model-section storage-bucket'}><div className="model-section-heading"><h3>Bucket</h3><span>{ready?(saved.secretAccessKeySet&&!draft.secretAccessKey&&!draft.removeSecret?'Saved':'Ready to save'):'Not set'}</span></div><div className="model-controls sign-in-block">
+      choice changes back before saving. It opens only when someone picks S3 here, not each time the form is
+      drawn again (after every Save): then it is simply there. */}
+  <Reveal className="reveal-part">{s3&&<div className="model-section storage-bucket"><div className="model-section-heading"><h3>Bucket</h3><span><Swap text={ready?(saved.secretAccessKeySet&&!draft.secretAccessKey&&!draft.removeSecret?'Saved':'Ready to save'):'Not set'}/></span></div><div className="model-controls sign-in-block">
    <div className="storage-fields">
     {text('storage-endpoint','Endpoint','endpoint','Leave blank for Amazon S3',2048)}
     {text('storage-region','Region','region','us-east-1',40)}
@@ -57,6 +57,6 @@ export function StorageSettings({draft,saved,change,test}:{draft:StorageDraft;sa
    <p className="settings-help">Works with Amazon S3, Cloudflare R2, MinIO and Backblaze B2. The secret is encrypted on the server and never returned to the browser.</p>
    {saved.secretAccessKeySet&&<label className="remove-key"><input type="checkbox" checked={draft.removeSecret} onChange={e=>set({removeSecret:e.target.checked,secretAccessKey:''})}/>Remove the saved secret</label>}
    {testRow}
-  </div></div>}
+  </div></div>}</Reveal>
  </CardContent></Card>
 }
