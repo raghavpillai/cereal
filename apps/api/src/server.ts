@@ -16,6 +16,7 @@ import { makeWebHandler } from "./static"
 import { appleAppSiteAssociation, makeLinkPreviews } from "./app-links"
 import { DOWNLOAD_FILES_PATH, makeDownloads } from "./downloads"
 import { readAppVersion } from "./version"
+import { makeUpdates } from "./updates"
 import { makeStorage } from "./storage"
 import {Effect} from "effect"
 import {createMcpStore} from "./mcp-store"
@@ -87,9 +88,12 @@ const appVersion = readAppVersion()
 /** The iPhone app's App Store ID as the admin panel has it now. */
 const appStoreId = async () => (await administration.apps()).iosAppStoreId
 const downloads = makeDownloads({ directory: process.env.DOWNLOADS_DIR || "/data/downloads", version: appVersion, iosAppStoreId: appStoreId, storage: storage.downloads })
+// "Update server" on the admin panel: the folder shared with scripts/updater.sh on the host, and the secret both
+// hold. Neither is set until that updater is installed; the panel then says so.
+const updates = makeUpdates({ directory: process.env.UPDATER_DIR, token: process.env.UPDATER_TOKEN, version: appVersion })
 // Saved conversations, per person; a thread is named by the same model request that names an untitled meeting.
 const chats = makeChatsService(makePrismaChatStore(database), { title: chatTitler(providers.title) })
-const api = makeApiHandler(repository, adminToken, { processing, administration, authentication, google, mcpStore, noteParticipants:makeNoteParticipantsService(database), downloads, storage, chats, teamSpace:makeTeamSpaceService(makePrismaTeamSpaceStore(database)), noteAccess:makeNoteAccessService(makePrismaNoteAccessStore(database,{signInDomains:async()=>(await administration.signInPolicy()).allowedEmails})) })
+const api = makeApiHandler(repository, adminToken, { processing, administration, authentication, google, mcpStore, noteParticipants:makeNoteParticipantsService(database), downloads, storage, chats, updates, teamSpace:makeTeamSpaceService(makePrismaTeamSpaceStore(database)), noteAccess:makeNoteAccessService(makePrismaNoteAccessStore(database,{signInDomains:async()=>(await administration.signInPolicy()).allowedEmails})) })
 const web = makeWebHandler(process.env.WEB_DIST ?? resolve(import.meta.dir, "../../web/dist/client"), { head: makeLinkPreviews({ origin: new URL(publicBaseURL).origin, iosAppStoreId: appStoreId }) })
 const live = makeLiveEndpoint({ repository, hub: liveHub, resolvePrincipal: headers => authentication.resolve(headers), isTrustedOrigin: origin => authentication.isTrustedOrigin(origin), transcriber: makeLiveTranscriberResolver(administration) })
 const server = Bun.serve<LiveConnection>({
@@ -137,6 +141,7 @@ async function shutdown() {
   stopping = true
   await mcpEndpoint.close()
   await liveHub.dispose()
+  api.closeStreams()
   await server.stop(false)
   await api.dispose()
   await close()

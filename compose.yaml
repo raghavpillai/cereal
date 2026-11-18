@@ -39,6 +39,9 @@ services:
       AUDIO_STORAGE_DIR: /data/audio
       DOWNLOADS_DIR: /data/downloads
       SETTINGS_KEY_FILE: /data/state/settings.key
+      # Where the server finds the updater's folder (the last volume below). It wins over the host path that
+      # UPDATER_DIR has in .env.
+      UPDATER_DIR: /data/updater
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:3000}
       AUTH_TRUSTED_ORIGINS: ${AUTH_TRUSTED_ORIGINS:-}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
@@ -52,6 +55,11 @@ services:
       # never writes here. Docker creates the directory if it does not exist yet (scripts/setup.sh makes it
       # first, so that it belongs to you).
       - ${DOWNLOADS_HOST_DIR:-./dist/release}:/data/downloads:ro
+      # "Update server" on the admin panel. The server holds no Docker socket: it leaves a signed request in
+      # this folder and reads the progress that scripts/updater.sh, running on the host, writes there.
+      # `./scripts/updater.sh install` sets UPDATER_DIR and UPDATER_TOKEN in .env; until then this is an empty
+      # folder and the panel says the updater is not installed.
+      - ${UPDATER_DIR:-./dist/updater}:/data/updater
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-3000}:3000"
     depends_on:

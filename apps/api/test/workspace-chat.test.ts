@@ -6,7 +6,7 @@ import type {ChatInput,ChatStreamEventDTO,NoteDTO} from "@meeting-notes/contract
 import {makeMemoryRepository} from "../src/repository"
 import {prepareMeetingChat,validateChatCitations} from "../src/chat-retrieval"
 import type {ChatToolCall,ChatToolMessage,ProviderServices} from "../src/providers"
-import {ANSWER_SYSTEM_PROMPT,MEETING_CHAT_TOOLS,RESEARCH_SYSTEM_PROMPT,calendarAnchors,workspaceChatMessages} from "../src/ai/workspace-chat"
+import {ANSWER_SYSTEM_PROMPT,MEETING_CHAT_TOOLS,RESEARCH_SYSTEM_PROMPT,asksNothing,calendarAnchors,workspaceChatMessages} from "../src/ai/workspace-chat"
 import {bestWindow,containsWord,coverageNote,searchWords} from "../src/ai/workspace-tools"
 
 const id=(n:number)=>`00000000-0000-4000-8000-${String(n).padStart(12,"0")}`
@@ -173,4 +173,23 @@ test("another account's meetings are unreachable by search, alias, forged ID or 
   // Two lookups failed, so the answer is told to say so, in one line; the workspace answer still cites its sources.
   expect(prepared.note.body.match(/<coverage_note>[^\n]*<\/coverage_note>/g)).toEqual(["<coverage_note>2 lookups failed, so this may be incomplete.</coverage_note>"])
   expect(prepared.note.body).toMatch(/\[S1\] /)
+})
+
+test("a greeting or a check that the assistant is there searches nothing, with a planner, without one, or with one that fails",async()=>{
+  for(const message of ["Test","testing","test 1 2 3","Hi","hello!","Thanks","thank you so much","Are you there?"])expect(asksNothing(message)).toBe(true)
+  // Anything that could be a question about the meetings is left to the research model.
+  for(const message of ["Test results from the pilot","testing plan","What did we test?","hi, what did Dana say about pricing?","thanks, and the budget?"])expect(asksNothing(message)).toBe(false)
+  const seed=[note(1,{title:"Mic test",enhanced:"We ran a test of the microphone.",transcriptSegments:[segment(1,"test test, is this on",0)]})]
+  const input={message:"Test",history:[],includeSources:true} as ChatInput
+  for(const script of [[[]] as ReadonlyArray<ReadonlyArray<ChatToolCall>>,null]){
+    const run=await research(seed,input,script)
+    expect(run.steps).toEqual([])
+    expect(run.prepared.note.body).not.toContain("Mic test")
+    // The planner, when there is one, is still asked: it starts from the question alone, with no search made for it.
+    if(script)expect(run.rounds[0]!.some(message=>message.role==="tool")).toBe(false)
+  }
+  // A real question still gets its automatic first search.
+  expect((await research(seed,{...input,message:"microphone test results"},[[]])).steps.length).toBeGreaterThan(0)
+  expect(RESEARCH_SYSTEM_PROMPT).toContain("When nothing needs retrieving")
+  expect(ANSWER_SYSTEM_PROMPT).toContain("First decide whether the message asks about the meetings at all")
 })

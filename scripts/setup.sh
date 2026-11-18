@@ -57,8 +57,9 @@ if [ -n "$address" ]; then
   public="$scheme://$host${port:+:$port}"
 fi
 
-# Where Mac builds are published from (Compose mounts it into the server read-only).
-mkdir -p dist/release
+# Where Mac builds are published from (Compose mounts it into the server read-only), and the folder Compose
+# mounts for the updater until scripts/updater.sh install names the real one.
+mkdir -p dist/release dist/updater
 umask 077
 
 # Replaces the line that sets $1 in .env, or adds it. Every other line stays exactly as it is.

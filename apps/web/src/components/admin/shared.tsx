@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { X } from 'lucide-react'
 import { AdminClientError } from '../../lib/client-error'
+import { cssMilliseconds } from '../../lib/css-time'
 
 export function Notice({ children, error = false }: { children: ReactNode; error?: boolean }) {
   return <div className={`admin-notice${error ? ' is-error' : ''}`} role={error ? 'alert' : 'status'}>{children}</div>
@@ -102,7 +103,7 @@ function fadeOutCopy(dialog: HTMLDialogElement) {
     // Still attached means this was not a real unmount.
     if (dialog.isConnected || !home?.isConnected || !box.width) return
     const tokens = getComputedStyle(document.documentElement)
-    const duration = parseFloat(tokens.getPropertyValue('--dur-gooey-exit')) || 200, from = parseFloat(tokens.getPropertyValue('--pop-from')) || 1
+    const duration = cssMilliseconds(tokens.getPropertyValue('--dur-gooey-exit'), 200), from = parseFloat(tokens.getPropertyValue('--pop-from')) || 1
     const scrim = document.createElement('div')
     scrim.className = 'dialog-scrim-ghost'
     copy.classList.add('dialog-ghost')

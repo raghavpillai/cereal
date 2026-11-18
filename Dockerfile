@@ -19,8 +19,9 @@ FROM oven/bun:1.3.8-slim AS runtime
 WORKDIR /app
 COPY --from=build /app /app
 # /app/package.json carries the product version the server reads at start-up. /data/downloads is where
-# published app builds are mounted; it exists, empty, when nothing is mounted.
-RUN mkdir -p /data/audio /data/state /data/downloads && chown bun:bun /data/audio /data/state && chmod 700 /data/audio /data/state
+# published app builds are mounted; it exists, empty, when nothing is mounted. /data/updater is the folder shared
+# with scripts/updater.sh on the host ("Update server"); empty means no updater.
+RUN mkdir -p /data/audio /data/state /data/downloads /data/updater && chown bun:bun /data/audio /data/state && chmod 700 /data/audio /data/state
 USER bun
 EXPOSE 3000
 CMD ["bun", "apps/api/src/server.ts"]

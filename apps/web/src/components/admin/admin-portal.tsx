@@ -10,6 +10,7 @@ import {SessionGate} from '../account/session-gate'
 import {Onboarding} from '../onboarding/onboarding'
 import {AdministratorsPanel} from './administrators-panel'
 import {SettingsPanel} from './settings-panel'
+import {UpdatesPanel} from './updates-panel'
 import {Loading,Notice,useAdminTask,useResource} from './shared'
 import {Button} from '../ui/button'
 import {ArrowUpRight,LogOut} from 'lucide-react'
@@ -61,7 +62,7 @@ function Workspace({session,client,initialSettings,transport,expired,signOut,res
   <div className="instance-heading"><div><h1>Instance settings</h1><p>{settings.instanceName}</p></div><span className="instance-owner">{session.user.role==='owner'?'Owner':'Administrator'}</span></div>
   <TransportWarning transport={transport}/>
   {notice&&<Notice>{notice}</Notice>}{tasks.error&&<Notice error>{tasks.error}</Notice>}
-  <SettingsPanel key={settings.updatedAt??'initial'} viewerEmail={session.user.email} settings={settings} client={client} expired={expired} busy={tasks.pending.has('settings')} save={save} replace={next=>{setSettings(next);setNotice('Sign-in method changed.')}}><AdministratorsPanel client={client} viewer={session.user} expired={expired}/></SettingsPanel>
+  <SettingsPanel key={settings.updatedAt??'initial'} viewerEmail={session.user.email} settings={settings} client={client} expired={expired} busy={tasks.pending.has('settings')} save={save} replace={next=>{setSettings(next);setNotice('Sign-in method changed.')}} extra={session.user.role==='owner'?[{id:'administrators',label:'Administrators',content:<AdministratorsPanel client={client} viewer={session.user} expired={expired}/>},{id:'updates',label:'Updates',content:<UpdatesPanel expired={expired}/>}]:[]}/>
   <div className="instance-footer"><span>Signed in as {session.user.email}{transport==='private'&&<span className="instance-transport"> · {PRIVATE_TRANSPORT_LINE}</span>}</span><div>{session.user.role==='owner'&&settings.onboarding&&<button type="button" className="instance-setup-again" disabled={tasks.pending.has('setup')} onClick={()=>void runSetupAgain()}>Run setup again</button>}<a href="/account">Google Calendar <ArrowUpRight size={12}/></a><Button variant="ghost" size="sm" onClick={()=>void signOut()}><LogOut/>Sign out</Button></div></div>
  </>
 }

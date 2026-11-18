@@ -58,7 +58,7 @@ export function SignInSettings({draft,saved,change,client,switched,expired,viewe
    change(savedGoogleFields(draft,saved))
   }else if(method==='google'&&setAside.current){change({...draft,...setAside.current});setAside.current=null}
  }
- return <Card id="sign-in"><CardHeader><CardTitle>Sign-in</CardTitle></CardHeader><CardContent>
+ return <Card><CardHeader><CardTitle>Sign-in</CardTitle></CardHeader><CardContent>
   <div className="model-section"><div className="model-section-heading"><h3>Method</h3><span>{current==='google'?'Google':'Email and password'}</span></div><div className="model-controls sign-in-block">
    <div role="radiogroup" aria-label="How people sign in" className="storage-choice">
     <label className="live-toggle sign-in-method"><input type="radio" name="sign-in-method" checked={wanted==='password'} disabled={busy!==null} onChange={()=>choose('password')}/>Email and password</label>

@@ -22,6 +22,7 @@ import {makeChatsService,makeMemoryChatStore,type ChatsService} from "./chats"
 import {withoutTranscriptLink} from "./transcript-link"
 import type {TeamSpaceService} from "./team-space"
 import type {NoteAccessService} from "./note-access"
+import {UPDATE_PATH,makeUpdateRoutes,makeUpdates,type UpdatesService} from "./updates"
 import {InvalidPageRequest,parseListInput,parseSearchInput,selectNoteSearch,selectNoteSummaries,withMeeting} from "./note-summaries"
 
 const unavailable = { error: "unavailable", message: "The note service is temporarily unavailable" } as const
@@ -60,7 +61,7 @@ function createShare(noteId: string, input: CreateShareInput, clock: () => Date)
 }
 
 /** The caller owns repository lifetime; dispose releases only the API runtime. */
-export function makeApiHandler(repository: NotesRepositoryService, adminToken: string, options: { clock?: () => Date; processing?: ProcessingService; administration?: AdministrationService; authentication?: AuthenticationService; google?: GoogleIntegration; noteParticipants?:NoteParticipantsService; mcpStore?:McpStore; downloads?:DownloadsService; storage?:StorageService; chats?:ChatsService; teamSpace?:TeamSpaceService; noteAccess?:NoteAccessService; principalResolver?: (headers: Headers) => Promise<PrincipalData|null> } = {}) {
+export function makeApiHandler(repository: NotesRepositoryService, adminToken: string, options: { clock?: () => Date; processing?: ProcessingService; administration?: AdministrationService; authentication?: AuthenticationService; google?: GoogleIntegration; noteParticipants?:NoteParticipantsService; mcpStore?:McpStore; downloads?:DownloadsService; storage?:StorageService; chats?:ChatsService; teamSpace?:TeamSpaceService; noteAccess?:NoteAccessService; updates?:UpdatesService; principalResolver?: (headers: Headers) => Promise<PrincipalData|null> } = {}) {
   if (adminToken.length < 32) throw new Error("ADMIN_TOKEN must contain at least 32 characters")
   const processing = options.processing ?? makeProcessingService(repository)
   const administration = options.administration ?? makeAdministrationService(makeMemoryCalendarStore(repository), undefined, { clock: options.clock })
@@ -71,12 +72,16 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
   const chats = options.chats ?? makeChatsService(makeMemoryChatStore(repository), { clock })
   // The apps this server hands out. The server passes its own; anything else reads the same environment.
   const downloads = options.downloads ?? makeDownloads({ directory: process.env.DOWNLOADS_DIR || "/data/downloads", version: readAppVersion(), iosAppStoreId: process.env.IOS_APP_STORE_ID })
+  // Who is asking: a browser session or token through the account service, else the setup code alone.
+  const resolvePrincipal = (headers: Headers) => options.principalResolver ? options.principalResolver(headers) : options.authentication ? options.authentication.resolve(headers) : Promise.resolve(isBootstrapToken(headers,adminToken)?bootstrapPrincipal:null)
+  // "Update server" (updates.ts). The server passes the folder it shares with the updater; anything else has none.
+  const updateRoutes = makeUpdateRoutes(options.updates ?? makeUpdates({ version: readAppVersion() }), { resolve: resolvePrincipal, isTrustedOrigin: origin => options.authentication?.isTrustedOrigin(origin) ?? false })
   const auth = Layer.succeed(OwnerAuth, {
     bearer: (httpEffect) => Effect.gen(function*() {
       const request = yield* HttpServerRequest.HttpServerRequest
       const headers = new Headers(request.headers)
       const principal = yield* Effect.tryPromise({
-        try: () => options.principalResolver ? options.principalResolver(headers) : options.authentication ? options.authentication.resolve(headers) : Promise.resolve(isBootstrapToken(headers,adminToken)?bootstrapPrincipal:null),
+        try: () => resolvePrincipal(headers),
         catch: () => ({error:"unavailable",message:"Account service is temporarily unavailable"} as const),
       })
       if (!principal) return yield* Effect.fail({ error: "unauthorized", message: "Authentication required" } as const)
@@ -316,6 +321,8 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
   )
   const web = HttpRouter.toWebHandler(app, { disableLogger: true })
   return {
+    /** Ends the open update progress streams, so that stopping the server does not wait for them. */
+    closeStreams: () => updateRoutes.close(),
     dispose: async () => { await options.google?.dispose(); await administration.dispose(); await processing.dispose(); await web.dispose() },
     handler: async (request: Request): Promise<Response> => {
       if(new URL(request.url).pathname==="/api/integrations/google/callback"){
@@ -359,6 +366,7 @@ export function makeApiHandler(repository: NotesRepositoryService, adminToken: s
           return answer(503,"unavailable","Sign-in is temporarily unavailable")
         }
       }
+      if(pathname===UPDATE_PATH||pathname.startsWith(UPDATE_PATH+"/"))return updateRoutes(request)
       // A published app file: public, cacheable for a few minutes, with byte ranges. Its headers are its own.
       if(pathname.startsWith(DOWNLOAD_FILES_PATH)&&!pathname.slice(DOWNLOAD_FILES_PATH.length).includes("/")&&pathname.length>DOWNLOAD_FILES_PATH.length)
         return downloads.file(request,pathname.slice(DOWNLOAD_FILES_PATH.length))

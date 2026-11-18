@@ -52,6 +52,31 @@
 .instance-owner{display:inline-flex;align-items:center;flex-shrink:0;height:24px;padding:0 8px;border:1px solid transparent;border-radius:6px;font-size:var(--text-help)}
 .instance-settings .admin-notice{font-size:var(--text-label)}
 .instance-form>[disabled]{opacity:.7}
+.instance-form[hidden]{display:none}
+
+/* ── Sections: a list on the left, the chosen one on the right ────────── */
+/* Wider than the other admin pages by the width of the list, so a section's card is as wide as it was. */
+:root .instance-settings:has(.settings-layout){max-width:calc(70rem + 2 * var(--gutter))}
+.settings-layout{display:grid;grid-template-columns:176px minmax(0,1fr);gap:32px;align-items:start}
+.settings-pane{min-width:0}
+/* Stays in view while a long section scrolls. Its items are 8px in on each side, taken back here so their words
+   start on the page's left edge, under the title. */
+.settings-nav{position:sticky;top:16px;display:grid;gap:2px;margin:0 -8px}
+.settings-nav a{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:32px;padding:0 8px;border-radius:var(--control-radius);font-size:var(--text-control);line-height:18px;color:var(--muted-foreground);text-decoration:none;white-space:nowrap;transition:background-color var(--dur-hover-in) var(--ease-fade),color var(--dur-hover-in) var(--ease-fade)}
+.settings-nav a:hover{background:var(--wash);color:var(--foreground)}
+.settings-nav a:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+.settings-nav a[aria-current]{background:var(--wash-strong);color:var(--foreground);font-weight:500}
+/* A section with an edit that is not saved yet. */
+.settings-nav-unsaved{flex-shrink:0;width:6px;height:6px;border-radius:50%;background:var(--brand)}
+@media(max-width:820px){
+ /* No room for a column: the sections become one row above the chosen one, scrolling sideways inside itself
+    (the page never does). It runs to the screen's edges so a cut-off name shows there is more. */
+ .settings-layout{grid-template-columns:minmax(0,1fr);gap:var(--section-gap)}
+ .settings-nav{position:static;display:flex;gap:4px;margin:0 calc(-1 * var(--gutter));padding:0 var(--gutter);overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:none}
+ .settings-nav::-webkit-scrollbar{display:none}
+ .settings-nav a{flex-shrink:0;justify-content:flex-start;gap:6px;min-height:var(--control-h-sm);padding:0 12px;border:1px solid var(--border);border-radius:999px;background:var(--background)}
+ .settings-nav a[aria-current]{border-color:transparent}
+}
 .instance-form .admin-fieldset{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--section-gap)}
 
 /* ── Cards ────────────────────────────────────────────────────────────── */
@@ -192,10 +217,6 @@
 .google-client-fields{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--section-gap)}
 /* Live limits: two short fields side by side when there is room. */
 .live-limits{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:var(--section-gap)}
-/* The page's sections, as links, on screens wide enough to show them in one row. */
-.settings-index{display:none}
-@media (min-width:900px){.settings-index{display:flex;flex-wrap:wrap;gap:4px 16px;font-size:var(--text-control);line-height:18px}.settings-index a{color:var(--muted-foreground);text-decoration:none}.settings-index a:hover,.settings-index a:focus-visible{color:var(--foreground);text-decoration:underline}}
-.instance-settings [id]{scroll-margin-top:72px}
 .environment-note{margin:0;padding:12px;border:1px solid var(--border);border-radius:8px;font-size:var(--text-control);line-height:18px;color:var(--muted-foreground);overflow-wrap:anywhere}
 .environment-note code{font-size:12px;color:var(--foreground)}
 /* Storage: the same one-column field stack as the Google client; the test button and its result share a row when there is room. */
@@ -216,7 +237,6 @@
 .instance-settings .redirect-uri>[data-slot=button]{flex-shrink:0;font-weight:400}
 
 /* ── Administrators ───────────────────────────────────────────────────── */
-.administrators-card{margin-top:var(--section-gap)}
 .administrators-list{display:grid}
 .administrator-row{display:flex;align-items:center;gap:10px;min-height:44px}
 .administrator-row+.administrator-row{border-top:1px solid var(--border)}
@@ -228,6 +248,246 @@
 /* "Revoke" keeps its hit area but its word ends where the Owner badge does. */
 .instance-settings .administrator-row>[data-slot=button]{flex-shrink:0;margin-right:-10px;font-weight:400}
 .admin-inline-notice{margin:0 0 var(--row-gap);font-size:var(--text-label)}
+
+/* ── Updates ──────────────────────────────────────────────────────────── */
+.update-version{display:flex;align-items:center;gap:8px;min-height:var(--control-h);margin:0;font-size:var(--text-control)}
+.update-version strong{font-weight:500}
+.updates-card code{padding:1px 5px;border-radius:4px;background:var(--secondary);font:var(--text-help)/16px var(--font-mono);color:var(--foreground);overflow-wrap:anywhere}
+.instance-settings .updates-card .admin-notice{margin-bottom:var(--section-gap)}
+.update-found{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;min-height:var(--control-h);margin:0;font-size:var(--text-control);line-height:18px;overflow-wrap:anywhere}
+.instance-settings .update-found.settings-error{margin:0;font-size:var(--text-control);line-height:18px}
+/* A sentence with code in it wraps as a sentence, not as a row of boxes. */
+.instance-settings .updates-card .settings-help{display:block}
+.update-actions{display:flex;flex-wrap:wrap;gap:var(--row-gap);margin-top:var(--row-gap)}
+/* What is wrong, said once, in the page's own colours: this is a state of the server, not a failed request. */
+.update-plain{display:flex;align-items:flex-start;gap:8px;margin:0;padding:calc((var(--control-h) - 18px) / 2) 0;font-size:var(--text-control);line-height:18px}
+.update-plain>svg{flex-shrink:0;margin-top:2px;color:var(--accent-ink)}
+.update-howto{display:grid;gap:var(--row-gap);margin:0;padding:0;list-style:none;counter-reset:howto}
+.update-howto li{display:grid;gap:var(--label-gap);padding:var(--control-px);border:1px solid var(--border);border-radius:var(--control-radius);background:var(--secondary);counter-increment:howto}
+.update-howto li>span{font-size:var(--text-label);line-height:16px}
+.update-howto li>span::before{content:counter(howto) ". ";color:var(--muted-foreground)}
+.update-howto li:only-child>span::before{content:none}
+.updates-card .update-howto code{display:block;padding:6px 8px;border:1px solid var(--border);background:var(--background);font-size:var(--text-label);user-select:all}
+.update-reload{display:flex;align-items:center;gap:6px;margin:0;font-size:var(--text-label);line-height:16px;color:var(--muted-foreground)}
+/* Until the progress has unfolded from it, the button that started the update keeps its full colour. */
+.instance-settings .update-go[data-busy]:disabled{opacity:1}
+.instance-settings .update-reload button{padding:0;color:var(--foreground);font:inherit;font-weight:500;text-decoration:underline;text-underline-offset:3px;cursor:pointer}
+
+/* ── An update, told by the mark: a bowl poured full, a fifth for every step ──────────────────────────────
+   Large while the update runs and while its ending is played, with the step in the page's serif beside it;
+   afterwards the same parts at the size of one control. Every size is one of the page's own:
+   the bowl is three controls high, then one; the list's rail runs under the bowl's middle; words start one
+   card inset to its right. Only transforms and opacity move (the running step's shimmer repaints its own words). */
+.update-progress{--bowl:calc(3 * var(--control-h));--lead:var(--card-px);--rail:var(--bowl);--rail-lead:var(--lead);--node:18px;display:grid;grid-template-columns:minmax(0,1fr);gap:var(--section-gap);min-width:0;scroll-margin:var(--card-py)}
+.update-progress.is-compact{--bowl:var(--control-h);--lead:var(--control-px);gap:var(--row-gap)}
+.update-hero{display:grid;grid-template-columns:var(--bowl) minmax(0,1fr);column-gap:var(--lead);align-items:center;min-height:var(--bowl)}
+.update-words{display:grid;grid-template-columns:minmax(0,1fr);gap:2px;min-width:0}
+.update-caption{position:relative;margin:0;font-size:var(--text-label);line-height:16px;color:var(--muted-foreground)}
+.instance-settings .update-headline{position:relative;margin:0;font:400 22px/1.3 var(--font-display);color:var(--foreground);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.update-outcome{display:flex;align-items:flex-start;gap:8px;margin:0;font-size:var(--text-control);line-height:18px;overflow-wrap:anywhere}
+.update-outcome>svg{flex-shrink:0;margin-top:2px}
+.update-outcome strong{font-weight:500}
+.update-outcome.is-bad,.update-outcome.is-bad>svg{color:var(--danger)}
+.is-live:not(.is-ended) .update-outcome{color:var(--muted-foreground)}
+.is-live:not(.is-ended) .update-outcome strong{font-weight:400}
+.update-link{display:flex;align-items:center;gap:6px;min-height:16px;margin:0;font-size:var(--text-label);line-height:16px;color:var(--muted-foreground)}
+.update-link>svg{flex-shrink:0}
+.instance-settings .updates-card .update-took{margin:0}
+/* Words that change: the new ones rise in while the old ones leave upwards, in the same place. */
+/* The old words are gone before the new ones are there to be read: the two never lie over each other. */
+.update-swap-in{display:inline-block;animation:fade-in var(--dur-snappy) var(--ease-fade) var(--dur-press) backwards,rise var(--dur-settle) var(--spring-settle) var(--dur-press) backwards}
+.update-swap-out{position:absolute;top:0;left:var(--swap-left,0);white-space:nowrap;opacity:0;pointer-events:none;animation:update-leave var(--dur-hover-in) var(--ease-fade) both}
+@keyframes update-leave{from{opacity:1;transform:translate(var(--swap-shift,0),0)}to{opacity:0;transform:translate(var(--swap-shift,0),calc(var(--rise) * -1))}}
+/* "Step 3 of 5": a reel of the digits, turned to the one that counts. */
+.update-count{display:inline-block;height:16px;overflow:hidden;vertical-align:top}
+.update-count-reel{display:grid;transform:translateY(calc(var(--at) * -16px));transition:transform var(--dur-gooey) var(--spring-gooey)}
+.update-count-reel>span{height:16px;text-align:center}
+/* The version turning from the old number to the new: only the characters that differ roll, one after the other. */
+.update-roll-cell{display:inline-block;height:1lh;overflow-y:clip;vertical-align:top}
+.update-roll-reel{position:relative;display:block;animation:update-roll var(--dur-settle) var(--spring-gooey) calc(760ms + var(--i) * 70ms) backwards}
+.update-roll-old{position:absolute;right:0;bottom:100%}
+@keyframes update-roll{from{transform:translateY(100%)}}
+
+/* The bowl. Its box is the mark's; flakes, sparks and what is spilt leave it without moving anything. */
+.update-bowl{--gold:var(--brand);--pale:color-mix(in srgb,var(--brand) 60%,#fff);display:block;width:var(--bowl);height:var(--bowl)}
+.update-bowl.is-ink{--gold:var(--foreground);--pale:var(--foreground)}
+.update-bowl svg{display:block;width:100%;height:100%;overflow:visible}
+.update-bowl-track{fill:var(--wash-strong)}
+.update-bowl-wave{fill:var(--gold)}
+.update-bowl-wave.is-far{fill:var(--pale);transform:translateY(-.5px)}
+.update-bowl-body,.update-bowl-plumb,.update-bowl-halo,.update-bowl-flake{transform-origin:var(--mx) var(--my)}
+.update-bowl-liquid{transform:translateY(var(--surface));transition:transform 1200ms var(--spring-settle)}
+.update-bowl-rock{transform-origin:var(--mx) 0}
+.update-bowl-flake{fill:var(--gold)}
+.update-bowl.is-hollow .update-bowl-flake{fill:var(--ink-faint)}
+.update-bowl.is-ink .update-bowl-flake{fill:var(--foreground)}
+.update-bowl-flake path{transform-origin:var(--fx) var(--fy)}
+.update-bowl-halo{fill:none;stroke:var(--gold);stroke-width:.5;opacity:0}
+.update-bowl-drop,.update-bowl-spill,.update-bowl-spark{fill:var(--gold);opacity:0;transform-box:fill-box;transform-origin:center}
+/* Pouring: the surface slides and rocks, a flake falls for each step that ends and the surface jumps under it. */
+.update-bowl:is(.is-pour,.is-orbit,.is-spill) .update-bowl-wave{animation:update-wave 1500ms linear infinite}
+.update-bowl:is(.is-pour,.is-orbit,.is-spill) .update-bowl-wave.is-far{animation:update-wave-far 2300ms linear infinite}
+.update-bowl.is-pour .update-bowl-rock{animation:update-rock 1900ms ease-in-out infinite alternate}
+.update-bowl.is-pour[data-kick="1"] .update-bowl-swell{animation:update-kick 900ms ease-in-out 430ms}
+.update-bowl.is-pour[data-kick="0"] .update-bowl-swell{animation:update-kick-again 900ms ease-in-out 430ms}
+.update-bowl-drop{animation:update-drop 540ms cubic-bezier(.5,0,.9,.5) both}
+@keyframes update-wave{to{transform:translateX(-8px)}}
+@keyframes update-wave-far{from{transform:translate(0,-.5px)}to{transform:translate(11px,-.5px)}}
+@keyframes update-rock{from{transform:rotate(-1.8deg)}to{transform:rotate(1.8deg)}}
+@keyframes update-kick{18%{transform:scaleY(2.6)}40%{transform:scaleY(.5)}62%{transform:scaleY(1.7)}82%{transform:scaleY(.8)}}
+@keyframes update-kick-again{18%{transform:scaleY(2.6)}40%{transform:scaleY(.5)}62%{transform:scaleY(1.7)}82%{transform:scaleY(.8)}}
+@keyframes update-drop{from{transform:translateY(-7px);opacity:0}18%,84%{opacity:1}to{transform:translateY(var(--surface));opacity:0}}
+/* Asked for: the two flakes are tossed up and dive in. They stay in the bowl while it fills. */
+.update-bowl.is-pour .update-bowl-flake path{opacity:0}
+.update-bowl:is(.is-empty,.is-pour) .update-bowl-flake{animation:update-dive-across 520ms cubic-bezier(.4,0,.7,1) 620ms both}
+.update-bowl:is(.is-empty,.is-pour) .update-bowl-flake path{animation:update-dive 520ms linear 620ms both}
+.update-bowl:is(.is-empty,.is-pour) .update-bowl-flake.is-second,.update-bowl:is(.is-empty,.is-pour) .update-bowl-flake.is-second path{animation-delay:730ms}
+@keyframes update-dive-across{to{transform:translateX(var(--dx))}}
+@keyframes update-dive{0%{opacity:1;transform:none;animation-timing-function:cubic-bezier(.2,.7,.4,1)}40%{transform:translateY(-3.6px) scale(1.3);animation-timing-function:cubic-bezier(.5,0,.9,.6)}80%{opacity:1}100%{opacity:0;transform:translateY(var(--dy)) scale(.7)}}
+/* The server is restarting: the bowl holds and the flakes come out and go round it, one a beat behind the other. */
+.update-bowl.is-orbit .update-bowl-flake{animation:update-orbit 2200ms infinite}
+.update-bowl.is-orbit .update-bowl-flake.is-second{animation-delay:130ms}
+.update-bowl.is-orbit .update-bowl-flake path{animation:update-emerge var(--dur-gooey) var(--spring-gooey) backwards,update-hop 2200ms infinite}
+.update-bowl.is-orbit .update-bowl-flake.is-second path{animation-delay:130ms}
+@keyframes update-orbit{0%{transform:rotate(0);animation-timing-function:var(--spring-gooey)}62%,100%{transform:rotate(360deg)}}
+@keyframes update-emerge{from{opacity:0;transform:translate(calc(var(--dx) * .5),calc(var(--dy) * .5)) scale(.2)}}
+@keyframes update-hop{0%,68%,94%,100%{scale:1}80%{scale:1.4}}
+/* It is in: the bowl pops, the flakes are flung out and settle, sparks fly and two rings of gold spread and fade. */
+.update-bowl.is-pop .update-bowl-body{animation:update-pop 780ms ease-in-out both}
+.update-bowl.is-pop .update-bowl-flake path{animation:update-burst 820ms ease-out 120ms backwards}
+.update-bowl.is-pop .update-bowl-flake.is-second path{animation-delay:190ms}
+.update-bowl.is-pop .update-bowl-halo{animation:update-halo 1100ms var(--ease-exit) 170ms both}
+.update-bowl.is-pop .update-bowl-halo.is-late{animation-delay:430ms}
+.update-bowl.is-pop .update-bowl-spark{animation:update-spark 720ms var(--ease-exit) calc(150ms + var(--i) * 18ms) both}
+@keyframes update-pop{0%{transform:scale(1)}14%{transform:scale(.9)}40%{transform:scale(1.16)}60%{transform:scale(.97)}80%{transform:scale(1.02)}100%{transform:scale(1)}}
+@keyframes update-burst{0%{opacity:0;transform:translate(var(--dx),var(--dy)) scale(.2)}20%{opacity:1}48%{transform:translate(calc(var(--dx) * -.2),calc(var(--dy) * -.2)) scale(1.3)}74%{transform:translate(calc(var(--dx) * .05),calc(var(--dy) * .05)) scale(.94)}100%{transform:none}}
+@keyframes update-halo{from{opacity:.6;transform:scale(.94)}to{opacity:0;transform:scale(1.7)}}
+@keyframes update-spark{from{opacity:0;transform:translateY(5px) scale(.3)}25%{opacity:1}to{opacity:0;transform:translateY(-5.5px)}}
+/* It failed: the bowl leans over its bite, what was poured runs out, and it comes upright again, empty. No shaking. */
+.update-bowl.is-spill .update-bowl-body{animation:update-tip 2700ms both}
+.update-bowl.is-spill .update-bowl-plumb{animation:update-plumb 2700ms both}
+.update-bowl.is-spill .update-bowl-liquid{transition:transform 1300ms cubic-bezier(.5,0,.8,.7) 380ms}
+.update-bowl.is-spill .update-bowl-spill{animation:update-spill 640ms cubic-bezier(.5,0,.9,.5) calc(520ms + var(--i) * 190ms) both}
+.update-bowl.is-spill .update-bowl-flake path{animation:fade-in var(--dur-settle) var(--ease-fade) 2300ms backwards}
+@keyframes update-tip{0%{transform:rotate(0);animation-timing-function:cubic-bezier(.4,0,.3,1)}22%,64%{transform:rotate(38deg);animation-timing-function:var(--spring-settle)}100%{transform:rotate(0)}}
+@keyframes update-plumb{0%{transform:rotate(0);animation-timing-function:cubic-bezier(.4,0,.3,1)}22%,64%{transform:rotate(-38deg);animation-timing-function:var(--spring-settle)}100%{transform:rotate(0)}}
+@keyframes update-spill{from{opacity:0;transform:translateY(-1px) scale(.5)}20%,72%{opacity:1}to{opacity:0;transform:translateY(7px)}}
+
+/* The steps, joined by a rail under the bowl's middle. A step that ends is checked with a stroke that draws
+   itself, and gold runs down the rail to the next. The one under way shimmers. */
+.update-steps{display:grid;margin:0;padding:0;list-style:none}
+.update-steps li{display:flex;align-items:center;min-height:var(--control-h-sm);font-size:var(--text-control);line-height:18px}
+.is-live .update-steps li{min-height:var(--control-h)}
+.update-node{position:relative;display:grid;place-items:center;align-self:stretch;flex:none;width:var(--rail);margin-right:var(--rail-lead)}
+.update-node svg{display:block;width:var(--node);height:var(--node);border-radius:50%;overflow:visible;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;color:var(--ink-faint);transition:background-color var(--dur-settle) var(--ease-fade),color var(--dur-settle) var(--ease-fade)}
+/* The rail from this step to the next: a faint track, and over it the gold, drawn from the top once the step is done. */
+.update-node::before,.update-node::after{content:'';position:absolute;left:calc(50% - 1px);top:calc(50% + var(--node) / 2 + 3px);bottom:calc(-50% + var(--node) / 2 + 3px);width:2px;border-radius:1px;background:var(--wash-strong)}
+.update-node::after{background:var(--brand);transform:scaleY(0);transform-origin:top;transition:transform var(--dur-settle) var(--spring-settle)}
+.update-steps li:last-child .update-node::before,.update-steps li:last-child .update-node::after{content:none}
+.update-steps li.is-done .update-node::after{transform:scaleY(1)}
+.update-step-text{display:flex;flex-wrap:wrap;align-items:baseline;column-gap:var(--row-gap);min-width:0}
+.update-step-text small{font-size:var(--text-help);line-height:16px;color:var(--muted-foreground)}
+.update-steps li:is(.is-waiting,.is-skipped) .update-step-name{color:var(--muted-foreground)}
+.update-steps li.is-waiting .update-node svg{box-shadow:inset 0 0 0 3px var(--wash-strong);transform:scale(.5)}
+.update-steps li.is-done .update-node svg{background:var(--brand);color:var(--on-brand)}
+.update-steps li.is-failed .update-node svg{box-shadow:inset 0 0 0 1.5px var(--danger-line);color:var(--danger)}
+.update-steps li.is-failed small{color:var(--danger)}
+.update-node-ring{stroke:var(--wash-strong);stroke-width:2}
+.update-node-arc{stroke:var(--brand);stroke-width:2;stroke-dasharray:.3 .7;transform-origin:8px 8px;animation:spin 900ms linear infinite}
+.update-node-line{stroke-dasharray:1}
+/* Played only for the page that watches: an update read afterwards is simply shown. */
+.is-live .update-node-line{animation:update-draw var(--dur-gooey) var(--ease-fade) 90ms backwards}
+.is-live .update-steps li:is(.is-done,.is-failed) .update-node svg{animation:pop-in var(--dur-gooey) var(--spring-gooey)}
+.is-live .update-step-text small{animation:fade-in var(--dur-snappy) var(--ease-fade) backwards,rise var(--dur-settle) var(--spring-settle) backwards}
+.is-live .update-steps li.is-running .update-step-name{background:linear-gradient(100deg,var(--foreground) 42%,var(--brand) 50%,var(--foreground) 58%) 100% 0/300% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:update-shimmer 1900ms linear infinite}
+@keyframes update-draw{from{stroke-dashoffset:1}}
+@keyframes update-shimmer{to{background-position:0 0}}
+/* It failed: the gold that marked the way is taken back, from the failed step up to the first. The steps stay
+   checked, because they were done; the one that failed is marked plainly. */
+.update-steps.is-unwound li.is-done .update-node svg,.update-steps li.is-rollback.is-done .update-node svg{background:var(--wash-strong);color:var(--foreground)}
+.update-steps.is-unwound li.is-done .update-node svg{transition-delay:calc(var(--back) * 130ms)}
+.update-steps.is-unwound li.is-done .update-node::after{transform:scaleY(0);transform-origin:top;transition-delay:calc(var(--back) * 130ms)}
+
+/* The updater's own lines, behind "Show log". They wrap, so a long path never makes the page scroll sideways. */
+.update-log-wrap{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--row-gap);min-width:0}
+.instance-settings .update-log-toggle{display:flex;align-items:center;justify-self:start;min-height:var(--control-h-sm);padding:0 var(--row-gap) 0 0;border-radius:var(--control-radius);font:var(--text-label)/16px var(--font-ui);color:var(--muted-foreground);cursor:pointer;transition:color var(--dur-hover-in) var(--ease-fade)}
+.instance-settings .update-log-toggle:hover{color:var(--foreground)}
+.instance-settings .update-log-toggle:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+.update-log-chevron{display:grid;place-items:center;flex:none;width:var(--rail);margin-right:var(--rail-lead)}
+.update-log-chevron svg{width:14px;height:14px;transition:transform var(--dur-snappy) var(--spring-snappy)}
+.update-log-toggle[aria-expanded=true] .update-log-chevron svg{transform:rotate(90deg)}
+.update-log-toggle small{margin-left:var(--row-gap);font-size:var(--text-help);color:var(--ink-faint);font-variant-numeric:tabular-nums}
+.update-log{min-height:calc(17px + 20px);max-height:260px;margin:0;scroll-margin:calc(2 * var(--card-py));padding:10px var(--control-px);overflow:auto;border:1px solid var(--border);border-radius:var(--control-radius);background:var(--secondary);color:var(--foreground);font:var(--text-help)/17px var(--font-mono);white-space:pre-wrap;overflow-wrap:anywhere;user-select:text}
+.update-log:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+
+/* ── View transitions (components/admin/update-motion.ts) ─────────────────────────────────────────────────
+   A change of layout in this section is made between two pictures of the page, and the browser moves from one
+   to the other with transforms and opacity. The names below exist only for the length of such a change.
+   The card is followed as a bare frame, stretched from its old height to its new one; everything in it is
+   followed on its own, at its own size, so nothing in it is stretched and nothing is drawn twice.
+   launch: the card grows, the progress section unfolds in it and "Update server" becomes the bowl.
+   settle: the large picture and the small summary trade places, every part travelling to where it belongs.
+   resize: the card grows or shrinks at its end (the log opens or closes). extend: a sixth step joins the list. */
+:root[data-update-stage] .updates-card{view-transition-name:updates-card}
+:root[data-update-stage] .updates-card>[data-slot=card-header]{view-transition-name:updates-title}
+:root[data-update-stage] .updates-card .admin-notice{view-transition-name:updates-notice}
+:root[data-update-stage] .updates-this{view-transition-name:updates-this}
+:root[data-update-stage] .updates-source{view-transition-name:updates-source}
+:root[data-update-stage] .update-section{view-transition-name:update-section}
+:root[data-update-stage] .instance-footer{view-transition-name:instance-footer}
+/* Opening the log can scroll the page, and closing it scrolls it back: the page's heading and the list of sections travel too. */
+:root[data-update-stage] .instance-settings .instance-heading{view-transition-name:instance-heading}
+:root[data-update-stage] .instance-settings .settings-nav{view-transition-name:instance-sections}
+:root[data-update-stage=launch] .updates-card:not(:has(.update-bowl)) .update-go{view-transition-name:update-bowl}
+:root:is([data-update-stage=launch],[data-update-stage=settle]) .update-bowl{view-transition-name:update-bowl}
+:root:is([data-update-stage=settle],[data-update-stage=resize],[data-update-stage=extend]) .update-log-panel{view-transition-name:update-log}
+:root[data-update-stage=settle] .update-section>.model-section-heading{view-transition-name:update-heading}
+:root[data-update-stage=settle] .update-words{view-transition-name:update-words}
+:root[data-update-stage=settle] .update-log-chevron{view-transition-name:update-log-chevron}
+:root[data-update-stage=settle] .update-log-label{view-transition-name:update-log-label}
+:root[data-update-stage=settle] .update-steps li:nth-child(1) .update-node{view-transition-name:update-node-1}
+:root[data-update-stage=settle] .update-steps li:nth-child(2) .update-node{view-transition-name:update-node-2}
+:root[data-update-stage=settle] .update-steps li:nth-child(3) .update-node{view-transition-name:update-node-3}
+:root[data-update-stage=settle] .update-steps li:nth-child(4) .update-node{view-transition-name:update-node-4}
+:root[data-update-stage=settle] .update-steps li:nth-child(5) .update-node{view-transition-name:update-node-5}
+:root[data-update-stage=settle] .update-steps li:nth-child(6) .update-node{view-transition-name:update-node-6}
+:root[data-update-stage=settle] .update-steps li:nth-child(1) .update-step-text{view-transition-name:update-step-1}
+:root[data-update-stage=settle] .update-steps li:nth-child(2) .update-step-text{view-transition-name:update-step-2}
+:root[data-update-stage=settle] .update-steps li:nth-child(3) .update-step-text{view-transition-name:update-step-3}
+:root[data-update-stage=settle] .update-steps li:nth-child(4) .update-step-text{view-transition-name:update-step-4}
+:root[data-update-stage=settle] .update-steps li:nth-child(5) .update-step-text{view-transition-name:update-step-5}
+:root[data-update-stage=settle] .update-steps li:nth-child(6) .update-step-text{view-transition-name:update-step-6}
+:root[data-update-stage=settle] :is(.update-node,.update-log-chevron){view-transition-class:update-middle}
+:root:is([data-update-stage=resize],[data-update-stage=extend]) .update-hero{view-transition-name:update-hero}
+:root:is([data-update-stage=resize],[data-update-stage=extend]) .update-steps{view-transition-name:update-steps}
+:root:is([data-update-stage=resize],[data-update-stage=extend]) .update-log-toggle{view-transition-name:update-log-toggle}
+:root[data-update-stage]::view-transition-group(*){animation-duration:var(--dur-settle);animation-timing-function:var(--spring-settle)}
+/* The rest of the page is the same before and after: it stays as it is (a change of page fades it, styles/base.css). */
+:root[data-update-stage]::view-transition-old(root){display:none}
+:root[data-update-stage]::view-transition-new(root){animation:none}
+/* Parts keep their own size as they travel. The card's frame is stretched, and the bowl is scaled, from the button's height to its own. */
+:root[data-update-stage]::view-transition-old(*),:root[data-update-stage]::view-transition-new(*){width:auto;height:auto}
+:root[data-update-stage]::view-transition-old(updates-card),:root[data-update-stage]::view-transition-new(updates-card){width:100%;height:100%}
+:root[data-update-stage]::view-transition-old(update-bowl),:root[data-update-stage]::view-transition-new(update-bowl){width:100%;height:100%;object-fit:contain}
+:root[data-update-stage=launch]::view-transition-old(update-bowl){animation-duration:var(--dur-snappy-exit)}
+/* A step's mark sits in the middle of a column that is as wide as the bowl, large or small: its two pictures are hung from that middle. */
+:root[data-update-stage]::view-transition-old(.update-middle),:root[data-update-stage]::view-transition-new(.update-middle){inset-inline-start:50%;translate:-50% 0}
+/* The words change with the size: the large ones are gone before the small ones arrive, and the other way round. */
+:root[data-update-stage]::view-transition-old(update-words),:root[data-update-stage]::view-transition-old(update-log-toggle){animation-duration:var(--dur-snappy-exit)}
+:root[data-update-stage]::view-transition-new(update-words),:root[data-update-stage]::view-transition-new(update-log-toggle){animation-delay:var(--dur-snappy-exit);animation-duration:var(--dur-snappy)}
+/* What was not there before is uncovered from its top edge, at the pace the card grows over it; what goes is covered the same way.
+   The two keyframe lists are --spring-settle itself, point for point: a clip that the compositor animates takes no linear() easing
+   (it runs straight from one keyframe to the next), so the spring is written into the keyframes and the timing is linear. */
+:root[data-update-stage]::view-transition-new(update-section):only-child,:root[data-update-stage]::view-transition-new(update-log):only-child{animation:fade-in var(--dur-snappy) var(--ease-fade) both,update-unfold var(--dur-settle) linear both}
+:root[data-update-stage]::view-transition-old(update-section):only-child,:root[data-update-stage]::view-transition-old(update-log):only-child{animation:fade-out var(--dur-snappy) var(--ease-fade) both,update-fold var(--dur-settle) linear both}
+/* The picture and the steps stay where they are when the card changes at its end: they are simply themselves, moving as they were.
+   A sixth step is uncovered as the card grows over it: the list's last sixth, at the card's pace. */
+:root[data-update-stage]::view-transition-old(update-hero),:root[data-update-stage]::view-transition-old(update-steps){display:none}
+:root[data-update-stage]::view-transition-new(update-hero),:root[data-update-stage]::view-transition-new(update-steps){animation:none}
+:root[data-update-stage=extend]::view-transition-new(update-steps){animation:update-unfold-sixth var(--dur-settle) linear both}
+@keyframes update-unfold-sixth{0%{clip-path:inset(0 0 16.67% 0)}1.25%{clip-path:inset(0 0 16.57% 0)}2.75%{clip-path:inset(0 0 16.25% 0)}4.5%{clip-path:inset(0 0 15.65% 0)}6.5%{clip-path:inset(0 0 14.73% 0)}9.25%{clip-path:inset(0 0 13.22% 0)}17%{clip-path:inset(0 0 8.59% 0)}20.5%{clip-path:inset(0 0 6.7% 0)}23.75%{clip-path:inset(0 0 5.16% 0)}27%{clip-path:inset(0 0 3.85% 0)}30.25%{clip-path:inset(0 0 2.78% 0)}33.75%{clip-path:inset(0 0 1.86% 0)}37.5%{clip-path:inset(0 0 1.12% 0)}41.75%{clip-path:inset(0 0 0.53% 0)}46.5%{clip-path:inset(0 0 0.12% 0)}52.5%{clip-path:inset(0 0 -0.15% 0)}61.25%{clip-path:inset(0 0 -0.24% 0)}99.5%{clip-path:inset(0 0 0% 0)}100%{clip-path:inset(0 0 0% 0)}}
+@keyframes update-unfold{0%{clip-path:inset(0 0 100% 0)}1.25%{clip-path:inset(0 0 99.45% 0)}2.75%{clip-path:inset(0 0 97.52% 0)}4.5%{clip-path:inset(0 0 93.89% 0)}6.5%{clip-path:inset(0 0 88.39% 0)}9.25%{clip-path:inset(0 0 79.34% 0)}17%{clip-path:inset(0 0 51.55% 0)}20.5%{clip-path:inset(0 0 40.19% 0)}23.75%{clip-path:inset(0 0 30.96% 0)}27%{clip-path:inset(0 0 23.12% 0)}30.25%{clip-path:inset(0 0 16.67% 0)}33.75%{clip-path:inset(0 0 11.15% 0)}37.5%{clip-path:inset(0 0 6.7% 0)}41.75%{clip-path:inset(0 0 3.17% 0)}46.5%{clip-path:inset(0 0 0.69% 0)}52.5%{clip-path:inset(0 0 -0.89% 0)}61.25%{clip-path:inset(0 0 -1.44% 0)}99.5%{clip-path:inset(0 0 -0.01% 0)}100%{clip-path:inset(0 0 0% 0)}}
+@keyframes update-fold{0%{clip-path:inset(0 0 0% 0)}1.25%{clip-path:inset(0 0 0.55% 0)}2.75%{clip-path:inset(0 0 2.48% 0)}4.5%{clip-path:inset(0 0 6.11% 0)}6.5%{clip-path:inset(0 0 11.61% 0)}9.25%{clip-path:inset(0 0 20.66% 0)}17%{clip-path:inset(0 0 48.45% 0)}20.5%{clip-path:inset(0 0 59.81% 0)}23.75%{clip-path:inset(0 0 69.04% 0)}27%{clip-path:inset(0 0 76.88% 0)}30.25%{clip-path:inset(0 0 83.33% 0)}33.75%{clip-path:inset(0 0 88.85% 0)}37.5%{clip-path:inset(0 0 93.3% 0)}41.75%{clip-path:inset(0 0 96.83% 0)}46.5%{clip-path:inset(0 0 99.31% 0)}52.5%{clip-path:inset(0 0 100.89% 0)}61.25%{clip-path:inset(0 0 101.44% 0)}99.5%{clip-path:inset(0 0 100.01% 0)}100%{clip-path:inset(0 0 100% 0)}}
 
 /* ── Save bar and footer ──────────────────────────────────────────────── */
 .instance-save{display:flex;align-items:center;justify-content:space-between;gap:var(--section-gap);min-height:var(--control-h);margin-top:var(--section-gap)}
@@ -306,5 +566,14 @@
  .administrator-row{min-height:52px}
  .administrator-person{flex-direction:column;align-items:flex-start;gap:0}
  .instance-footer{flex-direction:column;align-items:flex-start;gap:var(--row-gap)}
+ /* Under its name, not beside it: no control-tall row to line up with. */
+ .update-version,.update-found{min-height:0}
+ .update-plain{padding:0}
+ /* No room beside the bowl: the words go under it, centred, and the rail keeps the width of one control. */
+ .update-progress.is-live{--rail:var(--control-h);--rail-lead:var(--control-px)}
+ .update-progress.is-live .update-hero{grid-template-columns:minmax(0,1fr);justify-items:center;row-gap:var(--row-gap);text-align:center}
+ .update-progress.is-live .update-words{justify-items:center;--swap-left:50%;--swap-shift:-50%}
+ .update-progress.is-live .update-link{align-items:flex-start;justify-content:center}
+ .update-progress.is-live .update-link>svg{margin-top:2px}
 }
 @media(prefers-reduced-motion:reduce){.instance-settings *,.instance-select *{animation:none!important;transition:none!important}}

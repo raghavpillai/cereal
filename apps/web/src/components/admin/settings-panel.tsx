@@ -17,7 +17,23 @@ export function ProviderLogo({provider}:{provider:AIProvider}){return <img class
 export const modelLogo=(provider:AIProvider,model:string):AIProvider=>provider==='openrouter'&&/^(openai|anthropic)\//.test(model)?model.split('/')[0] as AIProvider:provider
 export type CatalogState={data?:ModelCatalogDTO;busy?:boolean;error?:string}
 const providers=Object.keys(providerNames) as AIProvider[]
-export function SettingsPanel({settings,client,expired,busy,save,replace,children,viewerEmail}:{viewerEmail?:string;children?:ReactNode;settings:AdminSettingsDTO;client:AdminClient;expired:()=>void;busy:boolean;save:(patch:UpdateAdminSettingsInput)=>Promise<void>;/** The settings changed outside the form (the sign-in method was switched): show them. */replace:(settings:AdminSettingsDTO)=>void}){
+/** A section that is not part of the settings form: it acts at once and has no "Save changes" (Administrators, Updates). */
+export type ExtraSection={id:string;label:string;content:ReactNode}
+/** Which section the address names (`/admin#models`), so reload, back and a shared link all open the same one.
+ * An unknown or missing name is the first section. */
+export function sectionFromHash(hash:string,ids:readonly string[]):string{
+ let name='';try{name=decodeURIComponent(hash.replace(/^#/,''))}catch{/* not a section */}
+ return ids.includes(name)?name:ids[0]??''
+}
+function useSection(ids:readonly string[]):string{
+ const key=ids.join(' '),read=()=>sectionFromHash(typeof window==='undefined'?'':window.location.hash,key.split(' '))
+ const[section,setSection]=useState(read)
+ useEffect(()=>{const changed=()=>setSection(read());changed();window.addEventListener('hashchange',changed);return()=>window.removeEventListener('hashchange',changed)},[key])
+ return section
+}
+/** The section a changed setting is shown in, for the mark beside its name in the sidebar. */
+export const sectionOfSetting=(key:string):string=>key==='instanceName'||key==='instanceLogo'?'identity':key.endsWith('ApiKey')||key==='openAiCompatibleBaseUrl'?'providers':key==='signIn'?'sign-in':key==='storage'||key==='apps'?key:'models'
+export function SettingsPanel({settings,client,expired,busy,save,replace,extra=[],viewerEmail}:{viewerEmail?:string;/** Sections after the form's own, in order. */extra?:readonly ExtraSection[];settings:AdminSettingsDTO;client:AdminClient;expired:()=>void;busy:boolean;save:(patch:UpdateAdminSettingsInput)=>Promise<void>;/** The settings changed outside the form (the sign-in method was switched): show them. */replace:(settings:AdminSettingsDTO)=>void}){
  const formId=useId()
  const[draft,setDraft]=useState(()=>instanceDraft(settings)),[editing,setEditing]=useState<AIProvider|null>(null),[catalogs,setCatalogs]=useState<Partial<Record<AIProvider,CatalogState>>>({}),[logoError,setLogoError]=useState<string|null>(null)
  const requests=useRef(new Map<AIProvider,AbortController>()),logoVersion=useRef(0),logoInput=useRef<HTMLInputElement>(null)
@@ -42,24 +58,30 @@ export function SettingsPanel({settings,client,expired,busy,save,replace,childre
  }
  function setKey(provider:AIProvider,value:string){requests.current.get(provider)?.abort();setCatalogs(old=>({...old,[provider]:{}}));setDraft(old=>({...old,keys:{...old.keys,[provider]:value},removed:{...old.removed,[provider]:false}}))}
  function setBaseUrl(value:string){requests.current.get('openai_compatible')?.abort();setCatalogs(old=>({...old,openai_compatible:{}}));update('compatibleBaseUrl',value)}
- // The page's sections in order. Administrators is drawn by the caller, and only for the owner.
- const sections:Array<[string,string]>=[['identity','Identity'],['providers','AI providers'],['models','Models'],...(settings.signIn?[['sign-in','Sign-in'] as [string,string]]:[]),...(settings.storage?[['storage','Storage'] as [string,string]]:[]),...(settings.apps?[['apps','Apps'] as [string,string]]:[]),['administrators','Administrators']]
- const[administratorsShown,setAdministratorsShown]=useState(false)
- useEffect(()=>{setAdministratorsShown(document.getElementById('administrators')!==null)})
+ // The page's sections in order: the form's own, then the caller's (Administrators and Updates, for the owner).
+ // One is shown at a time, chosen in the sidebar; the draft covers all of them, so an edit survives looking elsewhere.
+ const formSections:Array<[string,string]>=[['identity','Identity'],['providers','AI providers'],['models','Models'],...(settings.signIn?[['sign-in','Sign-in'] as [string,string]]:[]),...(settings.storage?[['storage','Storage'] as [string,string]]:[]),...(settings.apps?[['apps','Apps'] as [string,string]]:[])]
+ const sections:Array<[string,string]>=[...formSections,...extra.map(({id,label})=>[id,label] as [string,string])]
+ const section=useSection(sections.map(([id])=>id)),inForm=formSections.some(([id])=>id===section),unsaved=new Set(Object.keys(patch).map(sectionOfSetting))
+ const nav=useRef<HTMLElement>(null)
+ // On a phone the sections are one row that scrolls sideways: keep the chosen one in view.
+ useEffect(()=>{const row=nav.current,chosen=row?.querySelector<HTMLElement>('[aria-current]');if(row&&chosen&&row.scrollWidth>row.clientWidth)row.scrollTo({left:chosen.offsetLeft-(row.clientWidth-chosen.offsetWidth)/2})},[section])
  // The OpenAI-compatible server is usable with a valid address; the others with a key that is not being removed.
  const available=(id:AIProvider)=>id==='openai_compatible'?!!draft.compatibleBaseUrl.trim()&&!compatibleBaseUrlProblem(draft.compatibleBaseUrl):!draft.removed[id]&&(Boolean(draft.keys[id].trim())||Boolean(settings.providers.find(p=>p.id===id)?.configured))
  const compatibleSaved=settings.openAiCompatible,compatibleChanged=tidyBaseUrl(draft.compatibleBaseUrl)!==(compatibleSaved?.baseUrl??'')
  const status=(id:AIProvider)=>id==='openai_compatible'?(compatibleChanged&&available(id)?'Address ready':available(id)?'Connected':'Not connected'):draft.keys[id]?'Key ready':available(id)?'Connected':'Not connected'
- return <><form id={formId} className="instance-form" onSubmit={event=>{event.preventDefault();if(!problem&&dirty)void save(patch)}}>
+ return <div className="settings-layout">
+ <nav ref={nav} className="settings-nav" aria-label="Sections">{sections.map(([id,label])=><a key={id} href={`#${id}`} aria-current={id===section?'page':undefined}>{label}{unsaved.has(id)&&<span className="settings-nav-unsaved" role="img" aria-label="unsaved changes"/>}</a>)}</nav>
+ <div className="settings-pane">
+ <form id={formId} className="instance-form" hidden={!inForm} onSubmit={event=>{event.preventDefault();if(!problem&&dirty)void save(patch)}}>
  <fieldset disabled={busy} className="admin-fieldset">
-  <nav className="settings-index" aria-label="Sections">{sections.filter(([id])=>id!=='administrators'||administratorsShown).map(([id,label])=><a key={id} href={`#${id}`}>{label}</a>)}</nav>
   {settings.unusedEnvironment&&settings.unusedEnvironment.length>0&&<p className="environment-note" role="note">These are still set in the server’s environment but are no longer read, because their settings now live on this page: <code>{settings.unusedEnvironment.join(', ')}</code>. You can delete them.</p>}
-  <Card id="identity"><CardHeader><CardTitle>Identity</CardTitle></CardHeader><CardContent>
+  {section==='identity'&&<Card><CardHeader><CardTitle>Identity</CardTitle></CardHeader><CardContent>
    <div className="identity-fields"><div><label className="settings-label" htmlFor="instance-name">Team name</label><Input id="instance-name" value={draft.instanceName} maxLength={100} required onChange={e=>update('instanceName',e.target.value)}/></div>
     <div><label className="settings-label">Team logo</label><div className="logo-control"><div className="team-logo-preview">{draft.instanceLogo?<img src={draft.instanceLogo} alt="Team logo"/>:<img src="/mark.svg" width="26" height="26" alt="Cereal"/>}</div><div><Button type="button" variant="outline" onClick={()=>logoInput.current?.click()}><ImagePlus/>Upload logo</Button><p className="settings-help">PNG, JPG, WebP · 250 KB max</p></div>{draft.instanceLogo&&<Button type="button" variant="ghost" size="icon" aria-label="Remove team logo" onClick={()=>{logoVersion.current++;update('instanceLogo',null)}}><X/></Button>}</div><input ref={logoInput} type="file" className="sr-only" accept="image/png,image/jpeg,image/webp" aria-label="Upload team logo" onChange={e=>void readLogo(e.target.files?.[0])}/></div>
    </div>{logoError&&<p role="alert" className="settings-error">{logoError}</p>}
-  </CardContent></Card>
-  <Card id="providers"><CardHeader><CardTitle>AI providers</CardTitle>  </CardHeader><CardContent><div className="provider-list">{providers.map(id=>{const saved=settings.providers.find(p=>p.id===id),connected=available(id),state=catalogs[id],hint=saved?.configured&&!draft.removed[id]?saved.hint:null;return <div className="provider-entry" key={id}>
+  </CardContent></Card>}
+  {section==='providers'&&<Card><CardHeader><CardTitle>AI providers</CardTitle>  </CardHeader><CardContent><div className="provider-list">{providers.map(id=>{const saved=settings.providers.find(p=>p.id===id),connected=available(id),state=catalogs[id],hint=saved?.configured&&!draft.removed[id]?saved.hint:null;return <div className="provider-entry" key={id}>
    <div className="provider-row"><div className="provider-icon"><ProviderLogo provider={id}/></div><div className="provider-details"><strong title={providerNames[id]}>{providerShortNames[id]?<><span className="provider-name-long">{providerNames[id]}</span><span className="provider-name-short" aria-hidden="true">{providerShortNames[id]}</span></>:providerNames[id]}</strong>{hint&&<span className="provider-hint" title={hint}>{hint}{saved?.source==='environment'?' · server':''}</span>}</div><Badge variant="outline" className={connected?'provider-connected':'provider-disconnected'}><span/>{status(id)}</Badge><Button type="button" variant="ghost" size="sm" aria-expanded={editing===id} onClick={()=>setEditing(editing===id?null:id)}>{connected?'Manage':'Connect'}<ChevronRight className={editing===id?'rotate-90':''}/></Button></div>
    {editing===id&&id!=='openai_compatible'&&<div className="provider-editor"><label className="settings-label" htmlFor={`${id}-key`}>{providerNames[id]} API key</label><div className="provider-key-row"><Input id={`${id}-key`} type="password" autoComplete="new-password" value={draft.keys[id]} disabled={draft.removed[id]} placeholder={saved?.configured?'Type a new key to replace it':'Enter your API key'} onChange={e=>setKey(id,e.target.value)}/>{(connected||id==='openrouter')&&<Button type="button" variant="outline" disabled={state?.busy} onClick={()=>void loadCatalog(id,true)}>{state?.busy?<Loader2 className="animate-spin"/>:<RefreshCw/>}Load models</Button>}</div>
    <p className="settings-help">{saved?.configured&&!draft.removed[id]?savedKeyText(saved)?.replace(/\. Type.*$/,'. '):''}{saved?.source==='environment'?'A key saved here overrides it.':'Keys are encrypted on the server and never returned to the browser.'}</p>
@@ -74,8 +96,8 @@ export function SettingsPanel({settings,client,expired,busy,save,replace,childre
     {compatibleSaved?.apiKeySet&&<label className="remove-key"><input type="checkbox" checked={draft.removed[id]} onChange={e=>update('removed',{...draft.removed,[id]:e.target.checked})}/>Remove saved key</label>}</>}
     {state?.error&&<p role="alert" className="settings-error">{state.error}</p>}{state?.data&&<p className="settings-help"><Check size={12}/>{state.data.models.length?`${state.data.models.length} models available`:'No models listed. Type a model name in the model choices below.'}{compatibleChanged||draft.keys[id]?' · Save changes to connect':''}</p>}
    </div>}
-  </div>})}</div><p className="provider-security">API keys are encrypted and kept on your server.</p></CardContent></Card>
-  <Card id="models"><CardHeader><CardTitle>Models</CardTitle></CardHeader><CardContent>
+  </div>})}</div><p className="provider-security">API keys are encrypted and kept on your server.</p></CardContent></Card>}
+  {section==='models'&&<Card><CardHeader><CardTitle>Models</CardTitle></CardHeader><CardContent>
    <div className="model-section"><div className="model-section-heading"><h3>Chat</h3><span>{draft.chatModels.length} enabled</span></div><div className="model-controls">
     <div className="chat-model-list">{draft.chatModels.map((model,i)=><div className="chat-model-row" key={modelKey(model)}><ModelPicker value={model} kind="language" catalogs={catalogs} available={available} load={loadCatalog} label={`Chat model ${i+1}`} change={next=>{if(draft.chatModels.some((m,index)=>index!==i&&modelKey(m)===modelKey(next)))return;update('chatModels',draft.chatModels.map((m,index)=>index===i?next as LanguageModelSelection:m))}}/>{i===0?<Badge variant="secondary" className="default-model">Default</Badge>:<Button type="button" variant="ghost" size="icon" aria-label={`Make ${model.model} the default`} onClick={()=>update('chatModels',[model,...draft.chatModels.filter((_,index)=>index!==i)])}><Check size={14}/></Button>}<Button type="button" variant="ghost" size="icon" disabled={draft.chatModels.length===1} aria-label={`Remove ${model.model}`} onClick={()=>update('chatModels',draft.chatModels.filter((_,index)=>index!==i))}><Trash2/></Button></div>)}</div>
     {draft.chatModels.length<20&&<ModelPicker kind="language" catalogs={catalogs} available={available} load={loadCatalog} label="Add chat model" excluded={draft.chatModels.map(modelKey)} change={model=>update('chatModels',[...draft.chatModels,model as LanguageModelSelection])}/>}
@@ -91,10 +113,10 @@ export function SettingsPanel({settings,client,expired,busy,save,replace,childre
     </div>}
    </div></div>
    <div className="model-section"><div className="model-section-heading"><h3>Meeting notes</h3></div><ModelPicker value={draft.generationModel} kind="language" catalogs={catalogs} available={available} load={loadCatalog} label="Meeting notes model" change={model=>update('generationModel',model as LanguageModelSelection)}/></div>
-  </CardContent></Card>
-  {draft.signIn&&settings.signIn&&<SignInSettings viewerEmail={viewerEmail} draft={draft.signIn} saved={settings.signIn} change={next=>update('signIn',next)} client={client} switched={replace} expired={expired}/>}
-  {draft.storage&&settings.storage&&<StorageSettings draft={draft.storage} saved={settings.storage} change={next=>update('storage',next)} test={async(input,signal)=>{try{return await client.testStorage(input,signal)}catch(error){if(error instanceof AdminClientError&&error.status===401)expired();throw error}}}/>}
-  {draft.apps&&settings.apps&&<Card id="apps"><CardHeader><CardTitle>Apps</CardTitle></CardHeader><CardContent>
+  </CardContent></Card>}
+  {section==='sign-in'&&draft.signIn&&settings.signIn&&<SignInSettings viewerEmail={viewerEmail} draft={draft.signIn} saved={settings.signIn} change={next=>update('signIn',next)} client={client} switched={replace} expired={expired}/>}
+  {section==='storage'&&draft.storage&&settings.storage&&<StorageSettings draft={draft.storage} saved={settings.storage} change={next=>update('storage',next)} test={async(input,signal)=>{try{return await client.testStorage(input,signal)}catch(error){if(error instanceof AdminClientError&&error.status===401)expired();throw error}}}/>}
+  {section==='apps'&&draft.apps&&settings.apps&&<Card><CardHeader><CardTitle>Apps</CardTitle></CardHeader><CardContent>
    <div className="model-section"><div className="model-section-heading"><h3>iPhone app</h3><span>{draft.apps.iosAppStoreId.trim()?'On the App Store':'Not published'}</span></div><div className="model-controls sign-in-block"><div className="storage-fields">
     <div><label className="settings-label" htmlFor="ios-app-ids">App IDs that open note links</label><Input id="ios-app-ids" type="text" autoComplete="off" autoCapitalize="none" spellCheck={false} aria-describedby="ios-app-ids-help" placeholder="LZWN2FF7YB.dev.cereal.mobile" value={draft.apps.iosAppIds} onChange={e=>update('apps',{...draft.apps!,iosAppIds:e.target.value})}/><p id="ios-app-ids-help" className="settings-help">Team ID, a dot, the bundle ID; several separated by commas. Leave blank for the Cereal app.</p></div>
     <div><label className="settings-label" htmlFor="ios-app-store-id">App Store ID</label><Input id="ios-app-store-id" type="text" inputMode="numeric" autoComplete="off" maxLength={20} aria-describedby="ios-app-store-id-help" placeholder="Not published yet" value={draft.apps.iosAppStoreId} onChange={e=>update('apps',{...draft.apps!,iosAppStoreId:e.target.value})}/><p id="ios-app-store-id-help" className="settings-help">The number in the app’s App Store address. Adds the iPhone link on the download page and the “open in the app” banner in Safari.</p></div>
@@ -102,9 +124,11 @@ export function SettingsPanel({settings,client,expired,busy,save,replace,childre
   </CardContent></Card>}
  </fieldset>
  </form>
- {children}
-  <div className="instance-save"><span aria-live="polite">{busy?<><Loader2 size={14} className="animate-spin"/>Saving changes…</>:problem??(dirty?'You have unsaved changes.':<><Check size={14}/>All changes saved</>)}</span><Button form={formId} type="submit" disabled={busy||!!problem||!dirty}>Save changes</Button></div>
- </>
+ {extra.find(({id})=>id===section)?.content}
+  {/* Sections outside the form save nothing, so the bar is there only while an edit made elsewhere is waiting. */}
+  {(inForm||dirty||busy)&&<div className="instance-save"><span aria-live="polite">{busy?<><Loader2 size={14} className="animate-spin"/>Saving changes…</>:problem??(dirty?'You have unsaved changes.':<><Check size={14}/>All changes saved</>)}</span><Button form={formId} type="submit" disabled={busy||!!problem||!dirty}>Save changes</Button></div>}
+ </div>
+ </div>
 }
 export function ModelPicker({value,kind,catalogs,available,load,label,change,excluded=[]}:{value?:LanguageModelSelection|LiveTranscriptionModelSelection;kind:'language'|'live_transcription';catalogs:Partial<Record<AIProvider,CatalogState>>;available:(id:AIProvider)=>boolean;load:(id:AIProvider,refresh?:boolean)=>Promise<void>;label:string;change:(m:LanguageModelSelection|LiveTranscriptionModelSelection)=>void;excluded?:string[]}){
  const[query,setQuery]=useState(''),id=useId(),supported:readonly AIProvider[]=kind==='language'?['openrouter','openai','anthropic','openai_compatible']:['elevenlabs']

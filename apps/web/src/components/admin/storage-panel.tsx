@@ -31,7 +31,7 @@ export function StorageSettings({draft,saved,change,test}:{draft:StorageDraft;sa
     <p className={result&&!result.ok?'settings-error storage-test-result':'settings-help storage-test-result'} role="status" aria-live="polite">{testing?'Writing, reading and deleting a small test file…':result?<>{result.ok?<Check size={12}/>:<TriangleAlert size={12}/>}{result.message}</>:s3||ready?'Tries these settings as they are on screen, before you save them.':'Checks that the server can write to its disk.'}</p>
    </div>
    </>
- return <Card id="storage"><CardHeader><CardTitle>Storage</CardTitle></CardHeader><CardContent>
+ return <Card><CardHeader><CardTitle>Storage</CardTitle></CardHeader><CardContent>
   <div className="model-section"><div className="model-section-heading"><h3>Files</h3><span>{s3?'S3-compatible':'Local disk'}</span></div><div className="model-controls sign-in-block">
    <div role="radiogroup" aria-label="Where files are kept" className="storage-choice">
     <label className="live-toggle sign-in-method"><input type="radio" name="storage-backend" checked={!s3} onChange={()=>{setChosen(true);set({backend:'local'})}}/>Local disk</label>
