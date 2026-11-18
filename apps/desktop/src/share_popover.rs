@@ -1327,7 +1327,7 @@ impl Cereal {
                 .border_1()
                 .border_color(t.border)
                 .shadow_lg()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+                .occlude().on_any_mouse_down(|_, _, cx| cx.stop_propagation());
             for (index, option) in Level::ALL.into_iter().enumerate() {
                 options = options.child(
                     div()
@@ -1415,7 +1415,7 @@ impl Cereal {
             .border_1()
             .border_color(t.border)
             .shadow_lg()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .occlude().on_any_mouse_down(|_, _, cx| cx.stop_propagation())
             .child(
                 div()
                     .h(px(PICKER_CAPTION))

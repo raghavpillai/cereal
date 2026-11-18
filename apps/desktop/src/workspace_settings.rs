@@ -1276,7 +1276,7 @@ impl Cereal {
                 .items_center()
                 .justify_center()
                 .child(pop(
-                    content.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
+                    content.occlude().on_any_mouse_down(|_, _, cx| cx.stop_propagation()),
                     Pop::DIALOG,
                     pose,
                 ))
@@ -1358,7 +1358,7 @@ impl Cereal {
                 );
                 overlay
                     .child(div().absolute().left(origin.x).top(origin.y).child(pop(
-                        content.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
+                        content.occlude().on_any_mouse_down(|_, _, cx| cx.stop_propagation()),
                         Pop::menu((0.92, 0.)),
                         pose,
                     )))

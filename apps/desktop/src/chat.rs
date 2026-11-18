@@ -2359,7 +2359,6 @@ impl crate::app::Cereal {
                                 };
                                 cx.write_to_clipboard(ClipboardItem::new_string(question.clone()));
                                 crate::ui::confirm(("copy-chat-question", index), cx);
-                                this.show_toast("Copied to clipboard", cx);
                             })),
                     )
                     .child(
@@ -2455,7 +2454,6 @@ impl crate::app::Cereal {
                                     let copy = rewrite_citation_tokens(answer, &[], |_| String::new());
                                     cx.write_to_clipboard(ClipboardItem::new_string(copy));
                                     crate::ui::confirm(("copy-chat-response", index), cx);
-                                    this.show_toast("Copied to clipboard", cx);
                                 })),
                         )
                         .child(

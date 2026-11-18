@@ -81,7 +81,19 @@ impl Cereal {
             return;
         }
         if self.recording.is_active() {
-            self.show_toast("A recording is already active in another note", cx);
+            // It says where the recording is by offering to go there.
+            match self.recording.note_id.filter(|other| *other != id) {
+                Some(other) => self.show_toast_with(
+                    "Already recording in another note",
+                    "Show it",
+                    move |this, window, cx| {
+                        this.open_note(other, cx);
+                        this.focus.focus(window);
+                    },
+                    cx,
+                ),
+                None => self.show_toast("Already recording", cx),
+            }
             return;
         }
         self.recording_from = if self.recording.note_id == Some(id) {
@@ -900,7 +912,7 @@ impl Cereal {
                             .rem_euclid(1.),
                     ))),
             )
-            .map(|d| self.bar_tip(d, TIP_TRANSCRIPT, leading_label.clone(), t, cx))
+            .map(|d| self.bar_tip(d, leading_label.clone(), t))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                     this.transcript_open = !this.transcript_open;
@@ -1020,7 +1032,7 @@ impl Cereal {
                         TILE_INNER_RADIUS,
                     ))
                     .child(icon("footer-stop", 16., t.muted))
-                    .map(|d| self.bar_tip(d, TIP_STOP, "Stop recording".into(), t, cx))
+                    .map(|d| self.bar_tip(d, "Stop recording".into(), t))
                     .reach()
                     .focusable()
                     .cursor(CursorStyle::Arrow)
@@ -1233,19 +1245,14 @@ impl Cereal {
                     )
                     .child(icon("sparkles", 16., rgb(0xfcfcf8).into()))
                     .child("Generate notes")
-                    .tooltip(move |_, cx| {
-                        cx.new(|_| {
-                            ToolTip::new(
-                                if server {
-                                    "Generate notes from the saved server transcript"
-                                } else {
-                                    "Create a local outline from the saved notes and transcript"
-                                },
-                                t,
-                            )
-                        })
-                        .into()
-                    })
+                    .child(crate::ui::tip(
+                        if server {
+                            "Generate notes from the saved server transcript"
+                        } else {
+                            "Create a local outline from the saved notes and transcript"
+                        },
+                        t,
+                    ))
                     .reach().on_click(cx.listener(move |this, _, window, cx| {
                         this.focus.focus(window);
                         this.enhance_note_preview(id, cx);
@@ -1427,84 +1434,17 @@ fn edge(width: f32, out: f32, color: Hsla) -> Div {
         .border_color(color)
 }
 
-/// The recording bar's tooltips, as the reference places them: centred above
-/// the control, 6 pt clear of it, after the pointer has rested on it for
-/// 600 ms. GPUI's own tooltips open at the pointer, below the bar, where they
-/// cover the control they explain.
-const TIP_DELAY: Duration = Duration::from_millis(600);
-const TIP_TRANSCRIPT: u64 = 1;
-const TIP_STOP: u64 = 2;
-/// The reference's 75 ms ease-out from 95%, without overshoot.
-const TIP_ENTRANCE: crate::motion::Spring = crate::motion::Spring {
-    millis: 75,
-    damping: 1.,
-};
-
 impl Cereal {
-    /// Give the control `element` (a positioned tile) the tooltip `label`,
-    /// identified by `key` among the bar's controls.
+    /// Give the control `element` (a positioned tile) the tooltip `label`:
+    /// the app's one tooltip (`ui::tip`), centred above the control and 6 pt
+    /// clear of it, warm between the bar's neighbours.
     fn bar_tip(
         &self,
         element: Stateful<Div>,
-        key: u64,
         label: SharedString,
         t: Theme,
-        cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let shown = !crate::ui::popover_open()
-            && self
-                .bar_tip
-                .is_some_and(|(tip, since)| tip == key && since.elapsed() >= TIP_DELAY);
-        let pose = self.stage.presence(("bar-tip", key), shown, TIP_ENTRANCE);
-        element
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                if *hovered {
-                    this.bar_tip = Some((key, Instant::now()));
-                    cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(TIP_DELAY).await;
-                        let _ = this.update(cx, |_, cx| cx.notify());
-                    })
-                    .detach();
-                } else if this.bar_tip.is_some_and(|(tip, _)| tip == key) {
-                    this.bar_tip = None;
-                }
-                cx.notify();
-            }))
-            // A press dismisses it until the pointer comes back.
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    if this.bar_tip.is_some_and(|(tip, _)| tip == key) {
-                        this.bar_tip = None;
-                        cx.notify();
-                    }
-                }),
-            )
-            .when(pose.visible, |d| {
-                d.child(
-                    deferred(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .right_0()
-                            .bottom(relative(1.))
-                            .pb(px(6.))
-                            .flex()
-                            .justify_center()
-                            .child(crate::motion::pop(
-                                crate::ui::tip_box(label, t).whitespace_nowrap(),
-                                crate::motion::Pop {
-                                    anchor: (0.5, 1.),
-                                    scale: (0.95, 0.95),
-                                    travel: 0.,
-                                    rise: 0.,
-                                },
-                                pose,
-                            )),
-                    )
-                    .with_priority(20),
-                )
-            })
+        element.child(crate::ui::tip(label, t).above())
     }
 }
 

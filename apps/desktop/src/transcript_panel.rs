@@ -1215,7 +1215,7 @@ impl Cereal {
                                 0.
                             })),
                         ))
-                        .tooltip(move |_, cx| cx.new(|_| ToolTip::new(tip, t)).into())
+                        .child(crate::ui::tip(tip, t))
                         .reach()
                         .on_click(cx.listener(move |this, _, _, cx| step(this, previous, cx))),
                 );
@@ -1286,7 +1286,7 @@ impl Cereal {
                     cx,
                 )
                 .flex_shrink()
-                .tooltip(move |_, cx| cx.new(|_| ToolTip::new("Microphone", t)).into()),
+                .child(crate::ui::tip("Microphone", t)),
             )
             .child(
                 tool_tip("transcript-audio-settings", "sliders-vertical", "Sound settings", t)
@@ -1307,7 +1307,7 @@ impl Cereal {
                     cx,
                 )
                 .flex_shrink_0()
-                .tooltip(move |_, cx| cx.new(|_| ToolTip::new("Transcript language", t)).into()),
+                .child(crate::ui::tip("Transcript language", t)),
             )
     }
 

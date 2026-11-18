@@ -63,6 +63,71 @@ pub enum Menu {
     RemoveMember,
 }
 
+/// The one thing a toast can offer besides going away: "Undo", "Show it".
+#[derive(Clone)]
+pub struct ToastAction {
+    pub label: SharedString,
+    run: std::rc::Rc<dyn Fn(&mut Cereal, &mut Window, &mut Context<Cereal>)>,
+}
+
+/// How long a toast stays, and one that offers something to press.
+const TOAST_FOR: std::time::Duration = std::time::Duration::from_secs(4);
+const TOAST_WITH_ACTION_FOR: std::time::Duration = std::time::Duration::from_secs(6);
+/// The toast is a pill in the title bar: this tall with one line, this far
+/// down, at most this wide.
+const TOAST_HEIGHT: f32 = 36.;
+const TOAST_TOP: f32 = 6.;
+const TOAST_WIDEST: f32 = 440.;
+/// Narrower than this in the bar and its words would wrap: it goes under.
+const TOAST_NARROWEST: f32 = 240.;
+/// How far a toast stays from the title bar's own controls.
+const TOAST_CLEAR: f32 = 10.;
+
+/// Where the toast pill goes in a window `viewport` wide whose title bar
+/// has controls reaching `left` and `right` in from its edges, for content
+/// `natural` wide: its width, and its centre in the title bar, or `None`
+/// when it has to hang under the bar because the bar has no room for it.
+///
+/// With nothing else in the middle of the bar it is centred on the window.
+/// While the recording's pill is there (`pill` is its width) the toast goes
+/// beside it, to its right if it fits there, else to its left: never under
+/// it, on top of the page.
+pub fn toast_place(
+    natural: f32,
+    viewport: f32,
+    left: f32,
+    right: f32,
+    pill: Option<f32>,
+) -> (f32, Option<f32>) {
+    let wanted = natural.min(TOAST_WIDEST);
+    let least = wanted.min(TOAST_NARROWEST);
+    let (from, to) = (left + TOAST_CLEAR, viewport - right - TOAST_CLEAR);
+    let under = (wanted.min((viewport - 32.).max(120.)), None);
+    match pill {
+        None => {
+            let room = 2. * (viewport / 2. - from).min(to - viewport / 2.);
+            if room >= least {
+                (wanted.min(room), Some(viewport / 2.))
+            } else {
+                under
+            }
+        }
+        Some(pill) => {
+            let after = viewport / 2. + pill / 2. + TOAST_CLEAR;
+            let before = viewport / 2. - pill / 2. - TOAST_CLEAR;
+            if to - after >= least {
+                let width = wanted.min(to - after);
+                (width, Some(after + width / 2.))
+            } else if before - from >= least {
+                let width = wanted.min(before - from);
+                (width, Some(before - width / 2.))
+            } else {
+                under
+            }
+        }
+    }
+}
+
 pub struct Cereal {
     pub workspace: Workspace,
     pub login: Entity<crate::login::LoginView>,
@@ -141,9 +206,6 @@ pub struct Cereal {
     pub recording_from: crate::recording::Phase,
     pub recording_changed_at: Option<std::time::Instant>,
     pub recording_last_click: Option<(bool, std::time::Instant)>,
-    /// The recording bar control under the pointer and since when, for its
-    /// tooltip (see `recording_view::bar_tip`).
-    pub bar_tip: Option<(u64, std::time::Instant)>,
     pub microphone_muted: bool,
     pub menu: Option<Menu>,
     pub visible_menu: Option<Menu>,
@@ -170,6 +232,11 @@ pub struct Cereal {
     /// The last toast's text, kept so it can finish leaving after `toast` clears.
     pub toast_shown: String,
     pub toast_epoch: u64,
+    /// The one thing the toast offers to do ("Undo"), kept with its text
+    /// while it leaves.
+    pub toast_action: Option<ToastAction>,
+    /// Counts the toasts shown: a new one swaps its words into the pill.
+    pub toast_serial: u64,
     /// Animated values for this window (see `motion::Stage`).
     pub stage: crate::motion::Stage,
     /// How much of the sidebar's width is on screen right now, 0..=1.
@@ -203,10 +270,6 @@ pub struct Cereal {
     /// The note a list-row menu acts on,
     /// and where that menu is anchored.
     pub row_menu: Option<crate::chrome::RowMenu>,
-    /// Sidebar footer tool whose label is showing, and the last one shown
-    /// (kept so the label can finish fading after the pointer leaves).
-    pub footer_tip: Option<usize>,
-    pub footer_tip_shown: usize,
     pub chat_models: Vec<meeting_notes_api_types::LanguageModelSelection>,
     pub selected_chat_model: Option<String>,
     pub chat_model_picker_open: bool,
@@ -305,7 +368,7 @@ impl Cereal {
         let title_input = cx.new(|cx| TextInput::new("New note", false, cx));
         title_input.update(cx, |input, cx| input.set_wrap(true, cx));
         let editor =
-            cx.new(|cx| TextInput::new("Write notes, or press '/' for templates", true, cx));
+            cx.new(|cx| TextInput::new("Write notes", true, cx));
         editor.update(cx, |input, _| input.set_list_formatting(true));
         let note_scroll = ScrollHandle::new();
         editor.update(cx, |input, _| input.attach_scroll(note_scroll.clone()));
@@ -543,7 +606,6 @@ impl Cereal {
             recording_from: crate::recording::Phase::Idle,
             recording_changed_at: None,
             recording_last_click: None,
-            bar_tip: None,
             microphone_muted: false,
             menu: None,
             visible_menu: None,
@@ -560,6 +622,8 @@ impl Cereal {
             toast: None,
             toast_shown: String::new(),
             toast_epoch: 0,
+            toast_action: None,
+            toast_serial: 0,
             stage: Default::default(),
             sidebar_level: 1.,
             sidebar_width: crate::desktop_preferences::sidebar_width(),
@@ -574,8 +638,6 @@ impl Cereal {
             nav_history: Vec::new(),
             settings_tab: Default::default(),
             row_menu: None,
-            footer_tip: None,
-            footer_tip_shown: 0,
             chat_models: vec![],
             selected_chat_model: None,
             chat_model_picker_open: false,
@@ -697,21 +759,57 @@ impl Cereal {
         self.flush_edits(cx);
         cx.notify();
     }
+    /// Say something that needs no answer, in the title bar's pill: where
+    /// it covers nothing that can be pressed. It drops out of the top of the
+    /// window, stays four seconds and goes back up; a new one takes the
+    /// pill over (its words swap in and the pill finds its new width).
     pub fn show_toast(&mut self, message: &str, cx: &mut Context<Self>) {
+        self.raise_toast(message, None, cx);
+    }
+
+    /// [`Cereal::show_toast`] with one thing to press beside the words:
+    /// "Undo" after something was removed, a way to the thing it names.
+    /// Pressing it runs `action` and takes the toast away.
+    pub fn show_toast_with(
+        &mut self,
+        message: &str,
+        label: &'static str,
+        action: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let action = ToastAction {
+            label: label.into(),
+            run: std::rc::Rc::new(action),
+        };
+        self.raise_toast(message, Some(action), cx);
+    }
+
+    fn raise_toast(&mut self, message: &str, action: Option<ToastAction>, cx: &mut Context<Self>) {
         self.toast_epoch = self.toast_epoch.wrapping_add(1);
+        self.toast_serial = self.toast_serial.wrapping_add(1);
         let epoch = self.toast_epoch;
         let message = message.to_string();
         if self.toast.is_some() {
-            // A replacement toast pops again instead of silently swapping text.
-            self.stage.kick(("toast", 0), 0.6, crate::motion::GOOEY);
+            // A replacement gives the pill a small push; its words swap in.
+            self.stage.kick(("toast", 0), 0.8, crate::motion::GOOEY);
+        } else if self.stage.target(("toast", 0)).is_none() {
+            // Nothing is left of the last one: this one arrives at its own
+            // size and place rather than gliding there from the last one's.
+            self.stage.forget(("toast-width", 0));
+            self.stage.forget(("toast-top", 0));
+            self.stage.forget(("toast-centre", 0));
         }
+        let stays = if action.is_some() {
+            TOAST_WITH_ACTION_FOR
+        } else {
+            TOAST_FOR
+        };
         self.toast = Some(message.clone());
         self.toast_shown = message.clone();
+        self.toast_action = action;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(4))
-                .await;
+            cx.background_executor().timer(stays).await;
             let _ = this.update(cx, move |this, cx| {
                 if toast_should_expire(epoch, this.toast_epoch, &message, this.toast.as_deref()) {
                     this.toast = None;
@@ -726,6 +824,18 @@ impl Cereal {
         self.toast_epoch = self.toast_epoch.wrapping_add(1);
         self.toast = None;
         cx.notify();
+    }
+
+    /// The toast's one action was pressed: it is done, and the toast goes.
+    fn run_toast_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.toast.is_none() {
+            return;
+        }
+        let action = self.toast_action.clone();
+        self.dismiss_toast(cx);
+        if let Some(action) = action {
+            (action.run)(self, window, cx);
+        }
     }
 
     pub fn open_note(&mut self, id: u64, cx: &mut Context<Self>) {
@@ -812,30 +922,35 @@ impl Cereal {
         self.workspace.create_note_in(slot)
     }
 
+    /// The meetings "Select calendar event" offers without a server: those
+    /// from today on, or, when there are none, the three most recent.
+    /// Typing narrows that same list, so what is on screen is what is
+    /// searched.
     pub fn calendar_events(&self, query: &str) -> Vec<crate::model::Note> {
         let today = chrono::Local::now()
             .date_naive()
             .format("%Y-%m-%d")
             .to_string();
-        let mut events: Vec<_> = self
+        let notes: Vec<(&str, &crate::model::Note)> = self
             .workspace
-            .visible_notes(false, query)
+            .visible_notes(false, "")
             .into_iter()
-            .filter(|note| Some(note.id) != self.current_note && note.date >= today)
-            .take(6)
-            .cloned()
+            .map(|note| (note.date.as_str(), note))
             .collect();
-        if events.is_empty() && query.trim().is_empty() {
-            events = self
-                .workspace
-                .visible_notes(false, "")
-                .into_iter()
-                .filter(|note| Some(note.id) != self.current_note)
-                .take(3)
-                .cloned()
-                .collect();
-        }
-        events
+        let offered = calendar_event_offer(
+            &notes
+                .iter()
+                .map(|(date, note)| (note.id, *date, note.title.as_str()))
+                .collect::<Vec<_>>(),
+            self.current_note,
+            &today,
+            query,
+        );
+        offered
+            .into_iter()
+            .filter_map(|id| notes.iter().find(|(_, note)| note.id == id))
+            .map(|(_, note)| (*note).clone())
+            .collect()
     }
     pub fn select_calendar_event(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(event) = self.workspace.note(id).cloned() else {
@@ -980,8 +1095,14 @@ impl Cereal {
         self.visible_menu = None;
         self.menu_exiting = false;
         self.menu_epoch = self.menu_epoch.wrapping_add(1);
+        // It opens empty: what was searched for last time would only have to
+        // be deleted before the next search can be typed.
+        let reopening = !self.search_open;
         self.search.update(cx, |input, cx| {
-            input.set_placeholder("Search meetings", cx)
+            input.set_placeholder("Search meetings", cx);
+            if reopening {
+                input.set_content("", cx);
+            }
         });
         self.search_open = true;
         self.menu = None;
@@ -1012,6 +1133,39 @@ impl Cereal {
         cx.notify();
     }
 
+    /// Close the topmost thing that is open over the page, and only that
+    /// one: the model menu, a source card, the palette, a menu or popover
+    /// (a question inside it first, and the event picker back to the card
+    /// it unfolded from), the sidebar over a narrow window, the list of
+    /// recent chats. What Escape does first, wherever it is pressed.
+    /// Returns whether there was something to close.
+    pub(crate) fn dismiss_top(&mut self, cx: &mut Context<Self>) -> bool {
+        match top_layer(
+            self.chat_model_picker_open,
+            self.summary.open.is_some(),
+            self.search_open,
+            self.menu.as_ref(),
+            self.trash_ask.is_some(),
+            self.sidebar_overlay,
+            self.chat_history_open,
+        ) {
+            Some(Layer::ModelMenu) => self.chat_model_picker_open = false,
+            Some(Layer::SourceCard) => self.summary.dismiss(),
+            Some(Layer::Palette) => self.search_open = false,
+            Some(Layer::TrashQuestion) => self.trash_ask = None,
+            Some(Layer::EventPicker) => self.menu = Some(Menu::NoteDetails),
+            Some(Layer::Menu) => {
+                self.menu = None;
+                self.menu_keyboard.selected = None;
+            }
+            Some(Layer::Sidebar) => self.sidebar_overlay = false,
+            Some(Layer::ChatHistory) => self.chat_history_open = false,
+            None => return false,
+        }
+        cx.notify();
+        true
+    }
+
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
         // In the welcome, Escape is Back.
         if self.screen == Screen::Welcome && self.toast.is_none() && self.menu.is_none() {
@@ -1023,32 +1177,23 @@ impl Cereal {
             self.focus.focus(window);
             return;
         }
-        if self.sidebar_overlay && self.menu.is_none() && !self.search_open {
-            self.sidebar_overlay = false;
-            cx.notify();
+        // One layer at a time, topmost first. The composer's popovers and
+        // the sidebar leave the keyboard where it was, as a press outside
+        // them does: the next Escape folds the bar.
+        let keeps_focus = self.chat_model_picker_open
+            || (self.sidebar_overlay && self.menu.is_none() && !self.search_open)
+            || (self.chat_history_open && self.menu.is_none() && !self.search_open);
+        if self.dismiss_top(cx) {
+            if !keeps_focus {
+                self.focus.focus(window);
+            }
             return;
         }
-        // The composer's popovers close and leave the field its keyboard,
-        // as a press outside them does: the next Escape folds the bar.
-        if self.chat_model_picker_open {
-            self.chat_model_picker_open = false;
-            cx.notify();
-            return;
-        } else if self.summary.open.is_some() {
-            self.summary.dismiss();
-        } else if self.search_open {
-            self.search_open = false;
-        } else if self.menu.is_some() {
-            self.menu = None;
-        } else if self.transcript_find_open {
+        if self.transcript_find_open {
             self.transcript_find_end(window, cx);
         } else if self.transcript_open {
             self.transcript_open = false;
             self.transcript_epoch = self.transcript_epoch.wrapping_add(1);
-        } else if self.chat_history_open {
-            self.chat_history_open = false;
-            cx.notify();
-            return;
         } else if self.chat_editing.is_some() {
             self.cancel_chat_edit(cx);
         } else if self.chat_maximized {
@@ -1056,7 +1201,9 @@ impl Cereal {
         } else if self.assistant_open {
             self.close_chat_surface(cx);
         } else if self.current_note.is_some() {
-            self.navigate(Screen::Home, cx);
+            // With nothing left to close a note stays where it is: Escape
+            // only takes the keyboard out of the field. Leaving is the back
+            // pill, or ⌘1.
         } else if !matches!(self.screen, Screen::Home | Screen::Welcome | Screen::Login) {
             // With nothing left to close, Escape is the back pill: every
             // page but Home steps back to where it came from.
@@ -1065,6 +1212,266 @@ impl Cereal {
         self.focus.focus(window);
         cx.notify();
     }
+}
+
+impl Cereal {
+    /// The sidebar in the room it has beside the page: it keeps its natural
+    /// width and slides out from under a shrinking clip, so its own rows
+    /// never reflow. `over` draws it out of the flow, on the page's edge,
+    /// for the reduced-motion fade.
+    fn render_sidebar_slot(
+        &self,
+        sidebar: crate::motion::Pose,
+        over: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let t = self.theme();
+        let room = if over { 1. } else { self.sidebar_level };
+        div()
+            .relative()
+            .when(over, |slot| slot.absolute().top_0().left_0())
+            .w(px(self.sidebar_span * room))
+            .h_full()
+            .flex_shrink_0()
+            .overflow_hidden()
+            .bg(t.sidebar)
+            // It thins out as it slides, so its top strip never reads as
+            // colliding with the traffic lights.
+            .opacity(sidebar.fade * sidebar.value.clamp(0., 1.))
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right_0()
+                    .w(px(self.sidebar_span))
+                    .child(self.render_sidebar(cx)),
+            )
+    }
+
+    /// The toast: a pill in the title bar, centred over the page, where it
+    /// covers nothing that can be pressed (under the recording's pill when
+    /// that is there, and under the bar when the bar's own controls leave
+    /// it no room). It drops out of the top of the window and goes back up.
+    fn render_toast(
+        &self,
+        pose: crate::motion::Pose,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use crate::motion::SNAPPY;
+        let t = self.theme();
+        let toast = self
+            .toast
+            .clone()
+            .unwrap_or_else(|| self.toast_shown.clone());
+        let (title, description) = toast
+            .split_once('\n')
+            .map(|(title, description)| (title.to_string(), Some(description.to_string())))
+            .unwrap_or((toast.clone(), None));
+        let success = title.contains("copied to clipboard")
+            || title == "All changes saved"
+            || title == "Note restored"
+            || title.starts_with("Cereal is up to date");
+        let action = self.toast_action.clone();
+        let words = crate::update_view::text_width(&title, 13., FontWeight::SEMIBOLD, window).max(
+            description
+                .as_deref()
+                .map_or(0., |text| crate::update_view::text_width(text, 12., FontWeight::NORMAL, window)),
+        );
+        // Its label in 8 pt of padding either side, and the gap before it.
+        let action_width = action.as_ref().map_or(0., |action| {
+            crate::update_view::text_width(&action.label, 13., FontWeight::MEDIUM, window).ceil()
+                + 16.
+                + 8.
+        });
+        // The outline, the padding, the mark, the words (and a point to
+        // spare, so a rounding never wraps them), the action, the close
+        // button, each 8 pt from the next.
+        let natural = 2. + 12. + 16. + 8. + words.ceil() + 2. + action_width + 8. + 22. + 7.;
+        let viewport = f32::from(window.viewport_size().width);
+        let (reach_left, reach_right) = self.header_reach();
+        let (width, in_bar) = toast_place(
+            natural,
+            viewport,
+            reach_left,
+            reach_right,
+            self.session_pill_width(),
+        );
+        // In the bar; or, when the bar has no room, under it over the page.
+        let (top, centre) = match in_bar {
+            Some(centre) => (TOAST_TOP, centre),
+            None => (
+                44.,
+                self.sidebar_inset() + (viewport - self.sidebar_inset()) / 2.,
+            ),
+        };
+        let centre = self.stage.aim(("toast-centre", 0), centre, SNAPPY);
+        let width = self.stage.aim(("toast-width", 0), width, SNAPPY);
+        let top = self.stage.aim(("toast-top", 0), top, SNAPPY);
+        let swap = self.stage.swap(("toast-words", 0), self.toast_serial);
+        crate::motion::pop(
+            floating(div().id("toast-notification"))
+                .absolute()
+                .top(px(top))
+                .left(px(centre - width / 2.))
+                .w(px(width))
+                .min_h(px(TOAST_HEIGHT))
+                .pl(px(12.))
+                .pr(px(7.))
+                .py(px(6.))
+                .rounded(px(12.))
+                .bg(t.card)
+                .border_1()
+                .border_color(t.border)
+                .shadow_md()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .size(px(16.))
+                        .flex_shrink_0()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(t.muted)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(10.))
+                        .text_color(t.muted)
+                        .child(if success {
+                            icon("check", 10., t.muted).into_any_element()
+                        } else {
+                            div().child("i").into_any_element()
+                        }),
+                )
+                .child(crate::motion::swapped(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .line_height(px(18.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(t.text)
+                                .child(title),
+                        )
+                        .when_some(description, |d, description| {
+                            d.child(
+                                div()
+                                    .text_size(px(12.))
+                                    .line_height(px(16.))
+                                    .text_color(t.muted)
+                                    .child(description),
+                            )
+                        }),
+                    swap,
+                ))
+                .when_some(action, |toast, action| {
+                    toast.child(
+                        div()
+                            .id("toast-action")
+                            .h(px(24.))
+                            .px(px(8.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .rounded(px(6.))
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(t.accent)
+                            .cursor_default()
+                            .child(crate::motion::tactile(t.hover).press(t.fill))
+                            .child(action.label.clone())
+                            .reach()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.run_toast_action(window, cx)
+                            })),
+                    )
+                })
+                .child(
+                    tool_tip("dismiss-toast", "close", "Dismiss", t)
+                        .size(px(22.))
+                        .on_click(cx.listener(|this, _, _, cx| this.dismiss_toast(cx))),
+                ),
+            crate::motion::Pop::chip((0.5, 0.)),
+            pose,
+        )
+    }
+}
+
+/// What can be open over the page, topmost first (see [`top_layer`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Layer {
+    ModelMenu,
+    SourceCard,
+    Palette,
+    /// A Trash row asking "Delete forever?".
+    TrashQuestion,
+    /// "Select calendar event", unfolded from the details card.
+    EventPicker,
+    Menu,
+    Sidebar,
+    ChatHistory,
+}
+
+/// The topmost layer open over the page, which is the one Escape closes.
+pub(crate) fn top_layer(
+    model_menu: bool,
+    source_card: bool,
+    palette: bool,
+    menu: Option<&Menu>,
+    trash_question: bool,
+    sidebar_overlay: bool,
+    chat_history: bool,
+) -> Option<Layer> {
+    if model_menu {
+        Some(Layer::ModelMenu)
+    } else if source_card {
+        Some(Layer::SourceCard)
+    } else if palette {
+        Some(Layer::Palette)
+    } else if let Some(menu) = menu {
+        Some(match menu {
+            Menu::Trash if trash_question => Layer::TrashQuestion,
+            Menu::CalendarEvent => Layer::EventPicker,
+            _ => Layer::Menu,
+        })
+    } else if sidebar_overlay {
+        Some(Layer::Sidebar)
+    } else if chat_history {
+        Some(Layer::ChatHistory)
+    } else {
+        None
+    }
+}
+
+/// Which notes "Select calendar event" offers: of `notes` (id, day, title;
+/// newest first), without the note being edited, those from `today` on, or
+/// failing any the three most recent; then only those whose title contains
+/// `query`, at most six.
+pub fn calendar_event_offer(
+    notes: &[(u64, &str, &str)],
+    current: Option<u64>,
+    today: &str,
+    query: &str,
+) -> Vec<u64> {
+    let others = || notes.iter().filter(|(id, _, _)| Some(*id) != current);
+    let mut offered: Vec<_> = others().filter(|(_, date, _)| *date >= today).collect();
+    if offered.is_empty() {
+        offered = others().take(3).collect();
+    }
+    let query = query.trim().to_lowercase();
+    offered
+        .into_iter()
+        .filter(|(_, _, title)| query.is_empty() || title.to_lowercase().contains(&query))
+        .take(6)
+        .map(|(id, _, _)| *id)
+        .collect()
 }
 
 impl Focusable for Cereal {
@@ -1171,7 +1578,8 @@ impl Render for Cereal {
         crate::ui::set_dark(self.workspace.settings.dark_mode);
         crate::ui::set_scale(window.scale_factor());
         crate::ui::provision_focus(cx);
-        crate::ui::set_popover_open(self.visible_menu.is_some() || self.search_open);
+        // The control that opened what is open stays lit meanwhile.
+        self.hold_open_triggers();
         self.drain_chat_history(cx);
         if !self.sidebar_open {
             self.sidebar_grab = None;
@@ -1241,10 +1649,20 @@ impl Render for Cereal {
                 && (self.current_note.is_none() || self.chat_maximized),
             crate::motion::PANEL,
         );
-        self.sidebar_level = if sidebar.visible {
-            sidebar.value.clamp(0., 1.)
+        // The room the sidebar takes beside the page. With reduced motion
+        // it is given or taken back at once: the sidebar then fades over the
+        // page's edge, and the page, which has jumped, firms up under the
+        // same short fade instead of snapping bare.
+        let reduced = crate::motion::reduce_motion();
+        self.sidebar_level = self.stage.room(("sidebar", 0), sidebar);
+        let sidebar_over = reduced && sidebar.visible && self.sidebar_level <= 0.;
+        let page_firm = if reduced {
+            let pose = self
+                .stage
+                .swap(("sidebar-room", 0), u64::from(self.sidebar_level > 0.5));
+            crate::motion::PAGE_FROM + (1. - crate::motion::PAGE_FROM) * pose.fade.clamp(0., 1.)
         } else {
-            0.
+            1.
         };
         self.search_pose = self.stage.presence(("search", 0), self.search_open, GOOEY);
         let toast_pose = self
@@ -1374,33 +1792,7 @@ impl Render for Cereal {
             .text_size(px(14.))
             .line_height(px(18.))
             .whitespace_normal()
-            .when(sidebar.visible, |s| {
-                // The sidebar keeps its natural width and slides out from under
-                // a shrinking clip, so its own rows never reflow.
-                s.child(
-                    div()
-                        .relative()
-                        // Clamped: the spring's overshoot must not shove the
-                        // whole page sideways and back.
-                        .w(px(self.sidebar_span * sidebar.value.clamp(0., 1.)))
-                        .h_full()
-                        .flex_shrink_0()
-                        .overflow_hidden()
-                        .bg(t.sidebar)
-                        // It thins out as it slides, so its toolbar never
-                        // reads as colliding with the traffic lights.
-                        .opacity(sidebar.fade * sidebar.value.clamp(0., 1.))
-                        .child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .right_0()
-                                .w(px(self.sidebar_span))
-                                .child(self.render_sidebar(cx)),
-                        ),
-                )
-            })
+            .when(sidebar.visible && !sidebar_over, |s| s.child(self.render_sidebar_slot(sidebar, false, cx)))
             .child(
                 div()
                     .relative()
@@ -1409,6 +1801,7 @@ impl Render for Cereal {
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    .when(page_firm < 1., |page| page.opacity(page_firm))
                     // The Chat page has the pages' own header (the pill back
                     // to where it was opened from); only a note's chat opened
                     // to the full window has the chat header.
@@ -1430,35 +1823,46 @@ impl Render for Cereal {
                             .child(content),
                     )),
             )
+            // Reduced motion, closing: the sidebar fades over the page.
+            .when(sidebar_over, |s| s.child(self.render_sidebar_slot(sidebar, true, cx)))
             // The sidebar's edge: the strip that resizes it, over both the
             // sidebar and the page, under every popover.
             .children(self.render_sidebar_edge(sidebar, cx))
             .when(overlay.visible, |s| s.child(self.render_sidebar_overlay(overlay, cx)))
+            // The sidebar button and search: one pair, in one place, over
+            // the sidebar and the page's header alike.
+            .children(self.render_window_tools(login, cx))
             .when(self.search_pose.visible, |s| {
                 s.child(self.render_search(cx))
             })
             .when(history_pose.visible, |s| {
+                let left = self.sidebar_inset()
+                    + if self.current_note.is_some() {
+                        62.
+                    } else if self.screen == Screen::Chat && self.sidebar_away() {
+                        // Under the bar's own History button: past the
+                        // traffic lights, the two window tools and the back pill.
+                        // (8 + 80, two 28 pt tools and a 43 pt pill, 5 pt apart).
+                        202.
+                    } else {
+                        8.
+                    };
+                // A press outside it closes it and goes no further.
                 s.child(
-                    div()
-                        .absolute()
-                        .top(px(42.))
-                        .left(px(self.sidebar_inset()
-                            + if self.current_note.is_some() {
-                                62.
-                            } else if self.screen == Screen::Chat && self.sidebar_away() {
-                                // Under the bar's own History button: past the
-                                // traffic lights, the two window tools and the back pill.
-                                // (8 + 80, two 28 pt tools and a 43 pt pill, 5 pt apart).
-                                202.
-                            } else {
-                                8.
-                            }))
-                        .child(crate::motion::pop(
+                    crate::ui::overlay(
+                        self.chat_history_open,
+                        cx.listener(|this, _, _, cx| {
+                            this.chat_history_open = false;
+                            cx.notify();
+                        }),
+                    )
+                    .child(div().absolute().top(px(42.)).left(px(left)).child(
+                        crate::motion::pop(
                             self.render_chat_history(cx),
                             crate::motion::Pop::menu((0.1, 0.)),
                             history_pose,
-                        ))
-                        .on_mouse_down_out(cx.listener(|this, _, _, cx| this.dismiss_chat_history(cx))),
+                        ),
+                    )),
                 )
             })
             .when(self.visible_menu.is_some(), |s| {
@@ -1467,100 +1871,7 @@ impl Render for Cereal {
             .when(update_pose.visible, |s| {
                 s.child(self.render_update_notice(update_pose, window, cx))
             })
-            .when(toast_pose.visible, |s| {
-                let toast = self
-                    .toast
-                    .clone()
-                    .unwrap_or_else(|| self.toast_shown.clone());
-                let (title, description) = toast
-                    .split_once('\n')
-                    .map(|(title, description)| (title, Some(description)))
-                    .unwrap_or((&toast, None));
-                let success = title == "Note copied to clipboard"
-                    || title == "Link copied to clipboard"
-                    || title == "All changes saved"
-                    || title.starts_with("Cereal is up to date");
-                s.child(crate::motion::pop(
-                    div()
-                        .id("toast-notification")
-                        // What is under a notice is not under the pointer:
-                        // no row lights up through it and no tooltip of a
-                        // control behind it shows on top of it.
-                        .occlude()
-                        .absolute()
-                        // A toast sits above the update notice while that is up.
-                        .bottom(px(if update_pose.visible {
-                            16. + crate::update_view::NOTICE_HEIGHT + 8.
-                        } else {
-                            16.
-                        }))
-                        .right(px(16.))
-                        .w(px(384.))
-                        .max_w(window.viewport_size().width - px(32.))
-                        .min_h(px(56.))
-                        .pl(px(16.))
-                        .pr(px(8.))
-                        .py(px(10.))
-                        .rounded(px(12.))
-                        .bg(t.card)
-                        .border_1()
-                        .border_color(t.border)
-                        .shadow_lg()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .flex()
-                        .items_center()
-                        .gap(px(12.))
-                        .child(
-                            div()
-                                .size(px(16.))
-                                .flex_shrink_0()
-                                .rounded_full()
-                                .border_1()
-                                .border_color(t.muted)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_size(px(10.))
-                                .text_color(t.muted)
-                                .child(if success {
-                                    icon("check", 10., t.muted).into_any_element()
-                                } else {
-                                    div().child("i").into_any_element()
-                                }),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .text_size(px(13.))
-                                        .line_height(px(18.))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(t.text)
-                                        .child(title.to_string()),
-                                )
-                                .when_some(description, |d, description| {
-                                    d.child(
-                                        div()
-                                            .text_size(px(12.))
-                                            .line_height(px(16.))
-                                            .text_color(t.muted)
-                                            .child(description.to_string()),
-                                    )
-                                }),
-                        )
-                        .child(
-                            tool_tip("dismiss-toast", "close", "Dismiss notification", t)
-                                .size(px(20.))
-                                .on_click(cx.listener(|this, _, _, cx| this.dismiss_toast(cx))),
-                        ),
-                    crate::motion::Pop::chip((1., 1.)),
-                    toast_pose,
-                ))
-            });
+            .when(toast_pose.visible, |s| s.child(self.render_toast(toast_pose, window, cx)));
         let root = root.children(self.render_film_pointer());
         // With `CEREAL_FRAME_STATS`, a probe painted after everything else
         // marks the end of the frame's paint pass.
@@ -1637,6 +1948,136 @@ fn toast_should_expire(
     current_message: Option<&str>,
 ) -> bool {
     scheduled_epoch == current_epoch && current_message == Some(scheduled_message)
+}
+
+#[cfg(test)]
+mod layer_tests {
+    use super::{Layer, Menu, calendar_event_offer, toast_place, top_layer};
+
+    #[test]
+    fn escape_closes_the_topmost_layer_and_only_that_one() {
+        let top = |model, card, palette, menu: Option<Menu>, asking, sidebar, history| {
+            top_layer(model, card, palette, menu.as_ref(), asking, sidebar, history)
+        };
+        // Nothing is open: nothing to close.
+        assert_eq!(top(false, false, false, None, false, false, false), None);
+        // A menu over the sidebar that slid over a narrow window: the menu
+        // goes first and the sidebar stays.
+        assert_eq!(
+            top(false, false, false, Some(Menu::Workspace), false, true, false),
+            Some(Layer::Menu)
+        );
+        assert_eq!(top(false, false, false, None, false, true, false), Some(Layer::Sidebar));
+        // The palette is above any menu; the model menu above everything.
+        assert_eq!(
+            top(false, false, true, Some(Menu::Note), false, true, true),
+            Some(Layer::Palette)
+        );
+        assert_eq!(
+            top(true, true, true, Some(Menu::Note), false, true, true),
+            Some(Layer::ModelMenu)
+        );
+        assert_eq!(top(false, true, false, None, false, false, true), Some(Layer::SourceCard));
+        assert_eq!(top(false, false, false, None, false, false, true), Some(Layer::ChatHistory));
+        // The event picker folds back into the details card it came from;
+        // the card itself is an ordinary layer and closes on the next one.
+        assert_eq!(
+            top(false, false, false, Some(Menu::CalendarEvent), false, false, false),
+            Some(Layer::EventPicker)
+        );
+        assert_eq!(
+            top(false, false, false, Some(Menu::NoteDetails), false, false, false),
+            Some(Layer::Menu)
+        );
+        // A Trash row that is asking lets go of its question first; the
+        // question belongs to Trash alone.
+        assert_eq!(
+            top(false, false, false, Some(Menu::Trash), true, false, false),
+            Some(Layer::TrashQuestion)
+        );
+        assert_eq!(
+            top(false, false, false, Some(Menu::Trash), false, false, false),
+            Some(Layer::Menu)
+        );
+        assert_eq!(
+            top(false, false, false, Some(Menu::Note), true, false, false),
+            Some(Layer::Menu)
+        );
+    }
+
+    #[test]
+    fn typing_in_the_event_picker_narrows_the_list_that_is_on_screen() {
+        let notes = [
+            (5, "2026-11-12", "Weekly team standup"),
+            (4, "2026-11-12", "Product & design sync"),
+            (3, "2026-11-11", "Coffee with Maya"),
+            (2, "2026-11-11", "Customer discovery"),
+            (1, "2026-11-10", "Brand exploration"),
+        ];
+        // Nothing from today on: the three most recent, without the note
+        // being edited.
+        let today = "2026-11-18";
+        assert_eq!(calendar_event_offer(&notes, Some(5), today, ""), [4, 3, 2]);
+        // Typing narrows those same three (it used to find nothing at all).
+        assert_eq!(calendar_event_offer(&notes, Some(5), today, "cof"), [3]);
+        assert_eq!(calendar_event_offer(&notes, Some(5), today, " Cof "), [3]);
+        assert_eq!(calendar_event_offer(&notes, Some(5), today, "c"), [4, 3, 2]);
+        assert_eq!(calendar_event_offer(&notes, Some(5), today, "PRODUCT"), [4]);
+        // What is not on the list is not found by typing its name.
+        assert!(calendar_event_offer(&notes, Some(5), today, "brand").is_empty());
+        assert!(calendar_event_offer(&notes, Some(5), today, "zzz").is_empty());
+        // With meetings from today on, those are the list, six at most.
+        let coming: Vec<(u64, &str, &str)> = (0..9).map(|id| (id, "2026-11-20", "Planning")).collect();
+        let offered = calendar_event_offer(&coming, Some(0), today, "");
+        assert_eq!(offered, [1, 2, 3, 4, 5, 6]);
+        assert_eq!(calendar_event_offer(&coming, None, today, "plan").len(), 6);
+        let mixed = [(2, "2026-11-19", "Roadmap"), (1, "2026-11-01", "Retro")];
+        assert_eq!(calendar_event_offer(&mixed, None, today, ""), [2]);
+        assert!(calendar_event_offer(&mixed, None, today, "retro").is_empty());
+    }
+
+    #[test]
+    fn a_toast_sits_in_the_title_bar_clear_of_its_controls_or_under_it() {
+        // A wide window: the pill has its content's width, centred in the bar.
+        assert_eq!(toast_place(260., 1280., 240., 112., None), (260., Some(640.)));
+        // Never wider than the widest, however much it has to say.
+        assert_eq!(toast_place(900., 1280., 148., 112., None), (440., Some(640.)));
+        // Controls reaching far in from one side squeeze it, both ways:
+        // it is centred, so the nearer side decides.
+        let (width, centre) = toast_place(400., 900., 308., 112., None);
+        assert_eq!(centre, Some(450.));
+        assert!((width - 2. * (450. - 308. - 10.)).abs() < 0.01, "{width}");
+        assert_eq!(toast_place(400., 900., 112., 308., None), (width, centre));
+        // It stays clear of them on both sides.
+        assert!(450. - width / 2. >= 308. + 10. - 0.01);
+        // Too little room between them: it hangs under the bar instead,
+        // as wide as it wants, inside the window.
+        assert_eq!(toast_place(300., 760., 308., 112., None), (300., None));
+        assert_eq!(toast_place(900., 400., 148., 112., None), (368., None));
+        // A short toast fits where a long one would not.
+        assert_eq!(toast_place(180., 760., 270., 112., None), (180., Some(380.)));
+    }
+
+    #[test]
+    fn a_toast_goes_beside_the_recordings_pill_never_over_or_under_it() {
+        // The pill is 124 pt wide in the middle of a 1240 pt bar: the toast
+        // starts a gap to its right and ends short of the bar's controls.
+        let (width, centre) = toast_place(300., 1240., 131., 154., Some(124.));
+        let centre = centre.unwrap();
+        assert_eq!(width, 300.);
+        assert_eq!(centre - width / 2., 620. + 62. + 10.);
+        assert!(centre + width / 2. <= 1240. - 154. - 10.);
+        // No room on the right (wide controls there): it goes to the left,
+        // ending a gap before the pill.
+        let (width, centre) = toast_place(300., 1240., 131., 500., Some(124.));
+        assert_eq!(centre.unwrap() + width / 2., 620. - 62. - 10.);
+        assert!(centre.unwrap() - width / 2. >= 131. + 10.);
+        // Squeezed on the right but still readable: narrower, in the bar.
+        let (width, centre) = toast_place(440., 1240., 131., 154., Some(240.));
+        assert!(centre.is_some() && (240. ..440.).contains(&width), "{width}");
+        // No room on either side: under the bar.
+        assert_eq!(toast_place(300., 760., 200., 150., Some(240.)), (300., None));
+    }
 }
 
 #[cfg(test)]

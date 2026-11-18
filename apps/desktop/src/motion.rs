@@ -13,6 +13,28 @@
 //!
 //! All tokens live in this file. macOS "Reduce motion" is read in one place
 //! ([`reduce_motion`]) and turns every helper into a short opacity-only fade.
+//!
+//! # Which helper for which kind of thing
+//!
+//! One way of moving per kind of thing. Never time or ease something at a
+//! call site: pick the row below, and if nothing fits, add it here once.
+//! Every helper has its reduced-motion form built in (no movement, at most a
+//! [`REDUCED_FADE`]), so a caller cannot forget it.
+//!
+//! | The thing | Use |
+//! |---|---|
+//! | A menu, popover, dialog, palette or card opening and closing | [`Stage::presence`] for its pose, [`pop`] with a [`Pop`] anchored on the control that opened it, drawn on [`crate::ui::overlay`]; the control stays lit with [`hold`] |
+//! | A tooltip | [`crate::ui::tip`] (or `with_tooltip`): never GPUI's own `.tooltip` |
+//! | A toast | `Cereal::show_toast` / `show_toast_with` (one action) |
+//! | (a) Something entering or leaving the layout: a row, a banner, a message, a control | [`appear`] (its space opens and closes with it); [`vacate`] when what left can no longer be drawn |
+//! | (b) A container whose content changes height: a list of results, a card with a section that comes and goes | [`follow_height`] |
+//! | (c) A selected fill or a highlight that moves between items: tabs, a sidebar, menu rows | [`Stage::glide`]: one [`Glide::indicator`] before the items, a [`Glide::probe`] in the selected one |
+//! | (d) Content replaced in place when a tab or a page of data is switched | [`crossfade`] (a body of text or a list), [`page`] (a whole screen), [`Stage::swap`] with [`swapped`] or [`swap_in`] (one small piece: an icon, a label) |
+//! | (e) A list whose rows come and go: it makes room and closes up | [`Stage::roster`] with [`roster_row`] |
+//! | (f) Anything pressable: buttons, pills, icon buttons, rows | [`tactile`] as the control's first child: the eased hover wash and the one pressed state (a slight squash, sprung back) |
+//! | A value that changes: a width, an offset, a rotation | [`Stage::aim`] |
+//! | Something that shares the window with its neighbour: a sidebar, a side panel | [`Stage::presence`] for its pose and [`Stage::room`] for the room it takes |
+//! | A group of items arriving together | [`Stage::mark`] then [`Stage::cascade_next`] with [`lift`] |
 use crate::ui::{FONT, Theme, icon};
 use gpui::{prelude::*, *};
 use std::{
@@ -79,6 +101,16 @@ pub const STAGGER_CAP: usize = 7;
 pub const RISE_TRAVEL: f32 = 7.;
 /// How far a whole page travels while it settles in.
 pub const PAGE_TRAVEL: f32 = 4.;
+/// How long the pointer rests on a control before its tooltip shows.
+pub const TIP_DELAY: Duration = Duration::from_millis(500);
+/// For this long after a tooltip was showing, a neighbour's shows at once:
+/// reading along a row of tools takes one wait, not one per tool.
+pub const TIP_WARM: Duration = Duration::from_millis(450);
+/// How far a tooltip stands off the control it names.
+pub const TIP_GAP: f32 = 6.;
+/// More rows than this changing in one frame is a different list, not a
+/// list that changed: a [`Stage::roster`] then simply shows the new rows.
+pub const ROSTER_MOST: usize = 6;
 /// Hover washes ease in quickly and out a little slower.
 const HOVER_IN: Duration = Duration::from_millis(110);
 const HOVER_OUT: Duration = Duration::from_millis(220);
@@ -503,6 +535,45 @@ pub struct Stage {
     frame_started: Cell<Option<Instant>>,
     /// The window frame in which each watched thing was last on screen.
     seen: RefCell<HashMap<TrackKey, u64>>,
+    /// Lists whose rows come and go (see [`Stage::roster`]).
+    rosters: RefCell<HashMap<&'static str, Roster>>,
+}
+
+/// One list's rows as they were last drawn, and the ones on their way in or
+/// out. Rows at rest have no track.
+#[derive(Default)]
+struct Roster {
+    scope: u64,
+    /// Every row being drawn, in order: the list's own and those leaving.
+    order: Vec<u64>,
+    moving: HashMap<u64, Track>,
+}
+
+/// One row of a [`Stage::roster`]: draw it with [`roster_row`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Row {
+    pub key: u64,
+    pub pose: Pose,
+    /// False for a row that has left the list and is closing up.
+    pub present: bool,
+}
+
+/// Where the rows of a list that changed are drawn: `keys` in their order,
+/// with each row of `old` that is no longer among them kept where it was
+/// (after the row it followed), so the gap it leaves closes in place.
+pub fn roster_order(old: &[u64], keys: &[u64]) -> Vec<u64> {
+    let mut order = keys.to_vec();
+    let mut cursor = 0;
+    for row in old {
+        match order.iter().position(|key| key == row) {
+            Some(index) => cursor = index + 1,
+            None => {
+                order.insert(cursor.min(order.len()), *row);
+                cursor += 1;
+            }
+        }
+    }
+    order
 }
 
 impl Stage {
@@ -571,6 +642,124 @@ impl Stage {
             self.live.set(true);
         }
         track.value(shown)
+    }
+
+    /// How much of its room in the layout a surface that shares the window
+    /// with its neighbour (a sidebar, a side panel) takes right now, 0..=1,
+    /// from the pose [`Stage::presence`] gave for `key`. It follows the
+    /// surface as it slides, never past its full size (an overshoot must not
+    /// shove the neighbour and bring it back).
+    ///
+    /// With reduced motion nothing slides: the room is given, or taken back,
+    /// at once, and the surface fades over the neighbour meanwhile (draw it
+    /// out of the flow while `pose.value` is 1 and `open` is false). A
+    /// neighbour that jumps should replay its own short fade; see how the
+    /// main window does it for the sidebar.
+    pub fn room(&self, key: TrackKey, pose: Pose) -> f32 {
+        if !pose.visible {
+            return 0.;
+        }
+        if reduce_motion() {
+            return self.target(key).map_or(0., |target| target.clamp(0., 1.));
+        }
+        pose.value.clamp(0., 1.)
+    }
+
+    /// (e) The rows of a list whose rows come and go, so it makes room for
+    /// a new row and closes up after one that left instead of jumping: a
+    /// list of notes one is trashed from, messages arriving, people added.
+    ///
+    /// `keys` are the list's rows now, in order. What comes back is what to
+    /// draw: those rows, and any that have just left, kept where they were
+    /// until their space has closed. Draw each with [`roster_row`].
+    ///
+    /// `scope` names what the list is a list of (a page, a filter, a
+    /// query). A different scope, a list that was not on screen in the
+    /// previous frame, or more than [`ROSTER_MOST`] rows changing at once is
+    /// a different list rather than a changed one: it is simply shown. With
+    /// reduced motion rows fade in place and nothing slides.
+    pub fn roster(&self, name: &'static str, scope: u64, keys: &[u64]) -> Vec<Row> {
+        let (now, reduced) = (Instant::now(), reduce_motion());
+        let continuous = self.continuous((name, u64::MAX));
+        let mut rosters = self.rosters.borrow_mut();
+        let roster = rosters.entry(name).or_default();
+        let rest = |keys: &[u64]| -> Vec<Row> {
+            keys.iter()
+                .map(|key| Row { key: *key, pose: Pose::REST, present: true })
+                .collect()
+        };
+        if !continuous || roster.scope != scope || !self.primed.get() {
+            *roster = Roster { scope, order: keys.to_vec(), moving: HashMap::new() };
+            return rest(keys);
+        }
+        // The usual frame: nothing came, nothing went, nothing is moving.
+        if roster.moving.is_empty() && roster.order == keys {
+            return rest(keys);
+        }
+        let listed: std::collections::HashSet<u64> = keys.iter().copied().collect();
+        let drawn: std::collections::HashSet<u64> = roster.order.iter().copied().collect();
+        let arriving = keys.iter().filter(|key| !drawn.contains(key)).count();
+        let leaving = roster
+            .order
+            .iter()
+            .filter(|row| {
+                !listed.contains(row) && roster.moving.get(row).is_none_or(|track| track.to > 0.5)
+            })
+            .count();
+        if arriving + leaving > ROSTER_MOST {
+            *roster = Roster { scope, order: keys.to_vec(), moving: HashMap::new() };
+            return rest(keys);
+        }
+        for key in keys {
+            // A new row opens from nothing; one that was leaving and is back
+            // (an undo) turns round from wherever it had got to.
+            if !drawn.contains(key) {
+                let mut track = Track::rest(0., now);
+                track.present(true, GOOEY, now, reduced);
+                roster.moving.insert(*key, track);
+            } else if let Some(track) = roster.moving.get_mut(key) {
+                track.present(true, GOOEY, now, reduced);
+            }
+        }
+        for row in &roster.order {
+            if !listed.contains(row) {
+                roster
+                    .moving
+                    .entry(*row)
+                    .or_insert_with(|| Track::rest(1., now))
+                    .present(false, GOOEY, now, reduced);
+            }
+        }
+        roster.order = roster_order(&roster.order, keys);
+        let shown = shown_at(now);
+        let mut rows = Vec::with_capacity(roster.order.len());
+        let mut settled = Vec::new();
+        for key in &roster.order {
+            let present = listed.contains(key);
+            let pose = match roster.moving.get(key) {
+                Some(track) => {
+                    let pose = track.pose(shown, reduced);
+                    if pose.settled {
+                        settled.push(*key);
+                    }
+                    pose
+                }
+                None => Pose::REST,
+            };
+            if present || pose.visible {
+                rows.push(Row { key: *key, pose, present });
+            }
+        }
+        for key in settled {
+            roster.moving.remove(&key);
+            if !listed.contains(&key) {
+                roster.order.retain(|row| *row != key);
+            }
+        }
+        if !roster.moving.is_empty() {
+            self.live.set(true);
+        }
+        rows
     }
 
     /// Where a track is heading, if it exists: lets a surface that is leaving
@@ -1796,8 +1985,12 @@ pub fn page<E: Styled + IntoElement + 'static>(id: impl Into<ElementId>, element
         .into_any_element()
 }
 
-/// Swap content in place (the note's tabs): a brief firming-up with no
-/// movement, so text the reader is following does not shift.
+/// (d) Content replaced in place when a tab or a page of data is switched
+/// (the note's two documents, a list under another filter, a settings
+/// page): a brief firming-up with no movement, so text the reader is
+/// following does not shift. Key `id` by what is shown (the tab, the page),
+/// never by its content, so typing or a refresh does not replay it. It is
+/// the same short fade with reduced motion.
 pub fn crossfade<E: Styled + IntoElement + 'static>(
     id: impl Into<ElementId>,
     element: E,
@@ -1843,13 +2036,20 @@ struct GlideState {
     lead: Duration,
 }
 
+/// (c) A selected fill or a highlight that travels between items: tabs, the
+/// sidebar's rows, a menu's rows, the palette's results. Never give the
+/// selected item a background of its own: it would blink from one item to
+/// the next.
+///
 /// A selection highlight shared by a group of items. The selected item drops
 /// a [`Glide::probe`] inside itself; one [`Glide::indicator`] placed before
 /// the items paints the highlight and, whenever the selection moves, stretches
 /// it across like a droplet before it snaps back to size.
 ///
 /// The probe only measures and the indicator only paints, so moving the
-/// highlight never lays anything out.
+/// highlight never lays anything out. Where nothing is selected (the pointer
+/// has left a menu) the highlight eases away where it was; with reduced
+/// motion it is simply on the selected item, without travelling.
 #[derive(Clone, Default)]
 pub struct Glide(Rc<RefCell<GlideState>>);
 
@@ -1890,7 +2090,15 @@ impl Glide {
         let state = self.0.clone();
         let key = hash_key(key);
         canvas(
-            move |bounds, _, _| state.borrow_mut().fresh = Some((key, bounds)),
+            move |bounds, window, _| {
+                // Only as much of the item as can be seen: inside a list
+                // that scrolls, the highlight stops at the list's edge and
+                // an item scrolled out of view has none.
+                let seen = bounds.intersect(&window.content_mask().bounds);
+                if seen.size.width > px(0.) && seen.size.height > px(0.) {
+                    state.borrow_mut().fresh = Some((key, seen));
+                }
+            },
             |_, _, _, _| {},
         )
         .absolute()
@@ -2064,6 +2272,33 @@ thread_local! {
 /// a control that comes back under the same key does not flash revealed.
 pub fn frame() {
     REVEAL_FRAME.with(|frame| frame.set(frame.get().wrapping_add(1)));
+    HELD.with(|held| held.borrow_mut().clear());
+}
+
+thread_local! {
+    /// The controls held lit for this frame (see [`hold`]).
+    static HELD: RefCell<Vec<ElementId>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Keep the control with element id `id` lit for this frame, as if the
+/// pointer were on it: the control that opened a menu, a popover or a card
+/// stays looking active for as long as that is open, although the pointer
+/// has moved into it (and although an overlay now covers the control, so
+/// nothing under it is hovered at all). Call it from the main window's
+/// render, every frame while the thing is open; when the calls stop the
+/// wash eases away like any hover. It lights the control's [`tactile`]
+/// layer, so anything it reveals on hover (see [`Tactile::reveals`]) stays
+/// revealed too.
+pub fn hold(id: impl Into<ElementId>) {
+    HELD.with(|held| held.borrow_mut().push(id.into()));
+}
+
+/// Whether the control that owns the feedback layer `layer` is held lit.
+fn held(layer: &[ElementId]) -> bool {
+    let Some(owner) = layer.len().checked_sub(2).and_then(|index| layer.get(index)) else {
+        return false;
+    };
+    HELD.with(|held| held.borrow().contains(owner))
 }
 
 fn publish(key: u64, level: f32) -> bool {
@@ -2145,7 +2380,12 @@ pub fn hover_probe(key: u64) -> Tactile {
     tactile(transparent_black()).radius(0.).reveals(key)
 }
 
-/// Pointer feedback with a `hover` wash and 6 px corners.
+/// (f) Pointer feedback with a `hover` wash and 6 px corners: what every
+/// button, pill, icon button and row has as its first child. It is the one
+/// hover wash (eased in and out) and the one pressed state in the app (a
+/// slight squash on the press, sprung back on release); a control never
+/// styles `.hover(…)` or `.active(…)` itself. With reduced motion the wash
+/// still eases and nothing squashes.
 pub fn tactile(hover: Hsla) -> Tactile {
     Tactile {
         hover,
@@ -2284,9 +2524,11 @@ impl Element for Tactile {
                     pointer: Rc::default(),
                 });
                 state.pointer.hovered.set(hovered);
-                let hover = if hovered { 1. } else { 0. };
+                // What it opened is open: it stays lit (see [`hold`]).
+                let lit = hovered || held(id);
+                let hover = if lit { 1. } else { 0. };
                 if state.hover.target() != hover {
-                    let duration = if hovered { HOVER_IN } else { HOVER_OUT };
+                    let duration = if lit { HOVER_IN } else { HOVER_OUT };
                     state
                         .hover
                         .retarget(hover, now, slow(duration), Curve::Fade);
@@ -2996,6 +3238,9 @@ pub fn fold_height(natural: f32, level: f32) -> f32 {
     (natural * level.clamp(0., 1.)).max(0.)
 }
 
+/// What [`appear`] and [`roster_row`] are made of; use those unless the pose
+/// comes from somewhere else (a disclosure with its own chevron).
+///
 /// The body of a disclosure (an accordion): `content` clipped to the share of
 /// its own height that `pose` has reached, fading and settling into place, so
 /// whatever is below it slides instead of jumping. `pose` is the presence of
@@ -3042,6 +3287,129 @@ pub fn fold(stage: &Stage, key: TrackKey, pose: Pose, content: impl IntoElement)
             shell.h(px(0.)).overflow_hidden().opacity(0.).child(inner)
         }
     })
+}
+
+/// (a) Something that enters or leaves the layout: a row, a banner, a
+/// message, a control. Its space opens as it arrives and closes as it goes,
+/// so what is below slides instead of jumping, while it fades and settles
+/// into place. `key` names it on `stage`; `shown` is whether it should be
+/// there. Pass the content for as long as it can be drawn, also while
+/// `shown` is false: it is what fades as the space closes. `None` once it
+/// has left. When what left can no longer be drawn (its data is gone), use
+/// [`vacate`] in its place.
+///
+/// What was already there on the first frame is simply there. With reduced
+/// motion it fades in place at its full size and nothing slides.
+pub fn appear(stage: &Stage, key: TrackKey, shown: bool, content: impl IntoElement) -> Option<Div> {
+    fold(stage, key, stage.presence(key, shown, GOOEY), content)
+}
+
+/// (a) The space of something that has left and can no longer be drawn,
+/// closing: use it where [`appear`] was while there is nothing to pass it.
+/// `None` once the space has closed (or when nothing was there).
+pub fn vacate(stage: &Stage, key: TrackKey) -> Option<Div> {
+    let natural = FOLDS.with(|folds| folds.borrow().get(&key).copied())?;
+    let pose = stage.presence(key, false, GOOEY);
+    if !pose.visible {
+        FOLDS.with(|folds| folds.borrow_mut().remove(&key));
+        return None;
+    }
+    Some(
+        div()
+            .w_full()
+            .flex_shrink_0()
+            .h(px(fold_height(natural, pose.value))),
+    )
+}
+
+/// (e) One row of a [`Stage::roster`] called `name`: its content in a space
+/// that opens as the row arrives and closes after it has left. Pass `None`
+/// for a row that has left and can no longer be drawn; its space still
+/// closes. `None` comes back when there is nothing to draw.
+pub fn roster_row(
+    stage: &Stage,
+    name: &'static str,
+    row: Row,
+    content: Option<impl IntoElement>,
+) -> Option<Div> {
+    let key = (name, row.key);
+    match content {
+        Some(content) => fold(stage, key, row.pose, content),
+        None if row.pose.visible && !row.pose.at_rest() => {
+            let natural = FOLDS.with(|folds| folds.borrow().get(&key).copied())?;
+            Some(
+                div()
+                    .w_full()
+                    .flex_shrink_0()
+                    .h(px(fold_height(natural, row.pose.value))),
+            )
+        }
+        None => None,
+    }
+}
+
+thread_local! {
+    /// The natural height of each [`follow_height`] container's content, as
+    /// last laid out.
+    static HEIGHTS: RefCell<HashMap<TrackKey, f32>> = RefCell::new(HashMap::new());
+}
+
+/// (b) A container that follows its content's height: when what is inside
+/// grows or shrinks (results arriving, a section coming or going, a longer
+/// message), the container's edge travels to the new height on [`SNAPPY`]
+/// instead of jumping there. Use it for a card, a panel or a list whose
+/// content changes while it is on screen. `key` names it on `stage`.
+///
+/// The content is laid out at its natural height and clipped to the
+/// container, so nothing inside reflows while the edge moves; give the
+/// container's own background, border and corners to whatever wraps this.
+/// The first frame rests at the content's height. A change is seen when the
+/// content is laid out, so the edge starts moving one frame later, from
+/// where it was. With reduced motion the container is not sized at all and
+/// simply has its content's height.
+pub fn follow_height(stage: &Stage, key: TrackKey, content: impl IntoElement) -> Div {
+    let probe = canvas(
+        move |bounds, window, _| {
+            let height = f32::from(bounds.size.height);
+            let changed = HEIGHTS.with(|heights| {
+                heights
+                    .borrow_mut()
+                    .insert(key, height)
+                    .is_none_or(|before| (before - height).abs() > 0.5)
+            });
+            // Laid out at a new height: the next frame starts towards it.
+            if changed {
+                window.refresh();
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .inset_0();
+    let inner = div()
+        .relative()
+        .w_full()
+        .min_w_0()
+        .flex_shrink_0()
+        .flex()
+        .flex_col()
+        .child(content)
+        .child(probe);
+    let shell = div().w_full().min_w_0().flex().flex_col();
+    // Back on screen after being away: it is simply there at its content's
+    // height, whatever height it had when it was last seen.
+    if !stage.continuous(key) {
+        HEIGHTS.with(|heights| heights.borrow_mut().remove(&key));
+        stage.forget(key);
+    }
+    let natural = HEIGHTS.with(|heights| heights.borrow().get(&key).copied());
+    match natural {
+        Some(natural) if !reduce_motion() => shell
+            .h(px(stage.aim(key, natural, SNAPPY).max(0.)))
+            .overflow_hidden()
+            .child(inner),
+        _ => shell.child(inner),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3928,6 +4296,154 @@ mod tests {
         assert_eq!(stage.target(("chip", 0)), Some(1.));
         stage.forget(("chip", 0));
         assert_eq!(stage.target(("chip", 0)), None);
+    }
+
+    #[test]
+    fn a_row_that_leaves_a_list_keeps_its_place_until_its_space_has_closed() {
+        // Unchanged, grown at either end and in the middle.
+        assert_eq!(roster_order(&[1, 2, 3], &[1, 2, 3]), [1, 2, 3]);
+        assert_eq!(roster_order(&[1, 2, 3], &[0, 1, 2, 3, 4]), [0, 1, 2, 3, 4]);
+        // A row that left stays after the row it followed…
+        assert_eq!(roster_order(&[1, 2, 3], &[1, 3]), [1, 2, 3]);
+        assert_eq!(roster_order(&[1, 2, 3], &[1, 2]), [1, 2, 3]);
+        // …or first, if it was first; two neighbours keep their order.
+        assert_eq!(roster_order(&[1, 2, 3], &[2, 3]), [1, 2, 3]);
+        assert_eq!(roster_order(&[1, 2, 3, 4], &[1, 4]), [1, 2, 3, 4]);
+        // One leaves while another arrives above it.
+        assert_eq!(roster_order(&[1, 2, 3], &[9, 1, 3]), [9, 1, 2, 3]);
+        assert_eq!(roster_order(&[], &[5, 6]), [5, 6]);
+        assert_eq!(roster_order(&[5, 6], &[]), [5, 6]);
+    }
+
+    #[test]
+    fn a_list_makes_room_for_new_rows_and_closes_up_after_ones_that_left() {
+        let stage = Stage::default();
+        stage.primed.set(true);
+        let keys = |rows: &[Row]| rows.iter().map(|row| row.key).collect::<Vec<_>>();
+        // First sight: the list is simply there.
+        let rows = stage.roster("list", 0, &[1, 2, 3]);
+        assert!(rows.iter().all(|row| row.pose == Pose::REST && row.present));
+        frame();
+        // Nothing changed: nothing moves, and no frames are asked for.
+        stage.live.set(false);
+        assert!(stage.roster("list", 0, &[1, 2, 3]).iter().all(|row| row.pose == Pose::REST));
+        assert!(!stage.live.get());
+        frame();
+        // A row arrives on top and one leaves from the middle: both are
+        // drawn, the newcomer opening and the other closing in its place.
+        let rows = stage.roster("list", 0, &[9, 1, 3]);
+        assert_eq!(keys(&rows), [9, 1, 2, 3]);
+        assert!(rows[0].present && !rows[0].pose.settled);
+        assert!(!rows[2].present && rows[2].pose.visible && !rows[2].pose.settled);
+        assert_eq!((rows[1].pose, rows[3].pose), (Pose::REST, Pose::REST));
+        assert!(stage.live.get());
+        frame();
+        // The one that left is put back (an undo) before it has gone: it
+        // turns round where it is rather than arriving again.
+        let rows = stage.roster("list", 0, &[9, 1, 2, 3]);
+        assert_eq!(keys(&rows), [9, 1, 2, 3]);
+        assert!(rows[2].present && rows[2].pose.visible);
+        frame();
+        // Once they have come to rest the list is plain rows again.
+        std::thread::sleep(GOOEY.duration() + Duration::from_millis(40));
+        let rows = stage.roster("list", 0, &[9, 1, 2, 3]);
+        assert!(rows.iter().all(|row| row.pose.settled && row.present));
+        frame();
+        stage.live.set(false);
+        let rows = stage.roster("list", 0, &[9, 1, 2, 3]);
+        assert!(rows.iter().all(|row| row.pose == Pose::REST) && !stage.live.get());
+    }
+
+    #[test]
+    fn a_different_list_is_shown_rather_than_animated_into() {
+        let stage = Stage::default();
+        stage.primed.set(true);
+        stage.roster("list", 0, &[1, 2, 3]);
+        frame();
+        // Another scope (a filter, a page): its rows are simply there.
+        let rows = stage.roster("list", 1, &[7, 8]);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.pose == Pose::REST));
+        frame();
+        // Too much changing at once is a different list too.
+        let many: Vec<u64> = (100..100 + ROSTER_MOST as u64 + 1).collect();
+        let rows = stage.roster("list", 1, &many);
+        assert_eq!(rows.len(), many.len());
+        assert!(rows.iter().all(|row| row.pose == Pose::REST));
+        // Off screen for a while, then back with other rows: no entrance.
+        frame();
+        frame();
+        frame();
+        let rows = stage.roster("list", 1, &[100, 555]);
+        assert!(rows.iter().all(|row| row.pose == Pose::REST));
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn something_that_left_and_cannot_be_drawn_still_closes_its_space() {
+        let stage = Stage::default();
+        stage.primed.set(true);
+        let key = ("banner", 4);
+        // Nothing was ever there: nothing to close.
+        assert!(vacate(&stage, key).is_none());
+        // It was there, 60 pt tall, and is gone: its space is drawn closing.
+        stage.settle(key, true);
+        FOLDS.with(|folds| folds.borrow_mut().insert(key, 60.));
+        assert!(vacate(&stage, key).is_some());
+        std::thread::sleep(GOOEY.exit_duration() + Duration::from_millis(40));
+        assert!(vacate(&stage, key).is_none());
+        // And nothing of it is remembered.
+        assert!(FOLDS.with(|folds| folds.borrow().get(&key).is_none()));
+        // A row of a list is the same: no content, a closing space, then nothing.
+        let leaving = Row { key: 9, pose: Pose { value: 0.5, fade: 0.4, visible: true, settled: false }, present: false };
+        FOLDS.with(|folds| folds.borrow_mut().insert(("rows", 9), 28.));
+        assert!(roster_row(&stage, "rows", leaving, None::<Div>).is_some());
+        let gone = Row { pose: Pose { value: 0., fade: 0., visible: false, settled: true }, ..leaving };
+        assert!(roster_row(&stage, "rows", gone, None::<Div>).is_none());
+    }
+
+    #[test]
+    fn a_surface_beside_the_page_takes_its_room_as_it_slides() {
+        let stage = Stage::default();
+        stage.primed.set(true);
+        let key = ("side", 0);
+        // Closed: no room.
+        let closed = stage.presence(key, false, SETTLE);
+        assert_eq!(stage.room(key, closed), 0.);
+        // Opening: with motion the room follows the slide and never passes
+        // the whole; with reduced motion it is all there at once.
+        let opening = stage.presence(key, true, SETTLE);
+        let room = stage.room(key, opening);
+        if reduce_motion() {
+            assert_eq!(room, 1.);
+        } else {
+            assert!((0. ..0.2).contains(&room), "{room}");
+        }
+        assert_eq!(stage.room(key, Pose { value: 1.04, ..Pose::REST }).min(1.), stage.room(key, Pose { value: 1.04, ..Pose::REST }));
+        // Gone: no room, whatever the pose once said.
+        assert_eq!(stage.room(key, Pose { visible: false, ..Pose::REST }), 0.);
+    }
+
+    #[test]
+    fn a_control_is_held_lit_only_for_the_frame_it_was_asked_in() {
+        let layer = [
+            ElementId::from("cereal-root"),
+            ElementId::from("note-options"),
+            ElementId::from("tactile"),
+        ];
+        assert!(!held(&layer));
+        hold("note-options");
+        assert!(held(&layer));
+        // A control with an id of another kind, or another name, is not.
+        hold(("note-row", 4u64));
+        assert!(held(&[ElementId::from(("note-row", 4u64)), ElementId::from("tactile")]));
+        assert!(!held(&[ElementId::from(("note-row", 5u64)), ElementId::from("tactile")]));
+        // The next frame starts with nothing held.
+        frame();
+        assert!(!held(&layer));
+        // A feedback layer with no owner is never held.
+        hold("tactile");
+        assert!(!held(&[ElementId::from("tactile")]));
     }
 
     #[test]

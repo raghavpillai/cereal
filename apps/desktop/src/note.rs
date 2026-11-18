@@ -373,6 +373,8 @@ impl Cereal {
                         icon("note-tab-chevron", CHEVRON, ink)
                             .ml(px(lerp(CHEVRON_GAP_COLLAPSED, CHEVRON_GAP))),
                     )
+                    // Where it is drawn: its template menu hangs from it.
+                    .child(crate::onboarding_view::place("note-templates"))
                 })
                 .reach()
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
@@ -570,6 +572,8 @@ impl Cereal {
                         note_meta_chip("note-details", t)
                             .cursor_default()
                             .child(row_feedback(t, 0.).round())
+                            // Where it is drawn: the details card hangs from it.
+                            .child(crate::onboarding_view::place("note-details"))
                             .child(icon("calendar-dots", 14., t.muted))
                             .child(date_label)
                             .child(icon("people", 14., t.muted).ml(px(4.)))

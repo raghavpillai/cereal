@@ -558,7 +558,7 @@ impl Cereal {
             .child(header)
             .child(div().flex_shrink_0().h(px(hairline)).bg(t.hairline))
             .child(list.child(self.stage.glide("menu").indicator(t.hover, 8.)))
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+            .occlude().on_any_mouse_down(|_, _, cx| cx.stop_propagation());
         div()
             .absolute()
             .left(px(left))
@@ -617,9 +617,7 @@ impl Cereal {
                 .child(crate::motion::tactile(t.hover).press(t.fill).radius(6.))
                 .child(icon(symbol, BUTTON_ICON, t.muted))
                 .when_some(spot, |d, spot| d.child(crate::onboarding_view::place(spot)))
-                // The app's tooltips stay hidden while a popover is open;
-                // these belong to one, so they are shown.
-                .tooltip(move |_, cx| cx.new(|_| ToolTip::new(label, t)).into())
+                .child(crate::ui::tip(label, t))
         };
         let action = |id: (&'static str, u64), label: &'static str, danger: bool, spot: Option<&'static str>| {
             pill(id, label, "", t)

@@ -231,6 +231,21 @@ pub fn tool_sized(id: impl Into<ElementId>, symbol: &str, size: f32, t: Theme) -
     }
 }
 
+/// A [`tool_sized`] that says `label`: for a control whose meaning changes
+/// while it stays the same control (the sidebar button), so its id, and with
+/// it its hover, press and tooltip state, does not change with its label.
+pub fn tool_sized_tip(
+    id: impl Into<ElementId>,
+    symbol: &str,
+    size: f32,
+    label: impl Into<SharedString>,
+    t: Theme,
+) -> Stateful<Div> {
+    let id = id.into();
+    let glyph = tool_glyph_at(&id, symbol, size, t);
+    with_tooltip(tool_shell(id, t, Some(6.)).child(glyph), label.into(), t)
+}
+
 /// How long a button shows that it did its job.
 const CONFIRM_FOR: std::time::Duration = std::time::Duration::from_millis(1200);
 
@@ -672,22 +687,72 @@ pub const POPOVER_RADIUS: f32 = 12.;
 /// overlay's `pose.fade` so it arrives and leaves with it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scrim {
-    /// The command palette: 10% black.
+    /// The command palette: the page stays readable behind it.
     Palette,
     /// A dialog that only informs: a click outside dismisses it.
     Dialog,
+    /// The sidebar slid over a narrow window.
+    Sidebar,
     /// A form holding typed input: darker, and
     /// a stray click outside does not throw the input away.
     Form,
 }
 
+/// How strong each scrim is, as black over the page, in the light theme and
+/// in the dark one. The dark page is close to black already, so it takes
+/// more to step it back by the same amount.
+pub fn scrim_strength(kind: Scrim, dark: bool) -> f32 {
+    match (kind, dark) {
+        (Scrim::Palette, false) => 0.10,
+        (Scrim::Palette, true) => 0.30,
+        (Scrim::Dialog, false) => 0.19,
+        (Scrim::Dialog, true) => 0.42,
+        (Scrim::Sidebar, false) => 0.28,
+        (Scrim::Sidebar, true) => 0.40,
+        (Scrim::Form, _) => 0.60,
+    }
+}
+
 pub fn scrim(kind: Scrim, fade: f32) -> Hsla {
-    Hsla::from(match kind {
-        Scrim::Palette => rgba(0x0000001a),
-        Scrim::Dialog => rgba(0x29292930),
-        Scrim::Form => rgba(0x00000099),
-    })
-    .opacity(fade)
+    hsla(0., 0., 0., scrim_strength(kind, is_dark()) * fade.clamp(0., 1.))
+}
+
+/// The layer every menu, context menu, popover, dialog, palette and card is
+/// drawn on: it covers the window, and what the overlay shows is added to it
+/// as children (a surface made with [`floating`], popped out of its source with
+/// [`crate::motion::pop`]).
+///
+/// While `open`, the layer takes the pointer for everything under it:
+/// nothing behind it is hovered, shows a tooltip, scrolls or is pressed, and
+/// a press on it (any button) is `dismiss`ed and goes no further, as with a
+/// native menu. Once the overlay has been told to close (`open` false, its
+/// exit still playing) the layer is no longer there for the pointer, so the
+/// page can be used at once and nothing waits for the animation.
+///
+/// Give it a [`scrim`] with `.bg(…)` when the page should step back. Keep
+/// the control that opened it lit with [`crate::motion::hold`]. Escape must
+/// close the topmost overlay only (see `Cereal::dismiss_top`).
+pub fn overlay(
+    open: bool,
+    dismiss: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> Div {
+    let layer = div().absolute().inset_0();
+    if open {
+        layer.occlude().on_any_mouse_down(dismiss)
+    } else {
+        layer
+    }
+}
+
+/// The body of anything that floats over the page (a menu, a popover, a
+/// card, a toast): what it covers is not under the pointer, so nothing
+/// behind it lights up, shows a tooltip or takes a press through it, and a
+/// press on the surface itself is not a press outside it. Apply it to the
+/// outermost element of the floating thing.
+pub fn floating<E: InteractiveElement>(element: E) -> E {
+    element
+        .occlude()
+        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
 }
 
 /// What lies behind a bar floating 26 px above the bottom of a page: the page
@@ -741,12 +806,13 @@ fn tool_label(id: &ElementId, symbol: &str) -> Option<SharedString> {
     let label = match name {
         "sidebar-toggle" => "Hide sidebar · ⌘B",
         "open-sidebar" => "Show sidebar · ⌘B",
-        "sidebar-search" | "collection-search" => "Search notes · ⌘K",
+        "sidebar-search" | "collection-search" | "window-search" => "Search notes · ⌘K",
         "footer-settings" => "Settings",
         "footer-window" => "Workspace menu",
         "footer-invite" => "Invite people",
         "footer-shortcuts" => "Keyboard shortcuts",
-        "back-to-notes" => "Back to notes · Esc",
+        "back-to-notes" => "Home · ⌘1",
+        "header-back" => "Back · Esc",
         "close-search" => "Close search · Esc",
         "close-dialog" => "Close dialog · Esc",
         "note-copy" => "Copy note",
@@ -766,7 +832,7 @@ fn tool_label(id: &ElementId, symbol: &str) -> Option<SharedString> {
             "close" => "Close",
             "settings" | "sliders-horizontal" => "Settings",
             "keyboard" => "Keyboard shortcuts",
-            "trash" => "Move to trash",
+            "trash" => "Move to Trash",
             "share" => "Share",
             "arrow-up" => "Send message",
             "mic" => "Start recording",
@@ -778,23 +844,8 @@ fn tool_label(id: &ElementId, symbol: &str) -> Option<SharedString> {
     Some(label.into())
 }
 
-thread_local! {
-    static POPOVER_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Tell tooltips whether a menu or popover is open. While one is, a trigger's
-/// tooltip stays hidden instead of sitting on top of the menu it opened.
-pub fn set_popover_open(open: bool) {
-    POPOVER_OPEN.with(|flag| flag.set(open));
-}
-
-/// Whether a menu or popover is open, so a tooltip should stay hidden.
-pub fn popover_open() -> bool {
-    POPOVER_OPEN.with(|flag| flag.get())
-}
-
 /// The tooltip's box: 12 pt text on the inverted ink, 8 × 4 padding, 8 pt
-/// corners. Shared by GPUI's pointer tooltips and the bar's own.
+/// corners.
 pub fn tip_box(label: SharedString, theme: Theme) -> Div {
     div()
         .px(px(8.))
@@ -805,56 +856,475 @@ pub fn tip_box(label: SharedString, theme: Theme) -> Div {
         .font_family(FONT)
         .text_size(px(12.))
         .line_height(px(16.))
+        .whitespace_nowrap()
         .shadow_sm()
         .child(label)
 }
 
-/// Give a control the app's tooltip, hidden while a popover is open.
-pub(crate) fn with_tooltip(
-    element: Stateful<Div>,
-    label: SharedString,
-    theme: Theme,
-) -> Stateful<Div> {
-    // GPUI 0.2.2 shows these after 500 ms; the delay is the framework's.
-    element.tooltip(move |_, cx| {
-        cx.new(|_| ToolTip {
-            label: label.clone(),
-            theme,
-            hidden: POPOVER_OPEN.with(|flag| flag.get()),
-        })
-        .into()
-    })
+/// Give a control the app's tooltip (see [`tip`]).
+pub(crate) fn with_tooltip<E: ParentElement>(element: E, label: SharedString, theme: Theme) -> E {
+    element.child(tip(label, theme))
 }
 
-pub struct ToolTip {
-    label: SharedString,
-    theme: Theme,
-    hidden: bool,
-}
-
-impl ToolTip {
-    pub fn new(label: impl Into<SharedString>, theme: Theme) -> Self {
-        Self {
-            label: label.into(),
-            theme,
-            hidden: false,
-        }
+/// The app's one tooltip: add it as a child of the control it names (any
+/// element; it takes no room and fills the control). Never use GPUI's own
+/// `.tooltip(…)`, which opens at the pointer, on top of the control.
+///
+/// * It shows after the pointer has rested on the control for
+///   [`crate::motion::TIP_DELAY`]; while one is showing, and for a moment
+///   after, a neighbour's shows at once and the label glides across.
+/// * It pops out of the control on the snappy spring and leaves on the
+///   matching exit; with reduced motion it only fades.
+/// * It stands [`crate::motion::TIP_GAP`] clear of the control, centred
+///   above it (below it when there is no room above, or when asked with
+///   [`Tip::below`]), inside the window, so it never covers the control or
+///   the ones beside it.
+/// * A press, a scroll or a key takes it away and keeps it away until the
+///   pointer has left the control; it goes with its control, and with the
+///   window's focus; nothing under an overlay shows one.
+pub fn tip(label: impl Into<SharedString>, theme: Theme) -> Tip {
+    Tip {
+        label: label.into(),
+        theme,
+        side: TipSide::Auto,
     }
 }
 
-impl Render for ToolTip {
-    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        // A tooltip belongs to the pointer. Once the window is no longer the
-        // active one the pointer has gone elsewhere and no movement will
-        // arrive to take the tooltip down, so it goes now and stays gone.
-        if !window.is_window_active() {
-            self.hidden = true;
-        }
-        if self.hidden || POPOVER_OPEN.with(|flag| flag.get()) {
-            return div();
-        }
-        tip_box(self.label.clone(), self.theme)
+/// Which side of its control a tooltip stands on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TipSide {
+    /// Above, or below when the control is too near the top of the window.
+    Auto,
+    Above,
+    Below,
+}
+
+pub struct Tip {
+    label: SharedString,
+    theme: Theme,
+    side: TipSide,
+}
+
+impl Tip {
+    /// Stand below the control (above only if there is no room below).
+    pub fn below(mut self) -> Self {
+        self.side = TipSide::Below;
+        self
     }
+
+    /// Stand above the control (below only if there is no room above).
+    pub fn above(mut self) -> Self {
+        self.side = TipSide::Above;
+        self
+    }
+}
+
+/// How close a tooltip may come to the window's edge.
+const TIP_MARGIN: f32 = 6.;
+/// A tooltip whose control has not been drawn for this long has lost it.
+const TIP_STALE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Where a tooltip of `size` stands for a control at `control` in a window
+/// of `viewport`: its top-left corner, and whether that is above the
+/// control. Centred on the control, [`crate::motion::TIP_GAP`] clear of it,
+/// and inside the window.
+pub fn tip_place(
+    control: Bounds<Pixels>,
+    size: Size<Pixels>,
+    viewport: Size<Pixels>,
+    side: TipSide,
+) -> (Point<Pixels>, bool) {
+    let (gap, margin) = (px(crate::motion::TIP_GAP), px(TIP_MARGIN));
+    let fits_above = control.top() - gap - size.height >= margin;
+    let fits_below = control.bottom() + gap + size.height <= viewport.height - margin;
+    let above = match side {
+        TipSide::Auto | TipSide::Above => fits_above || !fits_below,
+        TipSide::Below => !fits_below && fits_above,
+    };
+    let y = if above {
+        control.top() - gap - size.height
+    } else {
+        control.bottom() + gap
+    };
+    let x = (control.center().x - size.width / 2.)
+        .min(viewport.width - size.width - margin)
+        .max(margin);
+    (point(x, y), above)
+}
+
+/// Every window's tooltips: one pointer, so one tooltip at a time.
+#[derive(Default)]
+struct Tips {
+    /// The control the pointer is resting on, and since when.
+    over: Option<(u64, std::time::Instant)>,
+    /// The control whose tooltip is showing (or leaving), and when that
+    /// control last drew it.
+    shown: Option<(u64, std::time::Instant)>,
+    presence: Option<crate::motion::Track>,
+    /// Until when a neighbour's tooltip shows without the wait.
+    warm_until: Option<std::time::Instant>,
+    /// The control that was pressed: it says nothing until the pointer
+    /// has left it.
+    quiet: Option<u64>,
+    /// Where the tooltip is drawn, so it glides from one control to the next.
+    origin: Option<(crate::motion::Track, crate::motion::Track)>,
+    /// The wait a timer has already been started for.
+    waking: Option<(u64, std::time::Instant)>,
+    /// When the pointer last moved, and where to. A control that comes
+    /// under a pointer that is lying still (the page changed beneath it, or
+    /// a press moved things) says nothing.
+    moved: Option<std::time::Instant>,
+    at: Option<Point<Pixels>>,
+}
+
+/// A control that finds itself under the pointer this long after the pointer
+/// last moved did not get there by the pointer moving.
+const TIP_ARRIVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+impl Tips {
+    fn showing(&self, key: u64) -> bool {
+        self.shown.is_some_and(|(shown, _)| shown == key)
+            && self.presence.is_some_and(|track| track.target() > 0.5)
+    }
+
+    /// What control `key` saw of the pointer this frame. Returns how long
+    /// to wait before looking again, when its tooltip is not due yet.
+    fn report(
+        &mut self,
+        key: u64,
+        hovered: bool,
+        now: std::time::Instant,
+        reduced: bool,
+    ) -> Option<std::time::Duration> {
+        // The control that was showing one is gone: so is its tooltip.
+        if self
+            .shown
+            .is_some_and(|(shown, drawn)| shown != key && now.saturating_duration_since(drawn) > TIP_STALE)
+        {
+            self.shown = None;
+            self.presence = None;
+            self.origin = None;
+        }
+        if !hovered {
+            if self.quiet == Some(key) {
+                self.quiet = None;
+            }
+            self.leave(key, now, reduced, true);
+            return None;
+        }
+        if self.quiet == Some(key) {
+            return None;
+        }
+        let since = match self.over {
+            Some((over, since)) if over == key => since,
+            _ => {
+                // It came to the pointer, not the pointer to it: quiet,
+                // until the pointer has left it and come back.
+                if !self
+                    .moved
+                    .is_some_and(|moved| now.saturating_duration_since(moved) <= TIP_ARRIVAL)
+                {
+                    self.quiet = Some(key);
+                    return None;
+                }
+                self.over = Some((key, now));
+                now
+            }
+        };
+        if self.showing(key) {
+            return None;
+        }
+        // A neighbour's is showing, or was a moment ago: no second wait.
+        let neighbour = self.shown.is_some_and(|(shown, _)| shown != key)
+            && self.presence.is_some_and(|track| track.target() > 0.5);
+        let warm = neighbour || self.warm_until.is_some_and(|until| since <= until);
+        let due = since + crate::motion::TIP_DELAY;
+        if warm || now >= due {
+            let track = self
+                .presence
+                .get_or_insert(crate::motion::Track::rest(0., now));
+            // Nothing is left of the last one: this one starts in its place
+            // rather than flying in from where that was.
+            if self.shown.is_none() || track.value(now) < 0.05 {
+                self.origin = None;
+            }
+            track.present(true, crate::motion::SNAPPY, now, reduced);
+            self.shown = Some((key, now));
+            self.warm_until = None;
+            None
+        } else {
+            Some(due - now)
+        }
+    }
+
+    /// The pointer is no longer resting on `key`.
+    fn leave(&mut self, key: u64, now: std::time::Instant, reduced: bool, warm: bool) {
+        if self.over.is_some_and(|(over, _)| over == key) {
+            self.over = None;
+        }
+        if self.showing(key)
+            && let Some(track) = self.presence.as_mut()
+        {
+            track.present(false, crate::motion::SNAPPY, now, reduced);
+            self.warm_until = warm.then(|| now + crate::motion::TIP_WARM);
+        }
+    }
+
+    /// `key` was pressed, scrolled or typed over: its tooltip goes, and
+    /// stays away until the pointer has left the control.
+    fn hush(&mut self, key: u64, now: std::time::Instant, reduced: bool) {
+        self.quiet = Some(key);
+        self.leave(key, now, reduced, false);
+        self.warm_until = None;
+    }
+
+    /// The pose to draw `key`'s tooltip at this frame, if it is the one.
+    fn pose(
+        &mut self,
+        key: u64,
+        now: std::time::Instant,
+        reduced: bool,
+    ) -> Option<crate::motion::Pose> {
+        if !self.shown.is_some_and(|(shown, _)| shown == key) {
+            return None;
+        }
+        let pose = self
+            .presence?
+            .pose(crate::motion::shown_at(now), reduced);
+        if !pose.visible {
+            self.shown = None;
+            self.presence = None;
+            self.origin = None;
+            return None;
+        }
+        self.shown = Some((key, now));
+        Some(pose)
+    }
+}
+
+thread_local! {
+    static TIPS: std::cell::RefCell<Tips> = std::cell::RefCell::new(Tips::default());
+}
+
+/// Tooltips belong to the pointer, which is in the active window. Debug
+/// builds can show them in a window that is not (`CEREAL_TIPS_INACTIVE=1`),
+/// so they can be filmed while another app has the keyboard.
+fn tips_allowed(window: &Window) -> bool {
+    #[cfg(debug_assertions)]
+    {
+        thread_local! {
+            static ALWAYS: bool = std::env::var_os("CEREAL_TIPS_INACTIVE").is_some();
+        }
+        if ALWAYS.with(|always| *always) {
+            return true;
+        }
+    }
+    window.is_window_active()
+}
+
+impl IntoElement for Tip {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for Tip {
+    type RequestLayoutState = ();
+    type PrepaintState = Hitbox;
+
+    fn id(&self) -> Option<ElementId> {
+        Some("tip".into())
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.refine(&StyleRefinement::default().absolute().inset_0());
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Hitbox {
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        let Some(key) = id.map(|id| tip_key(id, window)) else {
+            return hitbox;
+        };
+        let (now, reduced) = (std::time::Instant::now(), crate::motion::reduce_motion());
+        let Some(pose) = TIPS.with(|tips| tips.borrow_mut().pose(key, now, reduced)) else {
+            return hitbox;
+        };
+        // Laid out once to learn its size and side, then again popped out
+        // of the side that faces the control.
+        let build = |above: bool, label: SharedString, theme: Theme| {
+            crate::motion::pop(
+                tip_box(label, theme),
+                crate::motion::Pop::chip((0.5, if above { 1. } else { 0. })),
+                pose,
+            )
+        };
+        let mut element = build(true, self.label.clone(), self.theme);
+        let size = element.layout_as_root(AvailableSpace::min_size(), window, cx);
+        let (target, above) = tip_place(bounds, size, window.viewport_size(), self.side);
+        if !above {
+            element = build(false, self.label.clone(), self.theme);
+            element.layout_as_root(AvailableSpace::min_size(), window, cx);
+        }
+        let shown = crate::motion::shown_at(now);
+        let (at, gliding) = TIPS.with(|tips| {
+            let mut tips = tips.borrow_mut();
+            let (x, y) = tips.origin.get_or_insert((
+                crate::motion::Track::rest(f32::from(target.x), now),
+                crate::motion::Track::rest(f32::from(target.y), now),
+            ));
+            x.spring_to(f32::from(target.x), crate::motion::SNAPPY, now, reduced);
+            y.spring_to(f32::from(target.y), crate::motion::SNAPPY, now, reduced);
+            (
+                point(px(x.value(shown)), px(y.value(shown))),
+                !x.settled(shown) || !y.settled(shown),
+            )
+        });
+        if gliding || !pose.settled {
+            crate::motion::stats::cause("tip");
+            window.request_animation_frame();
+        }
+        // Over everything else in the window, and outside whatever clips
+        // the control.
+        window.defer_draw(element, at, 100);
+        hitbox
+    }
+
+    fn paint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        hitbox: &mut Hitbox,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let Some(key) = id.map(|id| tip_key(id, window)) else {
+            return;
+        };
+        let (now, reduced) = (std::time::Instant::now(), crate::motion::reduce_motion());
+        let hovered = hitbox.is_hovered(window) && tips_allowed(window);
+        let (wait, moving) = TIPS.with(|tips| {
+            let mut tips = tips.borrow_mut();
+            let wait = tips.report(key, hovered, now, reduced);
+            // One timer for each wait, however often the window is drawn.
+            let wait = wait.filter(|_| {
+                let waiting = tips.over.filter(|(over, _)| *over == key);
+                waiting.is_some() && std::mem::replace(&mut tips.waking, waiting) != waiting
+            });
+            let moving = tips.shown.is_some_and(|(shown, _)| shown == key)
+                && tips.presence.is_some_and(|track| !track.settled(now));
+            (wait, moving)
+        });
+        if moving {
+            // Its tooltip has just been told to come or go: the next frame
+            // draws it there.
+            crate::motion::stats::cause("tip");
+            window.request_animation_frame();
+        }
+        if let Some(wait) = wait {
+            window
+                .spawn(cx, async move |cx| {
+                    cx.background_executor().timer(wait).await;
+                    cx.update(|window, _| window.refresh()).ok();
+                })
+                .detach();
+        }
+
+        let hit = hitbox.clone();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, _| {
+            if phase != DispatchPhase::Capture {
+                return;
+            }
+            let hovered = hit.is_hovered(window) && tips_allowed(window);
+            let known = TIPS.with(|tips| {
+                let mut tips = tips.borrow_mut();
+                // Only a move that goes somewhere counts as moving.
+                if tips.at.replace(event.position) != Some(event.position) {
+                    tips.moved = Some(std::time::Instant::now());
+                }
+                tips.over.is_some_and(|(over, _)| over == key) || tips.quiet == Some(key)
+            });
+            if hovered != known {
+                crate::motion::stats::cause("pointer");
+                window.refresh();
+            }
+        });
+        let hit = hitbox.clone();
+        window.on_mouse_event(move |_: &MouseDownEvent, phase, window, _| {
+            if phase != DispatchPhase::Capture {
+                return;
+            }
+            // A press anywhere: whatever it brings under the pointer did
+            // not get there by the pointer moving.
+            TIPS.with(|tips| tips.borrow_mut().moved = None);
+            if hit.is_hovered(window) {
+                TIPS.with(|tips| {
+                    tips.borrow_mut()
+                        .hush(key, std::time::Instant::now(), crate::motion::reduce_motion())
+                });
+                window.refresh();
+            }
+        });
+        // Scrolling moves things under the pointer, and typing means the
+        // person has stopped reading labels.
+        let concerned = move || {
+            TIPS.with(|tips| {
+                let tips = tips.borrow();
+                tips.over.is_some_and(|(over, _)| over == key)
+                    || tips.shown.is_some_and(|(shown, _)| shown == key)
+            })
+        };
+        window.on_mouse_event(move |_: &ScrollWheelEvent, phase, window, _| {
+            if phase == DispatchPhase::Capture && concerned() {
+                TIPS.with(|tips| {
+                    tips.borrow_mut()
+                        .hush(key, std::time::Instant::now(), crate::motion::reduce_motion())
+                });
+                window.refresh();
+            }
+        });
+        window.on_key_event(move |_: &KeyDownEvent, phase, window, _| {
+            if phase == DispatchPhase::Capture && concerned() {
+                TIPS.with(|tips| {
+                    tips.borrow_mut()
+                        .hush(key, std::time::Instant::now(), crate::motion::reduce_motion())
+                });
+                window.refresh();
+            }
+        });
+    }
+}
+
+/// One control's tooltip, in one window.
+fn tip_key(id: &GlobalElementId, window: &Window) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut hasher);
+    window.window_handle().window_id().as_u64().hash(&mut hasher);
+    hasher.finish()
 }
 
 pub fn heading(text: impl Into<SharedString>, t: Theme) -> Div {
@@ -981,6 +1451,173 @@ mod tests {
     use super::*;
     // `gpui::*` re-exports its own `test` attribute; these are plain unit tests.
     use std::prelude::v1::test;
+
+    #[test]
+    fn every_scrim_is_black_and_stronger_on_the_dark_page() {
+        for kind in [Scrim::Palette, Scrim::Dialog, Scrim::Sidebar, Scrim::Form] {
+            let (light, dark) = (scrim_strength(kind, false), scrim_strength(kind, true));
+            assert!(light > 0. && dark >= light && dark <= 0.6, "{kind:?}");
+        }
+        // The dark page is nearly black: a dialog's scrim has to be seen on it.
+        assert!(scrim_strength(Scrim::Dialog, true) >= 0.4);
+        let dialog = scrim(Scrim::Dialog, 1.);
+        assert_eq!((dialog.l, dialog.s), (0., 0.));
+        // It arrives and leaves with the overlay.
+        assert_eq!(scrim(Scrim::Dialog, 0.).a, 0.);
+        assert!(scrim(Scrim::Dialog, 0.5).a < dialog.a);
+    }
+
+    #[test]
+    fn a_tooltip_stands_clear_of_its_control_and_inside_the_window() {
+        let viewport = size(px(1240.), px(860.));
+        let tip = size(px(120.), px(24.));
+        let gap = px(crate::motion::TIP_GAP);
+        // In the middle of the window: centred above, a gap clear.
+        let control = Bounds::new(point(px(600.), px(400.)), size(px(28.), px(28.)));
+        let (at, above) = tip_place(control, tip, viewport, TipSide::Auto);
+        assert!(above);
+        assert_eq!(at.y + tip.height + gap, control.top());
+        assert_eq!(at.x + tip.width / 2., control.center().x);
+        // In the title bar there is no room above: below, a gap clear.
+        let tool = Bounds::new(point(px(88.), px(8.)), size(px(28.), px(28.)));
+        let (at, above) = tip_place(tool, tip, viewport, TipSide::Auto);
+        assert!(!above);
+        assert_eq!(at.y, tool.bottom() + gap);
+        // Asked to stand below, it does while there is room, and goes back
+        // above when there is none.
+        assert!(!tip_place(control, tip, viewport, TipSide::Below).1);
+        let footer = Bounds::new(point(px(8.), px(820.)), size(px(28.), px(28.)));
+        let (at, above) = tip_place(footer, tip, viewport, TipSide::Below);
+        assert!(above);
+        // At the window's edges it slides in rather than hang outside, and
+        // still never covers the control.
+        assert_eq!(at.x, px(TIP_MARGIN));
+        assert!(at.y + tip.height <= footer.top());
+        let corner = Bounds::new(point(px(1210.), px(400.)), size(px(28.), px(28.)));
+        let (at, _) = tip_place(corner, tip, viewport, TipSide::Auto);
+        assert_eq!(at.x + tip.width, viewport.width - px(TIP_MARGIN));
+    }
+
+    #[test]
+    fn a_tooltip_waits_once_then_follows_the_pointer_between_neighbours() {
+        use crate::motion::{TIP_DELAY, TIP_WARM};
+        use std::time::{Duration, Instant};
+        let (a, b, c) = (1, 2, 3);
+        let start = Instant::now();
+        let ms = |millis: u64| start + Duration::from_millis(millis);
+        let mut tips = Tips::default();
+        // A control that turns up under a pointer lying still says nothing,
+        // however long it stays there (the page changed under the pointer).
+        assert_eq!(tips.report(c, true, start, false), None);
+        assert_eq!(tips.report(c, true, ms(5000), false), None);
+        assert!(!tips.showing(c) && tips.quiet == Some(c));
+        tips.report(c, false, start, false);
+        // From here on the pointer is moving as it goes.
+        let mut tips = Tips { moved: Some(ms(100_000)), ..Default::default() };
+        // The pointer comes to rest on A: nothing yet, and it asks to be
+        // woken when the wait is over.
+        assert_eq!(tips.report(a, true, start, false), Some(TIP_DELAY));
+        assert!(!tips.showing(a));
+        assert_eq!(tips.report(a, true, ms(200), false), Some(TIP_DELAY - Duration::from_millis(200)));
+        // The wait is over: A's tooltip shows.
+        assert_eq!(tips.report(a, true, ms(500), false), None);
+        assert!(tips.showing(a) && tips.pose(a, ms(520), false).is_some());
+        assert!(tips.pose(b, ms(520), false).is_none());
+        // The pointer slides onto B. Whichever of the two is drawn first
+        // this frame, B's shows at once and A's is not the one any more.
+        for a_first in [true, false] {
+            let mut tips = Tips { moved: Some(ms(100_000)), ..Default::default() };
+            tips.report(a, true, start, false);
+            tips.report(a, true, ms(500), false);
+            // (Every frame draws before it looks at the pointer.)
+            assert!(tips.pose(a, ms(900), false).is_some());
+            if a_first {
+                tips.report(a, false, ms(900), false);
+                assert_eq!(tips.report(b, true, ms(900), false), None);
+            } else {
+                assert_eq!(tips.report(b, true, ms(900), false), None);
+                tips.report(a, false, ms(900), false);
+            }
+            assert!(tips.showing(b) && !tips.showing(a), "A first: {a_first}");
+            // It never went away in between: the label glides across.
+            assert!(tips.presence.unwrap().value(ms(900)) > 0.9);
+        }
+        // (This is the case that used to lose the tooltip altogether: the
+        // old control's leave arriving after the new one's enter.)
+        tips.pose(a, ms(900), false);
+        tips.report(b, true, ms(900), false);
+        tips.report(a, false, ms(900), false);
+        assert!(tips.showing(b));
+        // Off B and across a gap onto C a moment later: still no wait.
+        tips.pose(b, ms(1200), false);
+        tips.report(b, false, ms(1200), false);
+        assert!(!tips.showing(b));
+        assert_eq!(tips.report(c, true, ms(1300), false), None);
+        assert!(tips.showing(c));
+        // Away for longer than the warm window: the wait is back.
+        tips.pose(c, ms(1400), false);
+        tips.report(c, false, ms(1400), false);
+        let later = ms(1400) + TIP_WARM + Duration::from_millis(50);
+        assert_eq!(tips.report(a, true, later, false), Some(TIP_DELAY));
+        assert!(!tips.showing(a));
+        // Leaving before the wait is over cancels it.
+        tips.report(a, false, later + Duration::from_millis(100), false);
+        assert!(tips.over.is_none());
+        assert_eq!(tips.report(a, true, later + Duration::from_millis(600), false), Some(TIP_DELAY));
+    }
+
+    #[test]
+    fn a_press_takes_the_tooltip_away_until_the_pointer_has_left() {
+        use crate::motion::TIP_DELAY;
+        use std::time::{Duration, Instant};
+        let (a, b) = (1, 2);
+        let start = Instant::now();
+        let ms = |millis: u64| start + Duration::from_millis(millis);
+        // Pressed while its tooltip is showing: it goes.
+        let mut tips = Tips { moved: Some(ms(100_000)), ..Default::default() };
+        tips.report(a, true, start, false);
+        tips.report(a, true, ms(500), false);
+        assert!(tips.showing(a));
+        tips.hush(a, ms(700), false);
+        assert!(!tips.showing(a));
+        // And stays away however long the pointer rests there afterwards.
+        assert_eq!(tips.report(a, true, ms(2000), false), None);
+        assert!(!tips.showing(a));
+        // A press does not warm the neighbours.
+        tips.report(a, false, ms(2100), false);
+        assert_eq!(tips.report(b, true, ms(2100), false), Some(TIP_DELAY));
+        tips.report(b, false, ms(2200), false);
+        // Back on the control after leaving it: it may speak again.
+        assert_eq!(tips.report(a, true, ms(2300), false), Some(TIP_DELAY));
+        assert_eq!(tips.report(a, true, ms(2800), false), None);
+        assert!(tips.showing(a));
+
+        // Pressed before the wait is over (the click that removes the
+        // control, even): the tooltip never shows.
+        let mut tips = Tips { moved: Some(ms(100_000)), ..Default::default() };
+        tips.report(a, true, start, false);
+        tips.hush(a, ms(300), false);
+        assert_eq!(tips.report(a, true, ms(900), false), None);
+        assert!(!tips.showing(a) && tips.pose(a, ms(900), false).is_none());
+
+        // The control went away while its tooltip was up (its page closed):
+        // nobody draws it, and the next control to look finds it gone.
+        let mut tips = Tips { moved: Some(ms(100_000)), ..Default::default() };
+        tips.report(a, true, start, false);
+        tips.report(a, true, ms(500), false);
+        assert!(tips.pose(a, ms(510), false).is_some());
+        tips.report(b, false, ms(510) + TIP_STALE + Duration::from_millis(1), false);
+        assert!(tips.shown.is_none() && tips.presence.is_none());
+        // With reduced motion it only fades, and is gone when the fade is.
+        let mut tips = Tips { moved: Some(ms(100_000)), ..Default::default() };
+        tips.report(a, true, start, true);
+        tips.report(a, true, ms(500), true);
+        let pose = tips.pose(a, ms(520), true).unwrap();
+        assert_eq!(pose.value, 1.);
+        assert!(pose.fade > 0. && pose.fade < 1.);
+        tips.report(a, false, ms(900), true);
+        assert!(tips.pose(a, ms(900) + crate::motion::REDUCED_FADE * 2, true).is_none());
+    }
 
     #[test]
     fn hairlines_are_never_thinner_than_a_device_pixel() {
