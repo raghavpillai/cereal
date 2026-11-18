@@ -45,18 +45,24 @@ import APIClient
         #expect(ServerHomeView.emptyDay(today: false, hadEvents: false) == "No events")
     }
 
-    @Test func anEventSaysItsTimesOnATwentyFourHourClockAndWhoIsInvited() throws {
+    @Test func anEventSaysItsTimesOnTheDevicesClockAndWhoIsInvited() throws {
         func event(_ start: String, _ end: String, attendees: Int? = nil, allDay: Bool = false) throws -> CalendarEventDTO {
             let count = attendees.map { ",\"attendeeCount\":\($0)" } ?? ""
             let json = ##"{"id":"e","calendarId":"c","calendarName":"Work","title":"Sync","startAt":"\##(start)","endAt":"\##(end)","startDate":"","endDate":"","allDay":\##(allDay),"color":"#87E5E8","status":"confirmed"\##(count)}"##
             return try JSONDecoder().decode(CalendarEventDTO.self, from: Data(json.utf8))
         }
         let utc = TimeZone(identifier: "UTC")!
-        // As in the reference: "15:30 – 16:30 · 14 attendees".
-        #expect(ServerHomeView.eventSubtitle(try event("2026-11-18T15:30:00Z", "2026-11-18T16:30:00Z", attendees: 14), timeZone: utc) == "15:30 – 16:30 · 14 attendees")
-        #expect(ServerHomeView.eventSubtitle(try event("2026-11-18T09:05:00Z", "2026-11-18T09:35:00Z"), timeZone: utc) == "09:05 – 09:35")
+        // A device on the 24-hour clock: "15:30 – 16:30 · 14 attendees".
+        let day = Locale(identifier: "en_GB")
+        #expect(ServerHomeView.eventSubtitle(try event("2026-11-18T15:30:00Z", "2026-11-18T16:30:00Z", attendees: 14), timeZone: utc, locale: day) == "15:30 – 16:30 · 14 attendees")
+        // The locale writes its own morning ("09:05" or "9:05"); there is no AM or PM on this clock.
+        let morning = ServerHomeView.eventSubtitle(try event("2026-11-18T09:05:00Z", "2026-11-18T09:35:00Z"), timeZone: utc, locale: day)
+        #expect(morning.contains("9:05 – ") && morning.hasSuffix("9:35") && !morning.uppercased().contains("AM"))
         // Only the account holder: no count.
-        #expect(ServerHomeView.eventSubtitle(try event("2026-11-18T09:05:00Z", "2026-11-18T09:35:00Z", attendees: 1), timeZone: utc) == "09:05 – 09:35")
+        #expect(ServerHomeView.eventSubtitle(try event("2026-11-18T09:05:00Z", "2026-11-18T09:35:00Z", attendees: 1), timeZone: utc, locale: day) == morning)
+        // A device on the 12-hour clock gets the same clock as the note rows under the events.
+        let twelve = ServerHomeView.eventSubtitle(try event("2026-11-18T15:30:00Z", "2026-11-18T16:30:00Z"), timeZone: utc, locale: Locale(identifier: "en_US"))
+        #expect(twelve.contains("3:30") && twelve.contains("4:30") && twelve.contains("PM") && !twelve.contains("15:30"))
         #expect(ServerHomeView.eventSubtitle(try event("2026-11-18T00:00:00Z", "2026-11-19T00:00:00Z", attendees: 3, allDay: true), timeZone: utc) == "All day · 3 attendees")
     }
 

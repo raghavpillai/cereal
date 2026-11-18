@@ -304,15 +304,60 @@ private actor MethodAnswers {
         #expect(model.state == .ready(SignInMethods(password: true, google: true)))
     }
 
+    @Test func aHalfTypedAddressIsNotScoldedAndReturnAsksAnyway() async {
+        let answers = MethodAnswers()
+        let model = SignInDiscoveryModel(pause: .milliseconds(10)) { try await answers.answer(for: $0) }
+        // "notes", a single letter, the start of a scheme, a name that stops at a dot: still being typed.
+        for text in ["n", "notes", "htt", "https://", "notes."] {
+            model.check(text)
+            try? await Task.sleep(for: .milliseconds(60))
+            #expect(model.state == .idle)
+        }
+        #expect(await answers.asked.isEmpty)
+        // Return asks about the address as it stands: a name with no dot is one a private network resolves.
+        model.check("notes", again: true, typed: false)
+        await waitUntil { await answers.asked == ["http://notes"] }
+        #expect(model.state == .checking)
+    }
+
+    @Test func anAddressTypedWithoutItsSchemeIsCompletedTheWayItIsMeant() async {
+        #expect(SignInAddress.completed("notes.example.com") == "https://notes.example.com")
+        #expect(SignInAddress.completed(" notes.example.com/cereal ") == "https://notes.example.com/cereal")
+        // Addresses that only exist on a private network speak plain HTTP.
+        #expect(SignInAddress.completed("192.168.1.20:3000") == "http://192.168.1.20:3000")
+        #expect(SignInAddress.completed("127.0.0.1:4350") == "http://127.0.0.1:4350")
+        #expect(SignInAddress.completed("cereal.local") == "http://cereal.local")
+        #expect(SignInAddress.completed("localhost:3000") == "http://localhost:3000")
+        // A scheme that was typed is kept, whatever it is.
+        #expect(SignInAddress.completed("http://notes.example.com") == "http://notes.example.com")
+        #expect(SignInAddress.completed("") == "")
+        #expect(!SignInAddress.isUnfinished("notes.example.com"))
+        #expect(!SignInAddress.isUnfinished("localhost:3000"))
+        #expect(SignInAddress.isUnfinished("192"))
+        #expect(SignInAddress.isUnfinished("https://notes-"))
+
+        let answers = MethodAnswers()
+        let model = SignInDiscoveryModel(pause: .milliseconds(10)) { try await answers.answer(for: $0) }
+        model.check("notes.example.com")
+        await waitUntil { await answers.asked == ["https://notes.example.com"] }
+        await answers.release("https://notes.example.com", .success(.passwordOnly))
+        await waitUntil { model.state == .ready(.passwordOnly) }
+        #expect(model.state == .ready(.passwordOnly))
+    }
+
     @Test func anAddressThatCannotBeAServerSaysWhyWithoutAsking() async {
         let answers = MethodAnswers()
         let model = SignInDiscoveryModel(pause: .milliseconds(10)) { try await answers.answer(for: $0) }
         model.check("http://notes.example.com")
         await waitUntil { model.state != .idle }
         #expect(model.state == .failed(APIClientError.insecureInstanceURL.localizedDescription))
-        model.check("notes.example.com")
+        // What cannot be an address says what is wrong with it, in its own terms.
+        model.check("https://notes.example.com/?next=1")
         await waitUntil { model.state != .idle }
-        #expect(model.state == .failed(APIClientError.invalidInstanceURL.localizedDescription))
+        #expect(model.state == .failed("Leave out the ? and everything after it."))
+        model.check("https://me:secret@notes.example.com")
+        await waitUntil { model.state != .idle }
+        #expect(model.state == .failed("Leave out the name before the @. You sign in after the address is found."))
         #expect(await answers.asked.isEmpty)
         // Clearing the field clears the message.
         model.check("")

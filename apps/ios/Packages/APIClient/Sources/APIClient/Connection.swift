@@ -73,14 +73,14 @@ public enum APIClientError: Error, LocalizedError, Equatable, Sendable {
 
     public var errorDescription: String? {
         switch self {
-        case .invalidInstanceURL: "Enter an instance URL without a query, fragment, or embedded credentials."
+        case .invalidInstanceURL: "Enter a server address without a query, fragment, or embedded credentials."
         case .insecureInstanceURL: ServerAddress.needsHTTPS
-        case .invalidToken: "Enter a valid instance access token."
+        case .invalidToken: "Enter a valid access token."
         case .secureStorage: "The access token could not be read or saved securely on this device."
         case .invalidIdentifier: "This note identifier is invalid."
         case .invalidResponse: "The server returned an unexpected response."
         case .invalidJSON: "The server response does not match this app's API version."
-        case .unauthorized: "The server did not accept your access token. Check your connection settings."
+        case .unauthorized: "The server did not accept your session. Sign in again."
         case .notFound: "This note is no longer available."
         case .unavailable: "The server is temporarily unavailable. Try again shortly."
         case .conflict: "This note changed. Refresh it before trying again."
@@ -90,7 +90,7 @@ public enum APIClientError: Error, LocalizedError, Equatable, Sendable {
             "You're offline. Your notes will be available when the connection returns."
         case .transport(let code) where code == .timedOut:
             "The server took too long to respond. Try again."
-        case .transport: "The server could not be reached. Check the instance URL and your connection."
+        case .transport: "The server could not be reached. Check the server address and your connection."
         }
     }
 }

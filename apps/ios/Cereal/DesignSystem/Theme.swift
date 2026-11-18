@@ -41,7 +41,10 @@ enum Theme {
     /// into the page in the same proportion.
     static let accentTint = Color(light: 0xEBE0BE, dark: 0x3A3320)
     static let accentTintGlyph = Color(light: 0x6B5000, dark: 0xE0C27A)
-    static let accentHighlight = Color(light: 0xEDE6CF, dark: 0x4A3F1E)
+    /// Behind matched words in search results. On light it was a wash (#EDE6CF, 1.09:1 on the
+    /// page) that could not be seen; it is now the brand hue at OKLCH 0.87 / 0.11 / 86
+    /// (`scripts/logo/gold_palette.py`): 1.3:1 on the page, 11.5:1 under the text.
+    static let accentHighlight = Color(light: 0xF4CF7D, dark: 0x4A3F1E)
     static let accentHighlightStroke = Color(light: 0xC2A860, dark: 0x7A6630)
     static let danger = Color(hex: 0xFF5A4F)
     static let lightButton = Color(hex: 0xECECE6)
@@ -150,10 +153,38 @@ extension Font {
 
 /// Applies the Theme setting to every window of the app.
 @MainActor enum ThemeWindows {
-    static func apply(_ theme: ThemePreference) {
+    /// A menu takes about this long to close. A theme chosen from one is applied
+    /// after it, so the menu never closes over a page that has already changed.
+    static let menuCloses: Duration = .milliseconds(320)
+    /// The whole window cross-fades from one theme to the other.
+    static let crossFade: TimeInterval = 0.25
+
+    /// `animated` cross-fades each window that changes. At launch the style is simply set.
+    static func apply(_ theme: ThemePreference, animated: Bool = false) {
         for scene in UIApplication.shared.connectedScenes {
             guard let scene = scene as? UIWindowScene else { continue }
-            for window in scene.windows { window.overrideUserInterfaceStyle = theme.interfaceStyle }
+            for window in scene.windows {
+                // The old appearance is kept as a picture over the window and fades away from the
+                // new one. (A cross-dissolve transition of the window itself drew a menu's label
+                // as a black block while it ran.)
+                let before = animated && window.overrideUserInterfaceStyle != theme.interfaceStyle
+                    ? window.snapshotView(afterScreenUpdates: false) : nil
+                window.overrideUserInterfaceStyle = theme.interfaceStyle
+                guard let before else { continue }
+                before.isUserInteractionEnabled = false
+                window.addSubview(before)
+                UIView.animate(withDuration: crossFade, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+                    before.alpha = 0
+                } completion: { _ in before.removeFromSuperview() }
+            }
+        }
+    }
+
+    /// A choice made in a menu: `commit` runs once the menu has closed.
+    static func choose(_ theme: ThemePreference, commit: @escaping @MainActor (ThemePreference) -> Void) {
+        Task { @MainActor in
+            try? await Task.sleep(for: menuCloses)
+            commit(theme)
         }
     }
 }
@@ -232,4 +263,49 @@ private struct ReadingFontModifier: ViewModifier {
 
 extension View {
     func readingFont(_ kind: ReadingFont) -> some View { modifier(ReadingFontModifier(kind: kind)) }
+}
+
+/// Interface text at a measured size that still follows the system text size.
+/// `size` is the size at the default setting, so nothing moves there.
+private struct ScaledFontModifier: ViewModifier {
+    let weight: Font.Weight
+    let design: Font.Design
+    @ScaledMetric private var size: CGFloat
+
+    init(size: CGFloat, weight: Font.Weight, design: Font.Design, style: Font.TextStyle) {
+        self.weight = weight; self.design = design
+        _size = ScaledMetric(wrappedValue: size, relativeTo: style)
+    }
+
+    func body(content: Content) -> some View { content.font(.system(size: size, weight: weight, design: design)) }
+}
+
+extension View {
+    /// **Text of the interface** (labels, headers, rows, fields): the measured
+    /// size at the default text size, scaled with Dynamic Type. Use it instead
+    /// of `.font(.system(size:))` for anything that is read. A glyph in a fixed
+    /// frame (a rail icon, an icon tile) keeps a fixed size.
+    ///
+    /// A screen whose layout holds only so far caps itself with
+    /// `.dynamicTypeSize(...DynamicTypeSize.accessibility1)` on its root.
+    func uiFont(_ size: CGFloat, weight: Font.Weight = .regular, design: Font.Design = .default,
+                relativeTo style: Font.TextStyle = .body) -> some View {
+        modifier(ScaledFontModifier(size: size, weight: weight, design: design, style: style))
+    }
+
+    /// The serif display face (`Font.display`), scaled with Dynamic Type.
+    func displayFont(_ size: CGFloat = 34) -> some View {
+        modifier(ScaledFontModifier(size: size, weight: .regular, design: .serif, style: .title))
+    }
+}
+
+/// Words the app uses in more than one place, so each thing has one name.
+enum Wording {
+    /// The sheet with the account, its workspaces and its server: the Settings row,
+    /// the sidebar row and the sheet's own title.
+    static let accountSheet = "Account and server"
+    /// The one word for asking again after something failed.
+    static let retry = "Try again"
+    /// Between two facts on one line: "4:39 PM · 4 attendees".
+    static let dot = " · "
 }

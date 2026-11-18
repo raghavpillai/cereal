@@ -443,9 +443,9 @@ struct RecordingPolishTests {
         #expect(sections.map(\.title) == ["Earlier today", "Yesterday"])
         #expect(sections[0].rows.map(\.tile) == [.letter("G"), .document, .letter("É")])
         #expect(sections[1].rows.map(\.tile) == [.letter("M")])
-        // The time under the title, then, as in the reference, "• 3 attendees" for a meeting with others.
+        // The time under the title, then "· 3 attendees" for a meeting with others.
         let times = ["09:00", "08:00", "07:00"].map { (Date.serverTimestamp("2026-11-13T\($0):00Z") ?? .distantPast).formatted(date: .omitted, time: .shortened) }
-        #expect(sections[0].rows.map(\.subtitle) == [times[0] + " • 3 attendees", times[1], times[2] + " • 2 attendees"])
+        #expect(sections[0].rows.map(\.subtitle) == [times[0] + " · 3 attendees", times[1], times[2] + " · 2 attendees"])
         #expect(sections.flatMap(\.rows).map(\.order) == [0, 1, 2, 3])
     }
 

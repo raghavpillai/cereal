@@ -42,6 +42,8 @@ enum SettingsMetrics {
     static let iconTile: CGFloat = 31
     static let label: CGFloat = 17
     static let header: CGFloat = 15
+    /// Where a row's text starts inside a card: the 11 pt inset, the icon tile and the 14 pt gap.
+    static let textLeading: CGFloat = 11 + iconTile + 14
     /// Cards sit 20 pt from the screen edge on a Duo, 16 on an iPhone.
     static func margin(_ rail: RailMetrics) -> CGFloat { rail.hasRail ? 20 : 16 }
 }
@@ -51,39 +53,47 @@ struct SettingsView: View {
     @Environment(Router.self) private var router
     @Environment(\.openURL) private var openURL
     @AppStorage(ThemePreference.storageKey) private var theme: ThemePreference = .auto
+    /// What "Share Cereal for iPhone" shares: the App Store page when the account's server names one.
+    @State private var shareURL: URL?
 
     private var session: AccountSession? { accounts.defaultSession }
+    /// Where the account's server offers its apps; without an account, the project's page.
+    private var downloadPage: URL { session?.notes.instance?.url.appendingPathComponent("download") ?? SettingsLinks.help }
 
     var body: some View {
         RailScaffold {
             SettingsScroll(title: "Settings") {
                 // The Mac app is offered by the account's own server; without one, by the project's page.
-                SettingsBanner(title: "Get Cereal for Mac", systemImage: "laptopcomputer") {
-                    openURL(session?.notes.instance?.url.appendingPathComponent("download") ?? SettingsLinks.help)
-                }
+                SettingsBanner(title: "Get Cereal for Mac", systemImage: "laptopcomputer") { openURL(downloadPage) }
                 SettingsSection("Account") {
                     SettingsRow("Profile", systemImage: "person") { router.path.append(.settings(.profile)) }
                     SettingsRow("Notifications", systemImage: "bell") { router.path.append(.settings(.notifications)) }
-                    SettingsRow("Server and accounts", systemImage: "server.rack") { router.showConnection = true }
+                    SettingsRow(Wording.accountSheet, systemImage: "server.rack") { router.showConnection = true }
                 }
                 SettingsSection("Appearance") {
                     ThemeRow(theme: $theme)
                     HapticsRow()
                 }
                 SettingsSection("Support") {
-                    SettingsRow("Send feedback", systemImage: "envelope") { openURL(SettingsLinks.feedback) }
-                    SettingsRow("Report a bug", systemImage: "exclamationmark.triangle") { openURL(SettingsLinks.bug) }
+                    // Every row here leaves the app, and says so with the same glyph.
+                    SettingsRow("Send feedback", systemImage: "envelope", trailing: .external) { openURL(SettingsLinks.feedback) }
+                    SettingsRow("Report a bug", systemImage: "exclamationmark.triangle", trailing: .external) { openURL(SettingsLinks.bug) }
                     SettingsRow("Help center", systemImage: "book.closed", trailing: .external) { openURL(SettingsLinks.help) }
-                    ShareLink(item: SettingsLinks.help) {
-                        SettingsRowLabel("Share Cereal for iPhone", systemImage: "square.and.arrow.up", trailing: .chevron)
+                    ShareLink(item: shareURL ?? downloadPage) {
+                        SettingsRowLabel("Share Cereal for iPhone", systemImage: "square.and.arrow.up", trailing: .none)
                     }
-                    .buttonStyle(RowPressStyle())
+                    .buttonStyle(.row)
                 }
             }
         } leading: {
             BackButton()
         } rail: {
             EmptyView()
+        }
+        .task(id: session?.key) {
+            shareURL = nil
+            guard let session, session.isReady, let answer = try? await session.notes.downloads() else { return }
+            shareURL = SettingsLinks.appStore(answer.iosAppStoreUrl)
         }
     }
 }
@@ -92,25 +102,37 @@ enum SettingsLinks {
     static let help = URL(string: "https://github.com/raghavpillai/cereal#readme")!
     static let bug = URL(string: "https://github.com/raghavpillai/cereal/issues/new")!
     static let feedback = URL(string: "https://github.com/raghavpillai/cereal/issues/new?labels=feedback")!
+
+    /// The App Store page a server names for the iPhone app. Only an https App Store address is shared.
+    static func appStore(_ text: String?) -> URL? {
+        text.flatMap(URL.init(string:)).flatMap { $0.scheme == "https" && $0.host == "apps.apple.com" ? $0 : nil }
+    }
 }
 
 /// The Theme row: the current choice with its symbol and an up-down chevron,
-/// opening a menu of Light, Dark and Auto.
+/// opening a menu of Light, Dark and Auto. The menu opens from the value
+/// (`ValueMenu`); the row stays where it is.
 private struct ThemeRow: View {
     @Binding var theme: ThemePreference
 
     var body: some View {
-        Menu {
-            Picker("Theme", selection: $theme) {
-                ForEach(ThemePreference.allCases) { choice in
-                    Label(choice.title, systemImage: choice.symbol).tag(choice)
+        HStack(spacing: 14) {
+            SettingsIconTile(systemImage: "circle.lefthalf.filled")
+            Text("Theme").uiFont(SettingsMetrics.label).foregroundStyle(Theme.textPrimary)
+            ValueMenu(value: theme.title, symbol: theme.symbol, size: SettingsMetrics.label) {
+                // The choice is applied once the menu has closed, and the window cross-fades.
+                Picker("Theme", selection: Binding(get: { theme }, set: { choice in ThemeWindows.choose(choice) { theme = $0 } })) {
+                    ForEach(ThemePreference.allCases) { choice in
+                        Label(choice.title, systemImage: choice.symbol).tag(choice)
+                    }
                 }
             }
-        } label: {
-            SettingsRowLabel("Theme", systemImage: "circle.lefthalf.filled", trailing: .value(theme.title, symbol: theme.symbol))
+            .accessibilityIdentifier("settings-theme")
+            .accessibilityLabel("Theme")
+            .accessibilityValue(theme.title)
         }
-        .accessibilityIdentifier("settings-theme")
-        .accessibilityValue(theme.title)
+        .padding(.leading, 11).padding(.trailing, 18)
+        .frame(minHeight: SettingsMetrics.rowHeight)
         .haptic(.selection, trigger: theme)
     }
 }
@@ -122,22 +144,51 @@ private struct HapticsRow: View {
     @AppStorage(HapticGate.storageKey) private var enabled = true
 
     var body: some View {
-        Toggle(isOn: $enabled) {
+        SettingsToggleRow("Haptics", systemImage: "hand.tap", isOn: $enabled)
+            // Turned on, it says so in the hand.
+            .haptic(.selection, trigger: enabled) { _, on in on }
+            .accessibilityIdentifier("settings-haptics")
+    }
+}
+
+/// The rounded square that leads a Settings row.
+struct SettingsIconTile: View {
+    let systemImage: String
+    var body: some View {
+        Image(systemName: systemImage)
+            .font(.system(size: 17))
+            .foregroundStyle(Theme.textPrimary.opacity(0.85))
+            .frame(width: SettingsMetrics.iconTile, height: SettingsMetrics.iconTile)
+            .background(Theme.iconTile, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .accessibilityHidden(true)
+    }
+}
+
+/// A switch as a Settings row: the icon tile, the label, an optional line of explanation.
+struct SettingsToggleRow: View {
+    let title: String
+    let systemImage: String
+    var detail: String? = nil
+    @Binding var isOn: Bool
+
+    init(_ title: String, systemImage: String, detail: String? = nil, isOn: Binding<Bool>) {
+        self.title = title; self.systemImage = systemImage; self.detail = detail; _isOn = isOn
+    }
+
+    var body: some View {
+        Toggle(isOn: $isOn) {
             HStack(spacing: 14) {
-                Image(systemName: "hand.tap")
-                    .font(.system(size: 16))
-                    .foregroundStyle(Theme.textPrimary.opacity(0.85))
-                    .frame(width: SettingsMetrics.iconTile, height: SettingsMetrics.iconTile)
-                    .background(Theme.iconTile, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                Text("Haptics").font(.system(size: SettingsMetrics.label)).foregroundStyle(Theme.textPrimary)
+                SettingsIconTile(systemImage: systemImage)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).uiFont(SettingsMetrics.label).foregroundStyle(Theme.textPrimary)
+                    if let detail { Text(detail).uiFont(14).foregroundStyle(Theme.textSecondary) }
+                }
             }
         }
         .tint(Theme.accent)
         .padding(.leading, 11).padding(.trailing, 18)
+        .padding(.vertical, detail == nil ? 0 : 8)
         .frame(minHeight: SettingsMetrics.rowHeight)
-        // Turned on, it says so in the hand.
-        .haptic(.selection, trigger: enabled) { _, on in on }
-        .accessibilityIdentifier("settings-haptics")
     }
 }
 
@@ -151,65 +202,83 @@ struct ProfileSettingsView: View {
     @AppStorage("profile.companyDescription") private var companyDescription = ""
     @AppStorage("profile.linkedIn") private var linkedIn = ""
 
+    @FocusState private var linkedInFocused: Bool
+    @Environment(\.motion) private var motion
+
     private var record: AccountRecord? { accounts.defaultSession?.record }
     static let userTypes = ["Startup/Generalist", "Engineering", "Product", "Design", "Sales", "Investor", "Recruiting", "Other"]
 
     var body: some View {
         RailScaffold {
+            ScrollViewReader { scroll in
             SettingsScroll(title: nil) {
                     Text("Your profile")
-                        .font(.display(30)).foregroundStyle(Theme.textPrimary)
+                        .displayFont(30).foregroundStyle(Theme.textPrimary)
                         .accessibilityAddTraits(.isHeader)
                         .padding(.top, 24)
                     Text("Cereal works best when it knows a little about you. These details stay on this iPhone.")
-                        .font(.system(size: 14)).foregroundStyle(Theme.textPrimary.opacity(0.85))
+                        .uiFont(14).foregroundStyle(Theme.textPrimary.opacity(0.85))
                         .padding(.top, 10)
                     VStack(spacing: 10) {
-                        AvatarView(name: record?.name ?? "Me", size: 96)
+                        AvatarView(name: record?.name ?? "", size: 96)
                         Text(record?.email ?? "Not signed in")
-                            .font(.system(size: 14)).foregroundStyle(Theme.textSecondary)
+                            .uiFont(14).foregroundStyle(Theme.textSecondary)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.top, 20).padding(.bottom, 16)
 
                     SettingsCard {
                         ProfileField("Name") { Text(record?.name ?? "").foregroundStyle(Theme.textPrimary) }
-                        ProfileField("Job Title") { field($jobTitle, prompt: "Your job title") }
-                        ProfileField("Company Name") { field($company, prompt: "Your company") }
-                        ProfileField("User Type", divider: false) {
-                            Menu {
-                                Picker("User Type", selection: $userType) {
+                        // Names of things: sentence case in the label, and the keyboard does not "correct" them.
+                        ProfileField("Job title") { field($jobTitle, prompt: "Your job title", capitalization: .sentences) }
+                        ProfileField("Company name") { field($company, prompt: "Your company", capitalization: .words) }
+                        ProfileField("User type", divider: false) {
+                            ValueMenu(value: userType, size: 14) {
+                                Picker("User type", selection: $userType) {
                                     ForEach(Self.userTypes, id: \.self) { Text($0).tag($0) }
                                 }
-                                .haptic(.selection, trigger: userType)
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Text(userType)
-                                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 11, weight: .medium))
-                                }.foregroundStyle(Theme.textPrimary)
                             }
+                            .haptic(.selection, trigger: userType)
                         }
                     }
                     SettingsCard {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Company Description").font(.system(size: 14)).foregroundStyle(Theme.textPrimary)
+                            Text("Company description").uiFont(14).foregroundStyle(Theme.textPrimary)
                             TextField("", text: $companyDescription, axis: .vertical)
-                                .font(.system(size: 14)).foregroundStyle(Theme.textPrimary)
+                                .uiFont(14).foregroundStyle(Theme.textPrimary)
                                 .lineLimit(4, reservesSpace: true)
+                                .accessibilityLabel("Company description")
                         }
                         .padding(.horizontal, 14).padding(.vertical, 14)
                     }
                     .padding(.top, 12)
                     SettingsCard {
-                        ProfileField("LinkedIn Username") { field($linkedIn, prompt: "username") }
+                        ProfileField("LinkedIn username") {
+                            // A username: never capitalised, never corrected.
+                            field($linkedIn, prompt: "username", capitalization: .never)
+                                .keyboardType(.asciiCapable)
+                                .focused($linkedInFocused)
+                                .accessibilityIdentifier("profile-linkedin")
+                        }
                         Text("linkedin.com/in/\(linkedIn)")
-                            .font(.system(size: 14)).foregroundStyle(Theme.textSecondary)
+                            .uiFont(14).foregroundStyle(Theme.textSecondary)
                             .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
                             .padding(.horizontal, 14)
                     }
                     .padding(.top, 12)
+                    .id(Self.linkedInCard)
             }
             .scrollDismissesKeyboard(.interactively)
+            // The address being built sits under the field: once the keyboard is up,
+            // the whole card is brought above it, not only the line being typed in.
+            .onChange(of: linkedInFocused) { _, focused in
+                guard focused else { return }
+                Task {
+                    try? await Task.sleep(for: .milliseconds(350))
+                    withAnimation(motion.snappy) { scroll.scrollTo(Self.linkedInCard, anchor: .bottom) }
+                }
+            }
+            }
         } leading: {
             BackButton()
         } rail: {
@@ -217,10 +286,15 @@ struct ProfileSettingsView: View {
         }
     }
 
-    private func field(_ text: Binding<String>, prompt: String) -> some View {
+    private static let linkedInCard = "linkedin-card"
+
+    private func field(_ text: Binding<String>, prompt: String, capitalization: TextInputAutocapitalization) -> some View {
         TextField("", text: text, prompt: Text(prompt).foregroundStyle(Theme.textTertiary))
             .multilineTextAlignment(.trailing)
             .foregroundStyle(Theme.textPrimary)
+            .textInputAutocapitalization(capitalization)
+            .autocorrectionDisabled()
+            .accessibilityLabel(prompt)
     }
 }
 
@@ -240,7 +314,7 @@ private struct ProfileField<Value: View>: View {
             Spacer(minLength: 12)
             value
         }
-        .font(.system(size: 14))
+        .uiFont(14)
         .padding(.horizontal, 14)
         .frame(minHeight: 40)
         .overlay(alignment: .bottom) {
@@ -256,6 +330,8 @@ private struct ProfileField<Value: View>: View {
 enum UpcomingMeetingNotifications {
     static let storageKey = "notifications.upcomingMeetings"
     private static let prefix = "upcoming-meeting-"
+    /// The line under the meeting's title in a reminder. The example in Settings shows the same words.
+    static let body = "Starting now. Open Cereal to take notes."
 
     static var isEnabled: Bool { UserDefaults.standard.bool(forKey: storageKey) }
 
@@ -273,7 +349,7 @@ enum UpcomingMeetingNotifications {
         for event in events where event.start > now {
             let content = UNMutableNotificationContent()
             content.title = event.title.isEmpty ? "Meeting" : event.title
-            content.body = "Starting now. Open Cereal to take notes."
+            content.body = body
             let parts = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: event.start)
             let request = UNNotificationRequest(identifier: prefix + event.id, content: content,
                                                 trigger: UNCalendarNotificationTrigger(dateMatching: parts, repeats: false))
@@ -295,52 +371,59 @@ struct NotificationSettingsView: View {
     @AppStorage(MeetingLiveActivities.storageKey) private var meetingCards = true
     @State private var denied = false
     @Environment(\.openURL) private var openURL
+    @Environment(\.motion) private var motion
 
     var body: some View {
         RailScaffold {
             SettingsScroll(title: "Notifications") {
-                Toggle(isOn: Binding(get: { upcoming }, set: { set($0) })) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Upcoming meetings").font(.system(size: 17)).foregroundStyle(Theme.textPrimary)
-                        Text("Notify me for upcoming meetings on the lock screen")
-                            .font(.system(size: 15)).foregroundStyle(Theme.textSecondary)
+                SettingsSection("Reminders") {
+                    SettingsToggleRow("Upcoming meetings", systemImage: "bell",
+                                      detail: "A notification on the Lock Screen as each meeting starts",
+                                      isOn: Binding(get: { upcoming }, set: { set($0) }))
+                        .accessibilityIdentifier("notifications-upcoming")
+                    // Asked for and refused: the line under the switch says so and offers the way to turn them on.
+                    if denied {
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text("Notifications are off for Cereal.").uiFont(14).foregroundStyle(Theme.textSecondary)
+                            Button("Open Settings") {
+                                if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+                            }
+                            .uiFont(14, weight: .medium).foregroundStyle(Theme.accentText)
+                            .frame(minHeight: 44).contentShape(Rectangle())
+                            .buttonStyle(.squash)
+                            .accessibilityIdentifier("notifications-open-settings")
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.leading, SettingsMetrics.textLeading).padding(.trailing, 18)
+                        .transition(motion.rise)
                     }
+                    // What this switch sends, under the switch that sends it.
+                    UpcomingMeetingPreview()
+                        .padding(.leading, SettingsMetrics.textLeading).padding(.trailing, 18)
+                        .padding(.top, 4).padding(.bottom, 10)
                 }
-                .tint(Theme.accent)
-                .accessibilityIdentifier("notifications-upcoming")
-                // Asked for and refused: the line under it says how to turn them on.
-                .haptic(.warning, trigger: denied) { _, now in now }
-                .padding(.horizontal, 6).padding(.top, 4)
-                if denied {
-                    Button("Notifications are off for Cereal. Turn them on in Settings.") {
-                        if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
-                    }
-                    .font(.system(size: 14)).foregroundStyle(Theme.textSecondary)
-                    .padding(.horizontal, 6)
+                SettingsSection("Live Activities") {
+                    SettingsToggleRow("Take a note button", systemImage: "waveform",
+                                      detail: "A Live Activity with a Take a note button as each meeting starts",
+                                      isOn: $meetingCards)
+                        .accessibilityIdentifier("notifications-meeting-cards")
+                        .onChange(of: meetingCards) { _, on in if !on { Task { await MeetingLiveActivities.endAll() } } }
                 }
-                Toggle(isOn: $meetingCards) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Take a note button").font(.system(size: 17)).foregroundStyle(Theme.textPrimary)
-                        Text("Show a Live Activity with a Take a note button as each meeting starts")
-                            .font(.system(size: 15)).foregroundStyle(Theme.textSecondary)
-                    }
-                }
-                .tint(Theme.accent)
-                .accessibilityIdentifier("notifications-meeting-cards")
-                .onChange(of: meetingCards) { _, on in if !on { Task { await MeetingLiveActivities.endAll() } } }
-                .padding(.horizontal, 6).padding(.top, 14)
-                UpcomingMeetingPreview()
-                    .padding(.top, 6)
             }
+            // The refusal line opens its own space: the card grows and what is under it glides.
+            .animates(denied)
         } leading: {
             BackButton()
         } rail: {
             EmptyView()
         }
+        .haptic(.warning, trigger: denied) { _, now in now }
+        .haptic(.selection, trigger: upcoming)
+        .haptic(.selection, trigger: meetingCards)
     }
 
     private func set(_ on: Bool) {
-        guard on else { upcoming = false; UpcomingMeetingNotifications.clear(); return }
+        guard on else { upcoming = false; denied = false; UpcomingMeetingNotifications.clear(); return }
         Task {
             let granted = await UpcomingMeetingNotifications.requestAuthorization()
             denied = !granted
@@ -349,34 +432,32 @@ struct NotificationSettingsView: View {
     }
 }
 
-/// What a reminder looks like: a white card with a meeting and a button to start Cereal.
+/// What a reminder looks like, in the words of the real one (`UpcomingMeetingNotifications.schedule`).
 private struct UpcomingMeetingPreview: View {
     var body: some View {
-        let start = Calendar.current.date(bySetting: .second, value: 0, of: .now) ?? .now
-        let end = start.addingTimeInterval(3600)
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(spacing: 10) {
-                RoundedRectangle(cornerRadius: 1.5).fill(Color(hex: 0xC62AE0)).frame(width: 3)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Catch up with the team").font(.system(size: 15, weight: .semibold)).foregroundStyle(Color(hex: 0x1C1C17))
-                    Label("\(start.formatted(date: .omitted, time: .shortened)) – \(end.formatted(date: .omitted, time: .shortened))", systemImage: "clock")
-                        .font(.system(size: 13, weight: .medium)).foregroundStyle(Color(hex: 0x1C1C17))
+        let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Example").uiFont(12, weight: .medium).foregroundStyle(Theme.textTertiary)
+            HStack(alignment: .top, spacing: 10) {
+                CerealMarkShape().fill(Theme.accent, style: FillStyle(eoFill: true))
+                    .frame(width: 18, height: 18)
+                    .frame(width: 34, height: 34)
+                    .background(Theme.iconTile, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Text("Catch up with the team").uiFont(15, weight: .semibold).foregroundStyle(Theme.textPrimary)
+                        Spacer(minLength: 8)
+                        Text("now").uiFont(13).foregroundStyle(Theme.textTertiary)
+                    }
+                    Text(UpcomingMeetingNotifications.body).uiFont(14).foregroundStyle(Theme.textSecondary)
                 }
             }
-            .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 8) {
-                Image(systemName: "waveform").font(.system(size: 15, weight: .semibold))
-                Text("Start Cereal").font(.system(size: 16, weight: .semibold))
-            }
-            .foregroundStyle(Color(hex: 0x1C1C17))
-            .frame(maxWidth: .infinity).frame(height: 40)
-            .background(Color(hex: 0xE3E3E1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .padding(12)
+            .background(Theme.bgTop, in: shape)
+            .overlay(shape.strokeBorder(Theme.stroke, lineWidth: 1))
         }
-        .padding(.horizontal, 11).padding(.top, 12).padding(.bottom, 9)
-        .background(Color(hex: 0xFCFCFA), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .shadow(color: .black.opacity(0.08), radius: 14, y: 4)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Example reminder")
+        .accessibilityLabel("Example reminder: Catch up with the team. \(UpcomingMeetingNotifications.body)")
     }
 }
 
@@ -385,7 +466,7 @@ private struct UpcomingMeetingPreview: View {
 /// The scrolling column of a Settings page. Beside a Duo rail the title sits
 /// centred at the top of the page and scrolls with it; on an iPhone it is the
 /// navigation bar's title.
-private struct SettingsScroll<Content: View>: View {
+struct SettingsScroll<Content: View>: View {
     let title: String?
     @ViewBuilder var content: Content
     @Environment(\.railMetrics) private var rail
@@ -394,7 +475,7 @@ private struct SettingsScroll<Content: View>: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 if rail.hasRail, let title {
-                    Text(title).font(.system(size: 17, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                    Text(title).uiFont(17, weight: .semibold).foregroundStyle(Theme.textPrimary)
                         .frame(maxWidth: .infinity).padding(.top, 20).padding(.bottom, 26)
                         .accessibilityAddTraits(.isHeader)
                 }
@@ -407,20 +488,22 @@ private struct SettingsScroll<Content: View>: View {
             .clearsBottomChrome()
         }
         .scrollIndicators(.hidden)
+        // Settings text follows the text size up to the first accessibility size, where its rows still hold.
+        .dynamicTypeSize(...DynamicTypeSize.accessibility1)
         // The navigation bar's title on an iPhone. Beside a rail the page draws its own.
         .navigationTitle(rail.hasRail ? "" : (title ?? ""))
     }
 }
 
 /// A section: a 15 pt grey header, 9 pt above its card.
-private struct SettingsSection<Content: View>: View {
+struct SettingsSection<Content: View>: View {
     let title: String
     @ViewBuilder var content: Content
     init(_ title: String, @ViewBuilder content: () -> Content) { self.title = title; self.content = content() }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            Text(title).font(.system(size: SettingsMetrics.header)).foregroundStyle(Theme.textSecondary)
+            Text(title).uiFont(SettingsMetrics.header).foregroundStyle(Theme.textSecondary)
                 .padding(.leading, 12)
                 .accessibilityAddTraits(.isHeader)
             SettingsCard { content }
@@ -451,9 +534,10 @@ private struct SettingsBanner: View {
         Button(action: action) {
             HStack(spacing: 14) {
                 Image(systemName: systemImage).font(.system(size: 18)).frame(width: 31)
-                Text(title).font(.system(size: SettingsMetrics.label))
+                Text(title).uiFont(SettingsMetrics.label)
                 Spacer(minLength: 8)
-                Image(systemName: "chevron.right").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.textSecondary)
+                // It opens the server's download page in the browser.
+                Image(systemName: "arrow.up.right").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.textSecondary)
             }
             .foregroundStyle(Theme.textPrimary)
             .padding(.leading, 14).padding(.trailing, 18)
@@ -467,8 +551,16 @@ private struct SettingsBanner: View {
 }
 
 enum SettingsTrailing {
-    case chevron, external, comingSoon
+    /// Pushes a page or opens a sheet inside the app.
+    case chevron
+    /// Leaves the app (the browser, another app).
+    case external
+    case comingSoon
+    /// Nothing trails the label (a share sheet, an action in place).
+    case none
     case value(String, symbol: String)
+    /// A fact at the trailing edge, with no control.
+    case text(String)
 }
 
 /// A row's look: an icon in a rounded square tile, the label, and what trails it.
@@ -477,35 +569,38 @@ struct SettingsRowLabel: View {
     let systemImage: String
     var trailing: SettingsTrailing = .chevron
 
-    init(_ title: String, systemImage: String, trailing: SettingsTrailing = .chevron) {
-        self.title = title; self.systemImage = systemImage; self.trailing = trailing
+    init(_ title: String, systemImage: String, trailing: SettingsTrailing = .chevron, destructive: Bool = false) {
+        self.title = title; self.systemImage = systemImage; self.trailing = trailing; self.destructive = destructive
     }
+
+    /// A destructive row (Sign out, Remove) writes its label in the danger colour.
+    var destructive = false
 
     private var muted: Bool { if case .comingSoon = trailing { true } else { false } }
 
     var body: some View {
         HStack(spacing: 14) {
-            Image(systemName: systemImage)
-                .font(.system(size: 17))
-                .foregroundStyle(Theme.textPrimary.opacity(0.85))
-                .frame(width: SettingsMetrics.iconTile, height: SettingsMetrics.iconTile)
-                .background(Theme.iconTile, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-            Text(title).font(.system(size: SettingsMetrics.label))
-                .foregroundStyle(muted ? Theme.textSecondary : Theme.textPrimary)
+            SettingsIconTile(systemImage: systemImage)
+            Text(title).uiFont(SettingsMetrics.label)
+                .foregroundStyle(destructive ? Theme.danger : muted ? Theme.textSecondary : Theme.textPrimary)
+                .multilineTextAlignment(.leading)
             Spacer(minLength: 8)
             switch trailing {
+            case .none: EmptyView()
+            case .text(let text):
+                Text(text).uiFont(SettingsMetrics.label).foregroundStyle(Theme.textSecondary).lineLimit(1)
             case .chevron:
                 Image(systemName: "chevron.right").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.textSecondary)
             case .external:
                 Image(systemName: "arrow.up.right").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.textSecondary)
             case .comingSoon:
-                Text("Coming soon").font(.system(size: 14)).foregroundStyle(Theme.textSecondary)
+                Text("Coming soon").uiFont(14).foregroundStyle(Theme.textSecondary)
                     .padding(.horizontal, 8).frame(height: 24)
                     .background(Theme.iconTile, in: Capsule())
             case .value(let text, let symbol):
                 HStack(spacing: 6) {
                     Image(systemName: symbol).font(.system(size: 15))
-                    Text(text).font(.system(size: SettingsMetrics.label))
+                    Text(text).uiFont(SettingsMetrics.label)
                     Image(systemName: "chevron.up.chevron.down").font(.system(size: 12, weight: .medium))
                 }
                 .foregroundStyle(Theme.textPrimary)
@@ -517,25 +612,57 @@ struct SettingsRowLabel: View {
     }
 }
 
-private struct SettingsRow: View {
+/// A Settings row that does something: `RowButton`'s press around `SettingsRowLabel`.
+struct SettingsRow: View {
     let title: String
     let systemImage: String
     var trailing: SettingsTrailing
+    var destructive = false
     var action: (() -> Void)?
 
-    init(_ title: String, systemImage: String, trailing: SettingsTrailing = .chevron, comingSoon: Bool = false, action: (() -> Void)? = nil) {
+    init(_ title: String, systemImage: String, trailing: SettingsTrailing = .chevron, comingSoon: Bool = false,
+         destructive: Bool = false, action: (() -> Void)? = nil) {
         self.title = title; self.systemImage = systemImage
         self.trailing = comingSoon ? .comingSoon : trailing
+        self.destructive = destructive
         self.action = comingSoon ? nil : action
     }
 
     var body: some View {
         if let action {
-            Button(action: action) { SettingsRowLabel(title, systemImage: systemImage, trailing: trailing) }
-                .buttonStyle(RowPressStyle())
+            RowButton(action: action) { SettingsRowLabel(title, systemImage: systemImage, trailing: trailing, destructive: destructive) }
         } else {
-            SettingsRowLabel(title, systemImage: systemImage, trailing: trailing)
+            SettingsRowLabel(title, systemImage: systemImage, trailing: trailing, destructive: destructive)
                 .accessibilityElement(children: .combine)
         }
+    }
+}
+
+/// A text field as a line of a card, for forms drawn with the Settings cards
+/// (sign-in, a new workspace, an invitation).
+struct CardField<Field: View>: View {
+    var divider = true
+    @ViewBuilder var field: Field
+
+    var body: some View {
+        field
+            .uiFont(SettingsMetrics.label).foregroundStyle(Theme.textPrimary)
+            .padding(.horizontal, 18)
+            .frame(minHeight: SettingsMetrics.rowHeight)
+            .overlay(alignment: .bottom) {
+                if divider { Rectangle().fill(Theme.divider.opacity(0.7)).frame(height: 0.5).padding(.leading, 18) }
+            }
+    }
+}
+
+/// The small print under a card.
+struct CardNote: View {
+    let text: String
+    var color = Theme.textSecondary
+    init(_ text: String, color: Color = Theme.textSecondary) { self.text = text; self.color = color }
+    var body: some View {
+        Text(text).uiFont(13).foregroundStyle(color)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14).padding(.top, 8)
     }
 }

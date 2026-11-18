@@ -10,7 +10,6 @@ struct SharedWithMeView: View {
     @Environment(Router.self) private var router
     @Environment(AccountsModel.self) private var accounts
     @Environment(ConnectionMode.self) private var mode
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.motion) private var motion
     @State private var text = ""
     @State private var problem: String?
@@ -18,36 +17,38 @@ struct SharedWithMeView: View {
 
     var body: some View {
         RailScaffold {
-            Group {
-                if history.visits.isEmpty {
-                    VStack(alignment: .leading, spacing: 0) {
-                        SharedWithMeTitle().padding(.leading, Theme.gutter)
+            // One list in both states. It used to be swapped for the empty prompt in the same
+            // animated change that deleted its last row, and the collection view under it
+            // then refused the update ("invalid number of items in section 0"): a crash.
+            // The list stays; the prompt is drawn over it once it has nothing to show.
+            SharedVisitList(visits: history.visits, open: { router.open(.shared($0.link), accounts: accounts, mode: mode) },
+                            remove: { visit in withAnimation(motion.exit(.settle)) { history.remove(visit.id) } })
+                .overlay {
+                    if history.visits.isEmpty {
                         ScreenPrompt(symbol: "link", title: "Nothing shared with you yet", detail: "Shared notes you open are kept here.")
+                            .allowsHitTesting(false)
                     }
-                } else {
-                    SharedVisitList(visits: history.visits, open: { router.open(.shared($0.link), accounts: accounts, mode: mode) },
-                                    remove: { visit in withAnimation(motion.exit(.settle)) { history.remove(visit.id) } })
-                        .transition(motion.fade)
                 }
-            }
-            .animation(motion.snappy, value: history.visits.isEmpty)
+                .animates(history.visits.isEmpty)
         } leading: {
-            GlassCircleButton(systemImage: "chevron.left") { dismiss() }
+            BackButton()
         } bottom: {
             VStack(alignment: .leading, spacing: 8) {
                 if let problem {
                     Text(problem).font(.footnote).foregroundStyle(Theme.danger)
-                        .padding(.horizontal, 16).transition(motion.fade)
+                        .padding(.horizontal, 16).transition(motion.rise)
                         .accessibilityIdentifier("paste-link-problem")
                 }
-                PasteLinkBar(text: $text, focused: $focused, submit: openTyped)
+                FieldBar(symbol: "link", prompt: "Paste link", text: $text, focused: $focused, submitLabel: .go,
+                         keyboard: .URL, contentType: .URL, clearLabel: "Clear link", identifier: "paste-link-field", submit: openTyped)
             }
-            .animation(motion.snappy, value: problem)
+            .animates(problem)
         }
+        .haptic(.error, trigger: problem) { old, new in new != nil && new != old }
         .onChange(of: text) { old, new in
             problem = nil
             // A link that arrives whole was pasted: open it without another tap.
-            if new.count - old.count > 1, pastedLink(new) != nil { openTyped() }
+            if new.count - old.count > 1, pastedLink(new) != nil { _ = openTyped() }
         }
     }
 
@@ -59,14 +60,16 @@ struct SharedWithMeView: View {
         }
     }
 
-    private func openTyped() {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    /// Opens what is in the field. True when it was refused: the keyboard stays up so it can be corrected.
+    private func openTyped() -> Bool {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         guard let link = pastedLink(text) else {
             problem = "That is not a link to a Cereal note. A shared link looks like https://notes.example.com/s/…"
-            return
+            return true
         }
         text = ""; problem = nil; focused = false
         router.open(link, accounts: accounts, mode: mode)
+        return false
     }
 }
 
@@ -74,7 +77,7 @@ struct SharedWithMeView: View {
 private struct SharedWithMeTitle: View {
     var body: some View {
         Text("Shared with me")
-            .font(.display(HomeMetrics.titleSize)).foregroundStyle(Theme.textPrimary)
+            .displayFont(HomeMetrics.titleSize).foregroundStyle(Theme.textPrimary)
             .accessibilityAddTraits(.isHeader)
             .padding(.leading, 1).padding(.top, 35).padding(.bottom, 23)
     }
@@ -91,77 +94,38 @@ private struct SharedVisitList: View {
 
     var body: some View {
         List {
-            SharedWithMeTitle()
-                .listRowInsets(Self.insets).listRowSeparator(.hidden).listRowBackground(Color.clear)
-            ForEach(visits) { visit in
-                Button { open(visit) } label: {
-                    NoteListRow(tile: .document, title: visit.title, subtitle: "\(visit.host) • \(visit.openedAt.noteMetaString)")
+            // The title is a section of its own: rows come and go in the other one,
+            // so a removal never changes the count of the section the title is in.
+            Section {
+                SharedWithMeTitle()
+                    .listRowInsets(Self.insets).listRowSeparator(.hidden).listRowBackground(Color.clear)
+            }
+            Section {
+                ForEach(visits) { visit in
+                    Button { open(visit) } label: {
+                        NoteListRow(tile: .document, title: visit.title, subtitle: visit.host + Wording.dot + visit.openedAt.noteMetaString)
+                    }
+                    .buttonStyle(.row)
+                    .listRowInsets(Self.insets).listRowSeparator(.hidden).listRowBackground(Color.clear)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                        Button(role: .destructive) { Haptics.shared.play(.destructive); remove(visit) } label: { Label("Remove", systemImage: "trash") }
+                            .tint(Theme.danger)
+                    }
+                    .contextMenu {
+                        Button("Open", systemImage: "arrow.up.forward.app") { open(visit) }
+                        ShareLink(item: visit.link.webURL) { Label("Share link", systemImage: "square.and.arrow.up") }
+                        Button("Remove", systemImage: "trash", role: .destructive) { Haptics.shared.play(.destructive); remove(visit) }
+                    }
+                    .accessibilityIdentifier("shared-visit")
                 }
-                .buttonStyle(RowPressStyle())
-                .listRowInsets(Self.insets).listRowSeparator(.hidden).listRowBackground(Color.clear)
-                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                    Button(role: .destructive) { Haptics.shared.play(.destructive); remove(visit) } label: { Label("Remove", systemImage: "trash") }
-                        .tint(Theme.danger)
-                }
-                .accessibilityIdentifier("shared-visit")
             }
         }
+        .listSectionSpacing(0)
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .scrollIndicators(.hidden)
         .scrollDismissesKeyboard(.interactively)
         .environment(\.defaultMinListRowHeight, 0)
         .contentMargins(.bottom, chrome + 24, for: .scrollContent)
-    }
-}
-
-/// A glass capsule above the keyboard, as on Search. A link is pasted or typed
-/// into it and opened with the keyboard's Go key.
-private struct PasteLinkBar: View {
-    @Binding var text: String
-    var focused: FocusState<Bool>.Binding
-    let submit: () -> Void
-    @Environment(\.motion) private var motion
-    @Namespace private var glass
-
-    var body: some View {
-        GlassChromeGroup(spacing: 10) {
-            HStack(spacing: 10) {
-                HStack(spacing: 10) {
-                    Image(systemName: "link").font(.system(size: 17))
-                        .foregroundStyle(Theme.textSecondary)
-                    TextField("", text: $text, prompt: Text("Paste link").foregroundStyle(Theme.textTertiary))
-                        .font(.system(size: 17)).foregroundStyle(Theme.textPrimary)
-                        .focused(focused)
-                        .keyboardType(.URL).textContentType(.URL)
-                        .submitLabel(.go)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .onSubmit(submit)
-                        .accessibilityLabel("Paste link")
-                        .accessibilityIdentifier("paste-link-field")
-                    if !text.isEmpty {
-                        Button { text = "" } label: {
-                            Image(systemName: "xmark.circle.fill").font(.system(size: 17))
-                                .foregroundStyle(Theme.textSecondary)
-                                .frame(width: 30, height: 30).contentShape(Rectangle().inset(by: -7))
-                        }
-                        .buttonStyle(SquashButtonStyle(scale: 0.86))
-                        .accessibilityLabel("Clear link")
-                        .transition(motion.pop)
-                    }
-                }
-                .padding(.leading, 16).padding(.trailing, 10)
-                .frame(height: 50)
-                .glassSurface(Capsule(), tint: .white.opacity(0.08))
-                .glassMorph("field", in: glass)
-                if focused.wrappedValue {
-                    HideKeyboardButton { focused.wrappedValue = false }
-                        .glassMorph("keyboard", in: glass)
-                }
-            }
-        }
-        .animation(motion.animation(.gooey, entering: focused.wrappedValue), value: focused.wrappedValue)
-        .animation(motion.snappy, value: text.isEmpty)
     }
 }

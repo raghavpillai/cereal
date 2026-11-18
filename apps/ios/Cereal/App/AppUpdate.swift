@@ -41,6 +41,9 @@ enum AppUpdate {
         return Offer(version: serverVersion, store: store)
     }
 
+    /// How long after Home's list has its answer the prompt waits, so the rows have risen first.
+    static let afterHomeSettles: Duration = .milliseconds(900)
+
     static let title = "Update available"
     static func message(_ offer: Offer) -> String {
         "Cereal \(offer.version) is available. Some functionality may be degraded if you don't update."

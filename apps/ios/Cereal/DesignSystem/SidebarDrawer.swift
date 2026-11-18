@@ -9,8 +9,8 @@ import APIClient
     /// 0 is closed, 1 is fully open. Follows the finger while dragging.
     private(set) var progress: CGFloat = 0
     private(set) var isDragging = false
-    /// Counts the times a drag let go and the panel snapped open or shut, which is felt.
-    /// A tap that opens or closes it is felt as the tap it was, not again here.
+    /// Counts the times the panel went to a side it was not resting on, which is felt:
+    /// a drag let go, and equally the button, the close control, the dimmed page or a row.
     private(set) var snaps = 0
     @ObservationIgnored var width: CGFloat = 300
     @ObservationIgnored var openAnimation: Animation = Motion(reduceMotion: false).settle
@@ -66,8 +66,14 @@ import APIClient
         open ? start < 0.999 : start > 0.001
     }
 
-    func open() { clearDrag(); settle(open: true) }
-    func close() { clearDrag(); settle(open: false) }
+    func open() { move(open: true) }
+    func close() { move(open: false) }
+
+    private func move(open: Bool) {
+        clearDrag()
+        if Self.snapIsFelt(from: progress, open: open) { snaps &+= 1 }
+        settle(open: open)
+    }
 
     /// Opening or closing by any other means leaves no drag state behind, so
     /// rows can never be left ignoring taps.
@@ -96,9 +102,16 @@ import APIClient
     }
 }
 
-/// The sidebar: Home, Account and workspaces, Shared with me, and My notes. This wrapper is
+/// The sidebar: Home, Account and server, Shared with me, and My notes. This wrapper is
 /// the only view that follows the drag; it moves the panel and dims the page.
 /// The panel's contents are a separate view that is not rebuilt per touch.
+///
+/// **A surface that slides (a drawer, a panel) stays in the tree and is moved
+/// by its offset alone.** Adding or removing a glass surface lets the material
+/// run its own appearance: the glass arrived late on the way in and was gone
+/// on the first frame of the way out, leaving the rows to slide away as bare
+/// text. At rest it sits off screen, takes no touches and is hidden from
+/// accessibility.
 struct SidebarDrawer: View {
     @Environment(\.motion) private var motion
     @Environment(\.layoutDirection) private var layoutDirection
@@ -110,29 +123,27 @@ struct SidebarDrawer: View {
             let width = min(320, proxy.size.width * 0.82)
             let direction: CGFloat = layoutDirection == .rightToLeft ? -1 : 1
             let travel = (width + 16) * direction
+            let visible = model.isVisible
             ZStack(alignment: .leading) {
-                if model.isVisible {
-                    Color.black.opacity(0.42 * model.progress)
-                        .ignoresSafeArea()
-                        .contentShape(Rectangle())
-                        .onTapGesture { model.close() }
-                        .accessibilityHidden(true)
-                        // Dims in and out with the panel, in the same animation.
-                        .transition(.opacity)
-                    SidebarPanel()
-                        .frame(width: width)
-                        // 8 pt from the top, leading and bottom edges of the screen.
-                        .padding(.leading, 8).padding(.top, 8).padding(.bottom, 8)
-                        .ignoresSafeArea(.container, edges: .bottom)
-                        .offset(x: -travel * (1 - model.progress))
-                        // Opened or closed by a tap, the panel is added or removed in the same
-                        // change that moves `progress`, so its offset alone would not animate and
-                        // it cross-faded in place. It slides the rest of the way instead: in from
-                        // fully closed, out by whatever is left of its travel.
-                        .transition(SidebarDrawer.slide(travel: travel, progress: model.progress, reduceMotion: motion.reduceMotion))
-                        .accessibilityAddTraits(.isModal)
-                        .accessibilityAction(.escape) { model.close() }
-                }
+                // Dims in and out with the panel, in the same animation.
+                Color.black.opacity(0.42 * model.progress)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture { model.close() }
+                    .accessibilityHidden(true)
+                SidebarPanel(visible: visible)
+                    .frame(width: width)
+                    // 8 pt from the top, leading and bottom edges of the screen.
+                    .padding(.leading, 8).padding(.top, 8).padding(.bottom, 8)
+                    .ignoresSafeArea(.container, edges: .bottom)
+                    .offset(x: SidebarDrawer.offset(travel: travel, progress: model.progress, reduceMotion: motion.reduceMotion))
+                    // Reduce Motion: the panel does not travel. Its place changes at once
+                    // (an animated offset would still slide it) and it fades where it rests.
+                    .transaction { if motion.reduceMotion { $0.animation = nil } }
+                    .opacity(motion.reduceMotion ? model.progress : 1)
+                    .accessibilityHidden(!visible)
+                    .accessibilityAddTraits(.isModal)
+                    .accessibilityAction(.escape) { model.close() }
             }
             // Dragging the open sidebar back towards the edge closes it, tracking the finger.
             .simultaneousGesture(
@@ -161,18 +172,13 @@ struct SidebarDrawer: View {
 }
 
 extension SidebarDrawer {
-    /// Insertion starts fully closed; removal covers the travel that is left at
-    /// `progress`, so a panel let go half way does not overshoot. Both run in the
-    /// open or close animation of the change. Reduce Motion fades instead.
-    static func slide(travel: CGFloat, progress: CGFloat, reduceMotion: Bool) -> AnyTransition {
-        guard !reduceMotion else { return .opacity }
-        return .asymmetric(insertion: .offset(x: -travel), removal: .offset(x: -remainingTravel(travel, progress: progress)))
-    }
-
-    /// How much further the panel moves to leave from `progress`: with its own
-    /// offset of `travel * (1 - progress)` it ends exactly at fully closed.
-    nonisolated static func remainingTravel(_ travel: CGFloat, progress: CGFloat) -> CGFloat {
-        travel * min(1, max(0, progress))
+    /// Where the panel is drawn at `progress`: off the leading edge by all of
+    /// its travel when closed, in place when open. Under Reduce Motion it is in
+    /// place whenever any of it shows, and parked off screen only when closed.
+    nonisolated static func offset(travel: CGFloat, progress: CGFloat, reduceMotion: Bool) -> CGFloat {
+        let progress = min(1, max(0, progress))
+        if reduceMotion { return progress > 0.001 ? 0 : -travel }
+        return -travel * (1 - progress)
     }
 }
 
@@ -182,6 +188,8 @@ private struct SidebarPanel: View {
     @Environment(Router.self) private var router
     @Environment(AccountsModel.self) private var accounts
     @Environment(ConnectionMode.self) private var connectionMode
+    /// Whether any of the panel shows. It changes when the panel opens and closes, not per touch.
+    let visible: Bool
     @AccessibilityFocusState private var focusedOnOpen: Bool
     private var model: SidebarModel { SidebarModel.shared }
 
@@ -190,7 +198,7 @@ private struct SidebarPanel: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 2) {
                 HStack {
-                    Text("Cereal").font(.display(22)).foregroundStyle(Theme.textPrimary)
+                    Text("Cereal").displayFont(22).foregroundStyle(Theme.textPrimary)
                         .accessibilityAddTraits(.isHeader)
                     Spacer()
                     Button { model.close() } label: {
@@ -204,7 +212,7 @@ private struct SidebarPanel: View {
                 .padding(.leading, 14).padding(.trailing, 2).padding(.top, 6)
                 row("Home", symbol: "house", selected: router.path.isEmpty) { router.path = [] }
                     .accessibilityFocused($focusedOnOpen)
-                row("Account and workspaces", symbol: "person.crop.circle", selected: false) { router.showConnection = true }
+                row(Wording.accountSheet, symbol: "person.crop.circle", selected: false) { router.showConnection = true }
                 row("Shared with me", symbol: "link", selected: selected(.sharedWithMe)) { router.path = [.sharedWithMe] }
                 // As on the desktop, Chat opens a new conversation; the open one is kept in its history.
                 if !connectionMode.isDemo, accounts.defaultSession?.notes.accountID != nil {
@@ -212,7 +220,7 @@ private struct SidebarPanel: View {
                         if let route = ChatNavigation.workspaceChat(accounts) { router.path = [route] }
                     }
                 }
-                Text("My notes").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.textSecondary)
+                Text("My notes").uiFont(13, weight: .medium).foregroundStyle(Theme.textSecondary)
                     .accessibilityAddTraits(.isHeader)
                     .padding(.horizontal, 14).padding(.top, 18).padding(.bottom, 6)
                 if connectionMode.isDemo {
@@ -241,11 +249,14 @@ private struct SidebarPanel: View {
         .mask(LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: 0.93), .init(color: .clear, location: 1)],
                              startPoint: .top, endPoint: .bottom))
         .glassSurface(RoundedRectangle(cornerRadius: 28, style: .continuous), tint: Theme.sidebarTint)
-        .onAppear { focusedOnOpen = true }
+        .onChange(of: visible) { _, shown in if shown { focusedOnOpen = true } }
+        // Sidebar text grows with the text size up to the first accessibility size.
+        .dynamicTypeSize(...DynamicTypeSize.accessibility1)
     }
 
     private func row(_ title: String, symbol: String, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button {
+        // A drag that closes the panel from a row gives that row's press up at once (`RowButton`).
+        RowButton {
             guard !model.suppressesRowTaps else { return }
             action()
             model.close()
@@ -253,7 +264,7 @@ private struct SidebarPanel: View {
             HStack(spacing: 12) {
                 Image(systemName: symbol).font(.system(size: 15, weight: .medium)).frame(width: 22)
                     .accessibilityHidden(true)
-                Text(title).font(.system(size: 15, weight: selected ? .semibold : .regular)).lineLimit(2)
+                Text(title).uiFont(15, weight: selected ? .semibold : .regular).lineLimit(2)
                     .multilineTextAlignment(.leading)
                 Spacer(minLength: 0)
             }
@@ -263,7 +274,6 @@ private struct SidebarPanel: View {
             .background(Theme.ink.opacity(selected ? 0.07 : 0), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .contentShape(Rectangle())
         }
-        .buttonStyle(RowPressStyle())
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 

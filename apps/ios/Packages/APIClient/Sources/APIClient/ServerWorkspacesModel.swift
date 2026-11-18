@@ -103,6 +103,15 @@ public struct WorkspacePermissions: Sendable {
     public func removeMember(id: String, memberID: String) async {
         await perform { _ = try await $0.removeOrganizationMember(id: id, memberID: memberID) }
     }
-    public func acceptInvitation(id: String) async { await perform { _ = try await $0.acceptOrganizationInvitation(id: id) } }
+    /// Joining a workspace is not switching to it. The server makes the workspace just
+    /// joined the selected one; the one that was in use is selected again, so the
+    /// selection only ever moves when the person moves it.
+    public func acceptInvitation(id: String) async {
+        let inUse = activeOrganizationID
+        await perform { api in
+            _ = try await api.acceptOrganizationInvitation(id: id)
+            if let inUse { _ = try await api.setActiveOrganization(id: inUse) }
+        }
+    }
     public func rejectInvitation(id: String) async { await perform { _ = try await $0.rejectOrganizationInvitation(id: id) } }
 }

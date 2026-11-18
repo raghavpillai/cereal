@@ -182,18 +182,34 @@ struct SidebarTests {
         #expect(!SidebarModel.shouldOpen(progress: 0.3, velocity: 0))
     }
 
-    @Test func aTappedPanelSlidesTheRestOfItsTravelAndNoFurther() {
-        // Fully open: the whole travel. Let go half way: the half that is left.
-        #expect(SidebarDrawer.remainingTravel(316, progress: 1) == 316)
-        #expect(SidebarDrawer.remainingTravel(316, progress: 0.5) == 158)
-        #expect(SidebarDrawer.remainingTravel(-316, progress: 0.25) == -79)
-        // A spring's overshoot never sends it past fully closed.
-        #expect(SidebarDrawer.remainingTravel(316, progress: 1.04) == 316)
-        #expect(SidebarDrawer.remainingTravel(316, progress: -0.1) == 0)
-        for progress in stride(from: 0.0, through: 1.0, by: 0.125) {
-            let own = 316 * (1 - progress)
-            #expect(own + SidebarDrawer.remainingTravel(316, progress: progress) == 316)
-        }
+    @Test func thePanelIsMovedByItsOffsetAloneAndNeverLeavesTheTree() {
+        // Closed it is off the leading edge by all of its travel; open it is in place.
+        #expect(SidebarDrawer.offset(travel: 316, progress: 0, reduceMotion: false) == -316)
+        #expect(SidebarDrawer.offset(travel: 316, progress: 0.5, reduceMotion: false) == -158)
+        #expect(SidebarDrawer.offset(travel: 316, progress: 1, reduceMotion: false) == 0)
+        // Right to left, it leaves by the other edge.
+        #expect(SidebarDrawer.offset(travel: -316, progress: 0.25, reduceMotion: false) == 237)
+        // A spring's overshoot never pulls it past its resting places.
+        #expect(SidebarDrawer.offset(travel: 316, progress: 1.04, reduceMotion: false) == 0)
+        #expect(SidebarDrawer.offset(travel: 316, progress: -0.1, reduceMotion: false) == -316)
+        // Reduce Motion: it does not travel. It is in place while any of it shows (it fades), and parked when closed.
+        #expect(SidebarDrawer.offset(travel: 316, progress: 0.5, reduceMotion: true) == 0)
+        #expect(SidebarDrawer.offset(travel: 316, progress: 0, reduceMotion: true) == -316)
+    }
+
+    @MainActor @Test func openingAndClosingByTapIsFeltOnceAndNotWhenNothingMoves() {
+        let model = SidebarModel()
+        #expect(model.snaps == 0)
+        model.open()
+        #expect(model.isOpen && model.snaps == 1)
+        // Already open: asking again moves nothing and is not felt.
+        model.open()
+        #expect(model.snaps == 1)
+        model.close()
+        #expect(!model.isVisible && model.snaps == 2)
+        // Closing what is closed (an account changing, a link opening) is silent.
+        model.close()
+        #expect(model.snaps == 2)
     }
 
     @MainActor @Test func aDragOpensAndTheSameTouchCannotPressARow() async throws {
@@ -253,5 +269,48 @@ struct NoteSearchTests {
         #expect(NoteTile.meeting(with: "  ") == .document)
         #expect(NoteTile.colour(for: "M") == NoteTile.colour(for: "M"))
         #expect(NoteTile.colour(for: "M") != NoteTile.colour(for: "S"))
+    }
+}
+
+
+struct LoadingPolicyTests {
+    @Test func nothingIsDrawnAtFirstAndAnAnswerInHandIsShownAtOnce() {
+        #expect(LoadingPolicy.initial(isLoading: true) == .quiet)
+        #expect(LoadingPolicy.initial(isLoading: false) == .content)
+    }
+
+    @Test func aPlaceholderThatAppearedStaysLongEnoughToBeRead() {
+        // The grace is shorter than an ordinary transition; the placeholder then stays at least as long as one.
+        #expect(LoadingPolicy.grace == .milliseconds(300))
+        #expect(LoadingPolicy.hold(afterShownFor: .milliseconds(0)) == LoadingPolicy.minimumShown)
+        #expect(LoadingPolicy.hold(afterShownFor: .milliseconds(100)) == .milliseconds(250))
+        #expect(LoadingPolicy.hold(afterShownFor: LoadingPolicy.minimumShown) == .zero)
+        #expect(LoadingPolicy.hold(afterShownFor: .seconds(4)) == .zero)
+    }
+
+    @Test func whatLeavesIsGoneBeforeWhatReplacesItArrives() {
+        // The leave is far shorter than any entrance, and Reduce Motion's fade is no shorter than it.
+        #expect(MotionResolver.leaveDuration < MotionToken.snappy.duration / 2)
+        #expect(MotionResolver.leaveDuration <= MotionResolver.reducedDuration)
+        #expect(MotionResolver.breathFaint > 0.3 && MotionResolver.breathFaint < 1)
+    }
+}
+
+@MainActor struct RowButtonTests {
+    @Test func aTouchThatTravelsIsADragAndNotATap() {
+        #expect(RowButton<EmptyView>.isTap(translation: .zero))
+        #expect(RowButton<EmptyView>.isTap(translation: CGSize(width: 4, height: -5)))
+        // A sideways swipe across a row, and a drag that closes the sidebar from one.
+        #expect(!RowButton<EmptyView>.isTap(translation: CGSize(width: -230, height: 2)))
+        #expect(!RowButton<EmptyView>.isTap(translation: CGSize(width: 0, height: 10)))
+    }
+
+    @Test func theEntranceGateOpensAgainForAFirstAccount() async throws {
+        let gate = EntranceGate()
+        #expect(gate.admit())
+        try await Task.sleep(for: .milliseconds(450))
+        #expect(!gate.admit())
+        gate.reopen()
+        #expect(gate.admit())
     }
 }

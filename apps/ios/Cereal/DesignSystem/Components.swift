@@ -326,8 +326,8 @@ struct RailAvatar: View {
                 .frame(width: RailChrome.itemWidth, height: RailChrome.itemHeight)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Connection settings")
+        .buttonStyle(.squash)
+        .accessibilityLabel("Settings")
     }
 }
 
@@ -502,10 +502,12 @@ struct RailScaffold<Content: View, Rail: View, Bottom: View>: View {
                     .ignoresSafeArea()
                 if Bottom.self != EmptyView.self {
                     // Edge to edge, so the fade has no visible sides on the flat background.
-                    // Text is gone before it reaches the bar: it fades over the 28 pt above
-                    // the bar's top, and the page is solid from the bar's middle down.
+                    // Text and tiles are gone before they reach the bar: they fade over the
+                    // 28 pt above the bar's top, and the page is solid from the bar's top down.
+                    // (Solid from the bar's middle left a row's tile showing, half faded, at the
+                    // bar's top corner and its text smeared through the glass.)
                     let barTop = metrics.bottomInset + metrics.bottomPadding + bottomHeight
-                    BottomFade(height: max(64, barTop + 28), solid: max(0, barTop - bottomHeight / 2))
+                    BottomFade(height: max(64, barTop + BottomFade.reach), solid: max(0, barTop))
                         .frame(maxHeight: .infinity, alignment: .bottom)
                         .ignoresSafeArea()
                 }
@@ -587,7 +589,7 @@ struct AskAnythingPill: View {
                     .frame(width: 20, height: 20)
                     .accessibilityHidden(true)
                 Text("Ask anything")
-                    .font(.system(size: 18))
+                    .uiFont(18)
                     .foregroundStyle(Theme.textPrimary)
             }
             .frame(maxWidth: .infinity)
@@ -595,6 +597,8 @@ struct AskAnythingPill: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.squash)
+        // The pill is 64 pt tall: its words grow with the text size as far as that holds.
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .glassSurface(Capsule(), interactive: true, tint: prominent ? Theme.askPillTint : Theme.fieldTint)
         // On light the reference's white pill is edged by a faint line.
         .overlay(Capsule().strokeBorder(Theme.floatingEdge, lineWidth: 1).allowsHitTesting(false))
@@ -740,7 +744,7 @@ struct HomeHeader: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
             Text(title)
-                .font(.display(HomeMetrics.titleSize))
+                .displayFont(HomeMetrics.titleSize)
                 .foregroundStyle(Theme.textPrimary)
                 // Words fade; a letter-by-letter roll is for numbers.
                 .contentTransition(.opacity)
@@ -749,12 +753,16 @@ struct HomeHeader: View {
                 .overlay(alignment: .topLeading) {
                     if let caption {
                         // Hangs clear of the title's descenders without moving the list.
-                        Text(caption).font(.system(size: 11)).foregroundStyle(Theme.textTertiary)
+                        Text(caption).uiFont(11).foregroundStyle(Theme.textTertiary)
                             .lineLimit(1).fixedSize()
                             .offset(x: 1, y: HomeMetrics.captionOffset)
                     }
                 }
                 .opacity(dayTitle == nil ? 1 : 0)
+                // The title and the date's row trade places like any replaced content: the one
+                // that leaves is gone before the other arrives, so "Today" never shows through
+                // the pager's circle.
+                .animation(dayTitle == nil ? motion.snappy.delay(MotionResolver.leaveDuration) : motion.leave, value: dayTitle == nil)
                 .accessibilityHidden(dayTitle != nil)
             Spacer()
             if dayTitle == nil {
@@ -772,6 +780,7 @@ struct HomeHeader: View {
                 .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + HomeMetrics.titleCapHeight / 2 }
                 .padding(.trailing, -7)
                 .padding(.vertical, -16)
+                .transition(motion.replace())
             }
         }
         .overlay {
@@ -780,7 +789,7 @@ struct HomeHeader: View {
                     pagerCircle("chevron.left", label: "Previous day", action: back).disabled(!canGoBack)
                     Spacer(minLength: 8)
                     Text(dayTitle)
-                        .font(.system(size: HomeMetrics.dayTitle))
+                        .uiFont(HomeMetrics.dayTitle)
                         .foregroundStyle(Theme.textPrimary)
                         .lineLimit(1)
                         .contentTransition(.opacity)
@@ -789,6 +798,7 @@ struct HomeHeader: View {
                     pagerCircle("chevron.right", label: "Next day", action: forward)
                 }
                 .padding(.horizontal, -1)
+                .transition(motion.replace())
             }
         }
         .padding(.top, 35)
@@ -843,7 +853,7 @@ struct HomeEventsEmpty: View {
     var body: some View {
         HomeEventsBlock {
             Text(text)
-                .font(.system(size: HomeMetrics.eventsText, weight: .medium))
+                .uiFont(HomeMetrics.eventsText, weight: .medium)
                 .foregroundStyle(Theme.textTertiary)
                 .contentTransition(.opacity)
         }
@@ -864,7 +874,7 @@ struct HomeSectionHeader: View {
     let title: String
     var body: some View {
         Text(title)
-            .font(.system(size: HomeMetrics.sectionHeader))
+            .uiFont(HomeMetrics.sectionHeader)
             .foregroundStyle(Theme.textSecondary)
             .padding(.bottom, 4)
             .accessibilityAddTraits(.isHeader)
@@ -932,9 +942,13 @@ struct NoteListRow: View {
     var tinted = false
     /// The title with matched words marked, for search results.
     var markedTitle: AttributedString? = nil
+    /// The line a search matched, when the title does not show why the note was found.
+    var excerpt: AttributedString? = nil
 
-    init(tile: NoteTile, title: String, subtitle: String, tinted: Bool = false, markedTitle: AttributedString? = nil) {
+    init(tile: NoteTile, title: String, subtitle: String, tinted: Bool = false, markedTitle: AttributedString? = nil,
+         excerpt: AttributedString? = nil) {
         self.tile = tile; self.title = title; self.subtitle = subtitle; self.tinted = tinted; self.markedTitle = markedTitle
+        self.excerpt = excerpt
     }
 
     var body: some View {
@@ -946,6 +960,11 @@ struct NoteListRow: View {
                     .foregroundStyle(Theme.textPrimary).lineLimit(1)
                 Text(subtitle).readingFont(.rowSubtitle)
                     .foregroundStyle(Theme.textSecondary).lineLimit(1)
+                if let excerpt {
+                    Text(excerpt).readingFont(.rowSubtitle)
+                        .foregroundStyle(Theme.textTertiary).lineLimit(1)
+                        .padding(.top, 1)
+                }
             }
             Spacer(minLength: 0)
         }
@@ -981,7 +1000,7 @@ struct DraftNoteRow: View {
             }
             Spacer(minLength: 0)
             if working {
-                ProgressView().controlSize(.small).tint(Theme.textTertiary)
+                CerealLoader(size: 18, color: Theme.textTertiary)
             } else {
                 Image(systemName: "pencil.line")
                     .font(.system(size: 17, weight: .light))
@@ -1009,7 +1028,7 @@ private func railLabel(_ symbol: String) -> String {
     case "square.and.pencil": "New chat"
     case "clock.arrow.circlepath": "Chat history"
     case "magnifyingglass": "Search"
-    case "gearshape": "Connection settings"
+    case "gearshape": "Settings"
     case "sidebar.left": "Sidebar"
     case "folder": "Notes and spaces"
     case "ellipsis": "More options"
@@ -1020,6 +1039,8 @@ private func railLabel(_ symbol: String) -> String {
 /// Fades content out under floating bottom chrome, into the page's own colour so
 /// it has no edge: clear at its top, solid from `solid` points above the bottom.
 struct BottomFade: View {
+    /// How far above the bar content starts to fade.
+    static let reach: CGFloat = 28
     var height: CGFloat = 64
     var solid: CGFloat = 0
     var body: some View {
@@ -1055,14 +1076,14 @@ struct TopFade: View {
     }
 }
 
-/// A wait with its reason beside it: the spinner leads the line it belongs to.
-/// A labelled `ProgressView` centres its spinner over the words, which reads as
-/// misplaced above a line of leading-aligned text.
+/// **A wait with its reason beside it**: the loader leads the line it belongs to.
+/// The app has one loader, the Cereal mark (`CerealLoader`); a system spinner
+/// is never used. For a whole region that is waiting, use `Loading`.
 struct InlineProgress: View {
     let text: String
     var body: some View {
         HStack(spacing: 10) {
-            ProgressView()
+            CerealLoader(size: 20, color: Theme.textSecondary)
             Text(text).foregroundStyle(Theme.textSecondary)
         }
         .accessibilityElement(children: .combine)
@@ -1137,8 +1158,11 @@ struct AvatarView: View {
     }
 
     var body: some View {
-        Text(initials)
-            .font(.system(size: size * 0.36, weight: .semibold))
+        Group {
+            // Nobody's name yet (signed out, or the session still being confirmed): a person, not a guessed letter.
+            if initials.isEmpty { Image(systemName: "person.fill").font(.system(size: size * 0.42, weight: .medium)) }
+            else { Text(initials.uppercased()).font(.system(size: size * 0.36, weight: .semibold)) }
+        }
             .foregroundStyle(.white)
             .frame(width: size, height: size)
             .background(

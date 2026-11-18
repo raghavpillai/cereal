@@ -49,7 +49,7 @@ struct SharedNoteView: View {
                         .refreshable { await load() }
                         .transition(motion.fade)
                 case .loading:
-                    ProgressView("Loading shared note…")
+                    InlineProgress(text: "Loading shared note…")
                         .padding(.top, 28).padding(.leading, Theme.gutter)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 case .failed(let error):
@@ -98,7 +98,7 @@ struct SharedNoteView: View {
             ScreenPrompt(symbol: "link", title: "This shared note is too large to open here", caption: host, actions: [browser], bottomRoom: 40)
         default:
             ScreenPrompt(symbol: "link", title: "This shared note could not be loaded", detail: error.localizedDescription, caption: host,
-                         actions: [ScreenPrompt.Action(title: "Retry") { phase = .loading; Task { await load() } }, browser], bottomRoom: 40)
+                         actions: [ScreenPrompt.Action(title: Wording.retry) { phase = .loading; Task { await load() } }, browser], bottomRoom: 40)
         }
     }
 

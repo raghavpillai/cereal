@@ -533,7 +533,7 @@ struct ChatHistorySheet: View {
                     }
                 }
                 if saved.more > 0, query.isEmpty {
-                    Button("Show \\(saved.more) more", action: onMore)
+                    Button("Show \(saved.more) more", action: onMore)
                         .font(.footnote).disabled(saved.loading)
                         .listRowBackground(Color.clear).listRowSeparator(.hidden)
                         .accessibilityIdentifier("server-chat-more")

@@ -22,7 +22,8 @@ struct CerealApp: App {
                 .environment(sharedHistory)
                 .preferredColorScheme(theme.colorScheme)
                 // Sheets, covers and alerts follow too, and Auto hands the choice back to the system.
-                .onChange(of: theme, initial: true) { _, theme in ThemeWindows.apply(theme) }
+                // A change made while the app runs cross-fades; the launch value is simply set.
+                .onChange(of: theme, initial: true) { old, theme in ThemeWindows.apply(theme, animated: old != theme) }
                 .tint(Theme.accentText)
                 #if DEBUG
                 .task { FrameLog.shared.start() }
@@ -58,6 +59,14 @@ enum AppAccounts {
         }
         #endif
         return nil
+    }
+
+    /// Whether an account was saved by an earlier launch, read without waiting for anything:
+    /// the list of accounts, or the one session a version before the list kept. A launch
+    /// with neither is a signed-out launch from its first frame, and opens on the sign-in
+    /// sheet instead of showing Home's placeholders and then a line asking to connect.
+    @MainActor static var hasSavedAccount: Bool {
+        UserDefaults.standard.object(forKey: AccountsModel.registryKey) != nil || ConnectionSettingsStore().savedInstance != nil
     }
 
     @MainActor static func make() -> AccountsModel {
@@ -131,6 +140,8 @@ final class Router {
     /// The server address the connection sheet opens with, when a page asked
     /// for a sign-in to a particular server.
     @ObservationIgnored var signInAddress: String?
+    /// The email it opens with, when the app knows who is signing in again.
+    @ObservationIgnored var signInEmail: String?
 }
 
 struct RootView: View {
@@ -191,6 +202,13 @@ struct RootView: View {
         .environment(\.zoomNamespace, zoom)
         .environment(\.restoringConnection, restoring)
         .overlay { SidebarDrawer() }
+        .onAppear {
+            // Nobody is signed in: the sign-in sheet is simply there, from the first frame.
+            guard LaunchContext.asksForServer, !connectionMode.isDemo, !AppAccounts.hasSavedAccount else { return }
+            var atOnce = Transaction()
+            atOnce.disablesAnimations = true
+            withTransaction(atOnce) { router.showConnection = true }
+        }
         .fullScreenCover(item: $router.newNoteID) { id in
             RailMetricsReader { NavigationStack { NewNoteView(noteID: id) } }
                 // The + button is only on Home; resuming from a note uses the system cover.
@@ -444,20 +462,39 @@ extension RootView {
 
     /// Once a launch, when an account's server is a later version than this app: the prompt.
     /// A server that cannot be asked says nothing, and is asked again when the accounts change.
+    /// The prompt waits for Home: an alert over a page that has not drawn yet is the first
+    /// thing seen, over nothing.
     fileprivate func askAboutUpdate() async {
         guard !updateAsked, !connectionMode.isDemo else { return }
         #if DEBUG
         if let sample = UserDefaults.standard.string(forKey: "qa.updateVersion") {
-            updateAsked = true
-            updateOffer = AppUpdate.offer(serverVersion: sample, storeURL: UserDefaults.standard.string(forKey: "qa.updateStore"))
+            await offerUpdate(AppUpdate.offer(serverVersion: sample, storeURL: UserDefaults.standard.string(forKey: "qa.updateStore")))
             return
         }
         #endif
         for session in accounts.sessions where session.isReady {
             guard let answer = try? await session.notes.downloads() else { continue }
-            updateAsked = true
-            if let offer = AppUpdate.offer(serverVersion: answer.version, storeURL: answer.iosAppStoreUrl) { updateOffer = offer; return }
+            let offer = AppUpdate.offer(serverVersion: answer.version, storeURL: answer.iosAppStoreUrl)
+            await offerUpdate(offer)
+            if offer != nil { return }
         }
+    }
+
+    /// Marks the question as asked and, when there is an offer, shows it once Home has settled.
+    /// A task that was replaced while waiting (the accounts changed) leaves the question open for its successor.
+    fileprivate func offerUpdate(_ offer: AppUpdate.Offer?) async {
+        guard let offer else { updateAsked = true; return }
+        // Home's list has its first answer (or five seconds have passed)...
+        for _ in 0..<50 where accounts.sessions.contains(where: { session in
+            if session.status == .checking { return true }
+            if session.isReady, case .loading = session.notes.state { return true }
+            return false
+        }) { try? await Task.sleep(for: .milliseconds(100)) }
+        // ...and its rows have risen into place.
+        try? await Task.sleep(for: AppUpdate.afterHomeSettles)
+        guard !Task.isCancelled, !updateAsked else { return }
+        updateAsked = true
+        updateOffer = offer
     }
 
     fileprivate func openPendingLink() {

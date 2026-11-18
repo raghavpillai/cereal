@@ -55,6 +55,14 @@ enum MotionResolver {
     static let staggerStep = 0.035
     static let staggerCap = 7
     static let pressedScale: CGFloat = 0.96
+    /// Whatever leaves to make room for something else fades this quickly, so
+    /// what arrives in its place is never drawn over text that can still be read.
+    static let leaveDuration = 0.09
+    /// Sideways travel of content that changes in a direction (the day pager).
+    static let stepTravel: CGFloat = 28
+    /// Half a breath of a placeholder: full strength to faint.
+    static let breathDuration = 0.9
+    static let breathFaint = 0.45
 
     static func spec(_ token: MotionToken, phase: MotionPhase = .enter, reduceMotion: Bool) -> MotionSpec {
         if reduceMotion { return MotionSpec(curve: .easeOut, duration: reducedDuration, bounce: 0) }
@@ -126,26 +134,57 @@ struct Motion: Equatable, Sendable {
         )
     }
 
-    /// Content that settles upward into a list or conversation.
+    /// The quick fade of anything that leaves to make room (see `MotionResolver.leaveDuration`).
+    var leave: Animation { .easeOut(duration: MotionResolver.leaveDuration) }
+
+    /// **A row, a line or a message joining or leaving a stack** (a note in a
+    /// list, an error under a field, a notice, a chat message). It rises into
+    /// the space that opens for it and fades at once when it goes, so the rows
+    /// closing up never cross it. The space opens and closes only if the stack
+    /// that holds it animates the same change: put `.animates(ids)` on that
+    /// stack, or make the change inside `withAnimation(motion.snappy)`.
+    /// A `List` moves its own rows and needs neither.
     var rise: AnyTransition { rise(delay: 0) }
 
     func rise(delay: Double) -> AnyTransition {
         guard !reduceMotion else { return fade }
         return .asymmetric(
             insertion: .offset(y: 10).combined(with: .opacity).animation(settle.delay(delay)),
-            removal: .opacity.animation(exit(.snappy))
+            removal: .opacity.animation(leave)
         )
     }
 
-    /// Content that changes in a direction (the next or previous day): it
-    /// arrives from that side over a short distance and the old content fades.
-    func step(forward: Bool) -> AnyTransition {
-        guard !reduceMotion else { return fade }
+    /// **Content taking the place of other content in the same spot** (loading
+    /// turning into loaded, one answer into the next, one prompt into another).
+    /// The old is gone before the new can be read: it fades in
+    /// `leaveDuration`, and only then does the new arrive. They are never
+    /// cross-faded over each other and never slide through each other.
+    /// `from` is the side the new content comes from when the change has a
+    /// direction; the old leaves by the other side.
+    ///
+    /// Give the two states different identities (an `if`/`switch`, or `.id`)
+    /// inside one container, and let that container animate: `Replaced` does
+    /// all of it and is the usual way to use this.
+    func replace(from edge: HorizontalEdge? = nil) -> AnyTransition {
+        let pause = MotionResolver.leaveDuration
+        guard !reduceMotion else {
+            return .asymmetric(insertion: .opacity.animation(MotionResolver.spec(.snappy, reduceMotion: true).animation.delay(pause)),
+                               removal: .opacity.animation(leave))
+        }
+        guard let edge else {
+            return .asymmetric(insertion: .offset(y: 6).combined(with: .opacity).animation(snappy.delay(pause)),
+                               removal: .opacity.animation(leave))
+        }
+        let travel = edge == .trailing ? MotionResolver.stepTravel : -MotionResolver.stepTravel
         return .asymmetric(
-            insertion: .offset(x: forward ? 24 : -24).combined(with: .opacity).animation(snappy),
-            removal: .opacity.animation(exit(.snappy))
+            insertion: .offset(x: travel).combined(with: .opacity).animation(snappy.delay(pause)),
+            removal: .offset(x: -travel).combined(with: .opacity).animation(leave)
         )
     }
+
+    /// Content that changes in a direction (the next or previous day): `replace`
+    /// from the side being stepped towards.
+    func step(forward: Bool) -> AnyTransition { replace(from: forward ? .trailing : .leading) }
 
     /// Two small glyphs or labels trading places inside one control.
     var swap: AnyTransition {
@@ -199,12 +238,18 @@ struct SquashButtonStyle: ButtonStyle {
 
 /// List rows soften under the finger instead of flashing. The row a screen
 /// was opened from keeps its highlight until the user is back on the list.
+///
+/// Use `RowButton` for a row in a scrolling stack: it adds what a style alone
+/// cannot (a sideways drag is not a tap). Use this style directly only for a
+/// row inside a `List`, which cancels presses for its own swipes.
 struct RowPressStyle: ButtonStyle {
     var isOrigin = false
+    /// The touch turned into a drag: the wash goes although the finger is still down.
+    var cancelled = false
     @Environment(\.motion) private var motion
 
     func makeBody(configuration: Configuration) -> some View {
-        let pressed = configuration.isPressed
+        let pressed = configuration.isPressed && !cancelled
         let lit = pressed || isOrigin
         configuration.label
             .background {
@@ -215,6 +260,57 @@ struct RowPressStyle: ButtonStyle {
             .scaleEffect(pressed ? MotionResolver.pressScale(reduceMotion: motion.reduceMotion, scale: 0.98) : 1)
             .animation(motion.animation(.snappy, entering: !pressed), value: pressed)
             .animation(motion.animation(.settle, entering: isOrigin), value: isOrigin)
+    }
+}
+
+/// **A full-width row that does something when tapped** (a note, an event, a
+/// search result, a sidebar item, a settings row): the rounded wash, the 0.98
+/// squash, and the highlight that stays while the screen it opened is up.
+///
+/// A scroll view only takes vertical drags, so a plain `Button` in one treats a
+/// sideways swipe that ends inside it as a tap. This row gives the press up as
+/// soon as the finger has travelled `strayDistance`: the wash clears and
+/// lifting does nothing. That covers a swipe across a list and a drag that
+/// closes the sidebar from one of its rows.
+///
+/// `haptic` is for a row that commits something by itself. A row that only
+/// opens a screen stays silent.
+struct RowButton<Label: View>: View {
+    var isOrigin = false
+    var haptic: HapticFeedback? = nil
+    let action: () -> Void
+    @ViewBuilder var label: Label
+    @GestureState private var dragging = false
+    @State private var strayed = false
+    @State private var activations = 0
+    @State private var release: Task<Void, Never>?
+
+    /// Further than a finger wanders during a tap, less than any deliberate swipe.
+    static var strayDistance: CGFloat { 10 }
+    /// Whether a touch that moved by `translation` is still a tap.
+    static func isTap(translation: CGSize) -> Bool {
+        hypot(translation.width, translation.height) < strayDistance
+    }
+
+    var body: some View {
+        Button {
+            guard !strayed else { return }
+            activations &+= 1
+            action()
+        } label: { label }
+            .buttonStyle(RowPressStyle(isOrigin: isOrigin, cancelled: strayed))
+            .simultaneousGesture(DragGesture(minimumDistance: Self.strayDistance).updating($dragging) { _, state, _ in state = true })
+            // Gesture state also resets when the system takes the touch away, where `onEnded` never runs.
+            .onChange(of: dragging) { _, now in
+                release?.cancel()
+                if now { strayed = true; return }
+                // The button's own action can arrive just after the drag ends; it is still that drag.
+                release = Task {
+                    try? await Task.sleep(for: .milliseconds(120))
+                    if !Task.isCancelled { strayed = false }
+                }
+            }
+            .haptic(trigger: activations) { _, _ in haptic }
     }
 }
 
@@ -231,7 +327,13 @@ struct PressReportingStyle: ButtonStyle {
 }
 
 extension ButtonStyle where Self == SquashButtonStyle {
+    /// **Any button that is not a list row**: it squashes a little under the finger and springs back.
     static var squash: SquashButtonStyle { SquashButtonStyle() }
+}
+
+extension ButtonStyle where Self == RowPressStyle {
+    /// A row inside a `List`. Anywhere else use `RowButton`.
+    static var row: RowPressStyle { RowPressStyle() }
 }
 
 // MARK: - Glass morphing
@@ -264,6 +366,12 @@ extension View {
     private var closing: Task<Void, Never>?
 
     init(open: Bool = true) { isOpen = open }
+
+    /// The list starts over (a first account has just signed in): its rows rise in again.
+    func reopen() {
+        closing?.cancel(); closing = nil
+        isOpen = true
+    }
 
     func admit() -> Bool {
         guard isOpen else { return false }
@@ -302,6 +410,160 @@ extension View {
     func staggeredEntrance(_ index: Int, gate: EntranceGate) -> some View {
         modifier(StaggeredEntrance(index: index, gate: gate))
     }
+}
+
+// MARK: - Animating a change
+
+private struct TokenAnimation<Value: Equatable>: ViewModifier {
+    let value: Value
+    let token: MotionToken
+    @Environment(\.motion) private var motion
+    func body(content: Content) -> some View { content.animation(motion.animation(token), value: value) }
+}
+
+extension View {
+    /// **The one way to animate a container when a value changes**: its rows
+    /// joining and leaving, its lines appearing, its size. It takes a token,
+    /// never a duration, and Reduce Motion is applied here.
+    ///
+    /// It goes on the stack that holds what changes, not on the thing that
+    /// changes: a row that fades while its neighbours jump has it one level too low.
+    func animates<Value: Equatable>(_ value: Value, _ token: MotionToken = .snappy) -> some View {
+        modifier(TokenAnimation(value: value, token: token))
+    }
+}
+
+/// **Content that replaces other content in the same place**, as one view:
+/// whatever `content` draws for one `id` leaves (`Motion.replace`) before what
+/// it draws for the next arrives. `from` gives the change a direction.
+///
+/// Use it where a value selects what a region shows: a day's events, a
+/// prompt, a result. Size the region so that both states fit (a fixed or
+/// minimum frame), or its neighbours move when the taller one goes.
+struct Replaced<ID: Hashable, Content: View>: View {
+    let id: ID
+    var from: HorizontalEdge? = nil
+    var alignment: Alignment = .topLeading
+    @ViewBuilder var content: Content
+    @Environment(\.motion) private var motion
+
+    var body: some View {
+        ZStack(alignment: alignment) {
+            content.id(id).transition(motion.replace(from: from))
+        }
+        .animation(motion.snappy, value: id)
+    }
+}
+
+// MARK: - Waiting for an answer
+
+/// What a region shows while an answer is on its way, decided in one place.
+///
+/// - For the first `grace` nothing is drawn: most answers arrive within it,
+///   and a placeholder that lasts 150 ms reads as a flicker.
+/// - After that the placeholder appears and stays at least `minimumShown`.
+/// - The content, which includes any "nothing here" or "sign in" message, is
+///   not built until the answer has arrived. A region can therefore never say
+///   "empty" about something it has not been told yet.
+enum LoadingPolicy {
+    static let grace: Duration = .milliseconds(300)
+    static let minimumShown: Duration = .milliseconds(350)
+
+    enum Stage: Equatable, Sendable {
+        /// Waiting, within the grace: the placeholder's room is kept, nothing is drawn.
+        case quiet
+        case placeholder
+        case content
+    }
+
+    static func initial(isLoading: Bool) -> Stage { isLoading ? .quiet : .content }
+
+    /// How much longer a placeholder that has been up for `shown` must stay once the answer is in.
+    static func hold(afterShownFor shown: Duration) -> Duration {
+        shown >= minimumShown ? .zero : minimumShown - shown
+    }
+}
+
+/// **The one way a region waits for an answer.** See `LoadingPolicy`.
+///
+/// `while` is true only while there is nothing to show yet. A refresh of
+/// something already on screen is not loading: keep showing it.
+///
+///     Loading(while: list.isFirstLoad) { PlaceholderRows() } then: {
+///         if rows.isEmpty { ScreenPrompt(…) } else { Rows(rows) }
+///     }
+///
+/// The placeholder breathes (`breathes()`), holds the room the content will
+/// take, and gives way with `Motion.replace`.
+struct Loading<Placeholder: View, Content: View>: View {
+    private let isLoading: Bool
+    private let alignment: Alignment
+    private let placeholder: Placeholder
+    private let content: () -> Content
+    @State private var stage: LoadingPolicy.Stage
+    @State private var shownAt: ContinuousClock.Instant?
+    @Environment(\.motion) private var motion
+
+    init(while isLoading: Bool, alignment: Alignment = .topLeading,
+         @ViewBuilder placeholder: () -> Placeholder, @ViewBuilder then content: @escaping () -> Content) {
+        self.isLoading = isLoading
+        self.alignment = alignment
+        self.placeholder = placeholder()
+        self.content = content
+        _stage = State(initialValue: LoadingPolicy.initial(isLoading: isLoading))
+    }
+
+    var body: some View {
+        ZStack(alignment: alignment) {
+            switch stage {
+            case .quiet:
+                placeholder.hidden().accessibilityHidden(true)
+            case .placeholder:
+                placeholder.breathes().transition(motion.replace())
+            case .content:
+                content().transition(motion.replace())
+            }
+        }
+        .task(id: isLoading) {
+            if isLoading {
+                if stage == .content { stage = .quiet }
+                guard stage == .quiet else { return }
+                try? await Task.sleep(for: LoadingPolicy.grace)
+                guard !Task.isCancelled else { return }
+                shownAt = .now
+                withAnimation(motion.snappy) { stage = .placeholder }
+            } else {
+                guard stage != .content else { return }
+                if stage == .placeholder, let shownAt {
+                    try? await Task.sleep(for: LoadingPolicy.hold(afterShownFor: ContinuousClock.now - shownAt))
+                    guard !Task.isCancelled else { return }
+                }
+                shownAt = nil
+                // An answer within the grace simply appears: there was nothing to replace.
+                withAnimation(motion.snappy) { stage = .content }
+            }
+        }
+    }
+}
+
+private struct Breathing: ViewModifier {
+    @Environment(\.motion) private var motion
+    @State private var faint = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(faint ? MotionResolver.breathFaint : 1)
+            .animation(motion.reduceMotion ? nil : .easeInOut(duration: MotionResolver.breathDuration).repeatForever(autoreverses: true), value: faint)
+            .onAppear { if !motion.reduceMotion { faint = true } }
+    }
+}
+
+extension View {
+    /// **A placeholder that stands for content on its way** breathes, so it
+    /// reads as waiting and not as an empty thing. Still under Reduce Motion.
+    /// `Loading` applies it to its placeholder; apply it yourself only to a
+    /// placeholder drawn some other way.
+    func breathes() -> some View { modifier(Breathing()) }
 }
 
 // MARK: - Zoom navigation

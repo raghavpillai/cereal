@@ -73,7 +73,7 @@ enum NoteSearch {
         format.calendar = calendar; format.timeZone = calendar.timeZone
         format.dateFormat = calendar.component(.year, from: date) == calendar.component(.year, from: .now) ? "EEE d MMM" : "EEE d MMM yyyy"
         let day = format.string(from: date)
-        return attendees >= 2 ? "\(day)  •  \(attendees) attendees" : day
+        return attendees >= 2 ? day + Wording.dot + "\(attendees) attendees" : day
     }
 
     /// The title with each word of the query marked by the brand's highlight, as
@@ -90,6 +90,20 @@ enum NoteSearch {
             }
         }
         return text
+    }
+
+    /// Whether the title itself shows why the note was found. When it does not, the row adds the matching line.
+    static func titleShowsMatch(_ title: String, query: String) -> Bool {
+        normalized(query).split(whereSeparator: \.isWhitespace)
+            .contains { title.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
+    }
+
+    /// The line under a result's date: the matching excerpt, with its matched words
+    /// marked when the server marked them. Nil when the title already shows the match.
+    static func excerptLine(for hit: SearchHit, query: String) -> AttributedString? {
+        guard !titleShowsMatch(hit.title, query: query) else { return nil }
+        if let parts = hit.excerptParts, !parts.isEmpty { return marked(parts) }
+        return hit.excerpt.flatMap { $0.isEmpty ? nil : AttributedString($0) }
     }
 
     /// The matching line with its matched words in the primary text colour. Size and weight do not change.
@@ -169,11 +183,15 @@ struct SearchView: View {
         } leading: {
             BackButton()
         } bottom: {
-            SearchBar(query: $query, focused: $focused) {
+            FieldBar(symbol: "magnifyingglass", prompt: "Search by title, notes, or people", text: $query, focused: $focused,
+                     clearLabel: "Clear search", identifier: "search-field") {
                 RecentSearchStore.remember(query)
                 recent = RecentSearchStore.load()
+                return false
             }
         }
+        // Asked for as the page appears, so the keyboard rises with the push and not after it.
+        .onAppear { focused = true }
         .task {
             #if DEBUG
             // QA only: `-qa.searchQuery <words>` opens search with words already typed.
@@ -181,9 +199,6 @@ struct SearchView: View {
             #endif
             begin()
             search?.update(query)
-            // The keyboard rises with the push instead of after it.
-            try? await Task.sleep(for: .milliseconds(120))
-            focused = true
         }
         .onChange(of: query) { _, text in search?.update(text) }
         // Another account's results are never shown under this one.
@@ -192,6 +207,27 @@ struct SearchView: View {
             query = ""; search?.update("")
             if searched == nil { search = nil; searchedKey = nil } else { begin() }
         }
+    }
+}
+
+/// What the search page shows. One at a time, each replacing the last (`Replaced`).
+enum SearchFace: Hashable {
+    /// Nothing searchable typed: the recent searches.
+    case recent
+    case failed
+    /// A first search on its way, with nothing to show yet.
+    case waiting
+    /// An answer with no matches.
+    case none
+    case results
+
+    /// `settledEmpty` is whether the last answer found nothing: while it did, further
+    /// letters leave "No matching notes" in place until something matches.
+    static func showing(query: String, hasHits: Bool, progress: SearchProgress, settledEmpty: Bool) -> SearchFace {
+        if query.isEmpty || progress == .idle { return .recent }
+        if hasHits { return .results }
+        if case .failed = progress { return .failed }
+        return progress == .searching && !settledEmpty ? .waiting : .none
     }
 }
 
@@ -205,104 +241,96 @@ private struct SearchResults: View {
     var recent: [String] = []
     var pickRecent: (String) -> Void = { _ in }
     @State private var showsAll = false
+    /// The last answer found nothing. Further letters then leave "No matching notes"
+    /// where it is until something matches, instead of trading it for "Searching…".
+    @State private var settledEmpty = false
+    /// The results are waiting on a newer answer, and have been for longer than the grace.
+    @State private var dimmed = false
     @Environment(\.motion) private var motion
     /// Rows shown before "View all".
     static let firstShown = 20
 
     var body: some View {
-        Group {
-            if query.isEmpty || progress == .idle {
+        let face = SearchFace.showing(query: query, hasHits: !hits.isEmpty, progress: progress, settledEmpty: settledEmpty)
+        Replaced(id: face) {
+            switch face {
+            case .recent:
                 RecentSearches(searches: recent, pick: pickRecent)
-            } else if case .failed(let message) = progress, hits.isEmpty {
-                prompt(symbol: "magnifyingglass", title: "Search could not finish", detail: message, action: retry)
-            } else if hits.isEmpty, progress == .searching {
-                prompt(symbol: "magnifyingglass", title: "Searching…", detail: nil)
-            } else if hits.isEmpty {
-                prompt(symbol: "magnifyingglass", title: "No matching notes", detail: "Try another title, phrase, or name.")
-            } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        // As in the reference: a "Previous meetings" header with "View all", then the rows.
-                        HStack {
-                            Text("Previous meetings").font(.system(size: 15)).foregroundStyle(Theme.textSecondary)
-                                .accessibilityAddTraits(.isHeader)
-                            Spacer()
-                            if hits.count > Self.firstShown && !showsAll {
-                                Button("View all") { withAnimation(motion.snappy) { showsAll = true }; more() }
-                                    .font(.system(size: 14)).foregroundStyle(Theme.textPrimary)
-                                    .padding(.horizontal, 14).frame(height: 32)
-                                    .overlay(Capsule().strokeBorder(Theme.ink.opacity(0.12), lineWidth: 1))
-                                    .contentShape(Capsule())
-                                    .buttonStyle(.squash)
-                            }
-                        }
-                        .padding(.bottom, 6)
-                        ForEach(showsAll ? hits : Array(hits.prefix(Self.firstShown))) { hit in
-                            Button { open(hit) } label: {
-                                NoteListRow(tile: hit.tile, title: hit.title, subtitle: hit.subtitle,
-                                            tinted: true, markedTitle: NoteSearch.markedTitle(hit.title, query: query))
-                            }
-                            .buttonStyle(RowPressStyle())
-                            .transition(motion.fade)
-                            .onAppear { if hit.id == hits.last?.id { more() } }
-                        }
-                        if case .failed(let message) = progress {
-                            VStack(alignment: .leading, spacing: 0) {
-                                Text("Search could not finish. " + message).font(.footnote)
-                                Button("Retry", action: retry).frame(minHeight: 44).contentShape(Rectangle())
-                            }.foregroundStyle(Theme.textSecondary).padding(.top, 8)
-                        }
-                    }
-                    // Results for the previous words stay, dimmed, until the next arrive.
-                    .opacity(progress == .searching ? 0.5 : 1)
-                    .padding(.leading, Theme.gutter).padding(.trailing, 8)
-                    .padding(.top, 20).clearsBottomChrome()
-                }
-                .scrollIndicators(.hidden)
-                .scrollDismissesKeyboard(.interactively)
-                .transition(motion.fade)
+            case .failed:
+                ScreenPrompt(symbol: "magnifyingglass", title: "Search could not finish",
+                             detail: { if case .failed(let message) = progress { message } else { nil } }(),
+                             actions: [.init(title: Wording.retry, run: retry)])
+            case .waiting:
+                // A first search waits like anything else: nothing for a moment, the prompt only if the wait is real.
+                Loading(while: true, alignment: .center) {
+                    ScreenPrompt(symbol: "magnifyingglass", title: "Searching…")
+                } then: { EmptyView() }
+            case .none:
+                ScreenPrompt(symbol: "magnifyingglass", title: "No matching notes", detail: "Try another title, phrase, or name.")
+            case .results:
+                results
             }
-        }
-        .animation(motion.snappy, value: query.isEmpty)
-        .animation(motion.snappy, value: hits.isEmpty)
-        .animation(motion.snappy, value: progress)
-        .onChange(of: query) { showsAll = false }
-    }
-
-    /// Centred in the space above the search field. When the keyboard leaves
-    /// little room (a landscape iPhone), the icon and then the detail line drop out.
-    private func prompt(symbol: String, title: String, detail: String?, action: (() -> Void)? = nil) -> some View {
-        ViewThatFits(in: .vertical) {
-            promptBody(symbol: symbol, title: title, detail: detail, action: action)
-            promptBody(symbol: nil, title: title, detail: detail, action: action)
-            promptBody(symbol: nil, title: title, detail: nil, action: action)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .transition(motion.fade)
+        .onChange(of: query) { showsAll = false }
+        .onChange(of: progress) { _, now in
+            if now == .settled { settledEmpty = hits.isEmpty }
+            else if now == .idle { settledEmpty = false }
+        }
+        .task(id: progress == .searching) {
+            guard progress == .searching else { dimmed = false; return }
+            try? await Task.sleep(for: LoadingPolicy.grace)
+            if !Task.isCancelled { dimmed = true }
+        }
     }
 
-    private func promptBody(symbol: String?, title: String, detail: String?, action: (() -> Void)? = nil) -> some View {
-        VStack(spacing: 10) {
-            if let symbol {
-                Image(systemName: symbol)
-                    .font(.system(size: 60, weight: .light))
-                    .foregroundStyle(Theme.textPrimary.opacity(0.7))
-                    .padding(.bottom, 12)
+    private var results: some View {
+        let shown = showsAll ? hits : Array(hits.prefix(Self.firstShown))
+        return ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                // As in the reference: a "Previous meetings" header with "View all", then the rows.
+                HStack {
+                    Text("Previous meetings").uiFont(15).foregroundStyle(Theme.textSecondary)
+                        .accessibilityAddTraits(.isHeader)
+                    Spacer()
+                    if hits.count > Self.firstShown && !showsAll {
+                        Button("View all") { showsAll = true; more() }
+                            .uiFont(14).foregroundStyle(Theme.textPrimary)
+                            .padding(.horizontal, 14).frame(height: 32)
+                            .overlay(Capsule().strokeBorder(Theme.ink.opacity(0.12), lineWidth: 1))
+                            .contentShape(Capsule())
+                            .buttonStyle(.squash)
+                    }
+                }
+                .padding(.bottom, 6)
+                ForEach(shown) { hit in
+                    RowButton { open(hit) } label: {
+                        NoteListRow(tile: hit.tile, title: hit.title, subtitle: hit.subtitle,
+                                    tinted: true, markedTitle: NoteSearch.markedTitle(hit.title, query: query),
+                                    excerpt: NoteSearch.excerptLine(for: hit, query: query))
+                    }
+                    .onAppear { if hit.id == hits.last?.id { more() } }
+                }
+                if case .failed(let message) = progress {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text("Search could not finish. " + message).font(.footnote)
+                        Button(Wording.retry, action: retry)
+                            .fontWeight(.medium).foregroundStyle(Theme.accentText)
+                            .frame(minHeight: 44).contentShape(Rectangle())
+                    }.foregroundStyle(Theme.textSecondary).padding(.top, 8)
+                }
             }
-            Text(title).font(.display(25)).fontWeight(.medium).foregroundStyle(Theme.textPrimary.opacity(0.7))
-                .contentTransition(.opacity)
-            if let detail {
-                Text(detail).font(.display(25)).foregroundStyle(Theme.textTertiary)
-                    .contentTransition(.opacity)
-            }
-            if let action {
-                Button("Retry", action: action).foregroundStyle(Theme.textSecondary)
-                    .frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
-            }
+            // One answer replaces the last in place. Results are re-ranked on every letter;
+            // rows that travelled to their new places crossed each other, text over text.
+            .transaction(value: shown.map(\.id)) { $0.animation = nil }
+            .padding(.leading, Theme.gutter).padding(.trailing, 8)
+            .padding(.top, 20).clearsBottomChrome()
         }
-        .multilineTextAlignment(.center)
-        .padding(.horizontal, Theme.gutter)
-        .padding(.bottom, symbol == nil ? 66 : 80)
+        .scrollIndicators(.hidden)
+        .scrollDismissesKeyboard(.interactively)
+        // Results for the previous words stay until the next arrive, and dim only if that takes a while.
+        .opacity(dimmed ? 0.5 : 1)
+        .animates(dimmed)
     }
 }
 
@@ -330,21 +358,20 @@ private struct RecentSearches: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 if !searches.isEmpty {
-                    Text("Recent searches").font(.system(size: 15)).foregroundStyle(Theme.textSecondary)
+                    Text("Recent searches").uiFont(15).foregroundStyle(Theme.textSecondary)
                         .accessibilityAddTraits(.isHeader)
                         .padding(.bottom, 6)
                     ForEach(searches, id: \.self) { search in
-                        Button { pick(search) } label: {
+                        RowButton { pick(search) } label: {
                             HStack(spacing: 14) {
                                 Image(systemName: "arrow.counterclockwise").font(.system(size: 15))
                                     .foregroundStyle(Theme.textSecondary)
-                                Text("\u{201C}\(search)\u{201D}").font(.system(size: 16)).foregroundStyle(Theme.textPrimary)
+                                Text("\u{201C}\(search)\u{201D}").uiFont(16).foregroundStyle(Theme.textPrimary)
                                     .lineLimit(1)
                                 Spacer(minLength: 0)
                             }
                             .frame(minHeight: 44).contentShape(Rectangle())
                         }
-                        .buttonStyle(RowPressStyle())
                     }
                 }
             }
@@ -353,64 +380,6 @@ private struct RecentSearches: View {
         }
         .scrollIndicators(.hidden)
         .scrollDismissesKeyboard(.interactively)
-    }
-}
-
-/// The field and its keyboard-dismiss control share one glass group, so the
-/// small button buds off the field when the keyboard rises and is drawn back
-/// into it when the keyboard goes.
-private struct SearchBar: View {
-    @Binding var query: String
-    var focused: FocusState<Bool>.Binding
-    var submit: () -> Void = {}
-    @Environment(\.motion) private var motion
-    @Namespace private var glass
-
-    var body: some View {
-        GlassChromeGroup(spacing: 10) {
-            HStack(spacing: 10) {
-                HStack(spacing: 10) {
-                    Image(systemName: "magnifyingglass").font(.system(size: 17))
-                        .foregroundStyle(Theme.textSecondary)
-                    TextField("", text: $query, prompt: Text("Search by title, notes, or people").foregroundStyle(Theme.textTertiary))
-                        .font(.system(size: 15)).foregroundStyle(Theme.textPrimary)
-                        .focused(focused)
-                        .submitLabel(.search)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .onSubmit { focused.wrappedValue = false; submit() }
-                        .accessibilityIdentifier("search-field")
-                    if !query.isEmpty {
-                        Button { query = "" } label: {
-                            Image(systemName: "xmark.circle.fill").font(.system(size: 17))
-                                .foregroundStyle(Theme.textSecondary)
-                                .frame(width: 30, height: 30).contentShape(Rectangle().inset(by: -7))
-                        }
-                        .buttonStyle(SquashButtonStyle(scale: 0.86))
-                        .accessibilityLabel("Clear search")
-                        .transition(motion.pop)
-                    }
-                }
-                .padding(.leading, 16).padding(.trailing, 10)
-                .frame(height: 50)
-                .glassSurface(Capsule(), tint: Theme.fieldTint)
-                .overlay(Capsule().strokeBorder(Theme.floatingEdge, lineWidth: 1).allowsHitTesting(false))
-                .glassMorph("field", in: glass)
-                // As in the reference, a keyboard button stays beside the field: it lowers the
-                // keyboard while it is up and raises it again when it is down.
-                Button { focused.wrappedValue.toggle() } label: {
-                    Image(systemName: "keyboard").font(.system(size: 17))
-                        .foregroundStyle(Theme.textPrimary.opacity(0.85)).frame(width: 50, height: 50)
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.squash)
-                .glassSurface(Circle(), interactive: true, tint: Theme.fieldTint)
-                .overlay(Circle().strokeBorder(Theme.floatingEdge, lineWidth: 1).allowsHitTesting(false))
-                .glassMorph("keyboard", in: glass)
-                .accessibilityLabel(focused.wrappedValue ? "Hide keyboard" : "Show keyboard")
-            }
-        }
-        .animation(motion.animation(.gooey, entering: focused.wrappedValue), value: focused.wrappedValue)
-        .animation(motion.snappy, value: query.isEmpty)
+        .dynamicTypeSize(...DynamicTypeSize.accessibility1)
     }
 }

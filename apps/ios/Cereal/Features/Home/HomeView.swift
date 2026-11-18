@@ -29,7 +29,8 @@ struct HomeView: View {
                             .padding(.bottom, 20)
                             .transition(motion.rise)
                     }
-                    eventsBlock
+                    // The day's block leaves by the side stepped away from before the next arrives.
+                    Replaced(id: dayOffset, from: steppedForward ? .trailing : .leading) { eventsBlock }
                     HomeDivider()
                     noteGroups
                 }
@@ -37,9 +38,10 @@ struct HomeView: View {
                 .padding(.trailing, 8)
                 .clearsBottomChrome()
                 // Notes arriving or leaving the list (a new recording, trash) settle rather than cut.
-                .animation(motion.settle, value: store.activeNotes.map(\.id))
-                .animation(motion.snappy, value: store.captureRecoveryMessage)
-                .animation(motion.snappy, value: store.persistenceError)
+                .animates(store.activeNotes.map(\.id), .settle)
+                .animates(store.captureRecoveryMessage)
+                .animates(store.persistenceError)
+                .dynamicTypeSize(...DynamicTypeSize.accessibility1)
             }
             .scrollIndicators(.hidden)
         } leading: {
@@ -96,18 +98,15 @@ struct HomeView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(dayEvents) { e in
                         HomeEventsBlock(barColor: Color(hex: 0x87E5E8)) {
-                            Text(e.title).font(.system(size: HomeMetrics.eventsText, weight: .semibold)).foregroundStyle(Theme.textPrimary)
-                            Text("\(Self.clock.string(from: e.start)) – \(Self.clock.string(from: e.end))")
-                                .font(.system(size: 14)).foregroundStyle(Theme.textSecondary)
+                            Text(e.title).uiFont(HomeMetrics.eventsText, weight: .semibold).foregroundStyle(Theme.textPrimary)
+                            Text("\(e.start.formatted(date: .omitted, time: .shortened)) – \(e.end.formatted(date: .omitted, time: .shortened))")
+                                .uiFont(14).foregroundStyle(Theme.textSecondary)
                         }
                     }
                 }
             }
         }
-        .frame(minHeight: dayOffset == 0 ? 0 : HomeMetrics.otherDayEventsHeight, alignment: .topLeading)
-        // The day's block arrives from the side the user stepped towards.
-        .id(dayOffset)
-        .transition(motion.step(forward: steppedForward))
+        .frame(maxWidth: .infinity, minHeight: dayOffset == 0 ? 0 : HomeMetrics.otherDayEventsHeight, alignment: .topLeading)
     }
 
     private var noteGroups: some View {
@@ -118,8 +117,7 @@ struct HomeView: View {
                 HomeSectionHeader(title: group.title)
                     .staggeredEntrance(group.notes.first.flatMap { order[$0.id] } ?? 0, gate: entrance)
                 ForEach(group.notes) { note in
-                    Button { router.path.append(.note(note.id)) } label: { NoteRow(note: note) }
-                        .buttonStyle(RowPressStyle(isOrigin: router.origin == .note(note.id)))
+                    RowButton(isOrigin: router.origin == .note(note.id)) { router.path.append(.note(note.id)) } label: { NoteRow(note: note) }
                         .contextMenu {
                             Button("Copy notes", systemImage: "doc.on.doc") { UIPasteboard.general.string = note.plainText; copyCount += 1 }
                             Button("Move to trash", systemImage: "trash", role: .destructive) {
@@ -128,18 +126,12 @@ struct HomeView: View {
                             }
                         }
                         .staggeredEntrance(order[note.id] ?? 0, gate: entrance)
-                        .transition(motion.fade)
+                        .transition(motion.rise)
                 }
                 Spacer().frame(height: 22)
             }
         }
     }
-
-    private static let clock: DateFormatter = {
-        let format = DateFormatter()
-        format.locale = Locale(identifier: "en_US_POSIX"); format.dateFormat = "HH:mm"
-        return format
-    }()
 
     private func startNewNote() {
         Task {
@@ -172,6 +164,6 @@ extension Note {
 
     var rowSubtitle: String {
         let time = createdAt.formatted(date: .omitted, time: .shortened)
-        return attendees.count >= 2 ? "\(time) • \(attendees.count) attendees" : time
+        return attendees.count >= 2 ? time + Wording.dot + "\(attendees.count) attendees" : time
     }
 }
