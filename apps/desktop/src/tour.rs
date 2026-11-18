@@ -4148,13 +4148,24 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
         }
         settle(cx).await;
         crate::motion::stats::report("launch");
-        for (name, hold, action) in all
+        let all = all
             .chain(audit_steps())
             .chain(audit_bench_steps())
             .chain(pill_steps())
             .chain(closed_window_steps())
-            .chain(transcript_steps())
+            .chain(transcript_steps());
+        // `CEREAL_TOUR_SCRIPT=<file>` (debug builds): the window is driven by
+        // the lines of that file instead, as they are written (`script`).
+        #[cfg(debug_assertions)]
         {
+            if let Some(path) = std::env::var_os("CEREAL_TOUR_SCRIPT") {
+                script(handle, std::path::PathBuf::from(path), all.collect(), cx).await;
+                eprintln!("tour done");
+                let _ = cx.update(|cx| cx.quit());
+                return;
+            }
+        }
+        for (name, hold, action) in all {
             if only.is_empty()
                 && ["p-", "b-", "i-", "a-", "c-", "d-", "e-", "k-", "m-", "f-"]
                     .iter()
@@ -4228,6 +4239,207 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
         let _ = cx.update(|cx| cx.quit());
     })
     .detach();
+}
+
+/// The window driven from outside, for interaction review (debug builds,
+/// `CEREAL_TOUR_SCRIPT=<file>` beside `--motion-tour` or `CEREAL_AUDIT=1`).
+/// The file is followed as it grows: each complete line is one command, run
+/// in order, so a reviewer can write a line, look at the window, and write
+/// the next. Input goes through the window's own listeners and never moves
+/// the real pointer or types on the real keyboard. Coordinates are points
+/// from the window's top-left corner. Every line is echoed on stderr as
+/// `script <wall-clock ms> <line>` when it starts.
+///
+///   move X Y              the pointer goes there (hover)
+///   down X Y / up X Y     the left button, held or let go (pressed states)
+///   click X Y [COUNT]     press and release; COUNT 2 is a double click
+///   rclick X Y            the right button
+///   drag X1 Y1 X2 Y2 MS   press, travel in a straight line for MS, release
+///   scroll X Y DY         one wheel event; negative DY moves down the content
+///   key NAME              a key as `Keystroke::parse` reads it: escape, cmd-k, shift-tab
+///   type TEXT             the text, a character at a time, into the focused field
+///   step PREFIX           every built-in tour step whose name starts with PREFIX
+///   size W H              resize the window
+///   wait MS               nothing, for that long (not stretched by slow motion)
+///   settle                until the window has stopped drawing
+///   stats NAME            the frame accounting since the last report, as `stats`
+///   quit                  leave
+#[cfg(debug_assertions)]
+async fn script(handle: WindowHandle<Cereal>, path: std::path::PathBuf, steps: Vec<Step>, cx: &mut AsyncApp) {
+    fn numbers(words: &[&str]) -> Option<Vec<f32>> {
+        words.iter().map(|word| word.parse::<f32>().ok()).collect()
+    }
+    fn button(window: &mut Window, cx: &mut App, button: MouseButton, x: f32, y: f32, down: bool, count: usize) {
+        let position = point(px(x), px(y));
+        if down {
+            window.dispatch_event(
+                PlatformInput::MouseDown(MouseDownEvent { button, position, click_count: count, ..Default::default() }),
+                cx,
+            );
+        } else {
+            window.dispatch_event(
+                PlatformInput::MouseUp(MouseUpEvent { button, position, click_count: count, ..Default::default() }),
+                cx,
+            );
+        }
+    }
+    let pause = |cx: &mut AsyncApp, ms: u64| cx.background_executor().timer(Duration::from_millis(ms));
+    let mut done = 0;
+    loop {
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        // Only whole lines: one still being written is left for the next look.
+        let whole = text.rfind('\n').map_or("", |end| &text[..end]);
+        let lines: Vec<String> = whole.lines().skip(done).map(str::to_owned).collect();
+        if lines.is_empty() {
+            pause(cx, 30).await;
+            continue;
+        }
+        for line in lines {
+            done += 1;
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_millis());
+            eprintln!("script {stamp} {line}");
+            let (command, rest) = line.split_once(' ').unwrap_or((line, ""));
+            let words: Vec<&str> = rest.split_whitespace().collect();
+            let input = |cx: &mut AsyncApp, act: Box<dyn FnOnce(&mut Window, &mut App)>| {
+                cx.update_window(handle.into(), |_, window, cx| act(window, cx)).is_ok()
+            };
+            let ran = match (command, numbers(&words)) {
+                ("quit", _) => return,
+                ("wait", Some(n)) if n.len() == 1 => {
+                    pause(cx, n[0] as u64).await;
+                    true
+                }
+                ("settle", _) => {
+                    settle(cx).await;
+                    true
+                }
+                ("stats", _) => {
+                    crate::motion::stats::report(rest);
+                    true
+                }
+                ("move", Some(n)) if n.len() == 2 => input(cx, Box::new(move |window, cx| pointer(window, cx, n[0], n[1]))),
+                ("down", Some(n)) if n.len() == 2 => input(
+                    cx,
+                    Box::new(move |window, cx| {
+                        pointer(window, cx, n[0], n[1]);
+                        button(window, cx, MouseButton::Left, n[0], n[1], true, 1);
+                    }),
+                ),
+                ("up", Some(n)) if n.len() == 2 => {
+                    input(cx, Box::new(move |window, cx| button(window, cx, MouseButton::Left, n[0], n[1], false, 1)))
+                }
+                ("click", Some(n)) if n.len() == 2 || n.len() == 3 => input(
+                    cx,
+                    Box::new(move |window, cx| {
+                        let count = n.get(2).map_or(1, |count| *count as usize).max(1);
+                        pointer(window, cx, n[0], n[1]);
+                        for press in 1..=count {
+                            button(window, cx, MouseButton::Left, n[0], n[1], true, press);
+                            button(window, cx, MouseButton::Left, n[0], n[1], false, press);
+                        }
+                    }),
+                ),
+                ("rclick", Some(n)) if n.len() == 2 => input(
+                    cx,
+                    Box::new(move |window, cx| {
+                        pointer(window, cx, n[0], n[1]);
+                        button(window, cx, MouseButton::Right, n[0], n[1], true, 1);
+                        button(window, cx, MouseButton::Right, n[0], n[1], false, 1);
+                    }),
+                ),
+                ("drag", Some(n)) if n.len() == 5 => {
+                    let (x1, y1, x2, y2) = (n[0], n[1], n[2], n[3]);
+                    let frames = ((n[4] / 16.) as usize).max(1);
+                    let mut ok = input(
+                        cx,
+                        Box::new(move |window, cx| {
+                            pointer(window, cx, x1, y1);
+                            button(window, cx, MouseButton::Left, x1, y1, true, 1);
+                        }),
+                    );
+                    for frame in 1..=frames {
+                        let along = frame as f32 / frames as f32;
+                        let (x, y) = (x1 + (x2 - x1) * along, y1 + (y2 - y1) * along);
+                        ok &= input(
+                            cx,
+                            Box::new(move |window, cx| {
+                                window.dispatch_event(
+                                    PlatformInput::MouseMove(MouseMoveEvent {
+                                        position: point(px(x), px(y)),
+                                        pressed_button: Some(MouseButton::Left),
+                                        ..Default::default()
+                                    }),
+                                    cx,
+                                );
+                            }),
+                        );
+                        pause(cx, 16).await;
+                    }
+                    ok && input(cx, Box::new(move |window, cx| button(window, cx, MouseButton::Left, x2, y2, false, 1)))
+                }
+                ("scroll", Some(n)) if n.len() == 3 => {
+                    input(cx, Box::new(move |window, cx| scroll(window, cx, n[0], n[1], n[2])))
+                }
+                ("size", Some(n)) if n.len() == 2 => {
+                    input(cx, Box::new(move |window, _| window.resize(size(px(n[0]), px(n[1])))))
+                }
+                ("key", _) if Keystroke::parse(rest).is_ok() => {
+                    let name = rest.to_owned();
+                    input(cx, Box::new(move |window, cx| press_key(window, cx, &name)))
+                }
+                ("type", _) => {
+                    let mut ok = true;
+                    for character in rest.chars() {
+                        ok &= input(
+                            cx,
+                            Box::new(move |window, cx| {
+                                let key = if character == ' ' { "space".to_owned() } else { character.to_lowercase().to_string() };
+                                let keystroke = Keystroke {
+                                    modifiers: Modifiers { shift: character.is_uppercase(), ..Default::default() },
+                                    key,
+                                    key_char: Some(character.to_string()),
+                                };
+                                window.dispatch_keystroke(keystroke, cx);
+                            }),
+                        );
+                        pause(cx, 25).await;
+                    }
+                    ok
+                }
+                ("step", _) if !rest.is_empty() => {
+                    let mut ok = true;
+                    for (name, hold, action) in steps.iter().filter(|(name, _, _)| name.starts_with(rest)) {
+                        eprintln!("tour {stamp} {name}");
+                        ok &= match action {
+                            Action::View(action) => handle
+                                .update(cx, |view, _, cx| {
+                                    action(view, cx);
+                                    cx.notify();
+                                })
+                                .is_ok(),
+                            Action::Window(action) => handle.update(cx, |view, window, cx| action(view, window, cx)).is_ok(),
+                            Action::Input(action) => cx.update_window(handle.into(), |_, window, cx| action(window, cx)).is_ok(),
+                        };
+                        pause(cx, (*hold).min(1500)).await;
+                    }
+                    ok
+                }
+                _ => {
+                    eprintln!("script: not understood: {line}");
+                    true
+                }
+            };
+            if !ran {
+                return;
+            }
+        }
+    }
 }
 
 /// `CEREAL_CAPTURE_PROBE=<seconds>`, without `--motion-tour` so the capture
