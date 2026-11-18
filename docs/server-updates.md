@@ -32,19 +32,51 @@ section says so and offers nothing to press; `scripts/deploy-ssh.sh` keeps worki
 
 ## Where a newer version comes from
 
-The source is a private repository, so the server needs a git remote it can read. Two ways:
+**The releases of the repository.** A release is a tag named like `v1.2.3`; publishing a release on GitHub
+makes one. `./scripts/release-github.sh` publishes the version in `package.json` as a release and attaches
+the Mac build (see "Publishing a version" below). The updater takes the release with the highest number and
+ignores tags with anything after the number (`v1.3.0-beta.1`). It reads them with git, so it needs a remote
+the server can read:
 
-1. **A read-only deploy key.** Add a deploy key (read access only) to the repository on GitHub, put the
-   private key on the server, and install with
-   `./scripts/updater.sh install git@github.com:<you>/cereal.git main --ssh-key ~/.ssh/cereal_deploy_key`.
-2. **A bare repository on the server that you push to.** Nothing on the server holds GitHub credentials:
-   `git init --bare ~/cereal.git` on the server, `git push <server>:cereal.git main` from your machine when
-   a version is ready, and install with `./scripts/updater.sh install ~/cereal.git main`.
+1. **A public repository:** `./scripts/updater.sh install https://github.com/<you>/cereal.git`.
+2. **A private repository, with a read-only deploy key.** Add a deploy key (read access only) to the
+   repository on GitHub, put the private key on the server, and install with
+   `./scripts/updater.sh install git@github.com:<you>/cereal.git --ssh-key ~/.ssh/cereal_deploy_key`.
 
-`main` can be any branch or tag. **"Newer" means: the commit that ref names is not the commit this server
-runs.** The version number shown is `version` in that commit's `package.json`. A commit that is behind the
-running one is never installed (migrations only go forward). The updater looks when the owner presses
-**Check for updates**, when it starts, and every six hours.
+The latest release is offered when it is ahead of the commit this server runs. A server deployed from a
+commit that is in no release (`scripts/deploy-ssh.sh` from a branch) is compared by version number instead:
+only a release with a higher number is offered. Nothing behind the running version is ever installed
+(migrations only go forward). The version number shown is `version` in the release's `package.json`, so
+keep it the same as the tag. The updater looks when the owner presses **Check for updates**, when it
+starts, and every six hours.
+
+**Or one branch or tag.** Give `install` a ref and the updater follows that instead: whatever commit it
+names is the version on offer. This suits a bare repository on the server that you push to, with no
+GitHub credentials on the server: `git init --bare ~/cereal.git` there, `git push <server>:cereal.git main`
+from your machine when a version is ready, and `./scripts/updater.sh install ~/cereal.git main`.
+
+## Publishing a version
+
+One version number covers the server and its apps, and each gets it from the one before:
+
+```
+ GitHub release v1.2.3 ──▶ server (Update server) ──▶ desktop apps (they ask their server)
+   tag + Mac build            builds the tag,            offered the Mac build the server
+                              fetches the Mac build      now holds; they never ask GitHub
+```
+
+1. Set the version everywhere (`bun scripts/check-version.ts` says where), commit and push.
+2. Build the Mac app from that commit: `./scripts/release-macos.sh`.
+3. `./scripts/release-github.sh` makes the release `v<version>` on that commit and uploads the Mac build's
+   two files to it. It refuses a version that was released before.
+4. On the server: **Instance settings → Updates → Update server**. While it builds the new version the
+   updater downloads the release's Mac build into the new release's downloads, so the updated server offers
+   it. Desktop apps see it the next time they check and update themselves from their server.
+
+A release without a Mac build (`--no-mac`) updates servers only. Downloading the Mac build needs the
+repository to be public on GitHub; with a private one, publish the build with
+`scripts/deploy-ssh.sh --release` as before. The iPhone app comes from TestFlight or the App Store; like the
+desktop app it only says an update exists when it is behind its server, never when it is ahead.
 
 ## Enable it on an existing deployment (once)
 
@@ -82,6 +114,6 @@ From the shell, without the panel: `./scripts/updater.sh status`, and with the s
 - The updater's progress files (`spool/state`, `job`, `log`) are readable by other users of the machine,
   because the container runs as a different user. They hold versions, paths and log lines, never a secret.
 - An update restarts the server: live transcription stops until each recording app reconnects.
-- The updater installs what the configured ref points to. Publishing a Mac build is still
-  `scripts/deploy-ssh.sh --release` or `scripts/publish-to-docker.sh`; an update keeps the builds that are
-  already published.
+- The Mac build comes with an update only when the release carries one and the repository is public on
+  GitHub. Otherwise an update keeps the builds that are already published, and a new one is published with
+  `scripts/deploy-ssh.sh --release` or `scripts/publish-to-docker.sh`.

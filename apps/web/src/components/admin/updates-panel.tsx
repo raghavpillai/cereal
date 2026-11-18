@@ -128,7 +128,7 @@ export function UpdatesView({status,lines,link,problem=null,asked=null,reloadOff
    <p className="update-plain"><TriangleAlert size={14}/>The updater is not installed on this server, so it cannot be updated from this page and this page cannot tell whether a newer version exists.</p>
    <p className="settings-help">Updating rebuilds and restarts the server’s containers. Cereal does not give its own container that power: a small program on the machine itself does it, and only when the owner asks here. To set it up, on the server, in the folder Cereal was deployed to:</p>
    <ol className="update-howto">
-    <li><span>Tell it where newer versions come from (a git remote the server can read, and a branch or tag):</span><code>./scripts/updater.sh install git@github.com:you/cereal.git main --ssh-key ~/.ssh/cereal_deploy_key</code></li>
+    <li><span>Tell it which repository’s releases to follow (add <code>--ssh-key</code> with a read-only deploy key when the repository is private):</span><code>./scripts/updater.sh install https://github.com/you/cereal.git</code></li>
     <li><span>Keep it running and restart Cereal once. The command above prints both steps:</span><code>sudo systemctl enable --now cereal-updater</code><code>docker compose up -d</code></li>
    </ol>
    <p className="settings-help">Until then, update from your own machine with <code>scripts/deploy-ssh.sh</code>. <code>docs/server-updates.md</code> has the details.</p>
@@ -138,7 +138,7 @@ export function UpdatesView({status,lines,link,problem=null,asked=null,reloadOff
    {updater.state==='stopped'&&<p className="update-plain"><TriangleAlert size={14}/>The updater is installed but is not running on the server, so nothing can be checked or installed right now.</p>}
    {updater.state==='stopped'&&<ol className="update-howto"><li><span>Start it on the server:</span><code>sudo systemctl start cereal-updater</code></li></ol>}
    <p className={available?.error?'settings-error update-found':'update-found'}>{offered&&<Badge variant="secondary" className="default-model">New</Badge>}{availabilityLine(status)}</p>
-   <p className="settings-help update-source">{available?.checkedAt?`Checked ${timestamp(available.checkedAt)}. `:''}Compares the commit this server runs with <code>{updater.ref??'the configured ref'}</code> in <code>{updater.source??'the configured repository'}</code>.</p>
+   {available?.checkedAt&&<p className="settings-help update-source">Checked {timestamp(available.checkedAt)}.</p>}
    <div className="update-actions">
     {/* It cannot be pressed from the moment an update is asked for. Until the progress has unfolded from it, it keeps its colour. */}
     {offered&&<Button type="button" className="update-go" data-busy={pending&&active?'':undefined} disabled={!ready||active||asked!==null} onClick={update}><RotateCw/>Update server</Button>}

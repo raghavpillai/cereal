@@ -37,6 +37,12 @@ describe('what an update offers', () => {
     expect(availabilityLine({ ...ready, available: { ...ready.available!, relation: 'same' } })).toBe('This server is up to date.')
     expect(availabilityLine({ ...ready, available: null })).toBe('Not checked yet.')
     expect(availabilityLine({ ...ready, available: { ...ready.available!, error: 'Could not fetch main from x' } })).toBe('Could not fetch main from x')
+    // Following releases, it says so, and never offers what is behind the running version.
+    const releases: UpdateStatus = { ...ready, updater: { ...ready.updater, ref: 'releases' }, available: { ...ready.available!, release: 'v0.2.0' } }
+    expect(availabilityLine(releases)).toBe('Version 0.2.0 (2222222) is available.')
+    expect(availabilityLine({ ...releases, available: { ...releases.available!, relation: 'same' } })).toBe('This server runs the latest release.')
+    expect(availabilityLine({ ...releases, available: { ...releases.available!, relation: 'older' } })).toBe('The latest release is 0.2.0 (2222222), and this server runs something later. There is nothing to install.')
+    expect(updateOffered({ ...releases, available: { ...releases.available!, relation: 'older' } })).toBe(false)
     expect(versionLabel(null, null)).toBe('an unknown version')
   })
 })
@@ -78,11 +84,13 @@ describe('the Updates section', () => {
     expect(markup).not.toContain('Update server')
     expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>.*Check for updates/)
   })
-  test('a newer version offers the update and says where it was looked for', () => {
+  test('a newer version offers the update and says when it was looked for', () => {
     const markup = view(ready)
     expect(markup).toContain('Version 0.2.0 (2222222) is available.')
     expect(markup).toContain('Update server')
-    expect(markup).toContain('<code>main</code> in <code>git@github.com:team/cereal.git</code>')
+    // When it looked, and nothing about where: the owner set that up on the server and does not need it read back.
+    expect(markup).toContain('Checked ')
+    expect(markup).not.toContain('git@github.com:team/cereal.git')
     expect(view({ ...ready, available: { ...ready.available!, relation: 'same' } })).not.toContain('Update server')
   })
   test('while an update runs nothing else can be started, and a lost connection during the restart is expected', () => {

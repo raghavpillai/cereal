@@ -13,7 +13,7 @@ export interface UpdateJob {
 export interface UpdateStatus {
   current: { version: string; commit: string | null }
   updater: { state: 'missing' | 'stopped' | 'ready'; source: string | null; ref: string | null }
-  available: null | { checkedAt: string | null; version: string | null; commit: string | null; relation: UpdateRelation | null; error: string | null }
+  available: null | { checkedAt: string | null; version: string | null; commit: string | null; relation: UpdateRelation | null; error: string | null; release?: string | null }
   job: UpdateJob | null
 }
 export const UPDATE_PATH = '/api/v1/admin/update'
@@ -43,12 +43,17 @@ export function updateOffered(status: UpdateStatus): boolean {
   const found = status.available
   return status.updater.state === 'ready' && !!found && !found.error && !!found.relation && found.relation !== 'same' && found.relation !== 'older'
 }
-/** One line on what the last look found. */
+/** One line on what the last look found. The updater follows the repository's releases, or one branch or tag. */
 export function availabilityLine(status: UpdateStatus): string {
   const found = status.available, ref = status.updater.ref ?? 'the configured ref'
   if (!found) return 'Not checked yet.'
   if (found.error) return found.error
   const name = versionLabel(found.version, found.commit)
+  if (status.updater.ref === 'releases') switch (found.relation) {
+    case 'same': return 'This server runs the latest release.'
+    case 'newer': return `Version ${name} is available.`
+    default: return `The latest release is ${name}, and this server runs something later. There is nothing to install.`
+  }
   switch (found.relation) {
     case 'same': return 'This server is up to date.'
     case 'newer': return `Version ${name} is available.`

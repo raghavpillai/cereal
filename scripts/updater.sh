@@ -1,7 +1,7 @@
 #!/bin/bash
 # Cereal's updater: the part of "Update server" (admin panel → Updates) that runs on the machine itself.
 #
-#   ./scripts/updater.sh install <git remote> [ref] [--dir <deployment>] [--ssh-key <file>]
+#   ./scripts/updater.sh install <git remote> [ref] [--dir <deployment>] [--ssh-key <file>]   no ref: its releases
 #   ./scripts/updater.sh run     [--dir <deployment>]     the service: waits for requests from the admin panel
 #   ./scripts/updater.sh check   [--dir <deployment>]     look for a newer version once, from the shell
 #   ./scripts/updater.sh update  [--dir <deployment>]     update once, from the shell
@@ -13,12 +13,22 @@
 # "update to it". Where the version comes from (the git remote and ref) is written here, on the host, by
 # `install`; a request cannot name another source, a commit or a command.
 #
-# Where a newer version comes from. The source is a private repository, so it is a git remote this machine
-# can read: either the repository itself with a read-only deploy key (git@github.com:you/cereal.git and
-# --ssh-key), or a bare repository on this machine that you push to (`git init --bare ~/cereal.git`, then
-# `git push server:cereal.git main` from your own machine). "Newer" means: the commit <ref> names there is
-# not the commit this server runs. The version number shown beside it is `version` in that commit's
-# package.json.
+# Where a newer version comes from: the releases of a git repository this machine can read. On GitHub that is
+# https://github.com/you/cereal.git for a public repository, or git@github.com:you/cereal.git with a read-only
+# deploy key (--ssh-key) for a private one. A release is a tag named like v1.2.3 (publishing a release on
+# GitHub makes one; `gh release create v1.2.3`); the one with the highest number counts, and a tag with
+# anything after the number (v1.3.0-beta.1) is not a release. The server is offered the latest release when
+# it is not the commit the server runs and not behind it. The version number shown is `version` in that
+# commit's package.json.
+#
+# The Mac build. A release made with scripts/release-github.sh carries the Mac app's two files. During an update
+# to such a release the updater downloads them into the new release's downloads folder, so the updated server
+# offers desktop apps the same version it runs. A release without them is not an error: the server is updated
+# and goes on offering nothing newer to the apps than before. This needs the repository to be public on GitHub.
+#
+# Given a ref (`install <git remote> main`), the updater follows that branch or tag instead: whatever commit it
+# names is the version on offer. That suits a bare repository on this machine that you push to
+# (`git init --bare ~/cereal.git`, then `git push server:cereal.git main`).
 #
 # How the server asks. <deployment>-releases/.updater/spool is mounted into the server's container
 # (compose.yaml, UPDATER_DIR). The server drops a small request file in spool/requests; this script answers
@@ -72,10 +82,12 @@ load_config() {
   if [ -n "$SSH_KEY" ]; then export GIT_SSH_COMMAND="ssh -i $SSH_KEY -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new"; fi
   # What the admin panel shows as the source: never a password or token that is part of the address.
   REMOTE_SHOWN="$(printf '%s' "$REMOTE" | sed 's#://[^/@]*@#://#')"
+  # What is followed, in words: for the log and the shell.
+  if [ "$REF" = releases ]; then FOLLOWED="the latest release in $REMOTE_SHOWN"; else FOLLOWED="$REF in $REMOTE_SHOWN"; fi
 }
 
 # ── What the server reads ────────────────────────────────────────────────────────────────────────────────
-check_at='' check_commit='' check_version='' check_relation='' check_error=''
+check_at='' check_commit='' check_version='' check_relation='' check_error='' check_release=''
 job_id='' job_status='' job_step='' job_started='' job_finished='' job_from_commit='' job_from_version='' job_to_commit='' job_to_version='' job_error='' job_helper_lines=0
 put() { printf '%s=%s\n' "$1" "$(one_line "$2")"; }
 current() {
@@ -85,7 +97,7 @@ current() {
 write_state() {
   current
   { put protocol 1; put remote "$REMOTE_SHOWN"; put ref "$REF"; put current_commit "$current_commit"; put current_version "$current_version"
-    put check_at "$check_at"; put check_commit "$check_commit"; put check_version "$check_version"; put check_relation "$check_relation"; put check_error "$check_error"
+    put check_at "$check_at"; put check_commit "$check_commit"; put check_version "$check_version"; put check_relation "$check_relation"; put check_error "$check_error"; put check_release "$check_release"
   } > "$S/state.tmp" && chmod 644 "$S/state.tmp" && mv -f "$S/state.tmp" "$S/state"
 }
 write_job() {
@@ -96,7 +108,7 @@ write_job() {
 }
 read_saved() {
   local key
-  for key in check_at check_commit check_version check_relation check_error; do eval "$key=\"\$(sed -n 's/^$key=//p' \"\$S/state\" 2>/dev/null | head -1)\""; done
+  for key in check_at check_commit check_version check_relation check_error check_release; do eval "$key=\"\$(sed -n 's/^$key=//p' \"\$S/state\" 2>/dev/null | head -1)\""; done
   for key in id status step started finished from_commit from_version to_commit to_version error helper_lines; do eval "job_$key=\"\$(sed -n 's/^$key=//p' \"\$S/job\" 2>/dev/null | head -1)\""; done
   case "$job_helper_lines" in ''|*[!0-9]*) job_helper_lines=0 ;; esac
 }
@@ -106,15 +118,33 @@ step() { job_step="$1"; write_job; }
 finish() { rm -f "$S/requests"/* 2>/dev/null; job_status="$1"; job_error="${2:-}"; job_finished="$(now)"; write_job; }
 
 # ── Looking for a newer version ──────────────────────────────────────────────────────────────────────────
-# Fetches <ref> into the local copy and compares it with what runs. Sets check_*; returns 1 when it could not look.
+# The tag of the latest release among the lines of `git ls-remote --tags --refs`: named v1.2.3 or 1.2.3, the
+# highest number. Nothing when there is none.
+latest_release() {
+  sed -n 's#^[0-9a-f]*[[:space:]]*refs/tags/##p' | grep -E '^v?[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$' \
+    | awk '{ t = $0; sub(/^v/, "", t); split(t, n, "."); printf "%09d%09d%09d %s\n", n[1], n[2], n[3], $0 }' | sort | tail -1 | cut -d' ' -f2
+}
+version_key() { printf '%s' "$1" | awk -F. '{ printf "%09d%09d%09d", $1, $2, $3 }'; }
+# Fetches what is followed into the local copy and compares it with what runs. Sets check_*; returns 1 when it could not look.
 look() {
-  local out commit
-  check_at="$(now)"; check_error=''
-  if ! out="$(git_source fetch --quiet --force --no-tags "$REMOTE" "$REF" 2>&1)"; then
-    check_error="Could not fetch $REF from $REMOTE_SHOWN: $(one_line "$out")"; write_state; return 1
+  local out commit wanted="$REF" name="$REF in $REMOTE_SHOWN"
+  check_at="$(now)"; check_error=''; check_release=''
+  if [ "$REF" = releases ]; then
+    if ! out="$(git_source ls-remote --tags --refs "$REMOTE" 2>&1)"; then
+      check_error="Could not read the releases of $REMOTE_SHOWN: $(one_line "$out")"; write_state; return 1
+    fi
+    check_release="$(printf '%s\n' "$out" | latest_release)"
+    if [ -z "$check_release" ]; then
+      check_commit=''; check_version=''; check_relation=''
+      check_error="$REMOTE_SHOWN has no release yet. A release is a tag named like v1.2.3."; write_state; return 1
+    fi
+    wanted="refs/tags/$check_release"; name="release $check_release in $REMOTE_SHOWN"
+  fi
+  if ! out="$(git_source fetch --quiet --force --no-tags "$REMOTE" "$wanted" 2>&1)"; then
+    check_error="Could not fetch $name: $(one_line "$out")"; write_state; return 1
   fi
   if ! commit="$(git_source rev-parse --verify --quiet 'FETCH_HEAD^{commit}')"; then
-    check_error="$REF in $REMOTE_SHOWN is not a commit"; write_state; return 1
+    check_error="There is no commit at $name"; write_state; return 1
   fi
   git_source update-ref refs/updates/target "$commit"
   check_commit="$commit"
@@ -127,8 +157,36 @@ look() {
   elif git_source merge-base --is-ancestor "$commit" "$current_commit"; then check_relation=older
   else check_relation=different
   fi
-  [ -n "$check_version" ] || { check_error="$REF has no version in its package.json"; write_state; return 1; }
+  # A server deployed from a commit that is in no release (scripts/deploy-ssh.sh, from a branch) cannot be placed
+  # by its commit. Its version number decides then: a release with a higher one is newer, any other is not offered.
+  if [ "$REF" = releases ] && [ -n "$current_version" ] && [ -n "$check_version" ]; then
+    case "$check_relation" in different|unknown)
+      if [ "$(version_key "$check_version")" \> "$(version_key "$current_version")" ]; then check_relation=newer; else check_relation=older; fi ;;
+    esac
+  fi
+  [ -n "$check_version" ] || { check_error="There is no version in the package.json of $name"; write_state; return 1; }
   write_state
+}
+
+# The Mac build of the release that was found, into <release folder>/dist/release. See "The Mac build" above.
+github_repository() { printf '%s' "$REMOTE" | sed -n -E 's#^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)$#\2#p' | sed 's/\.git$//'; }
+fetch_mac_build() {
+  local rel="$1" base repository name got=0
+  [ -n "$check_release" ] || return 0
+  case "$check_version" in ''|*[!0-9.]*) return 0 ;; esac
+  if [ -n "${CEREAL_UPDATER_DOWNLOADS:-}" ]; then base="$CEREAL_UPDATER_DOWNLOADS"
+  else repository="$(github_repository)"; [ -n "$repository" ] || return 0; base="https://github.com/$repository/releases/download"; fi
+  command -v curl >/dev/null || { log "curl is not installed, so the Mac build of $check_release was not fetched."; return 0; }
+  for name in "Cereal-$check_version-mac-arm64.dmg" "Cereal-$check_version-mac-arm64.zip"; do
+    if curl -fsSL --retry 2 --max-time 900 -o "$rel/dist/release/$name.part" "$base/$check_release/$name" 2>/dev/null && [ -s "$rel/dist/release/$name.part" ]; then got=$((got + 1)); fi
+  done
+  if [ "$got" = 2 ]; then
+    for name in "Cereal-$check_version-mac-arm64.dmg" "Cereal-$check_version-mac-arm64.zip"; do mv -f "$rel/dist/release/$name.part" "$rel/dist/release/$name"; chmod 644 "$rel/dist/release/$name"; done
+    log "Fetched the Mac build $check_version from release $check_release. Desktop apps will be offered it."
+  else
+    rm -f "$rel/dist/release/"*.part
+    log "Release $check_release has no Mac build that can be downloaded. Desktop apps keep the build already published."
+  fi
 }
 
 # ── Updating ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -164,13 +222,13 @@ update() {
   job_id="$(date -u +%Y%m%dT%H%M%SZ)"; job_status=running; job_started="$(now)"; job_finished=''; job_error=''; job_helper_lines=0
   job_from_commit="$current_commit"; job_from_version="$current_version"; job_to_commit=''; job_to_version=''
   : > "$S/log"; step fetch
-  log "Looking for $REF in $REMOTE_SHOWN…"
+  log "Looking for $FOLLOWED…"
   if ! look; then log "$check_error"; finish failed "$check_error Nothing changed."; return 1; fi
   job_to_commit="$check_commit"; job_to_version="$check_version"; short="${check_commit:0:7}"
   if [ "$check_relation" = same ]; then log "This server already runs $short (version $check_version)."; finish up-to-date; return 0; fi
   if [ "$check_relation" = older ]; then
-    log "$REF ($short) is older than what this server runs. Database migrations only go forward, so it is not installed."
-    finish failed "$REF is older than what this server runs. Nothing changed."; return 1
+    log "${check_release:-$REF} ($short) is older than what this server runs. Database migrations only go forward, so it is not installed."
+    finish failed "${check_release:-$REF} is older than what this server runs. Nothing changed."; return 1
   fi
   log "Found version $check_version ($short). This server runs ${current_version:-an unknown version} (${current_commit:0:7})."
   id="$job_id-$short"; job_id="$id"
@@ -195,6 +253,7 @@ update() {
   if ! out="$( { set -o pipefail; git_source archive --format=tar "$check_commit" | tar -x -C "$rel"; } 2>&1 && helper stage "$D" "$id" "$check_commit" "${check_commit:0:12}" 0 2>&1)"; then
     printf '%s\n' "$out" | log_lines; discard; finish failed "Could not unpack $short. Nothing changed."; return 1
   fi
+  fetch_mac_build "$rel"
   log "Building the image meeting-notes:${check_commit:0:12} (the current server keeps running)…"
   if ! out="$(helper build "$D" "$id" 2>&1)"; then
     printf '%s\n' "$out" | tail -40 | log_lines; discard; finish failed "The image did not build. Nothing changed."; return 1
@@ -264,7 +323,7 @@ case "$command" in
     umask 077
     mkdir -p "$H"
     token="$(config TOKEN)"; [ "${#token}" -ge 32 ] || token="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
-    printf 'REMOTE=%s\nREF=%s\nTOKEN=%s\nSSH_KEY=%s\n' "$remote_arg" "${ref_arg:-main}" "$token" "$key_arg" > "$H/config"
+    printf 'REMOTE=%s\nREF=%s\nTOKEN=%s\nSSH_KEY=%s\n' "$remote_arg" "${ref_arg:-releases}" "$token" "$key_arg" > "$H/config"
     load_config; prepare_spool
     # The two lines the server's container needs, in the deployment's private .env. Every other line stays.
     set_line() {
@@ -273,7 +332,7 @@ case "$command" in
     }
     set_line UPDATER_DIR "$S"; set_line UPDATER_TOKEN "$token"
     read_saved
-    if look; then echo "Source: $REF in $REMOTE_SHOWN is version $check_version (${check_commit:0:7})."
+    if look; then echo "Source: $FOLLOWED is ${check_release:+$check_release, }version $check_version (${check_commit:0:7})."
     else echo "Warning: $check_error" >&2; echo "The updater is installed, but it cannot read the source yet. Fix access and run: $0 check --dir $D" >&2; fi
     unit="$H/cereal-updater.service"
     printf '%s\n' '[Unit]' 'Description=Cereal updater (the admin panel'"'"'s "Update server")' 'After=docker.service' '' '[Service]' \
@@ -299,7 +358,7 @@ EOF
     load_config; current
     echo "deployment: $D"
     echo "runs: version ${current_version:-unknown} (${current_commit:0:7})"
-    echo "source: $REF in $REMOTE_SHOWN"
+    echo "source: $FOLLOWED"
     if pid="$(running_pid)"; then echo "service: running (process $pid)"; else echo "service: not running"; fi
     [ ! -f "$S/state" ] || sed -n 's/^check_/last check: /p' "$S/state"
     [ ! -f "$S/job" ] || grep -E '^(id|status|error)=' "$S/job" | sed 's/^/last update: /'
@@ -311,7 +370,7 @@ EOF
     read_saved
     if [ "$command" = check ]; then
       look || fail "$check_error"
-      echo "$REF is version $check_version (${check_commit:0:7}): $check_relation. This server runs ${current_version:-unknown} (${current_commit:0:7})."
+      echo "${check_release:-$REF} is version $check_version (${check_commit:0:7}): $check_relation. This server runs ${current_version:-unknown} (${current_commit:0:7})."
     else
       update; result=$?
       cat "$S/log"; echo "Result: $job_status${job_error:+ ($job_error)}"

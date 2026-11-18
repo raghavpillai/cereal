@@ -33,12 +33,15 @@ export interface UpdateStatusDTO {
   readonly updater: {
     /** missing: not installed or not connected to this server. stopped: installed, but not running now. */
     readonly state: UpdaterState
-    /** The git remote and ref a newer version is taken from; null until the updater is there. */
+    /** The git repository a newer version is taken from, and what is followed there: "releases" (its latest
+     * release) or a branch or tag. Null until the updater is there. */
     readonly source: string | null
     readonly ref: string | null
   }
   /** What the updater found the last time it looked; null if it has not looked. */
-  readonly available: null | { readonly checkedAt: string | null; readonly version: string | null; readonly commit: string | null; readonly relation: UpdateRelation | null; readonly error: string | null }
+  readonly available: null | { readonly checkedAt: string | null; readonly version: string | null; readonly commit: string | null; readonly relation: UpdateRelation | null; readonly error: string | null
+    /** The tag of the release that was found ("v1.2.3"), when releases are what is followed. */
+    readonly release: string | null }
   /** The update under way, or the last one. */
   readonly job: null | {
     readonly id: string; readonly status: UpdateJobStatus; readonly step: UpdateStep | null; readonly active: boolean
@@ -85,6 +88,7 @@ export function parseKeyValues(text: string): Record<string, string> {
 export const requestSignature = (token: string, stamp: string, action: string) => createHash("sha256").update(`${token}:${stamp}:${action}`).digest("hex")
 const commit = (value: string | undefined) => value && /^[0-9a-f]{7,64}$/.test(value) ? value : null
 const text = (value: string | undefined) => value ? value : null
+const release = (value: string | undefined) => value && /^v?\d{1,9}\.\d{1,9}\.\d{1,9}$/.test(value) ? value : null
 const time = (value: string | undefined) => value && /^\d{9,11}$/.test(value) ? new Date(Number(value) * 1000).toISOString() : null
 
 export function makeUpdates(options: UpdatesOptions): UpdatesService {
@@ -104,7 +108,7 @@ export function makeUpdates(options: UpdatesOptions): UpdatesService {
     return {
       current: { version: options.version, commit: commit(state.current_commit) },
       updater: { state: clock().getTime() - beat < HEARTBEAT_STALE_MS ? "ready" : "stopped", source: text(state.remote), ref: text(state.ref) },
-      available: state.check_at ? { checkedAt: time(state.check_at), version: text(state.check_version), commit: commit(state.check_commit), relation: RELATIONS.includes(state.check_relation ?? "") ? state.check_relation as UpdateRelation : null, error: text(state.check_error) } : null,
+      available: state.check_at ? { checkedAt: time(state.check_at), version: text(state.check_version), commit: commit(state.check_commit), relation: RELATIONS.includes(state.check_relation ?? "") ? state.check_relation as UpdateRelation : null, error: text(state.check_error), release: release(state.check_release) } : null,
       job: job && job.id && jobStatus ? {
         id: job.id, status: jobStatus, step: STEPS.includes(job.step ?? "") ? job.step as UpdateStep : null, active: jobStatus === "running",
         startedAt: time(job.started), finishedAt: time(job.finished),

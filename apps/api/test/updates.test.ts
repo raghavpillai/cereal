@@ -48,17 +48,17 @@ test("the updater's files become the status: source, what was found, and the las
   expect(await updates.status()).toEqual({
     current: { version: "1.0.0", commit: "1111111111111111111111111111111111111111" },
     updater: { state: "ready", source: "git@example.test:team/cereal.git", ref: "main" },
-    available: { checkedAt: new Date(1763450000_000).toISOString(), version: "1.1.0", commit: "2222222222222222222222222222222222222222", relation: "newer", error: null },
+    available: { checkedAt: new Date(1763450000_000).toISOString(), version: "1.1.0", commit: "2222222222222222222222222222222222222222", relation: "newer", error: null, release: null },
     job: { id: "20261118T101500Z-2222222", status: "rolled-back", step: "rollback", active: false, startedAt: new Date(1763460000_000).toISOString(), finishedAt: new Date(1763460300_000).toISOString(), from: { version: "1.0.0", commit: "1111111111111111111111111111111111111111" }, to: { version: "1.1.0", commit: "2222222222222222222222222222222222222222" }, error: "The new version did not start. The previous version is running again." },
   })
   expect(await updates.log(0)).toEqual({ lines: ["10:15:00 Looking for main…", "10:15:02 Found version 1.1.0"], next: 2 })
   expect(await updates.log(1)).toEqual({ lines: ["10:15:02 Found version 1.1.0"], next: 2 })
   expect(await updates.log(9)).toEqual({ lines: [], next: 2 })
   // What the updater writes is shown, never trusted: a status, step, relation or commit it does not know is dropped.
-  await writeFile(join(directory, "state"), STATE + "check_at=1763450000\ncheck_commit=$(reboot)\ncheck_relation=sideways\ncheck_version=1.1.0\n")
+  await writeFile(join(directory, "state"), STATE + "check_at=1763450000\ncheck_commit=$(reboot)\ncheck_relation=sideways\ncheck_version=1.1.0\ncheck_release=<script>\n")
   await writeFile(join(directory, "job"), "id=x\nstatus=exploded\n")
   const odd = await updates.status()
-  expect(odd.available).toEqual({ checkedAt: new Date(1763450000_000).toISOString(), version: "1.1.0", commit: null, relation: null, error: null })
+  expect(odd.available).toEqual({ checkedAt: new Date(1763450000_000).toISOString(), version: "1.1.0", commit: null, relation: null, error: null, release: null })
   expect(odd.job).toBeNull()
   expect(parseKeyValues("a=1\nB=2\n=3\nno equals\nkey_two= spaced \n")).toEqual({ a: "1", key_two: "spaced" })
 })
@@ -398,3 +398,99 @@ test("the updater installs a newer commit, goes back when it does not start, and
   // Every call went to the fake, and each was one it knows.
   expect(await readFile(join(fake, "calls"), "utf8")).not.toContain("unexpected")
 }, 180_000)
+
+test("without a ref the updater follows releases: the highest v-numbered tag, and nothing behind what runs", async () => {
+  const root = join(scratch, "releases"), home = join(root, "home"), origin = join(root, "origin"), work = join(root, "work"), deployment = join(home, "cereal")
+  await mkdir(home, { recursive: true })
+  const env = {
+    PATH: "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin", HOME: home, LC_ALL: "C",
+    GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.test", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.test",
+  }
+  await must(["git", "init", "--quiet", "--bare", "--initial-branch=main", origin], { env })
+  await must(["git", "clone", "--quiet", origin, work], { env })
+  await writeFile(join(work, "compose.yaml"), "name: meeting-notes\nservices: {}\n")
+  const commit = async (version: string) => {
+    await writeFile(join(work, "package.json"), JSON.stringify({ name: "cereal", version }, null, 2) + "\n")
+    await must(["git", "add", "-A"], { cwd: work, env }); await must(["git", "commit", "--quiet", "-m", `version ${version}`], { cwd: work, env })
+    await must(["git", "push", "--quiet", "origin", "HEAD:main"], { cwd: work, env })
+    return must(["git", "rev-parse", "HEAD"], { cwd: work, env })
+  }
+  const tag = async (name: string) => { await must(["git", "tag", name], { cwd: work, env }); await must(["git", "push", "--quiet", "origin", name], { cwd: work, env }) }
+  const first = await commit("1.0.0")
+  await mkdir(deployment)
+  await must(["sh", "-c", `git --git-dir="${origin}" archive ${first} | tar -x -C "${deployment}"`], { env })
+  await mkdir(join(deployment, "scripts"))
+  await writeFile(join(deployment, ".env"), "POSTGRES_PASSWORD=secret-database-password\n", { mode: 0o600 })
+  const deployed = (commit: string, version: string) => Promise.all([writeFile(join(deployment, "DEPLOYED_COMMIT"), commit + "\n"), writeFile(join(deployment, "package.json"), JSON.stringify({ name: "cereal", version }, null, 2) + "\n")])
+  await deployed(first, "1.0.0")
+  const updater = join(repoRoot, "scripts/updater.sh"), spoolDir = join(home, "cereal-releases/.updater/spool")
+  const check = () => run(["bash", updater, "check", "--dir", deployment], { env })
+  const found = async () => (await makeUpdates({ version: "1.0.0", directory: spoolDir, token: /^UPDATER_TOKEN=(.+)$/m.exec(await readFile(join(deployment, ".env"), "utf8"))![1]! }).status())
+
+  // A repository nobody has released from: installed, and it says what is missing. A branch moving is not a release.
+  const installed = await run(["bash", updater, "install", origin, "--dir", deployment], { env })
+  expect(installed.code).toBe(0)
+  expect(installed.err).toContain(`${origin} has no release yet. A release is a tag named like v1.2.3.`)
+  expect(await readFile(join(home, "cereal-releases/.updater/config"), "utf8")).toContain("\nREF=releases\n")
+  expect(await found()).toMatchObject({ updater: { source: origin, ref: "releases" }, available: { error: `${origin} has no release yet. A release is a tag named like v1.2.3.`, release: null, relation: null } })
+
+  // The release this server runs.
+  await tag("v1.0.0")
+  expect((await check()).out).toContain("v1.0.0 is version 1.0.0 (" + first.slice(0, 7) + "): same.")
+  expect((await found()).available).toMatchObject({ release: "v1.0.0", version: "1.0.0", commit: first, relation: "same", error: null })
+
+  // Work on the branch after it is not on offer; nor is a tag that is not a finished release.
+  const second = await commit("1.1.0")
+  await tag("v1.1.0-beta.1"); await tag("nightly")
+  expect((await found()).available).toMatchObject({ release: "v1.0.0", relation: "same" })
+  expect((await check()).out).toContain("v1.0.0 is version 1.0.0")
+
+  // Released: on offer. The highest number wins, whatever order the tags were made in (1.10.0 is after 1.9.0).
+  await tag("v1.1.0")
+  expect((await check()).out).toContain("v1.1.0 is version 1.1.0 (" + second.slice(0, 7) + "): newer.")
+  const ninth = await commit("1.9.0"); await tag("v1.9.0")
+  const tenth = await commit("1.10.0"); await tag("v1.10.0")
+  await must(["git", "tag", "v1.2.0", second], { cwd: work, env }); await must(["git", "push", "--quiet", "origin", "v1.2.0"], { cwd: work, env })
+  expect((await check()).out).toContain("v1.10.0 is version 1.10.0 (" + tenth.slice(0, 7) + "): newer.")
+  expect((await found()).available).toMatchObject({ release: "v1.10.0", version: "1.10.0", commit: tenth, relation: "newer" })
+
+  // A server running a later commit of the same line: the release is behind it, and is not offered.
+  await deployed(tenth, "1.10.0")
+  expect((await check()).out).toContain("same.")
+  const ahead = await commit("1.10.1")
+  await deployed(ahead, "1.10.1")
+  expect((await check()).out).toContain("v1.10.0 is version 1.10.0 (" + tenth.slice(0, 7) + "): older.")
+  // A server running a commit the releases do not contain is placed by its version number.
+  const elsewhere = "9".repeat(40)
+  await deployed(elsewhere, "1.10.0")
+  expect((await check()).out).toContain("): older.")
+  await deployed(elsewhere, "1.9.5")
+  expect((await check()).out).toContain("v1.10.0 is version 1.10.0 (" + tenth.slice(0, 7) + "): newer.")
+  expect(ninth).not.toBe(tenth)
+
+  // Updating to a release brings the Mac build attached to it, so the new server offers desktop apps its own version.
+  const fake = join(root, "fake-docker"), bin = join(root, "bin"), assets = join(root, "assets")
+  await mkdir(join(fake, "images"), { recursive: true }); await mkdir(bin, { recursive: true }); await mkdir(join(assets, "v1.10.0"), { recursive: true })
+  await cp(join(repoRoot, "apps/api/test/fake-docker.sh"), join(bin, "docker")); await chmod(join(bin, "docker"), 0o755)
+  await writeFile(join(fake, "running"), "local\n"); await writeFile(join(fake, "health"), "healthy\n"); await writeFile(join(fake, "images", "local"), "")
+  await writeFile(join(assets, "v1.10.0", "Cereal-1.10.0-mac-arm64.dmg"), "the installer"); await writeFile(join(assets, "v1.10.0", "Cereal-1.10.0-mac-arm64.zip"), "the archive")
+  const updating = { ...env, PATH: `${bin}:${env.PATH}`, FAKE_DOCKER: fake, DOCKER_HOST: "unix:///nonexistent/docker.sock", CEREAL_UPDATER_POLL: "0.1", CEREAL_HEALTH_TRIES: "3", CEREAL_HEALTH_SLEEP: "0.1", CEREAL_UPDATER_DOWNLOADS: "file://" + assets }
+  const update = () => run(["bash", updater, "update", "--dir", deployment], { env: updating })
+  const first110 = await update()
+  expect(first110.out).toContain("Fetched the Mac build 1.10.0 from release v1.10.0. Desktop apps will be offered it.")
+  expect(first110.out).toContain("Result: deployed")
+  expect((await readFile(join(deployment, "DEPLOYED_COMMIT"), "utf8")).trim()).toBe(tenth)
+  expect(await readFile(join(deployment, "dist/release/Cereal-1.10.0-mac-arm64.dmg"), "utf8")).toBe("the installer")
+  expect(await readFile(join(deployment, "dist/release/Cereal-1.10.0-mac-arm64.zip"), "utf8")).toBe("the archive")
+  // A release with no Mac build attached still updates the server; the build published before stays, and nothing half-fetched is left.
+  const eleventh = await commit("1.11.0"); await tag("v1.11.0")
+  await mkdir(join(assets, "v1.11.0")); await writeFile(join(assets, "v1.11.0", "Cereal-1.11.0-mac-arm64.dmg"), "an installer without its archive")
+  const bare = await update()
+  expect(bare.out).toContain("Release v1.11.0 has no Mac build that can be downloaded. Desktop apps keep the build already published.")
+  expect(bare.out).toContain("Result: deployed")
+  expect((await readFile(join(deployment, "DEPLOYED_COMMIT"), "utf8")).trim()).toBe(eleventh)
+  expect((await readdir(join(deployment, "dist/release"))).sort()).toEqual(["Cereal-1.10.0-mac-arm64.dmg", "Cereal-1.10.0-mac-arm64.zip"])
+  // Nothing to do once it runs the latest release.
+  expect((await update()).out).toContain("Result: up-to-date")
+  expect(await readFile(join(fake, "calls"), "utf8")).not.toContain("unexpected")
+}, 120_000)
