@@ -225,7 +225,7 @@ fn initial(name: &str) -> String {
 }
 
 /// Someone's letter on their tint: a circle, or a rounded tile (`radius`).
-fn letter(name: &str, key: &str, size: f32, radius: Option<f32>) -> Div {
+pub(crate) fn letter(name: &str, key: &str, size: f32, radius: Option<f32>) -> Div {
     let (fill, ink) = tint(key);
     div()
         .size(px(size))

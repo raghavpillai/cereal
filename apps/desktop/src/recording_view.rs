@@ -165,6 +165,7 @@ impl Cereal {
                     .restore_elapsed(Duration::try_from_secs_f64(seconds).unwrap_or_default());
             }
             self.start_real_audio(id, epoch, cx);
+            crate::latency::mark("handler_done");
             return;
         }
         cx.spawn(async move |this, cx| {
@@ -230,6 +231,7 @@ impl Cereal {
         self.transcript_find_open = false;
         self.save_recording_preview(cx);
         cx.notify();
+        crate::latency::mark("handler_done");
     }
 
     fn start_real_audio(&mut self, id: u64, epoch: u64, cx: &mut Context<Self>) {
@@ -244,6 +246,7 @@ impl Cereal {
         // The microphone chosen in the transcript panel; the language goes
         // to the server with the stream.
         self.apply_capture_choices();
+        crate::latency::mark("choices_applied");
         // The capture is kept in the directory of the note's account.
         let result = crate::model::audio_directory_of(id)
             .and_then(|directory| crate::audio::Capture::start(id, &directory, options));

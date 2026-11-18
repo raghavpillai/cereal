@@ -452,6 +452,21 @@ fn take_answered(
     waiting.take().map(|(attempt, _)| (attempt, code))
 }
 
+/// A wait and what it is for: the words, with the chat's sheen passing over
+/// them. The mark at the top of the page is what moves.
+fn waiting_line(id: &'static str, words: &'static str, t: Theme, cx: &App) -> Div {
+    div()
+        .h(px(20.))
+        .flex()
+        .items_center()
+        .text_size(px(14.))
+        .child(crate::motion::shimmer_label(id, words, t, cx))
+}
+
+/// The height the sign-in form is centred as: the mark, the heading, the
+/// address, both fields and both ways in. Taller states run on below it.
+const FORM_HEIGHT: f32 = 460.;
+
 impl Render for AccountView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The account page follows the app's theme, like the sign-in screen.
@@ -467,13 +482,9 @@ impl Render for AccountView {
                 .border_color(t.border)
                 .child(input.clone())
         };
-        let mut form = div()
-            .w(px(400.))
-            .max_w_full()
-            .flex()
-            .flex_col()
-            .gap(px(14.))
-            .child(heading("Your account", t));
+        // Everything under the heading. It arrives as one, a beat after the
+        // heading, so no row of it is on the page before the rows around it.
+        let mut form = div().w_full().flex().flex_col().gap(px(14.));
         if let Some(session) = crate::accounts::default_session() {
             form = form
                 .child(
@@ -519,14 +530,10 @@ impl Render for AccountView {
         match self.discovery.clone() {
             Discovery::Idle => {}
             Discovery::Checking => {
-                form = form.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(crate::motion::spinner(t.muted))
-                        .child(small("Checking how this server signs in…", t)),
-                );
+                form = form.child(crate::motion::swap_in(
+                    "account-checking",
+                    waiting_line("account-checking-words", "Checking how this server signs in…", t, cx),
+                ));
             }
             Discovery::Failed(message) => {
                 form = form.child(small(message, t)).child(
@@ -542,14 +549,15 @@ impl Render for AccountView {
             Discovery::Ready(_) if self.waiting.is_some() => {
                 password_offered = false;
                 form = form
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(crate::motion::spinner(t.muted))
-                            .child(small("Waiting for you to sign in in your browser…", t)),
-                    )
+                    .child(crate::motion::swap_in(
+                        "account-waiting",
+                        waiting_line(
+                            "account-waiting-words",
+                            "Waiting for you to sign in in your browser…",
+                            t,
+                            cx,
+                        ),
+                    ))
                     .child(
                         pill("account-browser-cancel", "Cancel", "", t)
                             .on_click(cx.listener(|this, _, _, cx| this.cancel_browser(cx))),
@@ -579,7 +587,7 @@ impl Render for AccountView {
                     let google = label == "Continue with Google";
                     // The pill's own shape, with Google's mark in its four
                     // colours where a tinted icon would otherwise be.
-                    form = form.child(
+                    form = form.child(crate::motion::arrive("account-browser-in", 0,
                         pill(
                             "account-browser",
                             if self.busy && !methods.password {
@@ -596,7 +604,7 @@ impl Render for AccountView {
                             )
                         })
                         .on_click(cx.listener(|this, _, _, cx| this.continue_in_browser(cx))),
-                    );
+                    ));
                 }
             }
         }
@@ -621,7 +629,38 @@ impl Render for AccountView {
             .p(px(32.))
             .bg(t.bg)
             .text_color(t.text)
-            .child(form)
+            // The form is as tall as what the server offers, which changes
+            // while one looks at it (checking, then its fields; a browser
+            // sign-in; an error). What is centred is a box of one height with
+            // the form hung from its top, so the mark and the heading stay
+            // where they are and only what is below them comes and goes.
+            .child(
+                div().h(px(FORM_HEIGHT)).max_w_full().flex_shrink_0().child(
+                    div()
+                        .w(px(400.))
+                        .max_w_full()
+                        .flex()
+                        .flex_col()
+                        .gap(px(14.))
+                        // The mark leads the page, alive: it is the wait as
+                        // well as the name.
+                        .child(crate::motion::arrive(
+                            "account-mark",
+                            0,
+                            div().pb(px(6.)).child(crate::motion::cereal_loader(
+                                "account-loader",
+                                56.,
+                                crate::onboarding_scene::gold(),
+                            )),
+                        ))
+                        .child(crate::motion::arrive(
+                            "account-heading",
+                            1,
+                            heading("Your account", t),
+                        ))
+                        .child(crate::motion::arrive("account-form", 2, form)),
+                ),
+            )
     }
 }
 

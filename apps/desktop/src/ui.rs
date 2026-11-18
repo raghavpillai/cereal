@@ -157,6 +157,14 @@ pub fn pill(
     symbol: &str,
     t: Theme,
 ) -> Stateful<Div> {
+    pill_shell(id, t)
+        .when(!symbol.is_empty(), |s| s.child(icon(symbol, 16., t.muted)))
+        .child(label.into())
+}
+
+/// A pill's box and nothing else: its size, outline and type. Nothing is in
+/// it and nothing about it answers the pointer or the keyboard.
+pub fn pill_frame(id: impl Into<ElementId>, t: Theme) -> Stateful<Div> {
     div()
         .id(id)
         .flex()
@@ -166,12 +174,18 @@ pub fn pill(
         .h(px(28.))
         .px(px(12.))
         .rounded_full()
-        .reach()
         .border_1()
         .border_color(t.hairline)
         .text_size(px(13.))
         .text_color(t.text)
         .cursor_default()
+}
+
+/// A pill with nothing in it yet: [`pill_frame`] as a control, with its
+/// place in the tab order and its wash under the pointer.
+pub fn pill_shell(id: impl Into<ElementId>, t: Theme) -> Stateful<Div> {
+    pill_frame(id, t)
+        .reach()
         // Callers may turn a pill into a dark primary button. A neutral wash
         // reads on every fill, so that pairing survives both pointer states.
         .child(
@@ -179,8 +193,6 @@ pub fn pill(
                 .press(neutral_wash(0.12))
                 .round(),
         )
-        .when(!symbol.is_empty(), |s| s.child(icon(symbol, 16., t.muted)))
-        .child(label.into())
 }
 
 pub fn tool(id: impl Into<ElementId>, symbol: &str, t: Theme) -> Stateful<Div> {
@@ -919,6 +931,30 @@ pub fn keycaps(keys: &[&'static str], t: Theme) -> Div {
                 .text_color(t.muted)
                 .child(*key)
         }))
+}
+
+/// A shortcut at the end of a menu row, as macOS menus write it: plain
+/// muted glyphs, no keycaps (a keycap's fill is the row's own highlight, so
+/// it disappears under the pointer).
+pub fn shortcut_hint(keys: &'static str, t: Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .pr(px(2.))
+        .font_family("Inter")
+        .text_size(px(12.))
+        .line_height(px(16.))
+        .text_color(t.muted)
+        .child(keys)
+}
+
+/// The mark of an update that is known: a dot of the brand's bright gold,
+/// in both themes (the light theme's deeper accent reads brown this small).
+pub fn update_dot(size: f32) -> Div {
+    div()
+        .size(px(size))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(rgb(SEND_GOLD))
 }
 
 /// A 12 px medium-weight secondary caption: date groups, section labels.

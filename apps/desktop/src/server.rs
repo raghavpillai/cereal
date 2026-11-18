@@ -2435,9 +2435,13 @@ impl Cereal {
                         break Err("Server worker stopped. Local audio is preserved.".into());
                     }
                     Err(mpsc::TryRecvError::Empty) => {
-                        // A generation is followed frame by frame; anything
-                        // else is looked at ten times a second, as before.
-                        let wait = if progress.is_some() { 16 } else { 100 };
+                        // A generation is followed frame by frame, and so
+                        // is the answer to Start, Resume and Stop: what the
+                        // window offers next ("Generate notes" after a Stop)
+                        // waits for it, and a look every tenth of a second
+                        // added up to that much to every one of them.
+                        // Anything else is looked at ten times a second.
+                        let wait = if progress.is_some() || traced.is_some() { 16 } else { 100 };
                         cx.background_executor()
                             .timer(Duration::from_millis(wait))
                             .await;

@@ -482,13 +482,12 @@ pub(crate) fn model_menu_key(
     }
 }
 
+/// Whether a question asked on `screen` is answered in the panel floating
+/// over that page. Only Home: a question asked on a space's page (My notes,
+/// Favorites) opens the Chat page, as the reference does, with the back
+/// pill returning to the space.
 pub(crate) fn floating_workspace_chat(screen: crate::app::Screen) -> bool {
-    matches!(
-        screen,
-        crate::app::Screen::Home
-            | crate::app::Screen::MyNotes
-            | crate::app::Screen::Favorites
-    )
+    matches!(screen, crate::app::Screen::Home)
 }
 
 pub struct ActiveChat {
@@ -1697,15 +1696,14 @@ impl crate::app::Cereal {
             .find(|chat| chat.id == archive_id)
             .cloned()
         {
-            if chat.note_id != 0 {
-                if !self
+            // A chat whose note is gone from here (in Trash, or deleted)
+            // still opens, by itself, as a full chat.
+            let beside_note = chat.note_id != 0
+                && self
                     .workspace
                     .note(chat.note_id)
-                    .is_some_and(|note| !note.trashed)
-                {
-                    self.show_toast("This meeting is no longer available", cx);
-                    return;
-                }
+                    .is_some_and(|note| !note.trashed);
+            if beside_note {
                 self.open_note(chat.note_id, cx);
                 self.chat_maximized = expanded;
                 self.assistant_open = true;
@@ -1960,7 +1958,7 @@ impl crate::app::Cereal {
             if floating_workspace_chat(self.screen) {
                 self.assistant_open = true;
             } else {
-                self.screen = crate::app::Screen::Chat;
+                self.open_chat_page();
             }
         }
         if begun.index == 0 {
@@ -2333,11 +2331,14 @@ impl crate::app::Cereal {
                         div()
                             .max_w(px(widest_question))
                             .rounded(px(if compact { 10. } else { 12. }))
-                            .px(px(if compact { 11. } else { 14. }))
-                            .py(px(if compact { 6. } else { 9. }))
+                            // On a page of its own the bubble is 33 pt tall
+                            // around 15 pt text, 16 pt in at the sides, as
+                            // the reference measures.
+                            .px(px(if compact { 11. } else { 16. }))
+                            .py(px(6.))
                             .bg(t.hover)
-                            .text_size(px(if compact { 14. } else { 16. }))
-                            .line_height(px(if compact { 20. } else { 24. }))
+                            .text_size(px(if compact { 14. } else { 15. }))
+                            .line_height(px(if compact { 20. } else { 21. }))
                             .child(question.to_string()),
                     ),
             )
@@ -2415,12 +2416,16 @@ impl crate::app::Cereal {
                         .flex()
                         .items_center()
                         .gap(px(6.))
-                        .h(px(30.))
+                        // On a page of its own: a 31 pt pill in full ink,
+                        // 35 pt under the answer's last line (the reference).
+                        .h(px(if compact { 30. } else { 33. }))
+                        .when(!compact, |row| row.mt(px(10.)))
                         .child(
                             pill(("chat-say-more", index), "Say more", "", t)
-                                .h(px(28.))
-                                .text_size(px(13.))
-                                .text_color(t.secondary)
+                                .h(px(if compact { 28. } else { 31. }))
+                                .when(!compact, |pill| pill.px(px(14.)).border_color(t.border))
+                                .text_size(px(if compact { 13. } else { 14. }))
+                                .text_color(if compact { t.secondary } else { t.text })
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     let Some(prompt) = follow_up_prompt(index, &this.chat_messages)
                                     else {
@@ -2979,13 +2984,7 @@ impl crate::app::Cereal {
             .iter()
             .enumerate()
             .rev()
-            .filter(|(_, a)| {
-                a.note_id == 0
-                    || self
-                        .workspace
-                        .note(a.note_id)
-                        .is_some_and(|note| !note.trashed)
-            })
+            // A chat about a note in Trash is still listed: it opens by itself.
             .map(|(i, a)| (i, a.title.clone()))
             .collect();
         if archives.is_empty() {
@@ -3637,10 +3636,10 @@ fn linked_inline_with_citations(
 const ANSWER_GAP: f32 = 15.;
 const ITEM_GAP: f32 = 4.;
 
-/// The ink an answer's running text is set in: a shade softer than full ink,
-/// which is kept for what is bold.
+/// The ink an answer's running text is set in: full ink, as the reference
+/// sets it (its answers measure #292929, the same as its titles).
 pub(crate) fn answer_ink(theme: Theme) -> Hsla {
-    crate::motion::mix(theme.text, theme.muted, 0.22)
+    theme.text
 }
 
 fn markdown_with_inline(
@@ -3649,8 +3648,6 @@ fn markdown_with_inline(
     compact: bool,
     render_inline: impl Fn(&str, usize) -> AnyElement,
 ) -> Div {
-    // Body text is a shade softer than full ink; what is bold (a lead-in,
-    // a heading) is full ink, so it carries the eye down the answer.
     let mut result = div()
         .min_w_0()
         .flex()
@@ -3894,16 +3891,12 @@ mod tests {
         );
     }
     #[test]
-    fn collection_quick_chats_float_but_sidebar_chat_remains_a_full_page() {
+    fn only_homes_quick_chat_floats_and_every_other_page_opens_the_chat_page() {
         use crate::app::Screen;
+        assert!(super::floating_workspace_chat(Screen::Home));
         for screen in [
-            Screen::Home,
             Screen::MyNotes,
             Screen::Favorites,
-        ] {
-            assert!(super::floating_workspace_chat(screen));
-        }
-        for screen in [
             Screen::Chat,
             Screen::SearchResults,
             Screen::Settings,

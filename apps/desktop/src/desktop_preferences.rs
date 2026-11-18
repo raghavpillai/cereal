@@ -215,9 +215,6 @@ pub struct MeetingPreferences {
     /// The scheme of the reminder identifiers registered with macOS (see
     /// `menubar::REMINDER_SCHEME`). 0 before reminders carried their account.
     pub reminder_scheme: u32,
-    /// Apple's voice isolation on the microphone of every recording (see
-    /// `audio::CaptureOptions`); system audio is never processed.
-    pub voice_isolation: bool,
     /// The microphone recordings use, by Core Audio device UID. `None`
     /// follows the Mac's default input (see `audio::set_input_device`).
     pub microphone: Option<String>,
@@ -239,7 +236,6 @@ impl Default for MeetingPreferences {
             live_indicator: true,
             hidden_calendars: Vec::new(),
             reminder_scheme: 0,
-            voice_isolation: true,
             microphone: None,
             transcript_language: None,
         }
@@ -515,7 +511,6 @@ mod tests {
                 && defaults.recording_notifications
                 && defaults.account_notifications
         );
-        assert!(defaults.voice_isolation);
         let saved = MeetingPreferences {
             menu_bar_events: false,
             scheduled_notifications: true,
@@ -531,11 +526,10 @@ mod tests {
         assert!(!older.menu_bar_events);
         // A file from before the notices had settings has them on.
         assert!(older.notes_notifications && older.recording_notifications);
-        // A file saved before the voice isolation setting turns it on; one
-        // with it turned off keeps it off.
-        assert!(older.voice_isolation);
+        // A file from when voice isolation was a setting still loads; the
+        // setting is gone and isolation is always on.
         fs::write(&path, br#"{"voice_isolation":false}"#).unwrap();
-        assert!(!read_as::<MeetingPreferences>(&path).unwrap().voice_isolation);
+        assert!(read_as::<MeetingPreferences>(&path).is_ok());
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]

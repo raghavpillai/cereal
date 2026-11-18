@@ -11,7 +11,6 @@ enum SettingToggle {
     Notification(crate::notifications::Kind),
     LiveIndicator,
     LoginItem,
-    VoiceIsolation,
 }
 
 /// The pages of the dedicated settings mode. Only settings this app really
@@ -24,9 +23,20 @@ pub enum SettingsTab {
     Calendar,
     Notifications,
     About,
+    /// The workspace's own pages (`workspace_settings.rs`), listed under
+    /// "Workspace" while someone is signed in to a server.
+    WorkspaceGeneral,
+    Members,
 }
 
 impl SettingsTab {
+    /// The pages about the workspace rather than this Mac or this person.
+    pub const WORKSPACE: [SettingsTab; 2] = [SettingsTab::WorkspaceGeneral, SettingsTab::Members];
+
+    pub fn is_workspace(self) -> bool {
+        Self::WORKSPACE.contains(&self)
+    }
+
     pub const ALL: [SettingsTab; 5] = [
         SettingsTab::Preferences,
         SettingsTab::Profile,
@@ -43,6 +53,8 @@ impl SettingsTab {
             SettingsTab::Calendar => "Calendar",
             SettingsTab::Notifications => "Notifications",
             SettingsTab::About => "About",
+            SettingsTab::WorkspaceGeneral => "General",
+            SettingsTab::Members => "Members",
         }
     }
 
@@ -53,6 +65,8 @@ impl SettingsTab {
             SettingsTab::Calendar => "calendar",
             SettingsTab::Notifications => "bell",
             SettingsTab::About => "help",
+            SettingsTab::WorkspaceGeneral => "building",
+            SettingsTab::Members => "users",
         }
     }
 }
@@ -455,7 +469,8 @@ impl Cereal {
                 .flex()
                 .items_center()
                 .justify_between()
-                .text_size(px(13.))
+                // 12.5 pt, as the reference measures ("Recents" is 46.5 pt wide there).
+                .text_size(px(12.5))
                 .line_height(px(16.))
                 .text_color(t.muted)
                 .child("Recents")
@@ -483,7 +498,14 @@ impl Cereal {
                 ),
         );
         let now = chrono::Utc::now();
-        let mut rows = div().mt(px(11.)).px(px(6.));
+        // The reference's rows, measured: the highlight runs the column's
+        // whole width (the composer's), with the tile 6 pt in and the time
+        // 7 pt in; the tile's edge is a darker hairline than a card's; the
+        // title is 13 pt and the time 12 pt in a paler grey than the header.
+        let dark = self.workspace.settings.dark_mode;
+        let tile_edge = if dark { t.border } else { hsla(0., 0., 0., 0.18) };
+        let time_ink: Hsla = if dark { t.muted } else { rgb(0xa5a5a0).into() };
+        let mut rows = div().mt(px(11.));
         for chat in chats {
             let (archive_id, account) = (chat.id.clone(), chat.account.clone());
             let updated = crate::chat::thread_age(&chat.updated_at, now);
@@ -491,6 +513,8 @@ impl Cereal {
                 div()
                     .id(SharedString::from(format!("workspace-recent-{}", chat.id)))
                     .h(px(40.5))
+                    .pl(px(6.))
+                    .pr(px(7.))
                     .rounded(px(7.))
                     .flex()
                     .items_center()
@@ -502,7 +526,7 @@ impl Cereal {
                             .size(px(30.))
                             .rounded(px(8.))
                             .border_1()
-                            .border_color(t.border)
+                            .border_color(tile_edge)
                             .bg(t.card)
                             .flex()
                             .items_center()
@@ -517,16 +541,15 @@ impl Cereal {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(13.5))
+                            .text_size(px(13.))
                             .truncate()
                             .child(chat.display_title().to_owned()),
                     )
                     .when_some(updated, |row, label| {
                         row.child(
                             div()
-                                .pr(px(2.))
-                                .text_size(px(12.5))
-                                .text_color(t.muted)
+                                .text_size(px(12.))
+                                .text_color(time_ink)
                                 .child(label),
                         )
                     })
@@ -661,7 +684,16 @@ impl Cereal {
         };
         let avatar = crate::portrait::avatar(picture, 32., avatar);
         let mut tabs = div().pt(px(20.)).px(px(8.)).flex().flex_col().gap(px(1.));
-        for tab in SettingsTab::ALL {
+        // The workspace's pages follow under their own caption.
+        let workspace = self
+            .organization_offered()
+            .then_some(SettingsTab::WORKSPACE)
+            .into_iter()
+            .flatten();
+        for tab in SettingsTab::ALL.into_iter().chain(workspace) {
+            if tab == SettingsTab::WORKSPACE[0] {
+                tabs = tabs.child(self.organization_sidebar_label());
+            }
             tabs = tabs.child(
                 div()
                     .id(tab.label())
@@ -748,6 +780,10 @@ impl Cereal {
         let t = self.theme();
         let connected = crate::server::enabled();
         let tab = self.settings_tab;
+        // The table of members is as wide as the page, not a column of cards.
+        if tab == SettingsTab::Members {
+            return self.render_organization_members(window, cx);
+        }
         let meetings = crate::desktop_preferences::meeting();
         let mut column = screen_column(self.page_column_width(window)).child(page_title(tab.label(), t));
         match tab {
@@ -802,16 +838,7 @@ impl Cereal {
                                         }),
                                     ),
                                 ),
-                            )
-                            .child(self.setting_toggle(
-                                "setting-voice-isolation",
-                                "sparkles",
-                                "Voice isolation",
-                                "Filters background noise from your mic for clearer transcripts. Applies when recording next starts or resumes; meeting audio is never changed.",
-                                meetings.voice_isolation,
-                                SettingToggle::VoiceIsolation,
-                                cx,
-                            )),
+                            ),
                     );
             }
             SettingsTab::Profile => {
@@ -970,7 +997,7 @@ impl Cereal {
                     .child(section_label("This app", t))
                     .child(
                         settings_card(t)
-                            .child(self.render_version_row(cx))
+                            .child(self.render_version_row(window, cx))
                             .child(
                                 settings_row(
                                     "lock",
@@ -1013,6 +1040,9 @@ impl Cereal {
                             ),
                     )
                     .child(div().mt(px(20.)).px(px(8.)).child(small("Your notes stay yours.", t)));
+            }
+            SettingsTab::WorkspaceGeneral | SettingsTab::Members => {
+                column = self.organization_general(column, window, cx);
             }
         }
         // Switching tabs settles the new page in; the key is the tab alone.
@@ -1274,13 +1304,6 @@ impl Cereal {
                     }
                     SettingToggle::Notification(kind) => this.set_notification(kind, !enabled, cx),
                     SettingToggle::LoginItem => this.set_login_item(!enabled, cx),
-                    SettingToggle::VoiceIsolation => {
-                        this.set_meeting_preference(
-                            |preferences| preferences.voice_isolation = !enabled,
-                            cx,
-                        );
-                        crate::audio::prepare_voice_isolation();
-                    }
                 }
                 this.persist(cx);
             }))
@@ -2147,7 +2170,7 @@ fn page_title(text: impl Into<SharedString>, t: Theme) -> Div {
     heading(text, t).px(px(9.))
 }
 
-fn settings_card(t: Theme) -> Div {
+pub(crate) fn settings_card(t: Theme) -> Div {
     div()
         .w_full()
         .rounded(px(16.))
@@ -2157,7 +2180,7 @@ fn settings_card(t: Theme) -> Div {
         .overflow_hidden()
 }
 
-fn section_label(label: &'static str, t: Theme) -> Div {
+pub(crate) fn section_label(label: &'static str, t: Theme) -> Div {
     div()
         .mt(px(26.))
         .mb(px(6.))
@@ -2169,6 +2192,48 @@ fn section_label(label: &'static str, t: Theme) -> Div {
         .child(label)
 }
 
+/// A settings row's measures: its least height, its padding across and down,
+/// the gap between its parts, its icon tile with its corner and its icon.
+/// The tile is as far from the row's top and bottom as from its left edge.
+pub(crate) const ROW_HEIGHT: f32 = 64.;
+pub(crate) const ROW_PAD: (f32, f32) = (16., 12.);
+pub(crate) const ROW_GAP: f32 = 14.;
+pub(crate) const ROW_TILE: f32 = 32.;
+pub(crate) const ROW_TILE_RADIUS: f32 = 8.;
+pub(crate) const ROW_ICON: f32 = 16.;
+
+/// A settings row with nothing in it: its box.
+pub(crate) fn settings_row_shell() -> Div {
+    div()
+        .relative()
+        .min_h(px(ROW_HEIGHT))
+        .px(px(ROW_PAD.0))
+        .py(px(ROW_PAD.1))
+        .flex()
+        .items_center()
+        .gap(px(ROW_GAP))
+}
+
+/// A settings row's column of text, with nothing in it: a 13 px title goes
+/// over a 12 px description, 2 px apart.
+pub(crate) fn settings_row_text() -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        // Optically the text sits a pixel low against its tile.
+        .pt(px(2.))
+        .flex()
+        .flex_col()
+}
+
+/// A settings row's title.
+pub(crate) fn settings_row_title(t: Theme) -> Div {
+    div()
+        .text_size(px(13.))
+        .line_height(px(18.))
+        .text_color(t.text)
+}
+
 /// One setting: a 32 px icon tile, a 13 px title over a 12 px description,
 /// and whatever control the caller appends at the trailing edge. Rows sit on
 /// a 64 px pitch with no dividers between them.
@@ -2178,26 +2243,19 @@ pub(crate) fn settings_row(
     description: impl Into<SharedString>,
     t: Theme,
 ) -> Div {
-    div()
-        .relative()
-        .min_h(px(64.))
-        .px(px(16.))
-        .py(px(12.))
-        .flex()
-        .items_center()
-        .gap(px(14.))
+    settings_row_shell()
         .child(
             div()
-                .size(px(32.))
+                .size(px(ROW_TILE))
                 .flex_shrink_0()
-                .rounded(px(8.))
+                .rounded(px(ROW_TILE_RADIUS))
                 .bg(t.hover)
                 .flex()
                 .items_center()
                 .justify_center()
                 .child(icon(
                     symbol,
-                    16.,
+                    ROW_ICON,
                     if symbol == "cereal" {
                         t.accent
                     } else {
@@ -2206,28 +2264,10 @@ pub(crate) fn settings_row(
                 )),
         )
         .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                // Optically the text sits a pixel low against its tile.
-                .pt(px(2.))
-                .flex()
-                .flex_col()
+            settings_row_text()
                 .gap(px(2.))
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .line_height(px(18.))
-                        .text_color(t.text)
-                        .child(title.into()),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .line_height(px(16.))
-                        .text_color(t.muted)
-                        .child(description.into()),
-                ),
+                .child(settings_row_title(t).child(title.into()))
+                .child(small(description.into(), t)),
         )
 }
 

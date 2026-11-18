@@ -253,6 +253,13 @@ impl Cereal {
         cx.stop_propagation();
     }
 
+    /// Whether the sidebar is not beside the page (closed, or the window is
+    /// too narrow for it): the header then carries the sidebar button.
+    pub(crate) fn sidebar_away(&self) -> bool {
+        !self.sidebar_open
+            || (self.sidebar_narrow && self.sidebar_level <= 0. && self.current_note.is_none())
+    }
+
     /// The sidebar button and its shortcut: beside the page, the sidebar
     /// opens or closes; in a narrow window it slides over the page or away.
     pub fn toggle_sidebar(&mut self) {
@@ -527,7 +534,7 @@ impl Cereal {
     fn render_workspace_sidebar(&self, cx: &mut Context<Self>) -> Div {
         let t = self.theme();
         let glide = self.stage.glide("sidebar");
-        let (threads, thread_selected) = self.render_sidebar_chat_threads(cx);
+        let (threads, thread_selected, threads_level) = self.render_sidebar_chat_threads(cx);
         let spaces = div()
             .flex()
             .flex_col()
@@ -586,7 +593,41 @@ impl Cereal {
                     .child(self.nav_row("Shared with me", "people", Screen::Shared, true, cx))
                     // The conversation on the page carries the highlight in
                     // Chat's place while it is listed beneath.
-                    .child(self.nav_row("Chat", "speech-bubble", Screen::Chat, !thread_selected, cx))
+                    .child(
+                        self.nav_row("Chat", "speech-bubble", Screen::Chat, !thread_selected, cx)
+                            // Its conversations fold away under it: a chevron at
+                            // the row's end, pointing down while they are out and
+                            // turning to the right as they fold.
+                            .when_some(threads_level, |row, level| {
+                                row.child(
+                                    div()
+                                        .id("sidebar-chat-fold")
+                                        .size(px(20.))
+                                        .flex_shrink_0()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(6.))
+                                        .child(row_feedback(t, 6.))
+                                        .child(
+                                            icon("chevron-down", 12., t.muted.opacity(0.8))
+                                                .with_transformation(Transformation::rotate(
+                                                    radians(-std::f32::consts::FRAC_PI_2 * (1. - level)),
+                                                )),
+                                        )
+                                        // On the press, which the row never sees: the
+                                        // row's own click opens a new conversation.
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.chat_threads_collapsed = !this.chat_threads_collapsed;
+                                                cx.notify();
+                                            }),
+                                        ),
+                                )
+                            }),
+                    )
                     .children(threads),
             )
             .child(spaces)
@@ -609,7 +650,8 @@ impl Cereal {
                     .child(row_feedback(t, 0.))
                     // Where it is drawn, for scripted runs that press it.
                     .child(crate::onboarding_view::place("workspace-switcher"))
-                    .child(self.space_tile("prompt"))
+                    // The workspace: the organisation's mark, as on the team space.
+                    .child(self.space_tile("users"))
                     .child(
                         div()
                             .flex_1()
@@ -618,6 +660,8 @@ impl Cereal {
                             .font_weight(FontWeight::MEDIUM)
                             .child(self.workspace_name()),
                     )
+                    // An update is waiting: the menu has its row.
+                    .when(self.updates.known().is_some(), |row| row.child(self.updates.badge(6.)))
                     .child(icon("chevrons-switcher", 16., t.muted))
                     .reach().on_click(cx.listener(|this, _, _, cx| {
                         if this.menu == Some(Menu::Workspace) {
@@ -744,21 +788,29 @@ impl Cereal {
     ///
     /// Also says whether one of the rows is the conversation on the page:
     /// that row then has the sidebar's highlight, not Chat.
-    fn render_sidebar_chat_threads(&self, cx: &mut Context<Self>) -> (Option<Div>, bool) {
+    ///
+    /// The list folds away and back with the chevron at the end of Chat's
+    /// row (`chat_threads_collapsed`); the third value is how far open it
+    /// is, for that chevron, when there is a list to fold.
+    fn render_sidebar_chat_threads(&self, cx: &mut Context<Self>) -> (Option<Div>, bool, Option<f32>) {
         const SHOWN: usize = 8;
         let t = self.theme();
         let glide = self.stage.glide("sidebar");
         let mut selected = false;
         let open = self.screen == Screen::Chat && self.current_note.is_none();
         let threads = self.chat_threads();
+        let foldable = open && !threads.is_empty();
         let pose = self.stage.presence(
             ("sidebar-chat-threads", 0),
-            open && !threads.is_empty(),
-            crate::motion::SNAPPY,
+            foldable && !self.chat_threads_collapsed,
+            crate::motion::GOOEY,
         );
+        let level = foldable.then(|| pose.value.clamp(0., 1.));
         if !pose.visible {
-            return (None, false);
+            return (None, false, level);
         }
+        // Folded away, Chat has the highlight again.
+        let open = open && !self.chat_threads_collapsed;
         let listed = if self.chat_threads_expanded {
             threads.len()
         } else {
@@ -866,7 +918,7 @@ impl Cereal {
                 .overflow_hidden()
                 .opacity(pose.fade);
         }
-        (Some(rows), selected)
+        (Some(rows), selected, level)
     }
 
     fn nav_row(
@@ -962,6 +1014,17 @@ impl Cereal {
                     },
                 );
         }
+        // With the sidebar away the Chat page's bar carries what the sidebar
+        // did, as the reference's does: a History menu beside the back
+        // pill (the threads are no longer listed at the side), and New chat
+        // as a round icon button instead of a labelled pill.
+        let sidebar_away = self.sidebar_away();
+        let chat_bar = self.screen == Screen::Chat && sidebar_away;
+        // Inside a conversation the pill steps back to the Chat page itself.
+        // (A conversation opened from a space's page steps back to that space.)
+        let in_thread = self.screen == Screen::Chat
+            && !self.chat_messages.is_empty()
+            && matches!(self.back_target(), Screen::Home | Screen::Chat);
         div()
             .h(px(48.))
             .flex_shrink_0()
@@ -976,7 +1039,7 @@ impl Cereal {
                     .items_center()
                     .gap(px(5.))
                     .ml(px(80. * (1. - self.sidebar_level)))
-                    .when(!self.sidebar_open || (self.sidebar_narrow && self.sidebar_level <= 0. && self.current_note.is_none()), |s| {
+                    .when(sidebar_away, |s| {
                         s.child(tool_sized("open-sidebar", "sidebar-collapsed", WINDOW_TOOL, t).on_click(
                             cx.listener(|this, _, _, cx| {
                                 this.toggle_sidebar();
@@ -991,12 +1054,28 @@ impl Cereal {
                     })
                     // Every page but Home can step back to where it came from.
                     .when_some(back_label(self.screen, self.back_target()), |d, label| {
+                        let label = if in_thread { BackLabel::Icon("chat") } else { label };
                         d.child(back_pill("header-back", label, t).on_click(cx.listener(
-                            |this, _, window, cx| {
-                                this.go_back(cx);
+                            move |this, _, window, cx| {
+                                if in_thread {
+                                    this.clear_chat(cx);
+                                } else {
+                                    this.go_back(cx);
+                                }
                                 this.focus.focus(window);
                             },
                         )))
+                    })
+                    .when(chat_bar, |d| {
+                        d.child(
+                            tool_tip("chat-bar-history", "chat-history", "Recent chats", t)
+                                .w_auto()
+                                .px(px(8.))
+                                .gap(px(6.))
+                                .child("History")
+                                .child(icon("chevron-down", 12., t.muted))
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_chat_history(cx))),
+                        )
                     }),
             )
             .when(self.screen == Screen::Settings, |header| {
@@ -1025,6 +1104,16 @@ impl Cereal {
                     div().flex().items_center().gap(px(8.)).child(match action {
                         HeaderAction::NewNote => pill("new-note", "New note", "plus-small", t)
                             .on_click(cx.listener(|this, _, w, cx| this.new_note(w, cx))),
+                        HeaderAction::NewChat if chat_bar => {
+                            round_tool("new-chat", "edit", "New chat", t)
+                                .size(px(30.))
+                                .border_1()
+                                .border_color(t.hairline)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.clear_chat(cx);
+                                    this.ask.read(cx).focus_handle.focus(window);
+                                }))
+                        }
                         HeaderAction::NewChat => pill("new-chat", "New chat", "edit", t).on_click(
                             cx.listener(|this, _, window, cx| {
                                 this.clear_chat(cx);
@@ -1456,6 +1545,11 @@ impl Cereal {
                     .child(self.render_share_popover(pose, window, cx))
                     .into_any_element();
             }
+            // Settings › Members: a row's menu, the invite dialog and the
+            // question before someone is removed (`workspace_settings.rs`).
+            Menu::Member | Menu::Invite | Menu::RemoveMember => {
+                return self.render_organization_menu(menu, content, overlay, pose, window, cx);
+            }
             Menu::NoteDetails | Menu::CalendarEvent => {
                 let anchors = self.note_metadata_anchors(window);
                 // The event picker unfolds from the details card and folds
@@ -1547,7 +1641,8 @@ impl Cereal {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .child(icon("prompt", 15., t.text)),
+                                    // The person: the personal mark, as on "My notes".
+                                    .child(icon("lock-solid", 14., t.text)),
                             )
                             .child(
                                 div()
@@ -1579,6 +1674,18 @@ impl Cereal {
                 }));
                 content = content
                     .child(separator(t).my(px(4.)))
+                    // An update that is known: a row of the menu's own
+                    // kind, a dot of the brand's gold where its icon would
+                    // be and the version where a shortcut would be.
+                    .when_some(self.updates.menu_row(), |content, (label, version)| {
+                        content.child(
+                            self.menu_row_led(label, self.updates.badge(8.), cx, |this, _, cx| {
+                                this.open_update(cx)
+                            })
+                            .child(div().flex_1())
+                            .child(small(version.to_owned(), t).flex_shrink_0().pr(px(2.))),
+                        )
+                    })
                     .child(
                         self.menu_row("Keyboard shortcuts", "keyboard", cx, |this, _, cx| {
                             this.open_menu(Menu::Shortcuts);
@@ -1590,7 +1697,7 @@ impl Cereal {
                             this.navigate(Screen::Settings, cx)
                         })
                         .child(div().flex_1())
-                        .child(keycaps(&["⌘", ","], t)),
+                        .child(shortcut_hint("⌘,", t)),
                     );
                 overlay = overlay.child(div().absolute().bottom(px(43.)).left(px(8.)).child(pop(
                     content.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
@@ -1949,11 +2056,30 @@ impl Cereal {
         cx: &mut Context<Self>,
         action: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> Stateful<Div> {
-        self.menu_item(label, symbol, None, cx, action)
+        self.menu_item(label, symbol, None, None, cx, action)
+    }
+
+    /// A menu row whose 16 px icon slot holds `lead` instead of an icon.
+    pub(crate) fn menu_row_led(
+        &self,
+        label: impl Into<SharedString>,
+        lead: impl IntoElement,
+        cx: &mut Context<Self>,
+        action: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> Stateful<Div> {
+        let lead = div()
+            .size(px(16.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(lead)
+            .into_any_element();
+        self.menu_item(label, "", None, Some(lead), cx, action)
     }
 
     /// A destructive menu row: label and icon both carry the danger colour.
-    fn danger_row(
+    pub(crate) fn danger_row(
         &self,
         label: impl Into<SharedString>,
         symbol: &str,
@@ -1961,7 +2087,7 @@ impl Cereal {
         action: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> Stateful<Div> {
         let danger = self.theme().danger;
-        self.menu_item(label, symbol, Some(danger), cx, action)
+        self.menu_item(label, symbol, Some(danger), None, cx, action)
     }
 
     fn menu_item(
@@ -1969,6 +2095,7 @@ impl Cereal {
         label: impl Into<SharedString>,
         symbol: &str,
         tint: Option<Hsla>,
+        lead: Option<AnyElement>,
         cx: &mut Context<Self>,
         action: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> Stateful<Div> {
@@ -2006,6 +2133,7 @@ impl Cereal {
                     tint.unwrap_or(t.secondary),
                 ))
             })
+            .children(lead)
             .child(label)
             .on_click(cx.listener(move |this, _, window, cx| {
                 if this.menu.is_some() && this.menu == open_menu && this.menu_epoch == menu_epoch {
@@ -2679,6 +2807,21 @@ mod chrome_tests {
             "Templates",
         ] {
             assert!(!labels.contains(&missing));
+        }
+        // The workspace's own pages are a second group, listed only while
+        // someone is signed in to a server: its name and its people. Nothing
+        // the server has no endpoint for (Spaces, Analytics, Billing).
+        let workspace: Vec<_> = SettingsTab::WORKSPACE.iter().map(|tab| tab.label()).collect();
+        assert_eq!(workspace, ["General", "Members"]);
+        assert_eq!(
+            SettingsTab::WORKSPACE.map(|tab| tab.icon()),
+            ["building", "users"]
+        );
+        assert!(SettingsTab::WORKSPACE.iter().all(|tab| tab.is_workspace()));
+        assert!(SettingsTab::ALL.iter().all(|tab| !tab.is_workspace()));
+        for tab in SettingsTab::WORKSPACE {
+            assert!(!SettingsTab::ALL.contains(&tab));
+            assert!(!icons.contains(&tab.icon()));
         }
     }
 }

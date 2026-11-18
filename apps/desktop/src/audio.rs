@@ -15,7 +15,7 @@ pub struct CaptureOptions {
     pub microphone: bool,
     pub system: bool,
     /// Apple's voice isolation on the microphone (never on system audio).
-    /// Settings › Voice isolation; on unless turned off there.
+    /// Always on in the app: there is no setting for it.
     pub voice_isolation: bool,
 }
 impl Default for CaptureOptions {
@@ -41,10 +41,9 @@ impl CaptureOptions {
     }
     pub fn production() -> Self {
         let args: Vec<_> = std::env::args().collect();
-        // `--no-voice-isolation` records the raw microphone whatever the
-        // setting says (for comparing the two with `--audio-probe`).
-        let voice_isolation = crate::desktop_preferences::meeting().voice_isolation
-            && !args.iter().any(|a| a == "--no-voice-isolation");
+        // Always on; `--no-voice-isolation` records the raw microphone (for
+        // comparing the two with `--audio-probe`).
+        let voice_isolation = !args.iter().any(|a| a == "--no-voice-isolation");
         let channels = if args
             .iter()
             .any(|a| a == "--audio-mic-only" || a == "--mic-only")
@@ -223,8 +222,11 @@ impl Capture {
             .map_err(|e| e.to_string())?
             .as_nanos();
         let capture_id = format!("capture-{}-{stamp}", std::process::id());
+        // The directory is made by the capture's own thread (below), not here:
+        // this runs in the press of Record, on the window's thread, and making
+        // directories waits for the disk, longest right after a Stop, while
+        // the capture before this one is still being synced.
         let directory = capture_directory(root, note_id).join(&capture_id);
-        private_directory(&directory)?;
         let manifest = CaptureManifest {
             version: 1,
             capture_id,
@@ -249,9 +251,18 @@ impl Capture {
         let fixture = fixture::source();
         thread::Builder::new()
             .name("local-audio-capture".into())
-            .spawn(move || match fixture {
-                Some(source) => fixture::run(state, receiver, &source),
-                None => run_capture(state, receiver, options),
+            .spawn(move || {
+                // A directory that cannot be made ends the capture as any
+                // other failure to start does: finished, with the reason.
+                if let Err(error) = private_directory(&state.snapshot().directory) {
+                    finish(&state, Some(error));
+                    return;
+                }
+                crate::latency::mark("capture_directory");
+                match fixture {
+                    Some(source) => fixture::run(state, receiver, &source),
+                    None => run_capture(state, receiver, options),
+                }
             })
             .map_err(|e| {
                 running().remove(&monitor.snapshot().capture_id);
@@ -569,7 +580,9 @@ fn finish(state: &CaptureMonitor, error: Option<String>) {
         manifest.stats.phase = "stopped".into();
     }
     if let Err(error) = write_manifest(&manifest) {
-        manifest.error = Some(error);
+        // What stopped the capture says more than a manifest that could not
+        // be written after it (there may be no directory to write it in).
+        manifest.error.get_or_insert(error);
     }
     let capture_id = manifest.capture_id.clone();
     *state.0.lock().unwrap_or_else(|e| e.into_inner()) = manifest;
@@ -609,10 +622,10 @@ fn write_manifest(manifest: &CaptureManifest) -> Result<(), String> {
         .map_err(|e| format!("Cannot finalize audio manifest: {e}"))
 }
 
-/// Loads voice isolation in the background (when the setting is on), so a
+/// Loads voice isolation in the background, so a
 /// recording starting or resuming never waits for the model. Returns at once.
 pub fn prepare_voice_isolation() {
-    if preview_mode() || !crate::desktop_preferences::meeting().voice_isolation {
+    if preview_mode() {
         return;
     }
     #[cfg(target_os = "macos")]
@@ -1122,6 +1135,28 @@ mod tests {
         // Tests never open a device or ask macOS anything.
         assert!(LevelCheck::start(true, true).is_none());
         assert_eq!(permission_status(0), None);
+    }
+    #[test]
+    fn a_capture_whose_directory_cannot_be_made_finishes_with_the_reason() {
+        // The directory is made on the capture's thread, after `start` has
+        // returned: a failure there is the capture's, finished and settled.
+        let blocker = std::env::temp_dir().join(format!(
+            "meeting-capture-blocked-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(&blocker, b"a file where the recordings would go").unwrap();
+        let capture = Capture::start(7, &blocker, CaptureOptions::production()).unwrap();
+        let monitor = capture.monitor();
+        let began = Instant::now();
+        while !monitor.snapshot().completed() && began.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let snapshot = monitor.snapshot();
+        let _ = fs::remove_file(&blocker);
+        assert!(snapshot.completed() && snapshot.settled());
+        let error = snapshot.error_message().unwrap_or_default();
+        assert!(error.starts_with("Cannot create audio directory"), "{error}");
+        assert_eq!(snapshot.audio_seconds(), 0.);
     }
     #[test]
     fn live_manifest_checkpoint_preserves_actual_paths_and_counters_before_stop() {

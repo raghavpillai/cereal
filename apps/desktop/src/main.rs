@@ -50,9 +50,12 @@ mod transcript_panel;
 mod trash;
 mod ui;
 mod update;
+mod update_about;
+mod update_bowl;
 mod update_view;
 #[cfg(test)]
 mod validation;
+mod workspace_settings;
 use gpui::*;
 /// The latency bench was asked to keep its window off the screen
 /// (`CEREAL_LATENCY_BENCH_HIDDEN=1`).
@@ -245,6 +248,7 @@ fn main() {
         shared_view::install(handle, cx);
         // What an earlier update left behind is cleared away.
         update::tidy();
+        update_view::install(handle, cx);
         if let Some(seconds) = probe {
             assert!(
                 crate::environment::var_os("CEREAL_DATA_DIR").is_some(),

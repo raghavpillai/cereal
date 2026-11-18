@@ -381,6 +381,225 @@ fn e2e_steps() -> Vec<Step> {
     Vec::new()
 }
 
+/// The update's film, `f-update-…` (debug builds; record it slowed with
+/// `CEREAL_SLOW_MOTION` and speed the frames back up). `f-update-light` and
+/// `f-update-dark` play the whole of it over Home: a version is found, its
+/// "Update" is pressed, four seconds of a download that comes unevenly, a
+/// second and a half of verifying, ready, and "Restart to update" pressed.
+/// `f-update-fail-light` and `f-update-fail-dark` fail part of the way and
+/// press "Try again". Nothing is asked of any server and nothing is fetched
+/// or installed (`Updates::review("film")`); the presses are real presses
+/// on the notice's own buttons, wherever they are drawn.
+///
+/// `f-about-…` is the same update taken in Settings → About, where its
+/// version row is the stage and the notice is not shown: "Check for
+/// updates" is pressed, the check finds a version a second and a half
+/// later, and "Update to 0.2.0" and "Restart to update" are pressed as
+/// above, after which the row is put back as it was. `f-about-fail-…`
+/// fails part of the way and presses "Try again"; `f-about-uptodate-…`
+/// checks and finds nothing newer; `f-about-tight-…` is the whole of it
+/// beside the widest sidebar (record it at 900 px wide: the narrowest the
+/// row gets).
+#[cfg(debug_assertions)]
+fn update_film_steps() -> Vec<Step> {
+    #[derive(Clone, Copy)]
+    enum Mouse {
+        Over,
+        Down,
+        Up,
+        Away,
+    }
+    fn mouse(name: String, hold: u64, what: Mouse) -> Step {
+        press(name, hold, what, "update-action")
+    }
+    fn press(name: String, hold: u64, what: Mouse, action: &'static str) -> Step {
+        input(name.leak(), hold, move |window, cx| {
+            let Some(at) = crate::onboarding_view::placed(action).map(|bounds| bounds.center()) else {
+                eprintln!("tour: the update's action is not on screen");
+                return;
+            };
+            // Where the pointer waits between presses: up and to the left
+            // of the notice, over the page.
+            let aside = point(at.x - px(150.), at.y - px(96.));
+            let event = match what {
+                Mouse::Over => PlatformInput::MouseMove(MouseMoveEvent {
+                    position: at,
+                    ..Default::default()
+                }),
+                Mouse::Down => PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: at,
+                    click_count: 1,
+                    ..Default::default()
+                }),
+                Mouse::Up => PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: at,
+                    click_count: 1,
+                    ..Default::default()
+                }),
+                // Off the window, as far as the app is told: nothing is
+                // left lit under it.
+                Mouse::Away => PlatformInput::MouseMove(MouseMoveEvent {
+                    position: point(px(-40.), px(-40.)),
+                    ..Default::default()
+                }),
+            };
+            // The pointer that is drawn (the real one is never moved): its
+            // tip a little inside the button.
+            crate::update_view::film_pointer(Some(match what {
+                Mouse::Away => aside,
+                _ => point(at.x + px(6.), at.y + px(3.)),
+            }));
+            window.dispatch_event(event, cx);
+            window.refresh();
+        })
+    }
+    let mut steps = Vec::new();
+    for (theme, dark) in [("light", false), ("dark", true)] {
+        for (kind, state) in [("", "film"), ("-fail", "film-fail")] {
+            let name = |part: &str| format!("f-update{kind}-{theme}-{part}");
+            steps.push(step(name("home").leak(), 1400, move |view, cx| {
+                view.menu = None;
+                view.workspace.settings.force_dark(dark);
+                view.navigate(Screen::Home, cx);
+                view.updates.review("idle");
+            }));
+            // Found: the notice comes up, the mark drops in, its flakes hop.
+            steps.push(step(name("found").leak(), 1700, move |view, _| view.updates.review(state)));
+            // The pointer comes on beside the notice, then goes to "Update".
+            steps.push(mouse(name("pointer"), 700, Mouse::Away));
+            steps.push(mouse(name("over"), 620, Mouse::Over));
+            steps.push(mouse(name("down"), 130, Mouse::Down));
+            steps.push(mouse(name("up"), 380, Mouse::Up));
+            if state == "film" {
+                // The download, the verifying and the pop, then a moment
+                // at rest.
+                steps.push(mouse(name("away"), 4000 + 1500 + 1900 - 380, Mouse::Away));
+                steps.push(mouse(name("restart-over"), 700, Mouse::Over));
+                steps.push(mouse(name("restart-down"), 150, Mouse::Down));
+                steps.push(mouse(name("restart-up"), 300, Mouse::Up));
+                steps.push(mouse(name("restart-away"), 1700, Mouse::Away));
+            } else {
+                // It fails 2.3 seconds in; the bowl tips and runs out.
+                steps.push(mouse(name("away"), 2300 + 2600 - 380, Mouse::Away));
+                steps.push(mouse(name("again-over"), 700, Mouse::Over));
+                steps.push(mouse(name("again-down"), 150, Mouse::Down));
+                steps.push(mouse(name("again-up"), 300, Mouse::Up));
+                steps.push(mouse(name("again-away"), 2200, Mouse::Away));
+            }
+            steps.push(step(name("end").leak(), 500, |view, _| view.updates.review("idle")));
+        }
+    }
+    // The notice and the row are one stage (`f-about-handoff`): a notice
+    // that is up over Home leaves when Settings → About comes on, where its
+    // row is already the update's card, and is back when the page is left.
+    steps.push(step("f-about-handoff-home", 1400, |view, cx| {
+        view.menu = None;
+        view.workspace.settings.force_dark(false);
+        view.updates.review("idle");
+        view.navigate(Screen::Home, cx);
+    }));
+    steps.push(step("f-about-handoff-found", 2000, |view, _| view.updates.review("found")));
+    steps.push(step("f-about-handoff-about", 1500, |view, cx| {
+        view.open_settings(crate::screens::SettingsTab::About, cx)
+    }));
+    steps.push(step("f-about-handoff-back", 1500, |view, cx| view.navigate(Screen::Home, cx)));
+    steps.push(step("f-about-handoff-end", 500, |view, _| view.updates.review("idle")));
+    // Each state of the row held for a while (`f-about-rest`, with
+    // `CEREAL_FRAME_STATS`): what waits for the person is drawn once and
+    // then costs nothing.
+    steps.push(step("f-about-rest-home", 1400, |view, cx| {
+        view.menu = None;
+        view.workspace.settings.force_dark(false);
+        view.updates.review("idle");
+        view.open_settings(crate::screens::SettingsTab::About, cx);
+    }));
+    for (name, state, hold) in [
+        ("f-about-rest-idle", "idle", 3000),
+        ("f-about-rest-available", "available", 4000),
+        ("f-about-rest-ready", "ready", 4000),
+        ("f-about-rest-failed", "failed", 4000),
+        ("f-about-rest-uptodate", "uptodate", 7000),
+        ("f-about-rest-end", "idle", 500),
+    ] {
+        steps.push(step(name, hold, move |view, _| view.updates.review(state)));
+    }
+    // Settings → About.
+    let check = (crate::update_view::SCRIPTED_CHECK * 1000.) as u64;
+    for (theme, dark) in [("light", false), ("dark", true)] {
+        for (kind, state) in [
+            ("", "film-check"),
+            ("-fail", "film-check-fail"),
+            ("-uptodate", "film-uptodate"),
+            ("-tight", "film-check"),
+        ] {
+            let name = |part: &str| format!("f-about{kind}-{theme}-{part}");
+            let about = |name: String, hold: u64, what: Mouse| {
+                press(name, hold, what, crate::update_view::ABOUT_ACTION)
+            };
+            let tight = kind == "-tight";
+            steps.push(step(name("home").leak(), 1400, move |view, cx| {
+                view.menu = None;
+                view.workspace.settings.force_dark(dark);
+                if tight {
+                    view.sidebar_width = crate::desktop_preferences::SIDEBAR_MAX;
+                }
+                view.updates.review("idle");
+                view.open_settings(crate::screens::SettingsTab::About, cx);
+            }));
+            // The row at rest, with the film's answers ready.
+            steps.push(step(name("found").leak(), 900, move |view, _| view.updates.review(state)));
+            // "Check for updates".
+            steps.push(about(name("pointer"), 700, Mouse::Away));
+            steps.push(about(name("over"), 620, Mouse::Over));
+            steps.push(about(name("down"), 130, Mouse::Down));
+            steps.push(about(name("up"), 380, Mouse::Up));
+            if state == "film-uptodate" {
+                // The check, "You're up to date." for as long as it is
+                // said, and the row as it was.
+                let said = (crate::update_view::PLEASED_FOR * 1000.) as u64;
+                steps.push(about(name("away"), check + said + 1300 - 380, Mouse::Away));
+            } else {
+                // The check, then the row growing into the update's card
+                // and the mark dropping in.
+                steps.push(about(name("away"), check + 1900 - 380, Mouse::Away));
+                steps.push(about(name("update-over"), 620, Mouse::Over));
+                steps.push(about(name("update-down"), 130, Mouse::Down));
+                steps.push(about(name("update-up"), 380, Mouse::Up));
+                if state == "film-check" {
+                    steps.push(about(name("update-away"), 4000 + 1500 + 1900 - 380, Mouse::Away));
+                    steps.push(about(name("restart-over"), 700, Mouse::Over));
+                    steps.push(about(name("restart-down"), 150, Mouse::Down));
+                    steps.push(about(name("restart-up"), 300, Mouse::Up));
+                    steps.push(about(name("restart-away"), 1700, Mouse::Away));
+                } else {
+                    steps.push(about(name("update-away"), 2300 + 2600 - 380, Mouse::Away));
+                    steps.push(about(name("again-over"), 700, Mouse::Over));
+                    steps.push(about(name("again-down"), 150, Mouse::Down));
+                    steps.push(about(name("again-up"), 300, Mouse::Up));
+                    // The second try goes through.
+                    steps.push(about(name("again-away"), 4000 + 1500 + 1900 - 300, Mouse::Away));
+                }
+                // Put back: the row eases to a row again.
+                steps.push(step(name("rest").leak(), 1300, |view, _| view.updates.review("idle")));
+            }
+            steps.push(step(name("end").leak(), 500, move |view, _| {
+                view.updates.review("idle");
+                if tight {
+                    view.sidebar_width = crate::desktop_preferences::SIDEBAR_DEFAULT;
+                }
+            }));
+        }
+    }
+    steps
+}
+
+#[cfg(not(debug_assertions))]
+fn update_film_steps() -> Vec<Step> {
+    Vec::new()
+}
+
 /// States to sit in while an outside tool samples the process (`i-…`): each
 /// holds still for fourteen seconds and then reports how often it rendered.
 fn idle_steps() -> Vec<Step> {
@@ -1444,6 +1663,80 @@ fn thinking_steps() -> Vec<Step> {
     Vec::new()
 }
 
+/// Settings › Workspace against a real workspace, `a-org-…` (debug builds;
+/// run with `CEREAL_AUDIT=1 CEREAL_TOUR=a-org`, signed in through
+/// `CEREAL_SERVER_URL` and `CEREAL_SERVER_TOKEN` as the owner of a throwaway
+/// server on this Mac whose workspace has an admin and then a member, in the
+/// order they joined). It makes the member an admin, removes them, invites
+/// them back beside an address the server has no account for, cancels the
+/// invitation and renames the workspace, all through the page's own menus
+/// and dialogs. `Cereal::review_organization_live` refuses any other server.
+fn org_e2e_steps() -> Vec<Step> {
+    // The "…" of the row whose middle is `y` points down the window.
+    fn more(y: f32) -> impl Fn(&mut Window, &mut App) + 'static {
+        move |window, cx| {
+            let x = f32::from(window.viewport_size().width) - 44.;
+            click(window, cx, x, y);
+        }
+    }
+    fn live(act: &'static str) -> impl Fn(&mut Cereal, &mut Window, &mut Context<Cereal>) + 'static {
+        move |view, window, cx| view.review_organization_live(act, window, cx)
+    }
+    // The third member's row, and the first row under the first band.
+    const THIRD: f32 = 321.;
+    const FIRST: f32 = 233.;
+    vec![
+        windowed("a-org-open-quiet", 3000, live("members")),
+        step("a-org-members", 300, |_, _| {}),
+        input("a-org-role-menu-quiet", 900, more(THIRD)),
+        input("a-org-role-quiet", 3000, |window, cx| {
+            press_key(window, cx, "down");
+            press_key(window, cx, "enter");
+        }),
+        step("a-org-role", 300, |_, _| {}),
+        input("a-org-remove-menu-quiet", 900, more(THIRD)),
+        input("a-org-remove-ask-quiet", 900, |window, cx| {
+            press_key(window, cx, "down");
+            press_key(window, cx, "down");
+            press_key(window, cx, "enter");
+        }),
+        step("a-org-remove-ask", 300, |_, _| {}),
+        windowed("a-org-remove-quiet", 3000, live("confirm")),
+        step("a-org-removed", 300, |_, _| {}),
+        windowed(
+            "a-org-invite-quiet",
+            4000,
+            live("invite:mia@acme.example, stranger@nowhere.example"),
+        ),
+        step("a-org-invite", 300, |_, _| {}),
+        windowed("a-org-invite-close-quiet", 900, live("close")),
+        step("a-org-invited", 300, |_, _| {}),
+        input("a-org-cancel-menu-quiet", 900, more(FIRST)),
+        input("a-org-cancel-quiet", 3000, |window, cx| {
+            press_key(window, cx, "down");
+            press_key(window, cx, "enter");
+        }),
+        step("a-org-cancelled", 300, |_, _| {}),
+        windowed("a-org-general-quiet", 2000, live("general")),
+        windowed("a-org-rename-quiet", 3000, live("rename:Acme HQ")),
+        step("a-org-renamed", 300, |_, _| {}),
+    ]
+}
+
+/// Press the "…" of a row of Settings › Members: at `CEREAL_TOUR_ORG_MORE`
+/// (`x,y` in window points), else where the third member's is in a window
+/// of the default size.
+fn org_more(window: &mut Window, cx: &mut App) {
+    let (x, y) = std::env::var("CEREAL_TOUR_ORG_MORE")
+        .ok()
+        .and_then(|at| {
+            let (x, y) = at.split_once(',')?;
+            Some((x.parse().ok()?, y.parse().ok()?))
+        })
+        .unwrap_or_else(|| (f32::from(window.viewport_size().width) - 44., 400.));
+    click(window, cx, x, y);
+}
+
 /// Surfaces reached from somewhere other than their own button, `p-fix-…`:
 /// the recent chats from Home's focused composer, Trash from another page
 /// and from the command palette, and the line generated notes end with.
@@ -1493,6 +1786,63 @@ fn surface_steps() -> Vec<Step> {
             view.workspace.settings.force_dark(false)
         }),
         step("p-appearance-end", 300, |view, _| view.menu = None),
+        // An update found by the quiet check at launch
+        // (`CEREAL_TOUR=p-update`): its notice over Home, then, after
+        // "Later", the account menu's row and the dot on its button, and
+        // Settings › About, in both themes.
+        step("p-update-prompt-light", 900, |view, cx| {
+            view.menu = None;
+            view.workspace.settings.force_dark(false);
+            view.navigate(Screen::Home, cx);
+            view.updates.review("found");
+        }),
+        step("p-update-menu-light", 900, |view, _| {
+            view.updates.review("later");
+            view.menu = Some(Menu::Workspace);
+        }),
+        step("p-update-about-light", 900, |view, cx| {
+            view.menu = None;
+            view.open_settings(crate::screens::SettingsTab::About, cx);
+        }),
+        step("p-update-prompt-dark", 900, |view, cx| {
+            view.workspace.settings.force_dark(true);
+            view.navigate(Screen::Home, cx);
+            view.updates.review("found");
+        }),
+        step("p-update-menu-dark", 900, |view, _| {
+            view.updates.review("later");
+            view.menu = Some(Menu::Workspace);
+        }),
+        step("p-update-about-dark", 900, |view, cx| {
+            view.menu = None;
+            view.open_settings(crate::screens::SettingsTab::About, cx);
+        }),
+        // The same two places while the update downloads: the menu's dot
+        // and the button in Settings fill with it.
+        step("p-update-busy-menu-light", 900, |view, cx| {
+            view.workspace.settings.force_dark(false);
+            view.navigate(Screen::Home, cx);
+            view.updates.review("downloading");
+            view.menu = Some(Menu::Workspace);
+        }),
+        step("p-update-busy-about-light", 900, |view, cx| {
+            view.menu = None;
+            view.open_settings(crate::screens::SettingsTab::About, cx);
+        }),
+        step("p-update-busy-menu-dark", 900, |view, cx| {
+            view.workspace.settings.force_dark(true);
+            view.navigate(Screen::Home, cx);
+            view.menu = Some(Menu::Workspace);
+        }),
+        step("p-update-busy-about-dark", 900, |view, cx| {
+            view.menu = None;
+            view.open_settings(crate::screens::SettingsTab::About, cx);
+        }),
+        step("p-update-end", 300, |view, cx| {
+            view.updates.review("idle");
+            view.workspace.settings.force_dark(false);
+            view.navigate(Screen::Home, cx);
+        }),
         // From a page without the sidebar's footer: Home, with the popover.
         step("p-fix-trash-from-settings", 1200, |view, cx| view.open_trash(cx)),
         // A link to a note that is in the Trash, followed from the note
@@ -1541,6 +1891,78 @@ fn surface_steps() -> Vec<Step> {
         }),
         step("p-fix-team-end", 300, |view, cx| {
             view.team.page = None;
+            view.navigate(Screen::Home, cx);
+        }),
+        // Settings › Workspace (`CEREAL_TOUR=p-fix-org`): Members as its
+        // owner sees it, a row's menu, the question before removing someone,
+        // the invite dialog, a search, then as an admin and a member see it,
+        // loading and failing, and General; then the same in the dark theme.
+        // The people are made up (`workspace_settings::tour_details`).
+        // `CEREAL_TOUR_ORG_MORE=x,y` is where the "…" of a row is pressed.
+        step("p-fix-org-owner", 1200, |view, cx| {
+            view.menu = None;
+            view.workspace.settings.force_dark(false);
+            view.review_organization("owner", cx);
+            view.open_settings(crate::screens::SettingsTab::Members, cx);
+        }),
+        input("p-fix-org-menu", 1200, org_more),
+        step("p-fix-org-remove", 1200, |view, _| {
+            view.org.removing = Some("00000000-0000-4000-8000-000000000103".into());
+            view.menu = Some(Menu::RemoveMember);
+        }),
+        windowed("p-fix-org-invite", 1200, |view, window, cx| {
+            view.menu = None;
+            view.open_invite(window, cx);
+        }),
+        step("p-fix-org-invite-error", 1200, |view, cx| {
+            view.org.invite_role = meeting_notes_api_types::InviteOrganizationMemberInputRole::Admin;
+            view.org.invite.update(cx, |input, cx| input.set_content("lee@acme.example, new@elsewhere.example", cx));
+            view.org.invite_problems = vec![
+                "new@elsewhere.example: An instance administrator must provision this account before it can be invited"
+                    .into(),
+            ];
+        }),
+        windowed("p-fix-org-search", 1200, |view, window, cx| {
+            view.menu = None;
+            view.org.invite.update(cx, |input, cx| input.set_content("", cx));
+            view.org.search.update(cx, |input, cx| input.set_content("sa", cx));
+            view.org.search.read(cx).focus_handle.focus(window);
+        }),
+        step("p-fix-org-search-empty", 1200, |view, cx| {
+            view.org.search.update(cx, |input, cx| input.set_content("zebra", cx));
+        }),
+        windowed("p-fix-org-admin", 1200, |view, window, cx| {
+            view.focus.focus(window);
+            view.review_organization("admin", cx);
+        }),
+        step("p-fix-org-member", 1200, |view, cx| view.review_organization("member", cx)),
+        step("p-fix-org-loading", 1200, |view, cx| view.review_organization("loading", cx)),
+        step("p-fix-org-failed", 1200, |view, cx| view.review_organization("failed", cx)),
+        step("p-fix-org-general", 1200, |view, cx| {
+            view.review_organization("owner", cx);
+            view.open_settings(crate::screens::SettingsTab::WorkspaceGeneral, cx);
+        }),
+        step("p-fix-org-general-member", 1200, |view, cx| view.review_organization("member", cx)),
+        step("p-fix-org-dark-general", 1200, |view, cx| {
+            view.workspace.settings.force_dark(true);
+            view.review_organization("owner", cx);
+        }),
+        step("p-fix-org-dark-owner", 1200, |view, cx| {
+            view.open_settings(crate::screens::SettingsTab::Members, cx);
+        }),
+        input("p-fix-org-dark-menu", 1200, org_more),
+        windowed("p-fix-org-dark-invite", 1200, |view, window, cx| {
+            view.menu = None;
+            view.open_invite(window, cx);
+        }),
+        step("p-fix-org-dark-member", 1200, |view, cx| {
+            view.menu = None;
+            view.review_organization("member", cx);
+        }),
+        step("p-fix-org-end", 300, |view, cx| {
+            view.menu = None;
+            view.workspace.settings.force_dark(false);
+            view.review_organization("off", cx);
             view.navigate(Screen::Home, cx);
         }),
         // The Share popover (`CEREAL_TOUR=p-fix-share`), from made-up people:
@@ -2055,6 +2477,9 @@ fn sidebar_steps() -> Vec<Step> {
         }),
         step("p-sidebar-chat", 900, |view, cx| view.navigate(Screen::Chat, cx)),
         step("p-sidebar-thread", 900, open_thread),
+        // The conversations folded away under Chat, and out again.
+        step("p-sidebar-fold", 900, |view, _| view.chat_threads_collapsed = true),
+        step("p-sidebar-unfold", 900, |view, _| view.chat_threads_collapsed = false),
         input("p-sidebar-more-hover", 900, on_more),
         input("p-sidebar-edge", 900, on_edge),
         // The edge taken hold of and drawn 68 pt to the right: it follows
@@ -3687,8 +4112,10 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
             .chain(ask_bar_steps())
             .chain(sidebar_steps())
             .chain(idle_steps())
+            .chain(update_film_steps())
             .chain(notes_generation_steps())
-            .chain(e2e_steps());
+            .chain(e2e_steps())
+            .chain(org_e2e_steps());
         // `CEREAL_TOUR_SIZE=760x580` resizes the window first, and
         // `CEREAL_TOUR_SHOTS=<directory>` holds each still (`p-…`, `a-…`)
         // until `<directory>/<name>.png` exists: an outside tool takes the
@@ -5039,7 +5466,9 @@ pub fn welcome(handle: WindowHandle<Cereal>, name: String, cx: &mut App) {
                     pause(cx, 6000).await;
                     say(&format!(
                         "check for updates: {:?}",
-                        handle.update(cx, |view, _, _| view.updates.row().0.to_string()).ok()
+                        handle
+                            .update(cx, |view, _, _| format!("{} ({})", view.updates.row().0, view.updates.status()))
+                            .ok()
                     ));
                     // The account screen says the same about the address.
                     let _ = handle.update(cx, |view, _, cx| view.navigate(Screen::Account, cx));

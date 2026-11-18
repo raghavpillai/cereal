@@ -136,6 +136,13 @@ fn time_scale() -> f32 {
     SCALE.with(|scale| *scale)
 }
 
+/// Seconds of motion in `elapsed` of the clock: the slow-motion review
+/// factor taken back out, for motion that is timed by hand (a pose computed
+/// from when it began) rather than by the length of an animation.
+pub fn paced(elapsed: Duration) -> f32 {
+    elapsed.as_secs_f32() / time_scale()
+}
+
 /// A motion duration with the slow-motion review factor applied.
 pub fn slow(duration: Duration) -> Duration {
     let scale = time_scale();
@@ -2712,6 +2719,187 @@ pub fn thinking_mark_pose(progress: f32) -> (f32, f32, f32) {
     (fluid_turn(progress), 1. - 0.12 * breath, 1. - 0.35 * breath)
 }
 
+/// One loop of the Cereal loader, in the mark's own 24-unit box.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LoaderPose {
+    /// The bowl's turn (1 is a whole turn; it overshoots a little past it)
+    /// and its scale.
+    pub bowl: (f32, f32),
+    /// Each flake's centre and scale.
+    pub flakes: [((f32, f32), f32); 2],
+}
+
+/// The loader's loop. The bowl takes this share of it to spin; the flakes
+/// follow, then hop one after the other while the bowl rests.
+pub(crate) const LOADER_LOOP: Duration = Duration::from_millis(2200);
+const LOADER_SPIN: f32 = 0.42;
+const LOADER_LAG: f32 = 0.055;
+/// The spin's spring: loose, so the bowl swings past and settles back.
+const LOADER_SPRING: Spring = Spring {
+    millis: 0,
+    damping: 0.56,
+};
+/// The middle of the bowl's ring, and the flakes' centres and radii at rest.
+/// The ring's middle is not the middle of the path's bounds: the bite takes
+/// the ring's right-hand edge, so the bounds stop short of it there.
+pub(crate) const LOADER_BOWL: (f32, f32) = (10.9925, 12.2575);
+pub(crate) const LOADER_FLAKES: [((f32, f32), f32); 2] = [((21.835, 2.149), 0.7), ((22.147, 6.575), 1.152)];
+/// The ring's outer radius, and the least dark kept between it and a flake.
+pub(crate) const LOADER_RING: f32 = 10.2925;
+const LOADER_GAP: f32 = 0.55;
+
+/// 0 → 1 → 0 across `t` in 0..=1, flat at both ends; 0 outside it.
+pub(crate) fn bump(t: f32) -> f32 {
+    if !(0. ..=1.).contains(&t) {
+        return 0.;
+    }
+    (std::f32::consts::PI * t).sin().powi(2)
+}
+
+/// Where the Cereal loader is `progress` of the way through its loop. The
+/// bowl spins once on a loose spring, squeezing as it goes; the flakes are
+/// flung round after it, each a beat later and pulled in toward the bowl,
+/// then hop outward in turn. It starts and ends at rest: no seam.
+pub fn cereal_loader_pose(progress: f32) -> LoaderPose {
+    let p = progress.clamp(0., 1.);
+    let spin = p / LOADER_SPIN;
+    let bowl = (LOADER_SPRING.at(spin), 1. - 0.08 * bump(spin));
+    let flakes = std::array::from_fn(|index| {
+        let ((x, y), radius) = LOADER_FLAKES[index];
+        let after = (p - LOADER_LAG * (index + 1) as f32) / LOADER_SPIN;
+        let hop = bump((p - 0.66 - 0.11 * index as f32) / 0.2);
+        let turn = LOADER_SPRING.at(after);
+        let (sin, cos) = (std::f32::consts::TAU * turn).sin_cos();
+        // Pulled in most on the far side of the bowl, wherever in time that is.
+        let pull = bump(turn.clamp(0., 1.));
+        let grow = 1. - 0.3 * pull + 0.35 * hop;
+        // But never onto the bowl: a flake the colour of the bowl that
+        // touches it reads as a lump on its rim, and one that goes behind it
+        // is gone for a few frames.
+        let (dx, dy) = (x - LOADER_BOWL.0, y - LOADER_BOWL.1);
+        let clear = (LOADER_RING + LOADER_GAP + radius * grow) / dx.hypot(dy);
+        let reach = (1. - 0.3 * pull).max(clear.min(1.)) + 0.13 * hop;
+        let (dx, dy) = (dx * reach, dy * reach);
+        (
+            (
+                LOADER_BOWL.0 + dx * cos - dy * sin,
+                LOADER_BOWL.1 + dx * sin + dy * cos,
+            ),
+            grow,
+        )
+    });
+    LoaderPose { bowl, flakes }
+}
+
+/// How far to shift the bowl's svg, in px, so that it turns and scales about
+/// the middle of its own ring. GPUI turns and scales an svg about the middle
+/// of its box and then shifts it (`p' = c + shift + R·S·(p − c)`), and the
+/// ring's middle is beside the box's, so without this the bowl would swing
+/// round the box's middle instead of spinning in place.
+fn loader_bowl_shift(turn: f32, scale: f32, unit: f32) -> (f32, f32) {
+    let (sin, cos) = (std::f32::consts::TAU * turn).sin_cos();
+    let (dx, dy) = ((LOADER_BOWL.0 - 12.) * unit, (LOADER_BOWL.1 - 12.) * unit);
+    (
+        dx - scale * (dx * cos - dy * sin),
+        dy - scale * (dx * sin + dy * cos),
+    )
+}
+
+/// The Cereal mark as a loader, `size` px square: the bowl spins and the
+/// flakes chase it and hop (see [`cereal_loader_pose`]). Reduced motion
+/// shows the still mark.
+pub fn cereal_loader(id: impl Into<ElementId>, size: f32, color: Hsla) -> AnyElement {
+    if reduce_motion() {
+        return icon("cereal", size, color).into_any_element();
+    }
+    let unit = size / 24.;
+    div()
+        .size(px(size))
+        .flex_shrink_0()
+        .relative()
+        .with_animation(
+            id,
+            Animation::new(slow(LOADER_LOOP)).repeat(),
+            move |frame, progress| {
+                let pose = cereal_loader_pose(progress);
+                let (turn, scale) = pose.bowl;
+                let shift = loader_bowl_shift(turn, scale, unit);
+                // The flakes are painted, not laid out: layout snaps to whole
+                // pixels, which at this size shows as stepping and as dots
+                // that change shape from frame to frame.
+                let flakes = canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        let (left, top) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+                        for (index, ((x, y), grow)) in pose.flakes.into_iter().enumerate() {
+                            let radius = LOADER_FLAKES[index].1 * grow * unit;
+                            window.paint_quad(
+                                fill(
+                                    Bounds::new(
+                                        point(px(left + x * unit - radius), px(top + y * unit - radius)),
+                                        gpui::size(px(2. * radius), px(2. * radius)),
+                                    ),
+                                    color,
+                                )
+                                .corner_radii(px(radius)),
+                            );
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0();
+                frame
+                    .child(
+                        svg()
+                            .path("icons/cereal-bowl.svg")
+                            .size(px(size))
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .text_color(color)
+                            .with_transformation(
+                                Transformation::scale(size2(scale, scale))
+                                    .with_translation(point(px(shift.0), px(shift.1)))
+                                    .with_rotation(radians(std::f32::consts::TAU * turn)),
+                            ),
+                    )
+                    .child(flakes)
+            },
+        )
+        .into_any_element()
+}
+
+/// How far through its arrival something is, as its opacity and how far
+/// below its place it is drawn. Reduced motion is the whole of
+/// [`REDUCED_FADE`], in place.
+fn arrive_pose(progress: f32, reduced: bool) -> (f32, f32) {
+    if reduced {
+        return (fade_curve(progress), 0.);
+    }
+    let value = GOOEY.at(progress);
+    (fade_for(value), 12. * (1. - value))
+}
+
+/// Something arriving with a little weight: it fades in while it drops into
+/// place on [`GOOEY`], `index` beats after the first of its group.
+pub fn arrive<E: Styled + IntoElement + 'static>(
+    id: impl Into<ElementId>,
+    index: usize,
+    element: E,
+) -> AnyElement {
+    let reduced = reduce_motion();
+    let wait = if reduced { 0. } else { 0.045 * index as f32 };
+    // In unscaled seconds; `slow` stretches the whole of it.
+    let length = if reduced { REDUCED_FADE } else { Duration::from_millis(GOOEY.millis) }.as_secs_f32();
+    let total = slow(Duration::from_secs_f32(wait + length));
+    Morph::new(element)
+        .with_animation(id, Animation::new(total), move |morph, t| {
+            let (fade, rise) = arrive_pose(((t * (wait + length) - wait) / length).clamp(0., 1.), reduced);
+            morph.opacity(fade).offset(0., rise)
+        })
+        .into_any_element()
+}
+
 /// How much of the highlight a glyph centred at `glyph_center` (0..=1 along
 /// the label) carries when the band is `progress` of the way through a sweep:
 /// 1 under the middle of the band, falling smoothly to 0 at its edges. The
@@ -3816,6 +4004,150 @@ mod tests {
         bar.retarget(3., now + BAR_GLIDE / 2, BAR_GLIDE, Curve::Standard);
         assert!((bar.value(now + BAR_GLIDE / 2) - halfway).abs() < 1e-4);
         assert!(bar.settled(now + BAR_GLIDE * 2));
+    }
+
+    #[test]
+    fn cereal_loader_starts_and_ends_at_rest_and_stays_in_its_box() {
+        for end in [0., 1.] {
+            let pose = cereal_loader_pose(end);
+            assert!((pose.bowl.0 - end).abs() < 1e-5 && (pose.bowl.1 - 1.).abs() < 1e-5);
+            for (index, ((x, y), grow)) in pose.flakes.into_iter().enumerate() {
+                let ((rx, ry), _) = LOADER_FLAKES[index];
+                assert!((x - rx).abs() < 1e-3 && (y - ry).abs() < 1e-3 && (grow - 1.).abs() < 1e-5);
+            }
+        }
+        let mut swung_past = false;
+        for tick in 0..=1000 {
+            let pose = cereal_loader_pose(tick as f32 / 1000.);
+            swung_past |= pose.bowl.0 > 1.01;
+            for (index, ((x, y), grow)) in pose.flakes.into_iter().enumerate() {
+                let radius = LOADER_FLAKES[index].1 * grow;
+                assert!(x - radius > -4. && x + radius < 28., "x {x}");
+                assert!(y - radius > -4. && y + radius < 28., "y {y}");
+            }
+        }
+        assert!(swung_past);
+    }
+
+    #[test]
+    fn arriving_starts_unseen_below_and_ends_in_place_and_reduced_only_fades() {
+        assert_eq!(arrive_pose(0., false), (0., 12.));
+        assert_eq!(arrive_pose(1., false), (1., 0.));
+        let mut last = 0.;
+        for tick in 0..=100 {
+            let (fade, rise) = arrive_pose(tick as f32 / 100., false);
+            assert!(fade >= last && (0. ..=1.).contains(&fade));
+            // It settles from below and swings past by no more than a pixel or so.
+            assert!(rise <= 12. && rise > -1.5, "{rise}");
+            last = fade;
+        }
+        // Reduced motion: nothing moves, and the fade lasts the whole of its
+        // time rather than being over in the first third of it.
+        assert_eq!(arrive_pose(0., true), (0., 0.));
+        assert_eq!(arrive_pose(1., true), (1., 0.));
+        let (half, rise) = arrive_pose(0.3, true);
+        assert!(half < 0.6 && rise == 0., "{half}");
+    }
+
+    /// Every `x,y` pair of an icon's path.
+    fn path_points(svg: &str) -> Vec<(f32, f32)> {
+        let path = svg.split(" d=\"").nth(1).unwrap().split('"').next().unwrap();
+        path.split(|c: char| c == ' ' || c == 'M' || c == 'Z')
+            .filter_map(|pair| {
+                let (x, y) = pair.split_once(',')?;
+                Some((x.parse().ok()?, y.parse().ok()?))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cereal_loader_turns_the_bowl_about_the_middle_of_its_ring() {
+        // The ring's outer edge is one circle about `LOADER_BOWL`: its
+        // leftmost, topmost and lowest points are the same distance from it
+        // (the bite takes the right-hand edge, which is why the middle of the
+        // path's bounds is not the middle of the ring).
+        let bowl = path_points(include_str!("../assets/icons/cereal-bowl.svg"));
+        assert!(bowl.len() > 100);
+        let far = |pick: fn(&(f32, f32)) -> f32| {
+            let (x, y) = bowl
+                .iter()
+                .copied()
+                .min_by(|a, b| pick(a).total_cmp(&pick(b)))
+                .unwrap();
+            ((x - LOADER_BOWL.0).powi(2) + (y - LOADER_BOWL.1).powi(2)).sqrt()
+        };
+        let (left, top, bottom) = (far(|p| p.0), far(|p| p.1), far(|p| -p.1));
+        assert!((left - top).abs() < 0.02 && (left - bottom).abs() < 0.02, "{left} {top} {bottom}");
+        assert!((left - LOADER_RING).abs() < 0.02, "{left}");
+        // And no point of the bowl is further from it than that edge.
+        for (x, y) in &bowl {
+            let away = ((x - LOADER_BOWL.0).powi(2) + (y - LOADER_BOWL.1).powi(2)).sqrt();
+            assert!(away < left + 0.02, "{x},{y} is {away} away");
+        }
+        // GPUI draws an svg at `c + shift + R·S·(p − c)`, `c` the middle of
+        // its box. With the loader's shift the ring's middle stays where it
+        // is at every turn and scale, so the bowl spins without swinging.
+        let unit = 56. / 24.;
+        let (cx, cy) = (LOADER_BOWL.0 * unit, LOADER_BOWL.1 * unit);
+        for tick in 0..=200 {
+            let (turn, scale) = cereal_loader_pose(tick as f32 / 200.).bowl;
+            let shift = loader_bowl_shift(turn, scale, unit);
+            let (sin, cos) = (std::f32::consts::TAU * turn).sin_cos();
+            let (dx, dy) = (scale * (cx - 12. * unit), scale * (cy - 12. * unit));
+            let x = 12. * unit + shift.0 + dx * cos - dy * sin;
+            let y = 12. * unit + shift.1 + dx * sin + dy * cos;
+            assert!((x - cx).abs() < 1e-3 && (y - cy).abs() < 1e-3, "{x},{y}");
+        }
+    }
+
+    #[test]
+    fn cereal_loader_rests_as_the_mark_and_moves_without_a_jump() {
+        // At rest the flakes are the mark's own: the same middles and radii
+        // as the two dots of `cereal.svg`, which is the bowl plus them.
+        let mark = path_points(include_str!("../assets/icons/cereal.svg"));
+        let bowl = path_points(include_str!("../assets/icons/cereal-bowl.svg"));
+        let dots: Vec<_> = mark.iter().filter(|point| !bowl.contains(point)).copied().collect();
+        for ((x, y), radius) in LOADER_FLAKES {
+            let on_edge = dots
+                .iter()
+                .filter(|(px, py)| (((px - x).powi(2) + (py - y).powi(2)).sqrt() - radius).abs() < 0.01)
+                .count();
+            assert!(on_edge >= 20, "a dot of the mark at {x},{y}: {on_edge}");
+        }
+        // No frame moves anything far: at 120 Hz over the 2.2 s loop a flake
+        // never travels more than a fifth of the mark between two frames,
+        // the bowl never turns more than a twelfth, and the wrap is still.
+        let frames = 264;
+        let at = |frame: usize| cereal_loader_pose((frame % frames) as f32 / frames as f32);
+        for frame in 0..frames {
+            let (a, b) = (at(frame), at(frame + 1));
+            let wrapped = if frame + 1 == frames { 1. } else { 0. };
+            assert!((b.bowl.0 + wrapped - a.bowl.0).abs() < 1. / 12., "bowl at {frame}");
+            assert!((b.bowl.1 - a.bowl.1).abs() < 0.01);
+            for index in 0..2 {
+                let ((ax, ay), ag) = a.flakes[index];
+                let ((bx, by), bg) = b.flakes[index];
+                assert!(((bx - ax).powi(2) + (by - ay).powi(2)).sqrt() < 24. / 5., "flake at {frame}");
+                assert!((bg - ag).abs() < 0.08);
+            }
+        }
+        // The flakes go round the bowl, never onto it.
+        for tick in 0..=2000 {
+            let pose = cereal_loader_pose(tick as f32 / 2000.);
+            for (index, ((x, y), grow)) in pose.flakes.into_iter().enumerate() {
+                let away = (x - LOADER_BOWL.0).hypot(y - LOADER_BOWL.1);
+                let gap = away - LOADER_FLAKES[index].1 * grow - LOADER_RING;
+                assert!(gap > 0.5, "flake {index} is {gap} from the bowl at {tick}");
+            }
+        }
+        // Nor onto each other, as the first passes the second on its way.
+        for tick in 0..=2000 {
+            let [((ax, ay), ag), ((bx, by), bg)] = cereal_loader_pose(tick as f32 / 2000.).flakes;
+            let gap = (ax - bx).hypot(ay - by) - LOADER_FLAKES[0].1 * ag - LOADER_FLAKES[1].1 * bg;
+            assert!(gap > 0.25, "the flakes are {gap} apart at {tick}");
+        }
+        let (last, first) = (at(frames - 1), at(0));
+        assert!((last.bowl.0 - 1.).abs() < 1e-3 && first.bowl.0 == 0.);
     }
 
     #[test]

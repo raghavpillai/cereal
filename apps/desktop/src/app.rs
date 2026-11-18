@@ -56,6 +56,11 @@ pub enum Menu {
     Trash,
     /// Settings › Appearance: System, Light or Dark.
     Theme,
+    /// Settings › Members (`workspace_settings.rs`): a row's "…" menu, the
+    /// "Invite teammates" dialog, and the question before removing someone.
+    Member,
+    Invite,
+    RemoveMember,
 }
 
 pub struct Cereal {
@@ -222,6 +227,9 @@ pub struct Cereal {
     pub chat_maximized: bool,
     /// The sidebar lists every conversation under Chat, not only the newest.
     pub chat_threads_expanded: bool,
+    /// The sidebar's conversations are folded away under Chat (the chevron
+    /// at the end of its row).
+    pub chat_threads_collapsed: bool,
     pub chat_history_open: bool,
     /// When a press outside the recent-chats list last closed it (see
     /// `toggle_chat_history`).
@@ -247,6 +255,8 @@ pub struct Cereal {
     pub share: crate::share_popover::Share,
     /// The team space page (`team_space.rs`).
     pub team: crate::team_space::TeamSpace,
+    /// Settings › Workspace: its name and its members (`workspace_settings.rs`).
+    pub org: crate::workspace_settings::Organizations,
     /// "Check for updates" (see `update_view.rs`).
     pub updates: crate::update_view::Updates,
     /// The first-run welcome: its step, and what this Mac has allowed.
@@ -319,6 +329,7 @@ impl Cereal {
         let (links, link_subscriptions) = crate::shared_view::Links::new(cx);
         let (share, share_subscriptions) = crate::share_popover::Share::new(cx);
         let (team, team_subscriptions) = crate::team_space::TeamSpace::new(cx);
+        let (org, org_subscriptions) = crate::workspace_settings::Organizations::new(cx);
         // The welcome draws the account form's fields in its own layout.
         let (account_address, account_email) = {
             let account = account.read(cx);
@@ -469,6 +480,7 @@ impl Cereal {
         subscriptions.extend(link_subscriptions);
         subscriptions.extend(share_subscriptions);
         subscriptions.extend(team_subscriptions);
+        subscriptions.extend(org_subscriptions);
         let mut this = Self {
             workspace: Workspace::load(),
             login,
@@ -578,6 +590,7 @@ impl Cereal {
             chat_editing: None,
             chat_maximized: false,
             chat_threads_expanded: false,
+            chat_threads_collapsed: false,
             chat_history_open: false,
             chat_history_closed_at: None,
             chat_model_picker_closed_at: None,
@@ -593,6 +606,7 @@ impl Cereal {
             links,
             share,
             team,
+            org,
             updates: Default::default(),
             onboarding: crate::onboarding_view::Onboarding::new(welcome, cx),
             menu_bar: Default::default(),
@@ -859,6 +873,13 @@ impl Cereal {
             self.show_toast("Note copied to clipboard", cx);
         }
     }
+    /// Show the conversation on the Chat page, remembering the page it was
+    /// asked from so the back pill returns there.
+    pub(crate) fn open_chat_page(&mut self) {
+        crate::chrome::record_navigation(&mut self.nav_history, self.screen, Screen::Chat);
+        self.screen = Screen::Chat;
+        self.assistant_open = false;
+    }
     pub fn submit_chat(&mut self, cx: &mut Context<Self>) {
         let question = self.ask.read(cx).content().trim().to_string();
         if question.is_empty() {
@@ -936,7 +957,7 @@ impl Cereal {
             if crate::chat::floating_workspace_chat(self.screen) {
                 self.assistant_open = true;
             } else {
-                self.screen = Screen::Chat;
+                self.open_chat_page();
             }
             self.search_open = false;
             self.menu = None;
@@ -1076,6 +1097,8 @@ impl Render for Cereal {
             window.appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         ));
+        // The Workspace pages of Settings read their workspace when shown.
+        self.organization_frame(cx);
         // The theme menu belongs to its button on the Preferences page.
         if self.menu == Some(Menu::Theme)
             && !(self.screen == Screen::Settings
@@ -1227,6 +1250,14 @@ impl Render for Cereal {
         let toast_pose = self
             .stage
             .presence(("toast", 0), self.toast.is_some(), GOOEY);
+        // The update's mark is timed by hand: it asks for its own frames.
+        // In Settings → About the update is told in the version row, and the
+        // notice in the corner is not shown.
+        let about = self.screen == Screen::Settings
+            && self.settings_tab == crate::screens::SettingsTab::About;
+        if self.updates.frame(std::time::Instant::now(), about) {
+            self.stage.keep_alive();
+        }
         let update_pose =
             self.stage
                 .presence(("update-notice", 0), self.updates.notice_open(), GOOEY);
@@ -1412,7 +1443,16 @@ impl Render for Cereal {
                         .absolute()
                         .top(px(42.))
                         .left(px(self.sidebar_inset()
-                            + if self.current_note.is_some() { 62. } else { 8. }))
+                            + if self.current_note.is_some() {
+                                62.
+                            } else if self.screen == Screen::Chat && self.sidebar_away() {
+                                // Under the bar's own History button: past the
+                                // traffic lights, the two window tools and the back pill.
+                                // (8 + 80, two 28 pt tools and a 43 pt pill, 5 pt apart).
+                                202.
+                            } else {
+                                8.
+                            }))
                         .child(crate::motion::pop(
                             self.render_chat_history(cx),
                             crate::motion::Pop::menu((0.1, 0.)),
@@ -1521,6 +1561,7 @@ impl Render for Cereal {
                     toast_pose,
                 ))
             });
+        let root = root.children(self.render_film_pointer());
         // With `CEREAL_FRAME_STATS`, a probe painted after everything else
         // marks the end of the frame's paint pass.
         let root = root.when(crate::motion::stats::enabled(), |root| {

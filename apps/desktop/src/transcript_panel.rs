@@ -1601,7 +1601,6 @@ mod tests {
         let old: crate::desktop_preferences::MeetingPreferences =
             serde_json::from_str(r#"{"voice_isolation":false}"#).unwrap();
         assert_eq!((old.transcript_language, old.microphone), (None, None));
-        assert!(!old.voice_isolation);
     }
 
     fn device(uid: &str, is_default: bool) -> InputDevice {

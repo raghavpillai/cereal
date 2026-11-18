@@ -622,10 +622,11 @@ impl crate::app::Cereal {
                         return;
                     }
                 };
-                let Some(note) = local_note(&this.workspace.notes, thread.note_id.as_deref(), &found) else {
-                    this.show_toast("This meeting is not on this Mac", cx);
-                    return;
-                };
+                // A chat about a note that is not here (in Trash, or never
+                // loaded on this Mac) still opens: by itself, as a full chat.
+                // Its server goes on answering it about its own note.
+                let note = local_note(&this.workspace.notes, thread.note_id.as_deref(), &found)
+                    .unwrap_or(crate::accounts::handle::NO_NOTE);
                 let id = thread.id.clone();
                 let busy = this.chats_in_flight();
                 let mut archives = std::mem::take(&mut this.chat_archives);
