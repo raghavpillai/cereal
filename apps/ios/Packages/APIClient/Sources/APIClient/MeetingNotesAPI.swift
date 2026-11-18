@@ -160,6 +160,11 @@ public struct MeetingNotesAPI: Sendable {
         ])
     }
 
+    /// The version the server is, and where its apps are (the App Store page, when it names one).
+    public func downloads() async throws -> DownloadsDTO {
+        try await send("GET", route: ["downloads"])
+    }
+
     /// The server atomically reuses an event's note; a tap never starts capture.
     public func noteForCalendarEvent(id: String) async throws -> NoteDTO {
         try validate(id)

@@ -292,6 +292,7 @@ enum UpcomingMeetingNotifications {
 
 struct NotificationSettingsView: View {
     @AppStorage(UpcomingMeetingNotifications.storageKey) private var upcoming = false
+    @AppStorage(MeetingLiveActivities.storageKey) private var meetingCards = true
     @State private var denied = false
     @Environment(\.openURL) private var openURL
 
@@ -317,6 +318,17 @@ struct NotificationSettingsView: View {
                     .font(.system(size: 14)).foregroundStyle(Theme.textSecondary)
                     .padding(.horizontal, 6)
                 }
+                Toggle(isOn: $meetingCards) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Take a note button").font(.system(size: 17)).foregroundStyle(Theme.textPrimary)
+                        Text("Show a Live Activity with a Take a note button as each meeting starts")
+                            .font(.system(size: 15)).foregroundStyle(Theme.textSecondary)
+                    }
+                }
+                .tint(Theme.accent)
+                .accessibilityIdentifier("notifications-meeting-cards")
+                .onChange(of: meetingCards) { _, on in if !on { Task { await MeetingLiveActivities.endAll() } } }
+                .padding(.horizontal, 6).padding(.top, 14)
                 UpcomingMeetingPreview()
                     .padding(.top, 6)
             }

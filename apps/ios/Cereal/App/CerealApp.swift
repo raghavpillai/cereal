@@ -148,6 +148,9 @@ struct RootView: View {
     /// leads to is opened once the session is back, so that the account's
     /// arrival does not close it again.
     @State private var pendingRecording: URL?
+    /// A later version found at launch, while its prompt is up; asked once a launch.
+    @State private var updateOffer: AppUpdate.Offer?
+    @State private var updateAsked = false
     #if DEBUG
     @State private var showLiveActivityQA = false
     @State private var debugScreenOpened = false
@@ -250,11 +253,16 @@ struct RootView: View {
             }
             #endif
             await serverRecording.sync(with: accounts.sessions.map(\.notes))
+            await askAboutUpdate()
             #if DEBUG
             await runQARecordingFlowIfRequested()
             #endif
         }
         .onOpenURL { receive($0) }
+        .alert(AppUpdate.title, isPresented: Binding(get: { updateOffer != nil }, set: { if !$0 { updateOffer = nil } }), presenting: updateOffer) { offer in
+            if let store = offer.store { Button("Update") { openURL(store) } }
+            Button(offer.store == nil ? "OK" : "Later", role: .cancel) { }
+        } message: { offer in Text(AppUpdate.message(offer)) }
         // A universal link is the web form of the same links; one this app
         // cannot read goes on to the browser it was meant for.
         .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
@@ -363,7 +371,18 @@ extension RootView {
             showLiveActivityQA = true
             return
         }
+        // QA only: a sample meeting's card, to look at on the Lock Screen. `?in=90` schedules it ahead.
+        if url.scheme == AppIdentity.urlScheme, url.host == "meeting-preview" {
+            let ahead = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "in" }?.value.flatMap(Double.init) ?? 0
+            let start = Date.now.addingTimeInterval(ahead + (ahead > 0 ? MeetingLiveActivities.lead : 0))
+            Task { await MeetingLiveActivities.sync([.init(account: MeetingLiveActivities.previewAccount, id: UUID().uuidString, title: "R&D Weekly", start: start, end: start.addingTimeInterval(3600), color: "#7A8F3A")]) }
+            return
+        }
         #endif
+        if let meeting = MeetingActivityAttributes.target(url) {
+            if restoring { pendingRecording = url } else { takeNote(account: meeting.account, eventID: meeting.eventID) }
+            return
+        }
         if open(url) { return }
         guard let link = RecordingActivityLinkPolicy.link(url) else { return }
         if restoring { pendingRecording = url; return }
@@ -400,6 +419,45 @@ extension RootView {
         case .note, .shared: router.open(link, accounts: accounts, mode: connectionMode)
         }
         return true
+    }
+
+    /// "Take a note" on a meeting's Lock Screen card: the event's note, made if it has
+    /// none, with its recording screen, exactly as tapping the event on Home while it runs.
+    fileprivate func takeNote(account raw: String, eventID: String) {
+        guard let account = AccountID(raw) else { return }
+        MeetingLiveActivities.end(account: raw, eventID: eventID)
+        Task {
+            // A cold launch is still confirming the session: wait for it briefly.
+            for _ in 0..<50 where accounts.session(account)?.isReady != true { try? await Task.sleep(for: .milliseconds(100)) }
+            guard let session = accounts.session(account), session.isReady else { return }
+            #if DEBUG
+            connectionMode.isDemo = false
+            #endif
+            router.showConnection = false
+            SidebarModel.shared.close()
+            guard let created = try? await session.notes.noteForCalendarEvent(id: eventID) else { router.path = []; return }
+            let note = NoteRef(account: account, id: created.id)
+            if serverRecording.isCapturing, serverRecording.active != note { router.path = [.serverNote(note)] }
+            else if router.serverCapture?.ref != note { router.path = []; router.serverCapture = ServerCaptureTarget(note) }
+        }
+    }
+
+    /// Once a launch, when an account's server is a later version than this app: the prompt.
+    /// A server that cannot be asked says nothing, and is asked again when the accounts change.
+    fileprivate func askAboutUpdate() async {
+        guard !updateAsked, !connectionMode.isDemo else { return }
+        #if DEBUG
+        if let sample = UserDefaults.standard.string(forKey: "qa.updateVersion") {
+            updateAsked = true
+            updateOffer = AppUpdate.offer(serverVersion: sample, storeURL: UserDefaults.standard.string(forKey: "qa.updateStore"))
+            return
+        }
+        #endif
+        for session in accounts.sessions where session.isReady {
+            guard let answer = try? await session.notes.downloads() else { continue }
+            updateAsked = true
+            if let offer = AppUpdate.offer(serverVersion: answer.version, storeURL: answer.iosAppStoreUrl) { updateOffer = offer; return }
+        }
     }
 
     fileprivate func openPendingLink() {

@@ -421,6 +421,12 @@ public final class ServerNotesModel {
         }
     }
 
+    /// The version this account's server is, and where its apps are.
+    public func downloads() async throws -> DownloadsDTO {
+        guard let api else { throw APIClientError.unauthorized }
+        return try await api.downloads()
+    }
+
     public func noteForCalendarEvent(id: String) async throws -> NoteDTO {
         guard let api else { throw APIClientError.unauthorized }
         let revision = connectionRevision

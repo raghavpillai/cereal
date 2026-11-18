@@ -183,6 +183,33 @@ struct ServerHomeView: View {
         }
         if !Task.isCancelled, day == dayOffset { calendarsReadFor = day }
         if day == 0, UpcomingMeetingNotifications.isEnabled { await scheduleReminders() }
+        // Only an answer read for today decides the cards; a failed read leaves them as they are.
+        if day == 0, !Task.isCancelled, calendarsLoadedForCards { await syncMeetingActivities() }
+    }
+
+    private var calendarsLoadedForCards: Bool {
+        // An account that cannot be reached just now keeps its cards: nothing was learned about its day.
+        accounts.sessions.allSatisfy { session in
+            guard session.isReady, case .loaded = session.notes.calendarState else { return false }
+            return true
+        }
+    }
+
+    /// The Lock Screen's "Take a note" card for each of today's meetings still to come or under way.
+    private func syncMeetingActivities() async {
+        let today = Date.now
+        let events = accounts.sessions.filter(\.isReady).flatMap { session -> [MeetingLiveActivities.Event] in
+            guard let account = session.notes.accountID?.raw else { return [] }
+            let snapshot = session.notes.calendarState.snapshot
+            let enabled = Set(snapshot.calendars.filter(\.enabled).map(\.id))
+            return CalendarSchedule.events(snapshot.events, on: today, enabledCalendarIDs: enabled, knownCalendarIDs: Set(snapshot.calendars.map(\.id)))
+                .filter { !$0.allDay }
+                .compactMap { event in
+                    guard let start = CalendarSchedule.timestamp(event.startAt), let end = CalendarSchedule.timestamp(event.endAt) else { return nil }
+                    return MeetingLiveActivities.Event(account: account, id: event.id, title: event.title, start: start, end: end, color: event.color)
+                }
+        }
+        await MeetingLiveActivities.sync(events)
     }
 
     /// Settings › Notifications › Upcoming meetings: a lock-screen reminder as each of today's meetings starts.
@@ -329,6 +356,7 @@ struct ServerHomeView: View {
         let event = item.event
         let activeAtGesture = CalendarSchedule.isActiveTimedEvent(event)
         openingEvent = eventRef; creationError = nil
+        MeetingLiveActivities.end(account: eventRef.account.raw, eventID: event.id)
         defer { openingEvent = nil }
         do {
             let created = try await item.session.notes.noteForCalendarEvent(id: event.id)

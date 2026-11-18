@@ -9,6 +9,46 @@ enum MicPermission {
     static func request() async -> Bool { await AVAudioApplication.requestRecordPermission() }
 }
 
+/// The recording's audio session, activated and released on one queue, in the order asked.
+///
+/// Both calls wait for the audio hardware (longer on a Bluetooth route), and a release also
+/// tells other apps they may play again: tens to hundreds of milliseconds. A release therefore
+/// never runs on the main thread, where it would hold the frame that follows End or Pause. An
+/// activation waits for whatever was asked before it, so a release still in flight can never
+/// land after the activation that follows it (Pause, then Resume at once).
+enum RecordingAudioSession {
+    private static let queue = DispatchQueue(label: AppIdentity.subsystem + ".audio-session", qos: .userInitiated)
+
+    /// Ready to record when this returns. Fast when `warm` has already brought the session up.
+    static func activate() throws {
+        try queue.sync {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.record, mode: .default, options: [.allowBluetoothHFP])
+            try session.setActive(true)
+        }
+    }
+
+    /// The session of a paused recording, active again.
+    static func reactivate() throws {
+        try queue.sync { try AVAudioSession.sharedInstance().setActive(true) }
+    }
+
+    /// Brings the session up without waiting for it, while something else is waited for (the
+    /// server's answer to Start). Whoever asks must `release` it if no capture follows.
+    static func warm() {
+        queue.async {
+            let session = AVAudioSession.sharedInstance()
+            try? session.setCategory(.record, mode: .default, options: [.allowBluetoothHFP])
+            try? session.setActive(true)
+        }
+    }
+
+    /// Lets the session go, without waiting for it.
+    static func release() {
+        queue.async { try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
+    }
+}
+
 /// Local demo provider seam. Server capture is transcribed by its live stream.
 protocol TranscriptionClient: Sendable {
     func startSegment(noteID: UUID, index: Int) async throws
@@ -129,11 +169,7 @@ final class Recorder {
                 // Commit recovery metadata before any real audio can be captured.
                 try CaptureRecovery.begin(noteID: noteID, index: segmentIndex, startedAt: startedAt, audioFile: url)
                 created = url
-                if backend.usesMicrophone {
-                    let session = AVAudioSession.sharedInstance()
-                    try session.setCategory(.record, mode: .default, options: [.allowBluetoothHFP])
-                    try session.setActive(true)
-                }
+                if backend.usesMicrophone { try RecordingAudioSession.activate() }
                 backend.onFailure = { [weak self, weak backend] message in
                     guard let self, let backend, self.backend === backend, isCapturing else { return }
                     fail(message, cause: .failure)
@@ -192,7 +228,7 @@ final class Recorder {
         guard state == .paused else { return }
         do {
             if let backend {
-                if backend.usesMicrophone { try AVAudioSession.sharedInstance().setActive(true) }
+                if backend.usesMicrophone { try RecordingAudioSession.reactivate() }
                 try backend.resume()
             }
             clock.resume(at: ProcessInfo.processInfo.systemUptime)
@@ -245,6 +281,9 @@ final class Recorder {
         }
         meterTask?.cancel()
         meterTask = nil
+        // Felt with the press, before the input is stopped and the file closed (tens of milliseconds).
+        if failure != nil { playHaptic(RecordingHaptic.stopped(by: cause)) }
+        else if let ending { playHaptic(ending == .discard ? .discarded : .ended) }
         let continuous = backend as? any ContinuousCaptureBackend
         // The backend closes the file and says how much audio it holds.
         let captured = backend?.stop()
@@ -262,8 +301,6 @@ final class Recorder {
         elapsed = clock.completed
         levels = Self.restingLevels
         state = failure.map(State.failed) ?? .stopped
-        if failure != nil { playHaptic(RecordingHaptic.stopped(by: cause)) }
-        else if let ending { playHaptic(ending == .discard ? .discarded : .ended) }
         // Failed zero-length starts must not create transcript revisions.
         guard duration > 0.01 else {
             if continuous != nil, lastCapturedFrames == 0 { Self.discardEmptyCapture(url) }
@@ -362,7 +399,9 @@ final class Recorder {
     @ObservationIgnored private var usesInjectedAudio = false
 
     private func deactivateSession() {
-        if !isSimulated, !usesInjectedAudio { try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
+        // Off the main thread: the input has already stopped, and the state this is called for
+        // (stopped, paused, failed) must not wait for the hardware to be let go.
+        if !isSimulated, !usesInjectedAudio { RecordingAudioSession.release() }
     }
 
     /// Removes a continuous capture that holds no samples, with its journal.

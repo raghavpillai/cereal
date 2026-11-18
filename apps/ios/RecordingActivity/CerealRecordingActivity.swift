@@ -8,6 +8,7 @@ struct CerealRecordingWidgets: WidgetBundle {
     var body: some Widget {
         CerealRecordingActivity()
         CerealChatActivity()
+        CerealMeetingActivity()
     }
 }
 

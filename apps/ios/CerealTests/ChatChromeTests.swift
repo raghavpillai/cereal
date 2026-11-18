@@ -70,4 +70,40 @@ import Contracts
         #expect(log.contains("writing a1"))
         #expect(log.last == "end a1 true")
     }
+
+    /// The loader starts and ends each loop as the still mark, so the wrap has no
+    /// seam, and its flakes stay inside the canvas it is drawn in.
+    @Test func theLoaderRestsAsTheMarkAndStaysInsideItsCanvas() {
+        for end in [0.0, 1.0] {
+            let pose = CerealLoader.pose(end)
+            #expect(abs(pose.turn - end) < 1e-9 && abs(pose.scale - 1) < 1e-9)
+            for (index, flake) in pose.flakes.enumerated() {
+                let rest = CerealLoader.flakes[index].center
+                #expect(abs(flake.center.x - rest.x) < 1e-6 && abs(flake.center.y - rest.y) < 1e-6 && abs(flake.scale - 1) < 1e-9)
+            }
+        }
+        // The last frame before the wrap is where the first frame after it is.
+        let before = CerealLoader.pose(1 - 1 / (CerealLoader.loop * 120)), after = CerealLoader.pose(0)
+        #expect(abs(before.turn - 1) < 1e-4 && abs(before.scale - after.scale) < 1e-4)
+        for index in before.flakes.indices {
+            #expect(abs(before.flakes[index].center.x - after.flakes[index].center.x) < 1e-2)
+            #expect(abs(before.flakes[index].center.y - after.flakes[index].center.y) < 1e-2)
+        }
+        var swungPast = false
+        var previous = CerealLoader.pose(0)
+        for tick in 0...1000 {
+            let pose = CerealLoader.pose(Double(tick) / 1000)
+            swungPast = swungPast || pose.turn > 1.01
+            // No jump from one moment to the next: under a twentieth of a turn per thousandth of a loop.
+            #expect(abs(pose.turn - previous.turn) < 0.05)
+            for (index, flake) in pose.flakes.enumerated() {
+                let radius = CerealLoader.flakes[index].radius * flake.scale
+                #expect(flake.center.x - radius > -CerealLoader.margin && flake.center.x + radius < 24 + CerealLoader.margin)
+                #expect(flake.center.y - radius > -CerealLoader.margin && flake.center.y + radius < 24 + CerealLoader.margin)
+                #expect(hypot(flake.center.x - previous.flakes[index].center.x, flake.center.y - previous.flakes[index].center.y) < 2)
+            }
+            previous = pose
+        }
+        #expect(swungPast)
+    }
 }

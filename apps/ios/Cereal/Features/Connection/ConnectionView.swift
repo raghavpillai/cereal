@@ -138,6 +138,8 @@ struct ConnectionView: View {
     /// within it, and the form then changes once (to its sign-in rows) instead of
     /// twice while the sheet is still rising.
     @State private var checkingShown = false
+    /// The mark and title spring up once the sheet is here.
+    @State private var arrived = false
     @State private var browser = BrowserSignInSession()
     /// True while the sign-in in progress is the one in the browser, so its own button shows it.
     @State private var inBrowser = false
@@ -218,9 +220,31 @@ struct ConnectionView: View {
         }
     }
 
+    /// A button's loader. It keeps its place in the label, so the row is the same
+    /// height with and without it, and buds in when the wait starts: a view that
+    /// is inserted into a list row's label is not given its transition.
+    private func rowLoader(_ shown: Bool, color: Color) -> some View {
+        CerealLoader(size: 20, color: color, running: shown)
+            .scaleEffect(shown || motion.reduceMotion ? 1 : 0.6).opacity(shown ? 1 : 0)
+            .animation(motion.animation(.gooey, entering: shown), value: shown)
+    }
+
     var body: some View {
         NavigationStack {
             Form {
+                // The mark leads the sheet, alive: it is the wait as well as the name.
+                Section {
+                    VStack(spacing: 10) {
+                        CerealLoader(size: 52)
+                        Text(accounts.sessions.isEmpty ? "Sign in to Cereal" : "Your account")
+                            .font(.system(.title2, design: .serif)).foregroundStyle(Theme.textPrimary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 8)
+                    .scaleEffect(arrived || motion.reduceMotion ? 1 : 0.7).opacity(arrived ? 1 : 0)
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets())
+                }
                 Section {
                     // Verbatim: as a localized key the example address is read as Markdown,
                     // which makes it a link and draws it in the tint colour.
@@ -237,7 +261,8 @@ struct ConnectionView: View {
                     case .idle: EmptyView()
                     case .checking:
                         if checkingShown {
-                            HStack { Text("Checking how this server signs in…").foregroundStyle(Theme.textSecondary); Spacer(); ProgressView() }
+                            HStack { Text("Checking how this server signs in…").foregroundStyle(Theme.textSecondary); Spacer(); CerealLoader(size: 20, color: Theme.textSecondary) }
+                                .transition(motion.rise)
                         }
                     case .failed(let message):
                         Text(message).foregroundStyle(Theme.danger)
@@ -252,7 +277,7 @@ struct ConnectionView: View {
                                 let address = instance, user = email.trimmingCharacters(in: .whitespacesAndNewlines), secret = password
                                 signIn { try await accounts.signIn(instance: address, email: user, password: secret) }
                             } label: {
-                                HStack { Text("Sign in"); Spacer(); if busy && !inBrowser { ProgressView() } }
+                                HStack { Text("Sign in"); Spacer(); rowLoader(busy && !inBrowser, color: Theme.textPrimary) }
                             }.buttonStyle(.glassProminent).tint(Theme.accent)
                                 .foregroundStyle(busy || email.isEmpty || password.isEmpty || address.isEmpty ? Theme.textTertiary : Theme.onAccent)
                                 .disabled(busy || email.isEmpty || password.isEmpty || address.isEmpty)
@@ -263,11 +288,11 @@ struct ConnectionView: View {
                             if methods.password {
                                 // Beside the password form the browser is the other way in.
                                 Button(action: continueInBrowser) {
-                                    HStack { Text(label); Spacer(); if inBrowser { ProgressView() } }
+                                    HStack { Text(label); Spacer(); rowLoader(inBrowser, color: Theme.textSecondary) }
                                 }.accessibilityIdentifier("connection-browser")
                             } else {
                                 Button(action: continueInBrowser) {
-                                    HStack { Text(label); Spacer(); if busy { ProgressView() } }
+                                    HStack { Text(label); Spacer(); rowLoader(busy, color: Theme.textPrimary) }
                                 }.buttonStyle(.glassProminent).tint(Theme.accent)
                                     .foregroundStyle(busy ? Theme.textTertiary : Theme.onAccent)
                                     .alignmentGuide(.listRowSeparatorLeading) { $0[.leading] }
@@ -312,7 +337,7 @@ struct ConnectionView: View {
                                 Link("Manage calendar connections", destination: connected.url.appendingPathComponent("account"))
                             }
                         case .checking:
-                            HStack { Text("Checking your session…").foregroundStyle(Theme.textSecondary); Spacer(); ProgressView() }
+                            HStack { Text("Checking your session…").foregroundStyle(Theme.textSecondary); Spacer(); CerealLoader(size: 20, color: Theme.textSecondary) }
                         case .unreachable(let failure):
                             Text(failure.localizedDescription).font(.footnote).foregroundStyle(Theme.textSecondary)
                             Button("Try again") { Task { await accounts.retryUnreachable() } }
@@ -383,6 +408,12 @@ struct ConnectionView: View {
                 instance = router.signInAddress ?? accounts.sessions.first?.record.instanceURL ?? ""
                 discovery.check(instance, typed: false)
                 accounts.refreshSavedData()
+            }
+            // After the first frame, as the sheet climbs: set in `onAppear` the change is
+            // part of that first frame, and the mark is simply there.
+            .task {
+                try? await Task.sleep(for: .milliseconds(50))
+                withAnimation(motion.gooey) { arrived = true }
             }
             .onDisappear { password = ""; token = ""; router.signInAddress = nil }
             // Sign out: says what stays, and offers the other action in the same place.

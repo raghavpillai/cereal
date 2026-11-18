@@ -203,7 +203,8 @@ struct ServerCaptureView: View {
                 if returning { barRevealed = true; revealedAtOpen = true }
                 // Nothing recorded into this note before: the first seconds offer Cancel.
                 freshRecording = !returning && discardsIfEmpty && value.transcriptRevision == 0
-                if !returning { await recording.start(note: value, in: account) }
+                // `value` is the server's answer of a moment ago: the start does not read the note again.
+                if !returning { await recording.start(note: value, in: account, justRead: true) }
                 startSettled = true
                 // The reference opens on the page, not the keyboard: a tap on the text raises it.
                 meetingContext = try? await server.noteContext(id: noteID)

@@ -243,7 +243,9 @@ final class ServerRecordingController {
 
     // MARK: Recording
 
-    func start(note: NoteDTO, in account: AccountID?) async {
+    /// `justRead`: `note` is the server's answer to a read made a moment ago by whoever asks (the
+    /// recording screen reads the note as it opens, then starts), so it is not read a second time.
+    func start(note: NoteDTO, in account: AccountID?, justRead: Bool = false) async {
         guard !isBusy, !recorder.isCapturing, let account, let record = accounts[account], !record.closed,
               let uuid = UUID(uuidString: note.id) else { return }
         let server = record.server
@@ -261,11 +263,19 @@ final class ServerRecordingController {
             error = "Allow microphone access in Settings before starting a recording."
             return
         }
+        // The audio session comes up while the server is asked, off the main thread: the hardware
+        // takes a moment (longer over Bluetooth) that would otherwise be spent after the server's
+        // answers, with the screen held. It is let go again if the start gets no further.
+        if needsMicrophone { RecordingAudioSession.warm() }
         do {
             // A previous Stop of this note, with the audio it hands over first, must reach the server before Resume.
-            _ = await record.controlTasks[note.id]?.value
+            let stopping = record.controlTasks[note.id]
+            _ = await stopping?.value
             try Task.checkCancellation()
-            let freshNote = try await server.note(id: note.id)
+            // A note read a moment ago is the note as it is, unless a Stop of it was still on its way
+            // or the person was being asked for the microphone meanwhile: then it is read again.
+            let freshNote: NoteDTO
+            if justRead, permitted, stopping == nil { freshNote = note } else { freshNote = try await server.note(id: note.id) }
             guard !record.closed else { throw CancellationError() }
             if record.histories[note.id] == nil {
                 record.histories[note.id] = ServerCaptureHistory(baseOffsetMs: Self.durationMs(freshNote), segments: [])
@@ -309,7 +319,11 @@ final class ServerRecordingController {
             } else {
                 beginLiveCapture(ref, transcript: stored)
             }
-        } catch { if let shown = ErrorText.shown(error) { self.error = shown } }
+        } catch {
+            // Everything that throws here comes before the capture: the session warmed for it is not needed.
+            if needsMicrophone { RecordingAudioSession.release() }
+            if let shown = ErrorText.shown(error) { self.error = shown }
+        }
     }
 
     /// Removes a note that was made only to be recorded and holds nothing: its
