@@ -208,6 +208,66 @@ describe.skipIf(!enabled)("sign-in settings, Google sign-in and the app handoff 
     expect(await db!.user.count({ where: { email: "carol@signin.test" } })).toBe(1)
   })
 
+  test("a workspace invitation lets a new address sign in with Google and join: any address when the inviter administers the server, only a listed one otherwise", async () => {
+    const invitations = `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`
+    const invite = (email: string) => request(invitations, "POST", { email, role: "member" }, { Authorization: "Bearer " + aliceToken })
+    const stored = (email: string) => db!.invitation.findFirstOrThrow({ where: { email }, orderBy: { createdAt: "desc" } })
+    const roles = async (email: string) => (await db!.user.findUniqueOrThrow({ where: { email }, include: { memberships: true } })).memberships.map(member => [member.organizationId, member.role])
+    const place = { organizationId_userId: { organizationId: DEFAULT_ORGANIZATION_ID, userId: aliceId } }
+    expect((await settings({ allowedEmails: ["@team.example"] })).status).toBe(200)
+    // Alice runs the workspace, not the server: she cannot let in an address the sign-in list does not name.
+    await db!.member.update({ where: place, data: { role: "admin" } })
+    const outsider = await invite("ivan@elsewhere.test")
+    expect(outsider.status).toBe(403); expect((await outsider.json()).message).toBe("ivan@elsewhere.test is not allowed to sign in to this server. Ask one of its administrators to invite them.")
+    // Someone at a listed domain who has not signed in yet can be invited, once.
+    const listed = await invite("Hana@Team.Example")
+    expect(listed.status).toBe(200); expect(await listed.json()).toMatchObject({ email: "hana@team.example", role: "member", status: "pending" })
+    // No email carries it: there are two weeks to sign in.
+    const days = ((await stored("hana@team.example")).expiresAt.getTime() - Date.now()) / 86_400_000
+    expect(days).toBeGreaterThan(13.9); expect(days).toBeLessThan(14.1)
+    const twice = await invite("hana@team.example")
+    expect(twice.status).toBe(409); expect((await twice.json()).message).toBe("hana@team.example has already been invited")
+    const member = await invite("carol@signin.test")
+    expect(member.status).toBe(409); expect((await member.json()).message).toBe("carol@signin.test is already in this workspace")
+    // Her invitation is not a way past the list: a consumer Google account with that address is still refused...
+    expect((await googleSignIn({ sub: "g-hana-consumer", email: "hana@team.example", email_verified: true })).headers.get("location")).toBe("/login?error=not_allowed")
+    expect((await stored("hana@team.example")).status).toBe("pending")
+    // ...and the organisation's own account gets in, with the invitation answered.
+    expect((await googleSignIn({ sub: "g-hana", email: "hana@team.example", email_verified: true, hd: "team.example" })).headers.get("location")).toBe("/notes")
+    expect((await stored("hana@team.example")).status).toBe("accepted")
+    expect(await roles("hana@team.example")).toEqual([[DEFAULT_ORGANIZATION_ID, "member"]])
+
+    // Once Alice administers the server, her invitation is what lets an outside address in.
+    await db!.user.update({ where: { id: aliceId }, data: { role: "admin" } })
+    expect((await googleSignIn({ sub: "g-ivan", email: "ivan@elsewhere.test", email_verified: true })).headers.get("location")).toBe("/login?error=not_allowed")
+    expect((await invite("ivan@elsewhere.test")).status).toBe(200)
+    const ivan = await googleSignIn({ sub: "g-ivan", email: "ivan@elsewhere.test", email_verified: true, name: "Ivan" })
+    expect(ivan.headers.get("location")).toBe("/notes")
+    expect(await whoAmI({ Cookie: cookiesOf(ivan) })).toMatchObject({ email: "ivan@elsewhere.test", role: "user" })
+    expect((await stored("ivan@elsewhere.test")).status).toBe("accepted")
+    expect(await roles("ivan@elsewhere.test")).toEqual([[DEFAULT_ORGANIZATION_ID, "member"]])
+    // An invitation that was cancelled, or has run out, lets nobody in.
+    const cancelled = await invite("judy@elsewhere.test")
+    expect((await request(`${invitations}/${(await cancelled.json()).id}`, "DELETE", undefined, { Authorization: "Bearer " + aliceToken })).status).toBe(200)
+    expect((await googleSignIn({ sub: "g-judy", email: "judy@elsewhere.test", email_verified: true })).headers.get("location")).toBe("/login?error=not_allowed")
+    expect((await invite("kofi@elsewhere.test")).status).toBe(200)
+    await db!.invitation.update({ where: { id: (await stored("kofi@elsewhere.test")).id }, data: { expiresAt: new Date(Date.now() - 1000) } })
+    expect((await googleSignIn({ sub: "g-kofi", email: "kofi@elsewhere.test", email_verified: true })).headers.get("location")).toBe("/login?error=not_allowed")
+    expect(await db!.user.count({ where: { email: { in: ["judy@elsewhere.test", "kofi@elsewhere.test"] } } })).toBe(0)
+    // Invited as an administrator of the workspace: that is the role they join with.
+    await db!.invitation.create({ data: { id: crypto.randomUUID(), organizationId: DEFAULT_ORGANIZATION_ID, email: "lena@elsewhere.test", role: "admin", status: "pending", inviterId: BOOTSTRAP_OWNER_ID, expiresAt: new Date(Date.now() + 3_600_000) } })
+    expect((await googleSignIn({ sub: "g-lena", email: "lena@elsewhere.test", email_verified: true })).headers.get("location")).toBe("/notes")
+    expect(await roles("lena@elsewhere.test")).toEqual([[DEFAULT_ORGANIZATION_ID, "admin"]])
+    expect(await whoAmI({ Cookie: cookiesOf(await googleSignIn({ sub: "g-lena", email: "lena@elsewhere.test", email_verified: true })) })).toMatchObject({ role: "user" })
+
+    // With email and password there is no first sign-in to make the account at: it has to exist.
+    expect((await settings({ password: true })).status).toBe(200)
+    const none = await invite("mona@elsewhere.test")
+    expect(none.status).toBe(400); expect((await none.json()).message).toBe("mona@elsewhere.test has no account on this server. Create it in the admin panel, then invite them.")
+    expect((await settings({ google: true, allowedEmails: [] })).status).toBe(200)
+    await db!.user.update({ where: { id: aliceId }, data: { role: "user" } }); await db!.member.update({ where: place, data: { role: "member" } })
+  })
+
   test("an existing account signs in by its verified address without being on the list, and stays linked to that Google identity", async () => {
     const first = await googleSignIn({ sub: "g-alice", email: "ALICE@signin.test", email_verified: true, name: "Someone Else" })
     expect(first.headers.get("location")).toBe("/notes")

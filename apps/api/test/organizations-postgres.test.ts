@@ -79,9 +79,12 @@ describe.skipIf(!enabled)("real Better Auth Organization/Admin plugin façade",(
     expect((await request("/api/v1/organizations/active","POST",{organizationId:orgId},"",{Cookie:users.owner.cookie,Origin:base})).status).toBe(200)
   })
   test("real pending invitations require preprovisioned accounts and exact authenticated recipients",async()=>{
-    expect((await request(org("/invitations"),"POST",{email:"unprovisioned@example.test",role:"member"})).status).toBe(400)
+    const unknown=await request(org("/invitations"),"POST",{email:"unprovisioned@example.test",role:"member"})
+    expect(unknown.status).toBe(400);expect((await unknown.json()).message).toBe("unprovisioned@example.test has no account on this server. Create it in the admin panel, then invite them.")
     const admin=await request(org("/invitations"),"POST",{email:users.admin.email,role:"admin"})
     expect(admin.status).toBe(200);adminInvitation=(await admin.json()).id
+    const twice=await request(org("/invitations"),"POST",{email:users.admin.email.toUpperCase(),role:"member"})
+    expect(twice.status).toBe(409);expect((await twice.json()).message).toBe(users.admin.email+" has already been invited")
     const member=await request(org("/invitations"),"POST",{email:users.member.email,role:"member"})
     expect(member.status).toBe(200);memberInvitation=(await member.json()).id
     const incoming=await(await request("/api/v1/organization-invitations","GET",undefined,users.admin.token)).json()
@@ -95,6 +98,8 @@ describe.skipIf(!enabled)("real Better Auth Organization/Admin plugin façade",(
     expect((await db!.user.findUniqueOrThrow({where:{id:users.admin.id}})).role).toBe("user")
     expect((await db!.user.findUniqueOrThrow({where:{id:users.admin.id}})).emailVerified).toBe(false)
     expect((await request("/api/v1/organization-invitations/"+adminInvitation+"/accept","POST",undefined,users.admin.token)).status).toBe(409)
+    const joined=await request(org("/invitations"),"POST",{email:users.admin.email,role:"member"})
+    expect(joined.status).toBe(409);expect((await joined.json()).message).toBe(users.admin.email+" is already in this workspace")
     adminMember=(await db!.member.findUniqueOrThrow({where:{organizationId_userId:{organizationId:orgId,userId:users.admin.id}}})).id
     memberId=(await db!.member.findUniqueOrThrow({where:{organizationId_userId:{organizationId:orgId,userId:users.member.id}}})).id
   })

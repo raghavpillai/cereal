@@ -29,6 +29,12 @@ export function emailAllowed(email: string, allowed: ReadonlyArray<string>, host
   const domain = address.slice(at), workspace = hostedDomain ? "@" + hostedDomain.trim().toLowerCase() : null
   return allowed.some(entry => entry.startsWith("@") ? entry === domain && entry === workspace : entry === address)
 }
+/** Whether the allow list names this address or its domain. A domain entry still needs Google's `hd` claim
+ * when the person signs in (`emailAllowed`), which cannot be known before they do. */
+export function emailListed(email: string, allowed: ReadonlyArray<string>): boolean {
+  const address = email.trim().toLowerCase(), at = address.lastIndexOf("@")
+  return at >= 1 && allowed.some(entry => entry.startsWith("@") ? entry === address.slice(at) : entry === address)
+}
 
 /** Where a browser may be sent after signing in: a path on this origin, never another site and never the API. */
 export function safeReturnPath(raw: string | null | undefined, origin: string): string | null {
@@ -148,8 +154,15 @@ export function makeSignInService(deps: {
     if (typeof data !== "object" || data === null || Array.isArray(data)) throw new Error("Google request failed")
     return data as Record<string, unknown>
   }
+  /** Workspace invitations to this address that still stand, oldest first. */
+  const invitationsFor = (client: Pick<Database, "invitation">, email: string) => client.invitation.findMany({
+    where: { email: { equals: email, mode: "insensitive" }, status: "pending", expiresAt: { gt: now() } },
+    orderBy: { createdAt: "asc" }, include: { inviter: { select: { role: true } } } })
   /** The account for a verified Google identity: one already linked to it, else the account with the same
-   * address, else a new one when the address is on the allow list. Null means not allowed. */
+   * address, else a new one when the address is on the allow list or someone who administers this server has
+   * invited it to a workspace (their invitation admits the address, as their adding it to the list would).
+   * A new account joins the workspaces it was invited to: Google has just proved the address is theirs.
+   * Null means not allowed. */
   async function accountFor(identity: { subject: string; email: string; name: string | null; hostedDomain: string | null; image: string | null }, allowed: ReadonlyArray<string>): Promise<string | null> {
     const link = (userId: string) => db.account.create({ data: { id: crypto.randomUUID(), accountId: identity.subject, providerId: "google", userId } })
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -158,12 +171,18 @@ export function makeSignInService(deps: {
       const existing = await db.user.findUnique({ where: { email: identity.email } })
       try {
         if (existing) { await link(existing.id); return existing.id }
-        if (!emailAllowed(identity.email, allowed, identity.hostedDomain)) return null
+        if (!emailAllowed(identity.email, allowed, identity.hostedDomain)
+          && !(await invitationsFor(db, identity.email)).some(invitation => invitation.inviter.role === "owner" || invitation.inviter.role === "admin")) return null
         const id = crypto.randomUUID()
         await db.$transaction(async tx => {
           await tx.user.create({ data: { id, name: identity.name ?? identity.email.split("@")[0]!, email: identity.email, emailVerified: true, image: identity.image, role: "user" } })
           await tx.account.create({ data: { id: crypto.randomUUID(), accountId: identity.subject, providerId: "google", userId: id } })
           await tx.member.create({ data: { id: crypto.randomUUID(), organizationId: deps.defaultOrganizationId, userId: id, role: "member" } })
+          for (const invitation of await invitationsFor(tx, identity.email)) {
+            const role = invitation.role === "admin" ? "admin" : "member", place = { organizationId: invitation.organizationId, userId: id }
+            await tx.member.upsert({ where: { organizationId_userId: place }, create: { id: crypto.randomUUID(), ...place, role }, update: role === "admin" ? { role } : {} })
+            await tx.invitation.update({ where: { id: invitation.id }, data: { status: "accepted" } })
+          }
         })
         return id
       } catch (error) { if (!duplicate(error) || attempt) throw error /* someone else created it a moment ago: look again */ }

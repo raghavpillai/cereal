@@ -2,6 +2,7 @@ import { Effect } from "effect"
 import {withAccountMutation} from "./account-mutations"
 import type { Database } from "@meeting-notes/database"
 import type { AuthenticationEngine } from "./auth"
+import { emailListed, passwordOnly, type SignInPolicy } from "./sign-in"
 import type { PrincipalData, ApiError } from "@meeting-notes/contracts/api"
 import type {
   OrganizationDTO, OrganizationsDTO, OrganizationDetailsDTO, OrganizationMemberDTO,
@@ -49,7 +50,7 @@ function invitationDTO(invitation:{id:string;organizationId:string;email:string;
 /** Typed façade around real Better Auth plugin APIs. Raw plugin HTTP routes are
  * not mounted. All mutation authorization is enforced here, independently of
  * instance roles. Membership never grants access to Note/Transcript/Share. */
-export function makeOrganizationService(db:Database,auth:AuthenticationEngine) {
+export function makeOrganizationService(db:Database,auth:AuthenticationEngine,signIn:()=>Promise<SignInPolicy>=async()=>passwordOnly) {
   async function signed(principal:PrincipalData,headers:Headers) {
     if (principal.source !== "session") throw fail("forbidden","Sign in with your account to manage workspaces")
     const safe = sessionHeaders(headers)
@@ -137,7 +138,17 @@ export function makeOrganizationService(db:Database,auth:AuthenticationEngine) {
       if (actor.role!=="owner"&&actor.role!=="admin") throw fail("forbidden","Workspace administrator access required")
       if (input.role==="admin"&&actor.role!=="owner") throw fail("forbidden","Only the workspace owner can invite administrators")
       const email=input.email.trim().toLowerCase()
-      if (!await db.user.findFirst({where:{email:{equals:email,mode:"insensitive"}}})) throw fail("invalid_request","An instance administrator must provision this account before it can be invited")
+      const invited=await db.user.findFirst({where:{email:{equals:email,mode:"insensitive"}}})
+      if (invited&&await db.member.findUnique({where:{organizationId_userId:{organizationId:id,userId:invited.id}}})) throw fail("conflict",`${email} is already in this workspace`)
+      if (await db.invitation.findFirst({where:{organizationId:id,email:{equals:email,mode:"insensitive"},status:"pending",expiresAt:{gt:new Date()}}})) throw fail("conflict",`${email} has already been invited`)
+      if (!invited) {
+        // Nobody has this address yet. With Google sign-in the account is made when they first sign in, and
+        // joins this workspace then (`accountFor` in sign-in.ts). Only someone who administers the server may
+        // admit an address the sign-in list does not name. A password account has to be created first.
+        const policy=await signIn(),administrator=context.session.user.role==="owner"||context.session.user.role==="admin"
+        if (!policy.google) throw fail("invalid_request",`${email} has no account on this server. Create it in the admin panel, then invite them.`)
+        if (!administrator&&!emailListed(email,policy.allowedEmails)) throw fail("forbidden",`${email} is not allowed to sign in to this server. Ask one of its administrators to invite them.`)
+      }
       const invitation=await auth.api.createInvitation({headers:context.headers,body:{organizationId:id,email,role:input.role}})
       return invitationDTO(invitation,actor.organization.name)
     })),

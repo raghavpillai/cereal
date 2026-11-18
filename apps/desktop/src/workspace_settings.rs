@@ -331,7 +331,8 @@ pub fn invite_problems(results: &[(String, Result<(), String>)]) -> Vec<String> 
         .iter()
         .filter_map(|(email, sent)| {
             let error = sent.as_ref().err()?;
-            Some(if alone { error.clone() } else { format!("{email}: {error}") })
+            // The server's own refusals name the address; a failure to reach it does not.
+            Some(if alone || error.contains(email.as_str()) { error.clone() } else { format!("{email}: {error}") })
         })
         .collect()
 }
@@ -683,7 +684,7 @@ impl Cereal {
                 };
                 let sent = results.iter().filter(|(_, sent)| sent.is_ok()).count();
                 if sent > 0 {
-                    this.show_toast(if sent == 1 { "Invitation sent" } else { "Invitations sent" }, cx);
+                    this.show_toast(if sent == 1 { "Invitation added" } else { "Invitations added" }, cx);
                 }
                 let problems = invite_problems(&results);
                 // Those that did not go stay in the field, to correct or try again.
@@ -1430,7 +1431,10 @@ impl Cereal {
                 let content = titled(
                     content,
                     "Invite teammates".into(),
-                    "Invite people who have an account on this server. They join once they accept the invitation; this does not share any existing notes.".into(),
+                    invite_explanation(
+                        &self.org.account.as_ref().and_then(crate::accounts::get).map(|account| account.host()).unwrap_or_default(),
+                    )
+                    .into(),
                     cx,
                 )
                 .child(self.organization_field(&self.org.invite, window, cx).h(px(32.)).w_full())
@@ -1476,12 +1480,21 @@ impl Cereal {
     }
 }
 
+/// What the invite dialog says under its title. The server sends no email,
+/// so it says where the person signs in (`host`, the server as the account
+/// knows it).
+pub fn invite_explanation(host: &str) -> String {
+    let place = if host.is_empty() { "to this server".to_owned() } else { format!("at {host}") };
+    format!("No email is sent, so let them know: they sign in {place} to join. This does not share any existing notes.")
+}
+
 /// What the invite dialog's button says, for `addresses` typed so far.
+/// Nothing is sent to anyone, so it does not say "Send".
 pub fn send_label(addresses: usize, sending: bool) -> String {
     match (sending, addresses) {
-        (true, _) => "Sending…".into(),
-        (false, 0 | 1) => "Send invitation".into(),
-        (false, several) => format!("Send {several} invitations"),
+        (true, _) => "Inviting…".into(),
+        (false, 0 | 1) => "Invite".into(),
+        (false, several) => format!("Invite {several} people"),
     }
 }
 
@@ -1806,10 +1819,15 @@ mod tests {
 
     #[test]
     fn the_send_button_counts_the_addresses_typed() {
-        assert_eq!(send_label(0, false), "Send invitation");
-        assert_eq!(send_label(1, false), "Send invitation");
-        assert_eq!(send_label(3, false), "Send 3 invitations");
-        assert_eq!(send_label(3, true), "Sending…");
+        assert_eq!(send_label(0, false), "Invite");
+        assert_eq!(send_label(1, false), "Invite");
+        assert_eq!(send_label(3, false), "Invite 3 people");
+        assert_eq!(send_label(3, true), "Inviting…");
+        assert_eq!(
+            invite_explanation("notes.example.com"),
+            "No email is sent, so let them know: they sign in at notes.example.com to join. This does not share any existing notes."
+        );
+        assert!(invite_explanation("").contains("they sign in to this server to join"));
     }
 
     #[test]
@@ -1919,7 +1937,7 @@ mod tests {
             // The server's own words for an address it has no account for.
             ("POST", _) if seen.body.contains("stranger") => json(
                 400,
-                r#"{"error":"invalid_request","message":"An instance administrator must provision this account before it can be invited"}"#,
+                r#"{"error":"invalid_request","message":"stranger@example.test has no account on this server. Create it in the admin panel, then invite them."}"#,
             ),
             ("POST", _) => json(200, serde_json::to_string(&invitation(10, "x@example.test", Role::Member, InvitationStatus::Pending, "2026-11-01T00:00:00.000Z")).unwrap()),
             ("PATCH", path) if path.contains("/members/") => {
@@ -1947,13 +1965,17 @@ mod tests {
         assert_eq!(sent[0], ("cy@example.test".to_owned(), Ok(())));
         assert_eq!(
             invite_problems(&sent),
-            ["stranger@example.test: An instance administrator must provision this account before it can be invited"]
+            ["stranger@example.test has no account on this server. Create it in the admin panel, then invite them."]
         );
         // One address that fails says only what the server said.
-        assert_eq!(
-            invite_problems(&sent[1..]),
-            ["An instance administrator must provision this account before it can be invited"]
-        );
+        assert_eq!(invite_problems(&sent[1..]), ["stranger@example.test has no account on this server. Create it in the admin panel, then invite them."]);
+        // A failure that does not say whose it is gets the address in front, among several.
+        let unreachable = [
+            ("a@example.test".to_owned(), Err("The server could not be reached".to_owned())),
+            ("b@example.test".to_owned(), Ok(())),
+        ];
+        assert_eq!(invite_problems(&unreachable), ["a@example.test: The server could not be reached"]);
+        assert_eq!(invite_problems(&unreachable[..1]), ["The server could not be reached"]);
         cancel_invitation(&client, ORGANIZATION, &id(9)).unwrap();
         set_role(&client, ORGANIZATION, &id(1), InviteRole::Member).unwrap();
         remove_member(&client, ORGANIZATION, &id(1)).unwrap();
@@ -2040,7 +2062,7 @@ mod tests {
         assert_eq!(sent[0].1, Ok(()));
         assert_eq!(
             invite_problems(&sent),
-            ["stranger@nowhere.example: An instance administrator must provision this account before it can be invited"]
+            ["stranger@nowhere.example has no account on this server. Create it in the admin panel, then invite them."]
         );
         let fourth = read(&owner).unwrap();
         let invited = listing(&fourth, "ned");

@@ -1918,7 +1918,7 @@ fn surface_steps() -> Vec<Step> {
             view.org.invite_role = meeting_notes_api_types::InviteOrganizationMemberInputRole::Admin;
             view.org.invite.update(cx, |input, cx| input.set_content("lee@acme.example, new@elsewhere.example", cx));
             view.org.invite_problems = vec![
-                "new@elsewhere.example: An instance administrator must provision this account before it can be invited"
+                "new@elsewhere.example is not allowed to sign in to this server. Ask one of its administrators to invite them."
                     .into(),
             ];
         }),

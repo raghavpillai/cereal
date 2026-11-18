@@ -74,6 +74,8 @@ export function makeAuthenticationEngine(db:Database,options:{secret:string},bas
    // Accounts are provisioned by operators; invitations are authenticated in-app,
    // not email capability links. Never claim SMTP/email verification took place.
    requireEmailVerificationOnInvitation:false,
+   // No email carries the invitation, so the person hears of it from the inviter: two weeks to sign in.
+   invitationExpiresIn:14*86400,
    roles:{owner:organizationAccess.newRole({organization:["update"],member:["create","update","delete"],invitation:["create","cancel"]}),
     admin:organizationAccess.newRole({organization:["update"],member:["create","delete"],invitation:["create","cancel"]}),
     member:organizationAccess.newRole({organization:[],member:[],invitation:[]})},
@@ -112,7 +114,7 @@ export function makeAuthenticationService(db:Database,bootstrapToken:string,opti
   // The state table holds a PKCE verifier for a few minutes; it is sealed with a key derived from the authentication secret.
   box:secretBoxFromKey(createHash("sha256").update("cereal.sign-in.state:"+options.secret).digest()),
   ...(options.google?.endpoints?{endpoints:options.google.endpoints}:{}),...(options.google?.fetch?{fetch:options.google.fetch}:{}),...(options.clock?{clock:options.clock}:{})})
- const organizations=makeOrganizationService(db,auth)
+ const organizations=makeOrganizationService(db,auth,policy)
  const mcp=makeMcpAuthentication(db,auth,base.origin)
  const allowed=new Map([
   ["/sign-in/email",["POST"]],["/sign-out",["POST"]],["/get-session",["GET"]],
