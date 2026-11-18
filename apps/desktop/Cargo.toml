@@ -1,6 +1,6 @@
 [package]
 name = "cereal"
-version = "0.1.0"
+version = "0.1.5"
 edition = "2024"
 description = "Cereal's native desktop meeting notepad"
 

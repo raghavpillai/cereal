@@ -34,8 +34,8 @@ targets:
       path: Cereal/Resources/Info.plist
       properties:
         CFBundleDisplayName: Cereal
-        CFBundleShortVersionString: "0.1.0"
-        CFBundleVersion: "2"
+        CFBundleShortVersionString: "0.1.5"
+        CFBundleVersion: "3"
         NSMicrophoneUsageDescription: Cereal records meeting audio on this device when you start recording.
         NSSupportsLiveActivities: true
         CFBundleURLTypes:
@@ -88,16 +88,16 @@ targets:
       path: RecordingActivity/Info.plist
       properties:
         CFBundleDisplayName: Cereal Recording
-        CFBundleShortVersionString: "0.1.0"
-        CFBundleVersion: "2"
+        CFBundleShortVersionString: "0.1.5"
+        CFBundleVersion: "3"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.cereal.mobile.recording
         GENERATE_INFOPLIST_FILE: YES
-        CURRENT_PROJECT_VERSION: "2"
-        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "3"
+        MARKETING_VERSION: "0.1.5"
         APPLICATION_EXTENSION_API_ONLY: YES
         SKIP_INSTALL: YES
   CerealTests:
