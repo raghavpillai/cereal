@@ -1783,14 +1783,7 @@ impl Cereal {
             }
             Menu::RecordingSettings | Menu::RecordingInput | Menu::RecordingLanguage => {
                 let viewport_width = f32::from(window.viewport_size().width);
-                let enhanced = self
-                    .current_note
-                    .and_then(|id| self.workspace.note(id))
-                    .is_some_and(|note| {
-                        !note.enhanced.trim().is_empty() || self.generation.is_running_for(note.id)
-                    });
-                let panel_width =
-                    (viewport_width.min(if enhanced { 682. } else { 672. }) + 8.).min(682.);
+                let panel_width = crate::note::transcript_panel_width(viewport_width);
                 // Each grows upwards out of its own control in the
                 // transcript panel's footer.
                 let (panel, popup_width, inset) = self.recording_popover(&menu, cx);

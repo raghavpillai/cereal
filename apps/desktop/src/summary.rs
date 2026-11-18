@@ -695,10 +695,14 @@ impl Cereal {
         cx.notify();
     }
 
+    /// Turn row `row` of the generated notes into a field. `at` is where
+    /// the pointer clicked it, in the window: the caret goes under it, as
+    /// it does in the note's own text. Without one it goes to the end.
     pub fn begin_enhanced_edit(
         &mut self,
         note_id: u64,
         row: usize,
+        at: Option<Point<Pixels>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -726,7 +730,12 @@ impl Cereal {
             return;
         };
         let input = cx.new(|cx| TextInput::new("", true, cx));
-        input.update(cx, |input, cx| input.set_content(text, cx));
+        input.update(cx, |input, cx| {
+            input.set_content(text, cx);
+            if let Some(at) = at {
+                input.place_caret(at, cx);
+            }
+        });
         let changed = cx.subscribe(&input, move |this, _, event: &InputChanged, cx| {
             if !this
                 .summary
@@ -1204,10 +1213,15 @@ impl Cereal {
                         } else {
                             crate::chat::inline_text(title, t).into_any_element()
                         })
+                        // It edits on a click like every other line, so it
+                        // shows the same cursor.
                         .when(!read_only, |heading| {
-                            heading.on_click(cx.listener(move |this, _, window, cx| {
-                                this.begin_enhanced_edit(note_id, editable_row, window, cx)
-                            }))
+                            heading.cursor(CursorStyle::IBeam).on_click(cx.listener(
+                                move |this, event: &ClickEvent, window, cx| {
+                                    let at = (!event.is_keyboard()).then(|| event.position());
+                                    this.begin_enhanced_edit(note_id, editable_row, at, window, cx)
+                                },
+                            ))
                         })
                         .into_any_element(),
                 );
@@ -1292,7 +1306,8 @@ impl Cereal {
                                         return;
                                     }
                                     if !read_only {
-                                        this.begin_enhanced_edit(note_id, editable_row, window, cx)
+                                        let at = (!event.is_keyboard()).then(|| event.position());
+                                        this.begin_enhanced_edit(note_id, editable_row, at, window, cx)
                                     }
                                 }
                             }))

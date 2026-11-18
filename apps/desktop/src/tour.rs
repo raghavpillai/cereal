@@ -1997,6 +1997,15 @@ fn surface_steps() -> Vec<Step> {
         }),
         input("p-fix-share-refused", 900, |window, cx| press_key(window, cx, "enter")),
         step("p-fix-share-end", 300, |view, _| view.menu = None),
+        // The Share popover open on the made-up people and nothing more, to
+        // be driven from there by hand (`step wb-share`).
+        step("wb-share", 300, |view, cx| {
+            view.menu = None;
+            view.open_note(1, cx);
+            let (access, workspace) = crate::share_popover::tour_fixture();
+            view.share.preview(access, workspace);
+            view.menu = Some(Menu::Share);
+        }),
         step("p-fix-transcript-link", 1200, |view, cx| {
             view.menu = None;
             for id in [2, 3] {
@@ -2086,7 +2095,7 @@ fn note_polish_steps() -> Vec<Step> {
                 crate::authorship::edited(&mut note.enhanced_authorship, &note.enhanced, &edited);
                 note.enhanced = edited;
             }
-            view.begin_enhanced_edit(1, 3, window, cx);
+            view.begin_enhanced_edit(1, 3, None, window, cx);
             if let Some(edit) = view.summary.edit.as_ref() {
                 let input = edit.input.clone();
                 input.update(cx, |input, cx| input.replace_text_in_range(None, "fff", window, cx));

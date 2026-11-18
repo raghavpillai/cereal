@@ -2003,6 +2003,39 @@ pub fn crossfade<E: Styled + IntoElement + 'static>(
         .into_any_element()
 }
 
+/// (d) [`crossfade`] where what was shown before can still be drawn (the
+/// other of a note's two documents): the two lie over each other while one
+/// fades out under the other fading in, so the page never dips or cuts
+/// between them. `arrived` is how far the incoming content is in, 0..=1,
+/// from a [`Stage::presence`] of what is shown (its `value`, or its `fade`
+/// with reduced motion); `outgoing` is only asked for while both show.
+/// Nothing moves, and the container has the incoming content's size
+/// throughout, so text the reader is following does not shift.
+pub fn crossfade_over(
+    arrived: f32,
+    incoming: impl IntoElement,
+    outgoing: impl FnOnce() -> Option<AnyElement>,
+) -> Div {
+    let arrived = arrived.clamp(0., 1.);
+    let shell = div().relative().w_full().min_w_0();
+    if arrived >= 1. {
+        return shell.child(div().child(incoming));
+    }
+    shell
+        .child(div().opacity(arrived).child(incoming))
+        .when_some(outgoing(), |shell, outgoing| {
+            shell.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w_full()
+                    .opacity(1. - arrived)
+                    .child(outgoing),
+            )
+        })
+}
+
 /// Apply a [`Stage::swap`] pose: a small piece of content that just replaced
 /// another fades in while rising a few pixels.
 pub fn swapped<E: Styled + IntoElement + 'static>(element: E, pose: Pose) -> AnyElement {
@@ -2103,6 +2136,19 @@ impl Glide {
         )
         .absolute()
         .inset_0()
+    }
+
+    /// Forget where the highlight was: when it is next drawn it is simply
+    /// on the selected item, at full strength, without travelling there or
+    /// fading in. For a group that comes back on screen selecting something
+    /// else than when it was last seen (another note's tabs).
+    pub fn rest(&self) {
+        let mut state = self.0.borrow_mut();
+        state.fresh = None;
+        state.key = None;
+        state.start = None;
+        state.shown = None;
+        state.alpha = Some(Track::rest(1., Instant::now()));
     }
 
     /// Paints the highlight. Place it before the items so it sits under them.

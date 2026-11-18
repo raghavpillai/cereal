@@ -43,13 +43,23 @@ pub(crate) struct NoteMetadataAnchors {
 /// Use the same content gutter and joined-tab width as the actual metadata
 /// row; `joined_views` is `None` while the note has no enhanced notes.
 fn metadata_anchors(viewport_width: f32, joined_views: Option<f32>) -> NoteMetadataAnchors {
-    let document_width = viewport_width.min(if joined_views.is_some() { 682. } else { 672. });
+    let document_width = viewport_width.min(DOCUMENT_WIDTH);
     let gutter_left = (viewport_width - document_width) / 2. + 29.;
     let details_left = gutter_left + joined_views.map_or(0., |width| width + 8.);
     let clamp = |left: f32, width: f32| left.clamp(12., (viewport_width - width - 12.).max(12.));
     NoteMetadataAnchors {
         details_left: clamp(details_left, 280.),
     }
+}
+
+/// The width of a note's column, whether or not it has generated notes:
+/// the title and the text under it never shift when notes are generated.
+pub(crate) const DOCUMENT_WIDTH: f32 = 682.;
+
+/// How wide the transcript panel is in a window `viewport` wide: the note's
+/// column, and never nearer than 16 pt to the window's sides.
+pub(crate) fn transcript_panel_width(viewport: f32) -> f32 {
+    DOCUMENT_WIDTH.min(viewport - 32.).max(200.)
 }
 
 /// What the joined view tabs of a note page show.
@@ -219,6 +229,16 @@ impl Cereal {
     ) -> Div {
         let t = self.theme();
         let tabs = self.stage.glide("note-tabs");
+        // Back on screen (another note, or the control arriving as notes
+        // start to be generated): it is simply in the pose of the tab that
+        // is selected now, capsule, widths and label, from its first frame.
+        let fresh = !self.stage.continuous(("note-tabs", 0));
+        if fresh {
+            tabs.rest();
+            for index in 0..2 {
+                self.stage.forget(("note-tab", index));
+            }
+        }
         let notes_label = note_tab_label_width(tabs_shown.notes_label, window);
         let widths = note_tab_widths(
             notes_label,
@@ -307,21 +327,15 @@ impl Cereal {
             };
             let lerp = |from: f32, to: f32| from + (to - from) * open;
             let ink = crate::motion::mix(t.muted, selected_ink, open);
-            // The label is uncovered and covered by its tab's edge, but never
-            // shown cut through a letter: it is only visible once the tab has
-            // room for all of it (the last few tenths of `open`, inside the
-            // last letter's side bearing), fades in from there, and is gone
-            // within a frame or two of its tab starting to close.
-            let room = ((open - 0.93) / 0.06).clamp(0., 1.);
-            let arrived = self
-                .stage
-                .presence(
-                    ("note-tab-label", index as u64),
-                    open >= 0.97,
-                    crate::motion::SNAPPY,
-                )
-                .fade;
-            let label_fade = room * room * (3. - 2. * room) * arrived;
+            // The label is uncovered and covered by its tab's edge. It is a
+            // function of how far the tab is open and nothing else, so it
+            // is there from the first frame of a tab at rest, reverses with
+            // the tab, and the capsule is not left empty while it travels:
+            // it starts to show once the tab has room for all but its last
+            // letter, when it is still too faint for the cut to read, and
+            // is at full strength as the tab lands.
+            let room = ((open - 0.82) / 0.15).clamp(0., 1.);
+            let label_fade = room * room * (3. - 2. * room);
             let collapsed_trail = if chevron {
                 CHEVRON_TRAIL_COLLAPSED
             } else {
@@ -343,13 +357,15 @@ impl Cereal {
                 .pl(px(lerp(lead_collapsed, lead)))
                 .pr(px(lerp(collapsed_trail, selected_trail).max(0.)))
                 .text_size(px(13.))
-                // A collapsed tab washes under the pointer like any tool; the
-                // wash fades out as the tab opens into the raised capsule, so
-                // the capsule stays white under the pointer and only darkens
-                // while it is held.
+                // A collapsed tab washes under the pointer like any tool.
+                // The moment it is chosen the wash is gone: the capsule that
+                // flows in under the pointer is the only shape in flight,
+                // and the press it was chosen with lets go with it. At rest
+                // the capsule stays white under the pointer and only
+                // darkens while it is held.
                 .child(
-                    crate::motion::tactile(t.hover.opacity(1. - open))
-                        .press(t.border.opacity(0.6))
+                    crate::motion::tactile(t.hover.opacity(if active { 0. } else { 1. - open }))
+                        .press(t.border.opacity(0.6 * if active { open * open } else { 1. }))
                         .round(),
                 )
                 .when(active, |d| d.child(tabs.probe(index)))
@@ -439,41 +455,99 @@ impl Cereal {
             && self.generation_draft.showing(id))
         .then(|| self.generation_draft.visible().to_owned());
         let has_enhanced = !note.enhanced.trim().is_empty() || generating || draft.is_some();
-        let document_width =
-            window
-                .viewport_size()
-                .width
-                .min(px(if has_enhanced { 682. } else { 672. }));
+        let document_width = window.viewport_size().width.min(px(DOCUMENT_WIDTH));
         let body_width = (document_width - px(64.)).max(px(100.));
         let display_tab = if has_enhanced && self.active_tab == NoteTab::Enhanced {
             NoteTab::Enhanced
         } else {
             NoteTab::Notes
         };
-        let views = self.note_view_tabs(
-            NoteTabs {
-                notes_label: "My notes",
-                menu: true,
-            },
-            display_tab,
-            window,
-            cx,
-            |this, tab, active, window, cx| {
-                this.focus.focus(window);
-                if active && tab == NoteTab::Enhanced {
-                    this.open_menu(Menu::Templates);
-                } else {
-                    this.summary.dismiss();
-                    this.active_tab = tab;
-                }
-                cx.notify();
-            },
-        );
         // The generation chip has a presence of its own. If the user watched
         // the generation finish, the chip leaves and the notes arrive block
         // by block, once. If it finished while they were elsewhere, the
         // notes are simply there when they come back.
         let watched = self.stage.continuous(("note-view", id));
+        // The tab control is there only for a note with generated notes. It
+        // grows into the row as the first ones start to be written, pushing
+        // the chip beside it along on the same spring, already selecting
+        // Enhanced; a note that is opened with notes simply has it.
+        let tabs_key = ("note-tabs-shown", id);
+        if !watched {
+            self.stage.settle(tabs_key, has_enhanced);
+        }
+        let tabs_pose = self
+            .stage
+            .presence(tabs_key, has_enhanced, crate::motion::GOOEY);
+        let views = tabs_pose.visible.then(|| {
+            let track = note_tab_widths(
+                note_tab_label_width("My notes", window),
+                note_tab_label_width("Enhanced", window),
+                true,
+            )
+            .track(display_tab);
+            let room = self.stage.room(tabs_key, tabs_pose);
+            let views = self.note_view_tabs(
+                NoteTabs {
+                    notes_label: "My notes",
+                    menu: true,
+                },
+                // Leaving (a generation that came to nothing), it keeps the
+                // pose it had.
+                if has_enhanced { display_tab } else { NoteTab::Enhanced },
+                window,
+                cx,
+                |this, tab, active, window, cx| {
+                    this.focus.focus(window);
+                    if active && tab == NoteTab::Enhanced {
+                        this.open_menu(Menu::Templates);
+                    } else {
+                        this.summary.dismiss();
+                        this.active_tab = tab;
+                    }
+                    cx.notify();
+                },
+            );
+            if tabs_pose.at_rest() {
+                return views.mr(px(8.)).into_any_element();
+            }
+            div()
+                .h(px(TAB_HEIGHT))
+                .w(px((track + 8.) * room))
+                .flex_shrink_0()
+                .overflow_hidden()
+                .opacity(tabs_pose.fade)
+                .child(views)
+                .into_any_element()
+        });
+        // The two documents cross-fade when the tab changes (and when the
+        // person's own notes give way to the ones being generated): how far
+        // the Enhanced one is in.
+        let enhanced_key = ("note-tab-enhanced", id);
+        if !watched {
+            self.stage
+                .settle(enhanced_key, display_tab == NoteTab::Enhanced);
+        }
+        let enhanced_pose = self.stage.presence(
+            enhanced_key,
+            display_tab == NoteTab::Enhanced,
+            crate::motion::SNAPPY,
+        );
+        let enhanced_in = if crate::motion::reduce_motion() {
+            enhanced_pose.fade
+        } else {
+            enhanced_pose.value.clamp(0., 1.)
+        };
+        // A title that arrives with the generated notes settles in like
+        // they do. One being typed is simply what was typed.
+        let title_pose = self.stage.swap(
+            ("note-title", id),
+            crate::lazy::key(&note.title),
+        );
+        let title_pose = if watched && !self.title_input.read(cx).focus_handle.is_focused(window) {
+            title_pose
+        } else {
+            crate::motion::Pose::REST
+        };
         let was_generating = self.stage.target(("generation", id)) == Some(1.);
         if !watched && !generating {
             self.stage.forget(("generation", id));
@@ -491,7 +565,11 @@ impl Cereal {
         {
             self.stage.mark("enhanced");
         }
-        let content = match display_tab {
+        // One of the note's two documents. A macro, not a closure: each use
+        // borrows the view afresh.
+        macro_rules! document {
+            ($tab:expr) => {
+        match $tab {
             NoteTab::Notes=>div().w(body_width).min_h(px(300.)).text_size(px(16.)).line_height(px(24.)).child(self.editor.clone()).into_any_element(),
             // The chip and the placeholder over it take 88 px (the two and
             // their gaps). That block opens as generation starts and closes
@@ -528,7 +606,15 @@ impl Cereal {
                     .child("Write your notes, then make a local outline to put your thoughts in order."))
                 .child(pill("enhance-local","Enhance notes","sparkles",t).on_click(cx.listener(move|this,_,_,cx|this.enhance_note_preview(id,cx)))).into_any_element(),
             NoteTab::Enhanced=>self.render_enhanced_content(&note,t,body_width,window,cx).into_any_element(),
-        };
+        }
+            };
+        }
+        let content = document!(display_tab);
+        let arrived = if display_tab == NoteTab::Enhanced { enhanced_in } else { 1. - enhanced_in };
+        // What it is taking over from, for as long as the two cross-fade.
+        let outgoing = (arrived < 1. && has_enhanced).then(|| {
+            document!(if display_tab == NoteTab::Enhanced { NoteTab::Notes } else { NoteTab::Enhanced })
+        });
         let parsed_date = note
             .meeting_context
             .as_ref()
@@ -544,30 +630,46 @@ impl Cereal {
             .flex_col()
             .w(document_width)
             .min_w_0()
-            .max_w(px(682.))
+            .max_w(px(DOCUMENT_WIDTH))
             .mx_auto()
             .px(px(32.))
             .pt(px(8.))
             .pb(px(136.))
-            .child(
+            .child(crate::motion::swapped(
                 div()
                     .w(body_width)
                     .font_family(DISPLAY)
                     .text_size(px(24.))
                     .line_height(px(28.))
                     .mb(px(14.))
+                    // Return in the title goes on to the body, with the
+                    // caret at its start, as in any document. With the
+                    // generated notes showing there is no one field to go
+                    // on to: the title is simply done.
+                    .capture_action(cx.listener(
+                        move |this, _: &crate::input::Enter, window, cx| {
+                            if display_tab == NoteTab::Notes {
+                                this.editor
+                                    .update(cx, |editor, cx| editor.focus_at_start(window, cx));
+                            } else {
+                                this.focus.focus(window);
+                            }
+                            cx.stop_propagation();
+                            cx.notify();
+                        },
+                    ))
                     .child(self.title_input.clone()),
-            )
+                title_pose,
+            ))
             .child(
                 div()
                     .h(px(28.))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .gap(px(8.))
                     .ml(px(-4.))
                     .mb(px(20.))
-                    .when(has_enhanced, |d| d.child(views))
+                    .children(views)
                     .child(
                         note_meta_chip("note-details", t)
                             .cursor_default()
@@ -589,12 +691,9 @@ impl Cereal {
                             })),
                     )
             )
-            // Switching between My notes and Enhanced settles in rather than
-            // swapping abruptly. Keyed by the tab only, so typing never replays it.
-            .child(crate::motion::crossfade(
-                ("note-tab-content", display_tab as u64),
-                div().child(content),
-            ));
+            // Switching between My notes and Enhanced is a cross-fade of
+            // the two documents: neither cuts out and nothing moves.
+            .child(crate::motion::crossfade_over(arrived, content, || outgoing));
         let transcript = self.stage.presence(
             ("transcript", 0),
             self.transcript_open,
@@ -711,7 +810,7 @@ impl Cereal {
                             };
                             self.render_transcript_panel(
                                 id,
-                                (document_width + px(8.)).min(px(682.)),
+                                px(transcript_panel_width(f32::from(window.viewport_size().width))),
                                 (window.viewport_size().height - px(100.))
                                     .min(px(465.))
                                     .max(px(280.)),
