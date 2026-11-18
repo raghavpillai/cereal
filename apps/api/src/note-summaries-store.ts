@@ -17,7 +17,7 @@ import {EXCERPT_SOURCE_CHARACTERS,FIELD_WEIGHT,PHRASE_WEIGHT,SEARCH_FIELDS,atten
 interface SummaryRow {
   id:string;title:string;date:Date;duration:string;createdAt:Date;updatedAt:Date;recordingState:string;generationState:string
   transcriptRevision:number;generatedRevision:number|null;organizationId:string|null
-  enhancedHead:string;bodyHead:string;hasSummary:boolean;hasBody:boolean;speakerCount:number;meeting:unknown
+  enhancedHead:string;bodyHead:string;hasSummary:boolean;hasBody:boolean;speakerCount:number;meeting:unknown;trashed:boolean
 }
 /** Numbered parameters, each with its cast, so a statement can be assembled from fragments. */
 function statement() {
@@ -29,25 +29,27 @@ const SUMMARY=SUMMARY_TEXT_SQL("n")
 const like=(text:string)=>`%${text.replace(/[\\%_]/g,"\\$&")}%`
 const HAS_TEXT=String.raw`~ '\S'`
 const SPOKEN=`EXISTS (SELECT 1 FROM "TranscriptSegment" spoken WHERE spoken."noteId"=n."id" AND spoken."text" ${HAS_TEXT})`
+/** In Trash: the owner suspended the note's sharing (NoteSharing, note-access.ts). */
+const TRASHED=`EXISTS (SELECT 1 FROM "NoteSharing" away WHERE away."noteId"=n."id" AND away."suspended")`
 const SUMMARY_COLUMNS=`n."id",n."title",n."date",n."duration",n."createdAt",n."updatedAt",n."recordingState",n."generationState",n."transcriptRevision",n."generatedRevision",n."organizationId",
   left(${SUMMARY},${EXCERPT_SOURCE_CHARACTERS}) AS "enhancedHead",left(n."body",${EXCERPT_SOURCE_CHARACTERS}) AS "bodyHead",
   (n."enhanced" ${HAS_TEXT}) AS "hasSummary",(n."body" ${HAS_TEXT}) AS "hasBody",
   (SELECT count(DISTINCT (voice."channel",voice."speakerId"))::int FROM "TranscriptSegment" voice WHERE voice."noteId"=n."id" AND voice."text" ${HAS_TEXT}) AS "speakerCount",
-  context."meeting"`
+  context."meeting",(${TRASHED}) AS "trashed"`
 const CONTEXT_JOIN=`LEFT JOIN "NoteMeetingContext" context ON context."noteId"=n."id" AND context."userId"=n."ownerId"`
 const ORDER=`"date" DESC,"createdAt" DESC,"id" DESC`
 const dayOf=(date:Date)=>date.toISOString().slice(0,10)
 
 export function makePrismaNoteSummaries(db:Database) {
-  const scope=(sql:ReturnType<typeof statement>,userId:string,organizationId:string|undefined,filter:NoteListInput["filter"])=>
-    `n."ownerId"=${sql.bind(userId,"uuid")}${organizationId?` AND n."organizationId"=${sql.bind(organizationId,"uuid")}`:""}${filter==="summarized"?` AND n."enhanced" ${HAS_TEXT}`:filter==="transcribed"?` AND ${SPOKEN}`:""}`
+  const scope=(sql:ReturnType<typeof statement>,userId:string,organizationId:string|undefined,{filter,trash}:Pick<NoteListInput,"filter"|"trash">)=>
+    `n."ownerId"=${sql.bind(userId,"uuid")}${organizationId?` AND n."organizationId"=${sql.bind(organizationId,"uuid")}`:""}${filter==="summarized"?` AND n."enhanced" ${HAS_TEXT}`:filter==="transcribed"?` AND ${SPOKEN}`:""}${trash==="exclude"?` AND NOT ${TRASHED}`:trash==="only"?` AND ${TRASHED}`:""}`
   const summaries=(rows:ReadonlyArray<SummaryRow>):Array<{summary:NoteSummaryDTO;people:string[]}>=>{
     return rows.map(row=>{
       const meeting=decodeMeeting(row.meeting)
       return{people:attendeeNames(meeting),summary:noteSummary({id:row.id,title:row.title,date:dayOf(row.date),duration:row.duration,createdAt:row.createdAt.toISOString(),updatedAt:row.updatedAt.toISOString(),
         recordingState:row.recordingState,generationState:row.generationState,transcriptRevision:row.transcriptRevision,generatedRevision:row.generatedRevision,
         hasBody:row.hasBody,hasSummary:row.hasSummary,speakerCount:row.speakerCount,enhanced:row.enhancedHead,body:row.bodyHead,complete:false,
-        meeting,organizationId:row.organizationId})}
+        meeting,organizationId:row.organizationId,trashed:row.trashed})}
     })
   }
   // The instant is bound as a Date, the way Prisma binds the ones it writes. Bound as text
@@ -59,15 +61,15 @@ export function makePrismaNoteSummaries(db:Database) {
     async list(userId:string,organizationId:string|undefined,input:NoteListInput) {
       const page=statement(),count=statement()
       const [rows,total]=await Promise.all([
-        db.$queryRawUnsafe<SummaryRow[]>(`SELECT ${SUMMARY_COLUMNS} FROM "Note" n ${CONTEXT_JOIN} WHERE ${scope(page,userId,organizationId,input.filter)}${input.cursor?` AND ${after(page,input.cursor,"n.")}`:""} ORDER BY n."date" DESC,n."createdAt" DESC,n."id" DESC LIMIT ${input.limit+1}`,...page.values),
-        db.$queryRawUnsafe<Array<{total:number}>>(`SELECT count(*)::int AS "total" FROM "Note" n WHERE ${scope(count,userId,organizationId,input.filter)}`,...count.values),
+        db.$queryRawUnsafe<SummaryRow[]>(`SELECT ${SUMMARY_COLUMNS} FROM "Note" n ${CONTEXT_JOIN} WHERE ${scope(page,userId,organizationId,input)}${input.cursor?` AND ${after(page,input.cursor,"n.")}`:""} ORDER BY n."date" DESC,n."createdAt" DESC,n."id" DESC LIMIT ${input.limit+1}`,...page.values),
+        db.$queryRawUnsafe<Array<{total:number}>>(`SELECT count(*)::int AS "total" FROM "Note" n WHERE ${scope(count,userId,organizationId,input)}`,...count.values),
       ])
       const shown=summaries(rows.slice(0,input.limit)),last=shown[shown.length-1]?.summary
-      return Schema.decodeUnknownSync(NoteSummariesPageDTO)({notes:shown.map(row=>row.summary),nextCursor:rows.length>input.limit&&last?listCursor(last,input.filter):null,total:total[0]?.total??0})
+      return Schema.decodeUnknownSync(NoteSummariesPageDTO)({notes:shown.map(row=>row.summary),nextCursor:rows.length>input.limit&&last?listCursor(last,input):null,total:total[0]?.total??0})
     },
     async search(userId:string,organizationId:string|undefined,input:NoteSearchInput) {
       if(!input.terms.length)return{results:[],nextCursor:null,total:0,terms:[]} satisfies typeof NoteSearchPageDTO.Type
-      const sql=statement(),where=scope(sql,userId,organizationId,input.filter)
+      const sql=statement(),where=scope(sql,userId,organizationId,input)
       const patterns=input.terms.map(term=>sql.bind(like(term),"text"))
       const invited=`jsonb_array_elements(CASE WHEN jsonb_typeof(n."meeting"->'participants')='array' THEN n."meeting"->'participants' ELSE '[]'::jsonb END)`
       const inField:Record<NoteSearchField,(pattern:string)=>string>={

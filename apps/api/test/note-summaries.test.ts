@@ -49,7 +49,7 @@ describe("notes list summaries",()=>{
     expect(page.total).toBe(1)
     expect(page.nextCursor).toBeNull()
     const row=page.notes[0]!
-    expect(Object.keys(row).sort()).toEqual(["attendees","createdAt","date","duration","excerpt","generatedRevision","generationState","hasBody","hasSummary","hasTranscript","id","meeting","organizationId","recordingState","speakerCount","title","transcriptRevision","updatedAt"])
+    expect(Object.keys(row).sort()).toEqual(["attendees","createdAt","date","duration","excerpt","generatedRevision","generationState","hasBody","hasSummary","hasTranscript","id","meeting","organizationId","recordingState","speakerCount","title","transcriptRevision","trashed","updatedAt"])
     expect(row).toMatchObject({id:note.id,title:"Pricing review",date:"2026-10-20",duration:"31:07",hasBody:true,hasSummary:true,hasTranscript:true,speakerCount:2,
       recordingState:"idle",generationState:"idle",transcriptRevision:1,generatedRevision:null,updatedAt:note.updatedAt,createdAt:note.createdAt,
       excerpt:"Pricing holds until March. Follow up with legal.",meeting:null,attendees:{people:[],others:0,total:0},organizationId:null})
@@ -109,6 +109,26 @@ describe("notes list summaries",()=>{
     for(const query of[`?cursor=${summarized.nextCursor}`,"?cursor=not_a_cursor","?cursor=!!","?limit=0","?limit=abc","?limit=1000","?filter=starred"])
       expect((await request(users.ada,`/api/v1/notes/summaries${query}`)).status).toBe(400)
     expect((await list(users.ada,"?limit=999")).notes.length).toBe(6)
+  })
+  test("Trash is a scope of the list and of search: every note, the kept ones, or Trash alone",async()=>{
+    const{create,request}=fixture()
+    const made=[];for(let i=0;i<5;i++)made.push(await create(users.ada,{title:`Plan ${i}`,date:day(i)}))
+    const away=new Set([made[1]!.id,made[4]!.id]),extras=(id:string)=>({trashed:away.has(id)})
+    const all=selectNoteSummaries(made,parseListInput({}),extras)
+    expect(all.notes.map(note=>[note.title,note.trashed])).toEqual([["Plan 4",true],["Plan 3",false],["Plan 2",false],["Plan 1",true],["Plan 0",false]])
+    const kept=selectNoteSummaries(made,parseListInput({trash:"exclude",limit:"2"}),extras)
+    expect(kept.total).toBe(3);expect(kept.notes.map(note=>note.title)).toEqual(["Plan 3","Plan 2"])
+    expect(selectNoteSummaries(made,parseListInput({trash:"exclude",limit:"2",cursor:kept.nextCursor!}),extras).notes.map(note=>note.title)).toEqual(["Plan 0"])
+    expect(selectNoteSummaries(made,parseListInput({trash:"only"}),extras).notes.map(note=>note.title)).toEqual(["Plan 4","Plan 1"])
+    // A cursor belongs to the scope it was issued for; one issued without a scope still reads as before.
+    expect(()=>parseListInput({trash:"only",cursor:kept.nextCursor!})).toThrow()
+    expect(()=>parseListInput({cursor:kept.nextCursor!})).toThrow()
+    const plain=selectNoteSummaries(made,parseListInput({limit:"2"}),extras)
+    expect(parseListInput({cursor:plain.nextCursor!,trash:"include"}).cursor).not.toBeNull()
+    expect(selectNoteSearch(made,parseSearchInput({q:"plan",trash:"exclude"}),extras).total).toBe(3)
+    expect(selectNoteSearch(made,parseSearchInput({q:"plan",trash:"only"}),extras).results.map(result=>result.note.trashed)).toEqual([true,true])
+    expect((await request(users.ada,"/api/v1/notes/summaries?trash=bin")).status).toBe(400)
+    expect((await request(users.ada,"/api/v1/notes/search?q=plan&trash=exclude")).status).toBe(200)
   })
 
   test("one account never sees another account's notes in the list or in search",async()=>{

@@ -1,10 +1,10 @@
-import { Link } from '@tanstack/react-router'
-import { copyText } from '../../lib/clipboard'
+import { Link, useNavigate } from '@tanstack/react-router'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { NoteDTO, NoteSummaryDTO } from '@meeting-notes/contracts'
 import { NoteText } from '../../lib/markdown'
-import { chipDayLabel, isFinished, meetingPeople, noteDay, noteFacts, noteIsFinished, noteMarkdown, transcriptMarkdown, type NoteStatus } from '../../lib/notes'
+import { chipDayLabel, isFinished, meetingPeople, noteDay, noteFacts, noteIsFinished, noteMarkdown, type NoteStatus } from '../../lib/notes'
 import { provisionalNote, summaryStatus } from '../../lib/note-list'
+import { AdminClientError } from '../../lib/admin-client'
 import { noteAppURL } from '../../lib/open-in-app'
 import { useResource } from '../admin/shared'
 import { HeaderPageActions } from '../kit/header-slot'
@@ -14,9 +14,9 @@ import { DetailsChip, NoteOptions, NoteViews, PendingNoteActions, type NoteTab }
 import { OpenInApp } from '../open-in-app'
 import { ReaderLoading } from '../reader-state'
 import { MeetingCard } from './meeting-card'
-import { useMeeting, useNotes } from './notes-context'
+import { errorText, useMeeting, useNotes } from './notes-context'
 import { ShareControl } from './share'
-import { TranscriptPanel, TranscriptToggle } from './transcript'
+import { DeleteQuestion, SUBTITLE } from './trash'
 
 export function NotePage({ noteId }: { noteId: string }) {
   const { expired, notes, morph } = useNotes()
@@ -45,15 +45,38 @@ export function NotePage({ noteId }: { noteId: string }) {
 
 /** `row` is set while only the list row is known: the heading is real and the text is still on its way. */
 function NoteReader({ note, row, appURL, refreshError, retry, focusTitle }: { note: NoteDTO; row: NoteSummaryDTO | null; appURL: string | null; refreshError: string | null; retry: () => Promise<void>; focusTitle: boolean }) {
-  const { client, expired, meetings, session } = useNotes()
+  const { client, expired, meetings, notes, notify, session } = useNotes()
+  const navigate = useNavigate()
   const facts = noteFacts(note), { title } = facts
   const has = row ? { enhanced: row.hasSummary, body: row.hasBody, transcript: row.hasTranscript } : { enhanced: facts.hasSummary, body: facts.hasBody, transcript: facts.hasTranscript }
   const status = row ? summaryStatus(row) : facts.status
   // A note with generated notes opens on them, as it does in the app.
   const [tab, setTab] = useState<NoteTab>('enhanced')
   const shown: NoteTab = has.enhanced && tab === 'enhanced' ? 'enhanced' : 'notes'
-  const [transcript, setTranscript] = useState(false)
   const heading = useRef<HTMLHeadingElement>(null)
+  // Whether the note is in Trash. Its row says so at once; a note opened by its address asks.
+  const [trashed, setTrashed] = useState<boolean | null>(() => { const known = row ?? notes.summary(note.id); return known ? known.trashed === true : null })
+  const loadAccess = useCallback(async (signal: AbortSignal) => { const access = await client.getNoteAccess(note.id, signal); setTrashed(access.suspended); return access }, [client, note.id])
+  useResource(loadAccess, expired)
+  const [busy, setBusy] = useState(false), [asking, setAsking] = useState(false), [problem, setProblem] = useState<string | null>(null)
+  const alive = useRef(true)
+  useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
+  /** One change to where the note is kept. A refusal is said beside the note; a session that has ended goes to sign-in. */
+  async function change(action: () => Promise<void>, done: () => void) {
+    if (busy) return
+    setBusy(true); setProblem(null)
+    try { await action() } catch (error) {
+      if (error instanceof AdminClientError && error.status === 401) expired()
+      else if (alive.current) setProblem(errorText(error))
+      if (alive.current) setBusy(false)
+      return
+    }
+    if (alive.current) setBusy(false)
+    done()
+  }
+  const moveToTrash = () => change(() => notes.moveToTrash(note.id), () => { notify('Note moved to trash'); void navigate({ to: '/notes' }) })
+  const restore = () => change(() => notes.restore(note.id), () => { if (alive.current) setTrashed(false); notify('Note restored') })
+  const deleteForever = () => change(() => notes.deleteForever(note.id), () => { notify('Note deleted forever'); void navigate({ to: '/notes/trash', replace: true }) })
 
   // Either way the answer lands in the shared store.
   const loadContext = useCallback(async (signal: AbortSignal) => { const context = await client.getNoteContext(note.id, signal); meetings.set(note.id, context.meeting); return context }, [client, meetings, note.id])
@@ -67,19 +90,39 @@ function NoteReader({ note, row, appURL, refreshError, retry, focusTitle }: { no
   // Arriving from the list, focus lands on the title so keyboards and screen readers start at the note.
   useEffect(() => { if (focusTitle && document.activeElement === document.body) heading.current?.focus({ preventScroll: true }) }, [focusTitle])
 
-  const copyTranscript = useCallback(async () => {
-    try { await copyText(transcriptMarkdown(note.transcriptSegments)); return true } catch { return false }
-  }, [note.transcriptSegments])
   const loading = row !== null && (shown === 'enhanced' ? has.enhanced : has.body)
 
   return <>
     <HeaderPageActions>
       <OpenInApp appURL={appURL} />
-      {row && (has.enhanced || has.body) && <PendingNoteActions />}
-      {!row && (has.enhanced || has.body) && <NoteOptions title={title} markdown={noteMarkdown(note, shown === 'enhanced' ? 'summary' : 'notes')} shown={shown} />}
-      {!row && (has.enhanced || has.body) && <ShareControl noteId={note.id} session={session} has={has} expired={expired} />}
+      {/* Until the note and where it is kept are both known, its actions stand in their places, dimmed. A note in Trash is shared with nobody, so it has no Share. */}
+      {row || trashed === null ? <PendingNoteActions share={trashed !== true && (has.enhanced || has.body)} />
+        : <>
+          <NoteOptions title={title} markdown={has.enhanced || has.body ? noteMarkdown(note, shown === 'enhanced' ? 'summary' : 'notes') : null} shown={shown}>
+            {close => trashed
+              ? <>
+                <button type="button" className="app-menu-row" role="menuitem" disabled={busy} onClick={() => { close(); void restore() }}><Icon name="restore" size={16} /><span>Restore</span></button>
+                <button type="button" className="app-menu-row is-danger" role="menuitem" disabled={busy} onClick={() => { close(); setAsking(true) }}><Icon name="trash" size={16} /><span>Delete forever</span></button>
+              </>
+              : <button type="button" className="app-menu-row is-danger" role="menuitem" disabled={busy} onClick={() => { close(); void moveToTrash() }}><Icon name="trash" size={16} /><span>Move to trash</span></button>}
+          </NoteOptions>
+          {!trashed && (has.enhanced || has.body) && <ShareControl noteId={note.id} session={session} has={has} expired={expired} />}
+        </>}
     </HeaderPageActions>
     <article className={has.enhanced ? 'note-doc' : 'note-doc is-plain'}>
+      {trashed && <div className="note-trashed">
+        {asking
+          ? <DeleteQuestion title={title} busy={busy} cancel={() => setAsking(false)} confirm={() => void deleteForever()} />
+          : <>
+            <Icon name="trash" size={16} />
+            <p role="status"><span>This note is in the Trash</span><span className="app-small">{SUBTITLE}</span></p>
+            <span className="trash-answers">
+              <button type="button" className="app-pill" disabled={busy} onClick={() => void restore()}><span>Restore</span></button>
+              <button type="button" className="app-pill" disabled={busy} onClick={() => setAsking(true)}><span>Delete forever</span></button>
+            </span>
+          </>}
+      </div>}
+      {problem && <p className="note-quiet is-warning" role="alert">{problem}</p>}
       <h1 className="note-title" ref={heading} tabIndex={-1}>{title}</h1>
       <div className="note-meta">
         {has.enhanced && <NoteViews shown={shown} show={setTab} />}
@@ -96,12 +139,9 @@ function NoteReader({ note, row, appURL, refreshError, retry, focusTitle }: { no
           : shown === 'enhanced'
           ? <><StatusLine status={status} /><NoteText value={note.enhanced} sourced={has.transcript} /></>
           : has.body ? <div className="note-own">{note.body}</div>
-          : <><StatusLine status={has.enhanced ? null : status} /><p className="note-quiet">{has.enhanced ? 'You wrote no notes of your own in this meeting.' : has.transcript ? 'No notes were written for this meeting. Its transcript is below.' : 'This note is empty.'}</p></>}
+          : <><StatusLine status={has.enhanced ? null : status} /><p className="note-quiet">{has.enhanced ? 'You wrote no notes of your own in this meeting.' : has.transcript ? 'No notes were written for this meeting.' : 'This note is empty.'}</p></>}
       </div>
     </article>
-    {has.transcript && !row && (transcript
-      ? <TranscriptPanel segments={note.transcriptSegments} close={() => setTranscript(false)} copy={copyTranscript} />
-      : <div className="note-footer"><div className="note-footer-row"><span className="transcript-capsule"><TranscriptToggle open={false} toggle={() => setTranscript(true)} /></span></div></div>)}
   </>
 }
 

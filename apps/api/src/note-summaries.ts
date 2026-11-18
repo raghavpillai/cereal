@@ -14,7 +14,7 @@
 import {Schema} from "effect"
 import {forContext} from "./transcript-link"
 import {MeetingContextDTO,NoteSearchPageDTO,NoteSummariesPageDTO,NoteSummaryDTO} from "@meeting-notes/contracts"
-import type {NoteAttendeesDTO,NoteDTO,NoteListFilter,NoteSearchExcerptDTO,NoteSearchField,NoteSearchResultDTO,NoteSearchTextPartDTO} from "@meeting-notes/contracts"
+import type {NoteAttendeesDTO,NoteDTO,NoteListFilter,NoteTrashScope,NoteSearchExcerptDTO,NoteSearchField,NoteSearchResultDTO,NoteSearchTextPartDTO} from "@meeting-notes/contracts"
 
 export const SUMMARY_PAGE_DEFAULT=50,SUMMARY_PAGE_MAX=100,SEARCH_PAGE_DEFAULT=30,SEARCH_PAGE_MAX=50
 /** How much of each document is read to write a row's excerpt. */
@@ -27,8 +27,8 @@ export class InvalidPageRequest extends Error {}
 
 export interface ListCursor {date:string;createdAt:string;id:string}
 export interface SearchCursor extends ListCursor {score:number}
-export interface NoteListInput {limit:number;cursor:ListCursor|null;filter:NoteListFilter}
-export interface NoteSearchInput {query:string;terms:ReadonlyArray<string>;limit:number;cursor:SearchCursor|null;filter:NoteListFilter}
+export interface NoteListInput {limit:number;cursor:ListCursor|null;filter:NoteListFilter;trash:NoteTrashScope}
+export interface NoteSearchInput {query:string;terms:ReadonlyArray<string>;limit:number;cursor:SearchCursor|null;filter:NoteListFilter;trash:NoteTrashScope}
 
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const day=/^\d{4}-\d{2}-\d{2}$/
@@ -44,37 +44,41 @@ const position=(date:unknown,createdAt:unknown,id:unknown):ListCursor=>{
 }
 /** A cursor is the last row of the page before it. It also carries what it was
  * issued for, so one made for another filter or search is refused, not misread. */
-const listScope=(filter:NoteListFilter)=>`l:${filter}`
-const searchScope=(input:Pick<NoteSearchInput,"terms"|"filter">)=>`s:${input.filter}:${input.terms.join(" ")}`
+type Listed=Pick<NoteListInput,"filter"|"trash">
+/** Reaching into Trash or not is part of what a cursor was issued for. "include" adds nothing, so the cursors of
+ * clients that do not say (they list everything) read as they always did. */
+const reach=(trash:NoteTrashScope)=>trash==="include"?"":`:${trash}`
+const listScope=(input:Listed)=>`l:${input.filter}${reach(input.trash)}`
+const searchScope=(input:Pick<NoteSearchInput,"terms"|"filter"|"trash">)=>`s:${input.filter}${reach(input.trash)}:${input.terms.join(" ")}`
 const fingerprint=(scope:string)=>{let hash=2166136261;for(let i=0;i<scope.length;i++){hash^=scope.charCodeAt(i);hash=Math.imul(hash,16777619)}return(hash>>>0).toString(36)}
-export const listCursor=(row:ListCursor,filter:NoteListFilter)=>encode([fingerprint(listScope(filter)),row.date,row.createdAt,row.id])
-export const searchCursor=(row:SearchCursor,input:Pick<NoteSearchInput,"terms"|"filter">)=>encode([fingerprint(searchScope(input)),row.score,row.date,row.createdAt,row.id])
+export const listCursor=(row:ListCursor,input:Listed)=>encode([fingerprint(listScope(input)),row.date,row.createdAt,row.id])
+export const searchCursor=(row:SearchCursor,input:Pick<NoteSearchInput,"terms"|"filter"|"trash">)=>encode([fingerprint(searchScope(input)),row.score,row.date,row.createdAt,row.id])
 function parseLimit(text:string|undefined,fallback:number,maximum:number) {
   if(text===undefined)return fallback
   const value=Number(text)
   if(!Number.isInteger(value)||value<1)throw new InvalidPageRequest("The page size is not valid")
   return Math.min(value,maximum)
 }
-export function parseListInput(query:{limit?:string;cursor?:string;filter?:NoteListFilter}):NoteListInput {
-  const filter=query.filter??"all"
+export function parseListInput(query:{limit?:string;cursor?:string;filter?:NoteListFilter;trash?:NoteTrashScope}):NoteListInput {
+  const filter=query.filter??"all",trash=query.trash??"include"
   let cursor:ListCursor|null=null
   if(query.cursor!==undefined){
     const value=decode(query.cursor)
-    if(value.length!==4||value[0]!==fingerprint(listScope(filter)))throw new InvalidPageRequest("The page cursor belongs to another list")
+    if(value.length!==4||value[0]!==fingerprint(listScope({filter,trash})))throw new InvalidPageRequest("The page cursor belongs to another list")
     cursor=position(value[1],value[2],value[3])
   }
-  return{limit:parseLimit(query.limit,SUMMARY_PAGE_DEFAULT,SUMMARY_PAGE_MAX),cursor,filter}
+  return{limit:parseLimit(query.limit,SUMMARY_PAGE_DEFAULT,SUMMARY_PAGE_MAX),cursor,filter,trash}
 }
-export function parseSearchInput(query:{q:string;limit?:string;cursor?:string;filter?:NoteListFilter}):NoteSearchInput {
-  const filter=query.filter??"all",terms=noteSearchTerms(query.q)
+export function parseSearchInput(query:{q:string;limit?:string;cursor?:string;filter?:NoteListFilter;trash?:NoteTrashScope}):NoteSearchInput {
+  const filter=query.filter??"all",trash=query.trash??"include",terms=noteSearchTerms(query.q)
   let cursor:SearchCursor|null=null
   if(query.cursor!==undefined){
     const value=decode(query.cursor)
-    if(value.length!==5||value[0]!==fingerprint(searchScope({terms,filter})))throw new InvalidPageRequest("The page cursor belongs to another search")
+    if(value.length!==5||value[0]!==fingerprint(searchScope({terms,filter,trash})))throw new InvalidPageRequest("The page cursor belongs to another search")
     if(typeof value[1]!=="number"||!Number.isInteger(value[1])||value[1]<0||value[1]>1_000_000)throw new InvalidPageRequest("The page cursor is not valid")
     cursor={score:value[1],...position(value[2],value[3],value[4])}
   }
-  return{query:phrase(query.q),terms,limit:parseLimit(query.limit,SEARCH_PAGE_DEFAULT,SEARCH_PAGE_MAX),cursor,filter}
+  return{query:phrase(query.q),terms,limit:parseLimit(query.limit,SEARCH_PAGE_DEFAULT,SEARCH_PAGE_MAX),cursor,filter,trash}
 }
 
 // ── Row content ────────────────────────────────────────────────────────────
@@ -136,7 +140,7 @@ export interface NoteSummarySource {
   transcriptRevision:number;generatedRevision:number|null;hasBody:boolean;hasSummary:boolean;speakerCount:number
   /** The opening of each document, or all of it when `complete`. */
   enhanced:string;body:string;complete:boolean
-  meeting:MeetingContextDTO|null;organizationId:string|null
+  meeting:MeetingContextDTO|null;organizationId:string|null;trashed:boolean
 }
 const decodeSummary=Schema.decodeUnknownSync(NoteSummaryDTO)
 export function noteSummary(source:NoteSummarySource):NoteSummaryDTO {
@@ -147,17 +151,17 @@ export function noteSummary(source:NoteSummarySource):NoteSummaryDTO {
     hasBody:source.hasBody,hasSummary:source.hasSummary,hasTranscript:source.speakerCount>0,speakerCount:source.speakerCount,
     excerpt:noteExcerpt(source.enhanced,source.body,source.complete),
     meeting:meeting?{startAt:meeting.startAt,endAt:meeting.endAt,allDay:meeting.allDay}:null,
-    attendees:attendeeSummary(meeting),organizationId:source.organizationId,
+    attendees:attendeeSummary(meeting),organizationId:source.organizationId,trashed:source.trashed,
   })
 }
 /** What a repository without its own calendar data cannot know about a note. */
-export interface NoteExtras {meeting?:MeetingContextDTO|null;organizationId?:string|null}
+export interface NoteExtras {meeting?:MeetingContextDTO|null;organizationId?:string|null;trashed?:boolean}
 const spoken=(segment:NoteDTO["transcriptSegments"][number])=>segment.text.trim().length>0
 export function summarizeNote(note:NoteDTO,extras:NoteExtras={}):NoteSummaryDTO {
   // The preview is read without the chat link line (transcript-link.ts).
   return noteSummary({...forContext(note),hasBody:note.body.trim().length>0,hasSummary:note.enhanced.trim().length>0,
     speakerCount:new Set(note.transcriptSegments.filter(spoken).map(segment=>`${segment.channel}:${segment.speakerId}`)).size,
-    complete:true,meeting:extras.meeting??null,organizationId:extras.organizationId??null})
+    complete:true,meeting:extras.meeting??null,organizationId:extras.organizationId??null,trashed:extras.trashed??false})
 }
 /** Calendar context is saved separately from the note. This puts it on a summary that was made without it. */
 export const withMeeting=(summary:NoteSummaryDTO,meeting:MeetingContextDTO|null):NoteSummaryDTO=>({...summary,meeting:meeting?{startAt:meeting.startAt,endAt:meeting.endAt,allDay:meeting.allDay}:null,attendees:attendeeSummary(meeting)})
@@ -168,13 +172,15 @@ export const withMeeting=(summary:NoteSummaryDTO,meeting:MeetingContextDTO|null)
 export function newestFirst(a:ListCursor,b:ListCursor):number {
   return a.date!==b.date?(a.date<b.date?1:-1):a.createdAt!==b.createdAt?(a.createdAt<b.createdAt?1:-1):a.id===b.id?0:a.id<b.id?1:-1
 }
-const matchesFilter=(note:NoteDTO,filter:NoteListFilter)=>filter==="all"||(filter==="summarized"?note.enhanced.trim().length>0:note.transcriptSegments.some(spoken))
+const matchesFilter=(note:NoteDTO,input:Listed,extras:(id:string)=>NoteExtras)=>
+  (input.trash==="include"||(extras(note.id).trashed??false)===(input.trash==="only"))
+  &&(input.filter==="all"||(input.filter==="summarized"?note.enhanced.trim().length>0:note.transcriptSegments.some(spoken)))
 const decodeSummaries=Schema.decodeUnknownSync(NoteSummariesPageDTO),decodeSearch=Schema.decodeUnknownSync(NoteSearchPageDTO)
 export function selectNoteSummaries(notes:ReadonlyArray<NoteDTO>,input:NoteListInput,extras:(id:string)=>NoteExtras=()=>({})):NoteSummariesPageDTO {
-  const matching=notes.filter(note=>matchesFilter(note,input.filter)).sort(newestFirst)
+  const matching=notes.filter(note=>matchesFilter(note,input,extras)).sort(newestFirst)
   const after=input.cursor?matching.filter(note=>newestFirst(input.cursor!,note)<0):matching
   const page=after.slice(0,input.limit),last=page[page.length-1]
-  return decodeSummaries({notes:page.map(note=>summarizeNote(note,extras(note.id))),nextCursor:after.length>input.limit&&last?listCursor(last,input.filter):null,total:matching.length})
+  return decodeSummaries({notes:page.map(note=>summarizeNote(note,extras(note.id))),nextCursor:after.length>input.limit&&last?listCursor(last,input):null,total:matching.length})
 }
 
 // ── Search ─────────────────────────────────────────────────────────────────
@@ -255,7 +261,7 @@ export function scoreNote(fields:Record<NoteSearchField,string>,input:Pick<NoteS
 export function selectNoteSearch(notes:ReadonlyArray<NoteDTO>,input:NoteSearchInput,extras:(id:string)=>NoteExtras=()=>({})):NoteSearchPageDTO {
   if(!input.terms.length)return{results:[],nextCursor:null,total:0,terms:[]}
   // Matched, and quoted, without the chat link line (transcript-link.ts).
-  const scored=notes.filter(note=>matchesFilter(note,input.filter)).map(forContext).flatMap(note=>{
+  const scored=notes.filter(note=>matchesFilter(note,input,extras)).map(forContext).flatMap(note=>{
     const meeting=extras(note.id).meeting??null,people=attendeeNames(meeting)
     const match=scoreNote({title:note.title.toLowerCase(),summary:note.enhanced.toLowerCase(),notes:note.body.toLowerCase(),transcript:note.transcriptSegments.map(segment=>segment.text.toLowerCase()).join("\n"),people:people.join("\n").toLowerCase()},input)
     return match?[{note,people,...match,date:note.date,createdAt:note.createdAt,id:note.id}]:[]

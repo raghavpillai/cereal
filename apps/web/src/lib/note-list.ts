@@ -31,6 +31,8 @@ export interface Feed<T> {
   load: () => Promise<void>
   /** Load the next page, unless one is already on its way or there is none. */
   more: () => Promise<void>
+  /** Take a row out now, because it has left this list (moved to Trash, restored, deleted). The pages still to come are unaffected. */
+  remove: (id: string) => void
   cancel: () => void
 }
 type PageLoader<T> = (cursor: string | undefined, signal: AbortSignal) => Promise<FeedPage<T>>
@@ -46,6 +48,11 @@ export function createFeed<T>(loadPage: PageLoader<T>, idOf: (item: T) => string
     get: () => state,
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener) } },
     cancel() { controller?.abort(); controller = null; if (state.loading) set({ loading: null }) },
+    remove(id) {
+      const items = state.items?.filter(item => idOf(item) !== id)
+      if (!items || !state.items || items.length === state.items.length) return
+      set({ items, total: state.total === null ? null : Math.max(0, state.total - 1) })
+    },
     async load() {
       const { signal } = begin(), early = seed
       seed = undefined
@@ -112,6 +119,8 @@ export interface NoteSearch {
   more: () => Promise<void>
   /** Ask again now: after an error, or to refresh. */
   retry: () => void
+  /** Take a note out of the results on screen now, because it has left the notes being searched. */
+  remove: (id: string) => void
   cancel: () => void
 }
 type SearchLoader = (input: { q: string; filter: NoteListFilter; cursor?: string }, signal: AbortSignal) => Promise<NoteSearchPageDTO>
@@ -165,6 +174,11 @@ export function createNoteSearch(load: SearchLoader, options: { delay?: number; 
       timer = timers.set(() => void run(), delay)
     },
     retry() { if (wanted) { stop(); void run() } },
+    remove(id) {
+      const results = state.results?.filter(result => result.note.id !== id)
+      if (!results || !state.results || results.length === state.results.length) return
+      set({ results, total: state.total === null ? null : Math.max(0, state.total - 1) })
+    },
     cancel() { stop(); if (state.pending || state.loadingMore) set({ pending: false, loadingMore: false }) },
     async more() {
       const target = wanted

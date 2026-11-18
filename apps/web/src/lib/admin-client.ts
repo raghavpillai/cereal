@@ -2,7 +2,7 @@ import { Effect, Result } from 'effect'
 import { FetchHttpClient } from 'effect/http'
 import { HttpApiClient } from 'effect/http-api'
 import { MeetingsApi } from '@meeting-notes/contracts/api'
-import type { ModelCatalogInput, NoteListFilter, OnboardingStepInput, StorageTestInput } from '@meeting-notes/contracts'
+import type { ModelCatalogInput, NoteListFilter, NoteTrashScope, OnboardingStepInput, StorageTestInput } from '@meeting-notes/contracts'
 import type { CreateCalendarInput, CreateUserInput, UpdateAdminSettingsInput, UpdateCalendarInput, UpdateUserRoleInput, CreateOrganizationInput, UpdateOrganizationInput, InviteOrganizationMemberInput, UpdateOrganizationMemberRoleInput } from '@meeting-notes/contracts'
 
 type Client = HttpApiClient.ForApi<typeof MeetingsApi>
@@ -69,14 +69,20 @@ export function createAdminClient(baseUrl: string, transport: typeof fetch = glo
     createAdministrator: (payload: CreateUserInput, signal?: AbortSignal) => execute(c => c.owner.createAdministrator({ payload }), signal),
     updateUserRole: (id: string, payload: UpdateUserRoleInput, signal?: AbortSignal) => execute(c => c.owner.updateUserRole({ params: { id }, payload }), signal),
     listNotes: (signal?: AbortSignal) => execute(c => c.owner.listNotes(), signal),
-    /** A page of list rows: no bodies, no transcripts. */
-    listNoteSummaries: (page: { limit?: number; cursor?: string; filter?: NoteListFilter } = {}, signal?: AbortSignal) => execute(c => c.owner.listNoteSummaries({ query: {
-      ...(page.limit === undefined ? {} : { limit: String(page.limit) }), ...(page.cursor === undefined ? {} : { cursor: page.cursor }), ...(page.filter === undefined || page.filter === 'all' ? {} : { filter: page.filter }),
+    /** A page of list rows: no bodies, no transcripts. `trash` says whether the rows are the notes outside Trash, the ones in it, or both. */
+    listNoteSummaries: (page: { limit?: number; cursor?: string; filter?: NoteListFilter; trash?: NoteTrashScope } = {}, signal?: AbortSignal) => execute(c => c.owner.listNoteSummaries({ query: {
+      ...(page.limit === undefined ? {} : { limit: String(page.limit) }), ...(page.cursor === undefined ? {} : { cursor: page.cursor }), ...(page.filter === undefined || page.filter === 'all' ? {} : { filter: page.filter }), ...(page.trash === undefined ? {} : { trash: page.trash }),
     } }), signal),
-    searchNotes: (search: { q: string; limit?: number; cursor?: string; filter?: NoteListFilter }, signal?: AbortSignal) => execute(c => c.owner.searchNotes({ query: {
-      q: search.q, ...(search.limit === undefined ? {} : { limit: String(search.limit) }), ...(search.cursor === undefined ? {} : { cursor: search.cursor }), ...(search.filter === undefined || search.filter === 'all' ? {} : { filter: search.filter }),
+    searchNotes: (search: { q: string; limit?: number; cursor?: string; filter?: NoteListFilter; trash?: NoteTrashScope }, signal?: AbortSignal) => execute(c => c.owner.searchNotes({ query: {
+      q: search.q, ...(search.limit === undefined ? {} : { limit: String(search.limit) }), ...(search.cursor === undefined ? {} : { cursor: search.cursor }), ...(search.filter === undefined || search.filter === 'all' ? {} : { filter: search.filter }), ...(search.trash === undefined ? {} : { trash: search.trash }),
     } }), signal),
     getNote: (id: string, signal?: AbortSignal) => execute(c => c.owner.getNote({ params: { id } }), signal),
+    /** A note's sharing as its owner sees it; `suspended` says the note is in Trash. */
+    getNoteAccess: (id: string, signal?: AbortSignal) => execute(c => c.owner.getNoteAccess({ params: { id } }), signal),
+    /** Put a note in Trash or take it out: the owner suspending, or resuming, the note's sharing. The note itself is kept. */
+    setNoteTrashed: (id: string, trashed: boolean, signal?: AbortSignal) => execute(c => c.owner.updateNoteAccess({ params: { id }, payload: { suspended: trashed } }), signal),
+    /** Delete a note for good: "Delete forever" in Trash. */
+    deleteNote: (id: string, signal?: AbortSignal) => execute(c => c.owner.deleteNote({ params: { id }, query: {} }), signal),
     getSettings: (signal?: AbortSignal) => execute(c => c.owner.getAdminSettings(), signal),
     getModelCatalog: (payload: ModelCatalogInput, signal?: AbortSignal) => execute(c => c.owner.getModelCatalog({payload}), signal),
     updateSettings: (payload: UpdateAdminSettingsInput, signal?: AbortSignal) => execute(c => c.owner.updateAdminSettings({ payload }), signal),

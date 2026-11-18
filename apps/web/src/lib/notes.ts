@@ -327,57 +327,6 @@ export function turnSource(turn: Pick<TranscriptTurn, 'source' | 'part'>): strin
   return turn.part ? `${turn.source} · Part ${turn.part}` : turn.source
 }
 
-/** One bubble of the transcript panel, as the desktop app lays a transcript out:
- * every spoken segment is its own bubble, the reader's own microphone on the right. */
-export interface Utterance {
-  id: string
-  /** The voice: a speaker id within a source. Neighbouring bubbles of one voice sit closer together. */
-  key: string
-  /** The name above the bubble, when the bubble is named at all (see `names`). */
-  speaker: string | null
-  /** One-based audio part within its source, when the speaker id carries one. */
-  part: number | null
-  own: boolean
-  source: 'Microphone' | 'System audio'
-  /** mm:ss from the start of the recording. */
-  time: string
-  text: string
-  final: boolean
-  /** This bubble starts a run of its voice, in a transcript where that voice needs naming. */
-  names: boolean
-  sameBefore: boolean
-  sameAfter: boolean
-}
-
-export function transcriptUtterances(segments: readonly TranscriptSegmentDTO[]): Utterance[] {
-  const said = segments.filter(spoken)
-  const parts: Record<'mic' | 'system', string[]> = { mic: [], system: [] }
-  for (const segment of said) {
-    const scope = partScope(segment)
-    if (scope && !parts[segment.channel].includes(scope)) parts[segment.channel].push(scope)
-  }
-  const rows = said.map(segment => {
-    const own = segment.channel === 'mic', scope = partScope(segment)
-    const part = scope ? parts[segment.channel].indexOf(scope) + 1 : null
-    const label = segment.speakerLabel?.trim() || null
-    const start = Math.max(0, segment.startMs)
-    return {
-      id: segment.id, key: speakerKey(segment), part, own,
-      speaker: part !== null ? `${label ?? 'Unlabeled speaker'} · ${own ? 'Mic' : 'System'} · Part ${part}` : label,
-      source: own ? 'Microphone' as const : 'System audio' as const,
-      time: `${String(Math.floor(start / 60000)).padStart(2, '0')}:${String(Math.floor(start / 1000) % 60).padStart(2, '0')}`,
-      text: segment.text, final: segment.isFinal,
-    }
-  })
-  // A speaker is named only where a source carries more than one voice, or its audio came in parts.
-  const voices = (own: boolean) => new Set(rows.filter(row => row.own === own && (row.final || row.speaker !== null)).map(row => row.key)).size
-  const several = { own: voices(true) > 1, other: voices(false) > 1 }
-  return rows.map((row, index) => {
-    const sameBefore = index > 0 && rows[index - 1]!.key === row.key, sameAfter = rows[index + 1]?.key === row.key
-    return { ...row, sameBefore, sameAfter, names: !sameBefore && ((row.own ? several.own : several.other) || row.part !== null) && row.speaker !== null }
-  })
-}
-
 // ── People ────────────────────────────────────────────────────────────────
 
 export function initials(name: string): string {

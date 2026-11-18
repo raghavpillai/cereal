@@ -11,6 +11,8 @@ export interface NotesContextValue {
   notes: NotesStore
   meetings: MeetingStore
   morph: MorphStore
+  /** Say that something has just been done ("Note moved to trash"), in the corner, for a few seconds. */
+  notify: (message: string) => void
 }
 
 /** What changes with every keystroke. Kept apart so typing re-renders the list and nothing else. */
@@ -60,27 +62,77 @@ export interface NotesStore {
   /** Read one note. A request already under way for it is shared, so a press and the click after it ask once.
    * It is not cancelled when one asker leaves: it is small, and its answer is kept for the next visit. */
   read: (id: string) => Promise<NoteDTO>
+  /** The notes in Trash, a page at a time. The lists and the search above never hold them. */
+  trash: Feed<NoteSummaryDTO>
+  /** Read Trash from the top: on every visit, since a note may have been put in it or taken out in one of the apps. */
+  showTrash: () => void
+  /** Put a note in Trash. It leaves the lists and the search at once, and is in Trash when that is next shown. */
+  moveToTrash: (id: string) => Promise<void>
+  /** Take a note out of Trash. It leaves Trash at once, and is back among the notes when they are next shown. */
+  restore: (id: string) => Promise<void>
+  /** Delete a note that is in Trash, for good. */
+  deleteForever: (id: string) => Promise<void>
   dispose: () => void
 }
 
 const page = (response: NoteSummariesPageDTO): FeedPage<NoteSummaryDTO> => ({ items: response.notes, nextCursor: response.nextCursor, total: response.total })
 
-function createNotesStore(client: AdminClient, onError: (error: unknown) => void): NotesStore {
+/** Where a note is listed: among the notes, or in Trash. */
+type Place = 'notes' | 'trash'
+
+/** What the store asks of the server: the calls of `AdminClient` it makes, so a test can stand in for them. */
+export type NotesTransport = Pick<AdminClient, 'listNoteSummaries' | 'searchNotes' | 'getNote' | 'setNoteTrashed' | 'deleteNote'>
+
+export function createNotesStore(client: NotesTransport, onError: (error: unknown) => void): NotesStore {
   const feeds = new Map<NoteListFilter, Feed<NoteSummaryDTO>>(), stale = new Set<NoteListFilter>()
   const kept = new Map<string, NoteDTO>(), reading = new Map<string, Promise<NoteDTO>>()
-  const search = createNoteSearch((input, signal) => client.searchNotes(input, signal), { onError })
+  // Where this session has put notes, in order. A page asked for before a move and answered after it would bring
+  // the note back to the place it has just left; such a row is dropped as the page arrives. A page asked for
+  // after the move is the server's word and is taken as it is.
+  const moved = new Map<string, { to: Place | 'gone'; at: number }>()
+  let moves = 0
+  const move = (id: string, to: Place | 'gone') => { moved.set(id, { to, at: ++moves }) }
+  /** Whether a row of a page asked for at `asked` still belongs in `place`. */
+  const still = (place: Place, asked: number) => (note: NoteSummaryDTO) => { const last = moved.get(note.id); return !last || last.at <= asked || last.to === place }
+  const rows = (place: Place, asked: number) => (response: NoteSummariesPageDTO) => page({ ...response, notes: response.notes.filter(still(place, asked)) })
+  const search = createNoteSearch(async (input, signal) => {
+    const asked = moves, found = await client.searchNotes({ ...input, trash: 'exclude' }, signal), belongs = still('notes', asked)
+    return { ...found, results: found.results.filter(result => belongs(result.note)) }
+  }, { onError })
+  const trash = createFeed<NoteSummaryDTO>((cursor, signal) => client.listNoteSummaries({ limit: PAGE, trash: 'only', ...(cursor === undefined ? {} : { cursor }) }, signal).then(rows('trash', moves)), note => note.id, { onError })
   function list(filter: NoteListFilter) {
     let feed = feeds.get(filter)
     if (!feed) {
       const early = filter === 'all' ? earlyNotes.get(client) : undefined
       if (early) earlyNotes.delete(client)
-      feed = createFeed<NoteSummaryDTO>((cursor, signal) => client.listNoteSummaries({ limit: PAGE, filter, ...(cursor === undefined ? {} : { cursor }) }, signal).then(page), note => note.id, { ...(early ? { seed: early } : {}), onError })
+      feed = createFeed<NoteSummaryDTO>((cursor, signal) => client.listNoteSummaries({ limit: PAGE, filter, trash: 'exclude', ...(cursor === undefined ? {} : { cursor }) }, signal).then(rows('notes', moves)), note => note.id, { ...(early ? { seed: early.then(rows('notes', 0)) } : {}), onError })
       feeds.set(filter, feed)
     }
     return feed
   }
+  /** The lists and the search no longer show what they would be given now: they reload when next shown. */
+  const notesChanged = () => { for (const filter of feeds.keys()) stale.add(filter); search.retry() }
   return {
-    list, search,
+    list, search, trash,
+    showTrash() { void trash.load() },
+    async moveToTrash(id) {
+      await client.setNoteTrashed(id, true)
+      move(id, 'trash')
+      feeds.forEach(feed => feed.remove(id))
+      search.remove(id)
+    },
+    async restore(id) {
+      await client.setNoteTrashed(id, false)
+      move(id, 'notes')
+      trash.remove(id)
+      notesChanged()
+    },
+    async deleteForever(id) {
+      await client.deleteNote(id)
+      move(id, 'gone')
+      trash.remove(id)
+      kept.delete(id)
+    },
     show(filter) {
       const feed = list(filter), state = feed.get()
       if (stale.delete(filter) || (!state.items && !state.loading && !state.error)) void feed.load()
@@ -92,7 +144,7 @@ function createNotesStore(client: AdminClient, onError: (error: unknown) => void
     },
     full: id => kept.get(id),
     summary(id) {
-      for (const feed of feeds.values()) { const found = feed.get().items?.find(note => note.id === id); if (found) return found }
+      for (const feed of [...feeds.values(), trash]) { const found = feed.get().items?.find(note => note.id === id); if (found) return found }
       return search.get().results?.find(result => result.note.id === id)?.note
     },
     read(id) {
@@ -106,7 +158,7 @@ function createNotesStore(client: AdminClient, onError: (error: unknown) => void
       reading.set(id, request)
       return request
     },
-    dispose() { feeds.forEach(feed => feed.cancel()); search.cancel() },
+    dispose() { feeds.forEach(feed => feed.cancel()); trash.cancel(); search.cancel() },
   }
 }
 
@@ -153,15 +205,18 @@ function createMorphStore(): MorphStore {
 
 // ── A list request started alongside the session check ─────────────────────
 
-const earlyNotes = new WeakMap<AdminClient, Promise<FeedPage<NoteSummaryDTO>>>()
+const earlyNotes = new WeakMap<object, Promise<NoteSummariesPageDTO>>()
 /** Start loading the first page before the session check has answered: both use
  * the same cookie, so a signed-in visit saves a round trip and a signed-out one
  * just gets a refusal that is dropped here. Used once, then forgotten. */
 export function preloadNotes(client: AdminClient) {
-  const request = client.listNoteSummaries({ limit: PAGE }).then(page)
+  const request = client.listNoteSummaries({ limit: PAGE, trash: 'exclude' })
   request.catch(() => { if (earlyNotes.get(client) === request) earlyNotes.delete(client) })
   earlyNotes.set(client, request)
 }
+
+/** How long a notice stays: the desktop app's four seconds. */
+const TOAST_MS = 4000
 
 /** Holds one signed-in session's list rows and opened notes for the list and the
  * note page, so opening a note and going back never refetch or flash a loading state. */
@@ -172,7 +227,14 @@ export function NotesProvider({ session, client, expired, children }: { session:
   const [query, setQuery] = useState('')
   const meetings = useMemo(createMeetingStore, [client])
   const morph = useMemo(createMorphStore, [])
-  const value = useMemo<NotesContextValue>(() => ({ session, client, expired, notes, meetings, morph }), [session, client, expired, notes, meetings, morph])
+  // One notice at a time; a second one replaces the first and starts its own four seconds, as in the desktop app.
+  const [toast, setToast] = useState<{ message: string; key: number } | null>(null)
+  const notify = useCallback((message: string) => setToast(old => ({ message, key: (old?.key ?? 0) + 1 })), [])
+  useEffect(() => { if (!toast) return; const timer = window.setTimeout(() => setToast(null), TOAST_MS); return () => window.clearTimeout(timer) }, [toast])
+  const value = useMemo<NotesContextValue>(() => ({ session, client, expired, notes, meetings, morph, notify }), [session, client, expired, notes, meetings, morph, notify])
   const search = useMemo<NotesSearchValue>(() => ({ query, setQuery }), [query])
-  return <NotesContext value={value}><NotesSearchContext value={search}>{children}</NotesSearchContext></NotesContext>
+  return <NotesContext value={value}><NotesSearchContext value={search}>
+    {children}
+    <div className="app-toast-place" role="status" aria-live="polite">{toast && <div className="app-toast" key={toast.key}>{toast.message}</div>}</div>
+  </NotesSearchContext></NotesContext>
 }

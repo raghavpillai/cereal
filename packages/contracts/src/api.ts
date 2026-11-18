@@ -1,7 +1,7 @@
 import { Context, Schema } from "effect"
 import {UploadNoteAttachmentInput,NoteAttachmentDTO,AgentBriefDTO,UpdateAgentBriefInput} from "./index"
 import {ModelCatalogInput,ModelCatalogDTO,ChatModelsDTO} from "./index"
-import {NoteListFilter,NoteSummariesPageDTO,NoteSearchPageDTO} from "./index"
+import {NoteListFilter,NoteTrashScope,NoteSummariesPageDTO,NoteSearchPageDTO} from "./index"
 import {AuthMethodsDTO,AppHandoffInput,AppHandoffDTO,AppHandoffExchangeInput,AppHandoffTokenDTO} from "./index"
 import {DownloadsDTO} from "./index"
 import {ChatThreadsPageDTO,ChatThreadDTO,CreateChatThreadInput,AppendChatTurnInput,UpdateChatThreadInput,ChatThreadStreamInput} from "./chats"
@@ -132,8 +132,8 @@ export const MeetingsApi = HttpApi.make("MeetingNotesApi")
     .add(HttpApiEndpoint.post("appendChatTurn", "/api/v1/chats/:id/turns", { params: { id: UUID }, payload: AppendChatTurnInput, success: ChatThreadDTO, error: errors }))
     .add(HttpApiEndpoint.post("streamChatThread", "/api/v1/chats/:id/stream", { params: { id: UUID }, payload: ChatThreadStreamInput, success: HttpApiSchema.StreamSse({ data: ChatStreamEventDTO, keepAlive: "10 seconds" }), error: errors }))
     .add(HttpApiEndpoint.get("listNotes", "/api/v1/notes", { success: NotesDTO, error: errors }))
-    .add(HttpApiEndpoint.get("listNoteSummaries", "/api/v1/notes/summaries", { query: { limit: Schema.optionalKey(PageLimit), cursor: Schema.optionalKey(PageCursor), filter: Schema.optionalKey(NoteListFilter) }, success: NoteSummariesPageDTO, error: errors }))
-    .add(HttpApiEndpoint.get("searchNotes", "/api/v1/notes/search", { query: { q: Schema.String.check(Schema.isMaxLength(200)), limit: Schema.optionalKey(PageLimit), cursor: Schema.optionalKey(PageCursor), filter: Schema.optionalKey(NoteListFilter) }, success: NoteSearchPageDTO, error: errors }))
+    .add(HttpApiEndpoint.get("listNoteSummaries", "/api/v1/notes/summaries", { query: { limit: Schema.optionalKey(PageLimit), cursor: Schema.optionalKey(PageCursor), filter: Schema.optionalKey(NoteListFilter), trash: Schema.optionalKey(NoteTrashScope) }, success: NoteSummariesPageDTO, error: errors }))
+    .add(HttpApiEndpoint.get("searchNotes", "/api/v1/notes/search", { query: { q: Schema.String.check(Schema.isMaxLength(200)), limit: Schema.optionalKey(PageLimit), cursor: Schema.optionalKey(PageCursor), filter: Schema.optionalKey(NoteListFilter), trash: Schema.optionalKey(NoteTrashScope) }, success: NoteSearchPageDTO, error: errors }))
     .add(HttpApiEndpoint.post("createNote", "/api/v1/notes", { payload: CreateNoteInput, success: NoteDTO, error: errors }))
     .add(HttpApiEndpoint.get("getNote", "/api/v1/notes/:id", { params: { id: UUID }, success: NoteDTO, error: errors }))
     .add(HttpApiEndpoint.patch("updateNote", "/api/v1/notes/:id", { params: { id: UUID }, payload: UpdateNoteInput, success: NoteDTO, error: errors }))

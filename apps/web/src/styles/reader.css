@@ -1,8 +1,8 @@
 /* A note, laid out as the desktop app's note view (apps/desktop/src/note.rs,
-   summary.rs, recording_view.rs, chrome.rs). The shared reader is the same page. */
+   summary.rs, chrome.rs). The shared reader is the same page. The web shows notes only: no transcript. */
 
 /* ── The document: 682 px with 32 px gutters, centred ──────────────────── */
-.note-doc { display: flex; flex-direction: column; width: 100%; max-width: 682px; min-width: 0; margin: 0 auto; padding: 8px 32px 136px; color: var(--app-text); }
+.note-doc { display: flex; flex-direction: column; width: 100%; max-width: 682px; min-width: 0; margin: 0 auto; padding: 8px 32px 96px; color: var(--app-text); }
 /* A note with no generated notes is a little narrower, as it is in the app. */
 .note-doc.is-plain { max-width: 672px; }
 .note-title { position: relative; top: -1px; margin: 0 0 14px; font: 400 24px / 28px var(--font-display); letter-spacing: 0; text-wrap: wrap; overflow-wrap: anywhere; }
@@ -11,22 +11,25 @@
 /* The row under the title: the joined views and the details chip. */
 .note-meta { display: flex; align-items: center; gap: 8px; flex-shrink: 0; height: 28px; margin: 0 0 20px -4px; }
 .note-views {
-  display: flex; align-items: center; flex-shrink: 0; height: 28px;
-  border: 1px solid var(--app-hairline); border-radius: 999px;
-  /* A sunken track; the view on screen is a raised, outlined capsule. */
+  position: relative; display: flex; align-items: center; flex-shrink: 0; height: 28px;
+  border-radius: 999px;
+  /* A sunken track; the view on screen is a raised, outlined capsule exactly the track's size on its end of it. */
   background: var(--app-sidebar);
 }
+/* The track's edge is its own layer, lighter than the capsule's, which paints over it: one edge where they meet. */
+.note-views::before { content: ''; position: absolute; inset: 0; border: 1px solid var(--app-tab-edge); border-radius: inherit; pointer-events: none; }
+/* The app's tabs where there is no template menu (apps/desktop/src/note.rs: NOTES_LEAD, SPARKLE_LEAD, the label
+   gaps, LABEL_TRAIL, `note_tab_widths`), in its points. A collapsed tab is its glyph; a selected one uncovers its
+   label, in a softer ink than the page's text. The web has no template menu, so there is no chevron and no room for one. */
 .note-view {
-  display: flex; align-items: center; justify-content: center; gap: 6px; flex-shrink: 0;
-  width: 34px; height: 28px; padding: 0; overflow: hidden;
+  position: relative; display: flex; align-items: center; gap: 2.35px; flex-shrink: 0;
+  width: 35px; height: 28px; padding: 0 0 0 11.1px; overflow: hidden;
   border: 0; border-radius: 999px; background: transparent;
   color: var(--app-muted); font-size: 13px; line-height: var(--app-leading); white-space: nowrap;
 }
-/* In the app this half ends in the control that changes the template; its room is kept, so everything after it stands where it does there. */
-.note-view.is-enhanced { width: 46px; padding-right: 12px; }
-.note-view[aria-selected='true'] { width: 100px; background: var(--app-card); box-shadow: inset 0 0 0 1px var(--app-hairline); }
-.note-view.is-enhanced[aria-selected='true'] { width: 112px; }
-.note-view > span { color: var(--app-text); }
+.note-view.is-enhanced { gap: 5.9px; width: 39px; padding-left: 11.6px; }
+.note-view[aria-selected='true'] { width: 97px; background: var(--app-card); box-shadow: inset 0 0 0 1px var(--app-tab-capsule-edge); color: var(--app-tab-ink); }
+.note-view.is-enhanced[aria-selected='true'] { width: 107px; padding-left: 12.5px; }
 .note-view:hover:not([aria-selected='true']) { background: var(--app-hover); }
 .note-chip {
   display: flex; align-items: center; justify-content: center; gap: 6px; flex-shrink: 0;
@@ -42,9 +45,15 @@
 
 /* Text takes its direction from what it says: an Arabic or Hebrew title, line or bubble reads from the right
    and starts at the right edge, with its punctuation on the correct side; everything else is unchanged. */
-.note-title, .note-own, .note-text h2, .note-line, .utterance-bubble { unicode-bidi: plaintext; text-align: start; }
+.note-title, .note-own, .note-text h2, .note-line, .chat-question { unicode-bidi: plaintext; text-align: start; }
 /* A list item stays beside its bullet or number, whichever way its words run. */
 .note-item .note-line { text-align: left; }
+
+/* A note that is in Trash says so above its title, with the way out and the way to delete it for good. */
+.note-trashed { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px 12px; min-height: 44px; margin: 0 -8px 20px; padding: 7px 8px 7px 12px; border: 1px solid var(--app-border); border-radius: 12px; background: var(--app-hover); }
+.note-trashed > .icon { color: var(--app-muted); }
+.note-trashed > p { display: flex; flex-direction: column; flex: 1 1 200px; min-width: 0; margin: 0; font-size: 13px; line-height: var(--app-leading); }
+.note-trashed > p > span:first-child { position: relative; top: 1px; }
 
 /* Switching views settles in rather than swapping abruptly. */
 .note-content { width: 100%; min-width: 0; animation: fade-in var(--dur-snappy) var(--ease-fade) backwards; }
@@ -60,7 +69,8 @@
 /* The mark the app keeps in the gutter beside each heading. */
 .note-hash { position: absolute; left: -16px; top: 0; color: var(--app-muted); font-weight: 400; opacity: 0.6; }
 .note-gap { flex-shrink: 0; height: 8px; }
-.note-text hr { flex-shrink: 0; width: 100%; height: 1px; margin: 20px 0; border: 0; background: var(--app-border); }
+/* A rule has 8 px above and below it (apps/desktop/src/summary.rs, RULE_SPACE); the blank lines Markdown puts around it add theirs. */
+.note-text hr { flex-shrink: 0; width: 100%; height: 1px; margin: 8px 0; border: 0; background: var(--app-border); }
 .note-text ul { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
 .note-text li { display: flex; flex-direction: column; gap: 4px; }
 .note-item { position: relative; display: flex; align-items: flex-start; width: 100%; }
@@ -81,7 +91,9 @@
 /* A web address in a note: the text's own colour, underlined, as the apps draw it. */
 .note-link { color: inherit; text-decoration: underline; text-decoration-color: var(--app-marker); text-decoration-thickness: 1px; text-underline-offset: 3px; }
 .note-link:hover { text-decoration-color: currentColor; }
-.note-transcript-link { color: var(--app-muted); font-size: 14px; line-height: 20px; }
+/* The closing chat line: 14/20 muted. Measured against the app, it stands where a browser sets it (no 1 px nudge), with its underline a pixel lower. */
+.note-transcript-link { top: 0; color: var(--app-muted); font-size: 14px; line-height: 20px; }
+.note-transcript-link .note-link { text-underline-offset: 4px; }
 
 .note-loading { display: grid; gap: 12px; padding-top: 4px; }
 .note-loading .skeleton { height: 14px; }
@@ -89,77 +101,12 @@
 .note-loading.is-page .skeleton.is-title { width: min(70%, 320px); height: 24px; margin: 2px 0 6px; }
 .note-loading.is-page .skeleton.is-chips { width: 240px; height: 28px; margin-bottom: 12px; border-radius: 999px; }
 
-/* ── The capsule at the foot of a note, and what stands behind it ──────── */
+/* ── What is pinned to the foot of the window: the chat's question field ─ */
 .note-footer { position: fixed; z-index: 20; bottom: 26px; left: 24px; right: 24px; display: flex; justify-content: center; pointer-events: none; }
-/* The page colour from the capsule's middle down to the window edge, easing in over the 24 px above:
-   text scrolls up to the capsule's top edge untouched and nothing shows underneath it. */
+/* The page colour from the field's middle down to the window edge, easing in over the 24 px above:
+   text scrolls up to the field's top edge untouched and nothing shows underneath it. */
 .note-footer::before { content: ''; position: absolute; top: 6px; bottom: -26px; left: -24px; right: -24px; background: linear-gradient(180deg, transparent, var(--app-bg) 24px); }
 .note-footer-row { position: relative; display: flex; align-items: center; gap: 8px; width: 100%; max-width: 672px; height: 59px; }
-.transcript-capsule {
-  position: relative; display: flex; align-items: center; flex-shrink: 0;
-  width: 58px; height: 58px; padding: 4px;
-  border: 1px solid var(--app-border); border-radius: 29px; background: var(--app-card);
-  box-shadow: var(--app-shadow-capsule);
-  pointer-events: auto;
-}
-.transcript-capsule.is-open { border-color: transparent; background: transparent; box-shadow: none; }
-.transcript-toggle { position: relative; flex-shrink: 0; width: 48px; height: 48px; padding: 0; border: 0; border-radius: 10px; background: transparent; color: var(--app-muted); }
-.transcript-toggle:hover { background: var(--app-hover); }
-.transcript-glyph { position: absolute; left: 3px; top: 8px; }
-/* The chevron points up while the card is closed and down once it is open. */
-.transcript-chevron { position: absolute; left: 28px; top: 16px; transform: rotate(180deg); transition: transform var(--dur-gooey) var(--spring-gooey); }
-.transcript-toggle[aria-expanded='true'] .transcript-chevron { transform: none; }
-
-/* ── The transcript: a card that unfolds from the capsule ──────────────── */
-.transcript-dock { position: fixed; z-index: 25; bottom: 22px; left: 16px; right: 16px; display: flex; justify-content: center; pointer-events: none; }
-.transcript-panel {
-  position: relative; display: flex; flex-direction: column;
-  width: 682px; max-width: 100%; height: clamp(280px, calc(100dvh - 100px), 465px);
-  border: 1px solid var(--app-border); border-radius: 32px; background: var(--app-card); color: var(--app-text);
-  box-shadow: var(--app-shadow-sm); overflow: hidden; pointer-events: auto;
-  transform-origin: 41px calc(100% - 37px);
-  animation: transcript-unfold var(--dur-gooey) var(--spring-snappy) backwards, fade-in calc(var(--dur-gooey) * 0.4) var(--ease-fade) backwards;
-}
-@keyframes transcript-unfold { from { transform: scale(0.6, 0.2); } }
-/* The app lays the card's content out 682 px wide inside its 1 px edge, so the gutters are 12 px and 10 px. */
-.transcript-toolbar { display: flex; align-items: center; gap: 2px; flex-shrink: 0; height: 44px; padding: 0 10px 0 12px; }
-.transcript-toolbar-space { flex: 1; }
-.transcript-collapse > span { width: 12px; height: 1px; background: var(--app-muted); }
-.transcript-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; }
-.transcript-body::-webkit-scrollbar { display: none; }
-.transcript-body:focus-visible { outline-offset: -2px; }
-.transcript-rows { display: flex; flex-direction: column; padding: 0 10px 0 12px; }
-/* A long meeting has thousands of bubbles, kept in runs of fifty. A run that is off screen is neither laid out nor
-   painted until it comes near, and keeps the height it last had, so the card opens and scrolls as it does for a short one. */
-.transcript-run { display: flex; flex-direction: column; flex-shrink: 0; margin: 0; padding: 0; list-style: none; content-visibility: auto; contain-intrinsic-size: auto 2200px; }
-.transcript-foot { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; height: 64px; padding: 0 10px 0 12px; }
-
-/* One bubble for each thing said. Others on the left, the reader's own microphone on the right;
-   neighbours of one voice sit closer and share a tighter corner. */
-.utterance { display: flex; justify-content: flex-start; flex-shrink: 0; min-width: 0; margin: 4px 0; padding: 1px 64px 1px 0; }
-.utterance[data-own] { justify-content: flex-end; padding: 1px 0 1px 64px; }
-.utterance[data-joins-before] { margin-top: 0; }
-.utterance[data-joins-after] { margin-bottom: 0; }
-.utterance[data-first] { margin-top: 10px; }
-.utterance[data-last] { margin-bottom: 10px; }
-.utterance-stack { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; min-width: 0; }
-.utterance[data-own] .utterance-stack { align-items: flex-end; }
-.utterance-speaker { position: relative; top: -1px; padding: 0 4px; color: var(--app-muted); font-size: 12px; line-height: 16px; }
-.utterance-bubble {
-  position: relative; min-width: 0; max-width: 100%; margin: 0; padding: 6px 8px; border-radius: 8px;
-  background: var(--app-bubble-other); color: var(--app-bubble-other-ink);
-  font-size: 13px; line-height: 17.875px; overflow-wrap: anywhere;
-}
-.utterance[data-own] .utterance-bubble { background: var(--app-bubble-own); color: var(--app-bubble-own-ink); }
-.utterance[data-joins-before]:not([data-own]) .utterance-bubble { border-top-left-radius: 6px; }
-.utterance[data-joins-after]:not([data-own]) .utterance-bubble { border-bottom-left-radius: 6px; }
-.utterance[data-joins-before][data-own] .utterance-bubble { border-top-right-radius: 6px; }
-.utterance[data-joins-after][data-own] .utterance-bubble { border-bottom-right-radius: 6px; }
-.utterance-bubble.is-interim { opacity: 0.5; }
-/* When it was said, beside the bubble while the pointer is on its row. */
-.utterance-time { position: absolute; top: 6px; left: 100%; margin-left: 8px; color: var(--app-muted); font-size: 12px; line-height: 16px; white-space: nowrap; opacity: 0; transition: opacity var(--dur-hover-out) var(--ease-fade); }
-.utterance[data-own] .utterance-time { left: auto; right: 100%; margin: 0 8px 0 0; }
-.utterance:hover .utterance-time { opacity: 1; }
 
 /* ── Share: the dark split pill and its card ───────────────────────────── */
 .share-split { position: relative; display: flex; gap: 1px; flex-shrink: 0; }
@@ -207,8 +154,6 @@
 .share-revoke { flex-shrink: 0; height: 22px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: var(--app-danger); font-size: 12px; line-height: 16px; }
 .share-revoke:hover:not(:disabled) { background: var(--app-hover); }
 .note-options { width: 220px; }
-/* The app hangs this menu 120 px from the window's edge when Share stands beside it: a pixel past its own control. */
-.app-popover-root:has(+ .share-split) .note-options { right: -1px; }
 
 /* A note's calendar context, in the card behind its details chip. */
 .meeting-card { display: flex; flex-direction: column; gap: 6px; padding: 6px; }
@@ -221,14 +166,11 @@
 .meeting-links { display: flex; flex-wrap: wrap; gap: 6px; }
 .meeting-card .app-menu-row { margin: 0 -6px; width: calc(100% + 12px); }
 
-@media (prefers-reduced-motion: reduce) {
-  .transcript-panel { animation: fade-in var(--dur-reduced) var(--ease-fade) backwards; }
-  .transcript-chevron { transition: none; }
-}
 @media (max-width: 720px) {
   /* The same page on a phone: the column fills the width and its gutters come in from 32 px to 20 px,
      which still leaves the heading marks their 16 px. The row under the title may wrap. */
-  .note-doc { padding: 8px 20px 120px; }
+  .note-doc { padding: 8px 20px 80px; }
+  .chat-doc { padding-bottom: 120px; }
   .note-meta { flex-wrap: wrap; height: auto; min-height: 28px; }
   /* The details card hangs from the row, not from its chip: on a phone the chip can sit so far along the row that a card hung from it would leave the screen. */
   .note-meta { position: relative; }
@@ -236,23 +178,22 @@
   .note-details-card { top: calc(100% + 4px); left: 4px; width: min(280px, calc(100% - 4px)); max-width: none; }
   .note-footer { left: 16px; right: 16px; }
   .note-footer::before { left: -16px; right: -16px; }
-  .transcript-dock { left: 8px; right: 8px; bottom: 12px; }
-  .transcript-panel { height: clamp(280px, calc(100dvh - 76px), 465px); border-radius: 28px; }
 }
 @media print {
-  .note-footer, .transcript-dock { display: none; }
+  .note-footer { display: none; }
   .note-doc { padding-bottom: 0; }
-  .utterance, .note-text li { break-inside: avoid; }
+  .note-text li { break-inside: avoid; }
 }
 
 /* ── Chat with a meeting's transcript (/notes/<id>/chat) ───────────────── */
-.chat-doc { gap: 0; }
+.chat-doc { gap: 0; padding-bottom: 136px; }
 .chat-note-link { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; max-width: 100%; margin: 0 0 6px; color: var(--app-muted); font-size: 14px; line-height: 22px; text-decoration: none; }
 .chat-note-link > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-note-link:hover { color: var(--app-text); }
 .chat-doc .note-title { margin-bottom: 14px; }
 .chat-thread { display: flex; flex-direction: column; gap: 12px; }
-.chat-question { font-size: 14px; line-height: 20px; white-space: pre-wrap; }
+/* A question: a bubble at the trailing edge, as the reader's own words are drawn in the app. */
+.chat-question { align-self: flex-end; max-width: calc(100% - 64px); margin: 11px 0 5px; padding: 6px 8px; border-radius: 8px; background: var(--app-bubble-own); color: var(--app-bubble-own-ink); font-size: 14px; line-height: 20px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .chat-answer { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .chat-sources { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; font-size: 13px; line-height: 18px; color: var(--app-muted); }
 .chat-sources li { display: flex; gap: 8px; min-width: 0; }

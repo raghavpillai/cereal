@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react'
+import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type RefObject } from 'react'
 import type { NoteSearchResultDTO, NoteSearchTextPartDTO, NoteSummaryDTO } from '@meeting-notes/contracts'
 import { chipDayLabel, clockParts, timelineDate } from '../../lib/notes'
 import { finishedResults, finishedSummaries, groupSummariesByDay, summaryFacts } from '../../lib/note-list'
@@ -38,17 +38,8 @@ export function NotesHome() {
 
   const groups = useMemo(() => groupSummariesByDay(rows ?? [], new Date()), [rows])
 
-  // The next page is asked for as the end of the list comes near. Observing again after each
-  // page means a page that did not fill the screen is followed by the next without a scroll.
   const loadMore = results !== null ? store.search.more : feed.more
-  useEffect(() => {
-    const element = more.current
-    if (!element || !hasMore || loadingMore || moreError) return
-    if (typeof IntersectionObserver === 'undefined') { void loadMore(); return }
-    const observer = new IntersectionObserver(entries => { if (entries.some(entry => entry.isIntersecting)) void loadMore() }, { rootMargin: '900px 0px' })
-    observer.observe(element)
-    return () => observer.disconnect()
-  }, [hasMore, loadingMore, moreError, loadMore, received])
+  useNextPage(more, { hasMore, loading: loadingMore, error: moreError, load: loadMore, received })
 
   // The field takes focus as it appears, in the same turn as the press that asked for it, so what is typed straight
   // after lands in it. A field that is open because a search is still in it (coming back from a note) does not.
@@ -110,6 +101,7 @@ export function NotesHome() {
           <button type="button" className="app-tool is-small" aria-label="Close search" title="Close search · Esc" onClick={closeSearch}><Icon name="close" size={15} /></button>
         </div>
         : <button type="button" className="app-tool" aria-label="Search notes" title="Search notes · /" onClick={openSearch}><Icon name="search" size={15} /></button>}
+      <Link to="/notes/trash" className="app-tool" aria-label="Trash" title="Trash"><Icon name="trash" size={15} /></Link>
     </header>
 
     {listed.error !== null && !searching && <Notice error>{errorText(listed.error)} <button type="button" className="admin-text-button" onClick={() => void store.reload(LISTED)}>Try again</button></Notice>}
@@ -169,9 +161,23 @@ function Parts({ parts }: { parts: readonly NoteSearchTextPartDTO[] }) {
   return <>{parts.map((part, at) => part.hit ? <mark key={at}>{part.text}</mark> : part.text)}</>
 }
 
+/** The next page is asked for as the end of a list comes near: `sentinel` is an element after its last row.
+ * Observing again after each page (`received` changes) means a page that did not fill the screen is followed
+ * by the next without a scroll. */
+export function useNextPage(sentinel: RefObject<HTMLElement | null>, { hasMore, loading, error, load, received }: { hasMore: boolean; loading: boolean; error: unknown; load: () => Promise<void>; received: number }) {
+  useEffect(() => {
+    const element = sentinel.current
+    if (!element || !hasMore || loading || error) return
+    if (typeof IntersectionObserver === 'undefined') { void load(); return }
+    const observer = new IntersectionObserver(entries => { if (entries.some(entry => entry.isIntersecting)) void load() }, { rootMargin: '900px 0px' })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [sentinel, hasMore, loading, error, load, received])
+}
+
 /** Row-shaped placeholders: four while the page is first loading, two under a list that is being continued. */
-function NoteRowsSkeleton({ more = false }: { more?: boolean }) {
-  return <div className={more ? 'notes-skeleton is-more' : 'notes-skeleton'} aria-busy="true"><span className="sr-only" role="status">{more ? 'Loading more notes…' : 'Loading your notes…'}</span>
+export function NoteRowsSkeleton({ more = false, label = 'Loading your notes…' }: { more?: boolean; label?: string }) {
+  return <div className={more ? 'notes-skeleton is-more' : 'notes-skeleton'} aria-busy="true"><span className="sr-only" role="status">{more ? 'Loading more notes…' : label}</span>
     {(more ? [0, 1] : [0, 1, 2, 3]).map(row => <div key={row}><span className="skeleton" /><span className="skeleton" /><span className="skeleton" /></div>)}
   </div>
 }
@@ -180,8 +186,8 @@ function NoteRowsSkeleton({ more = false }: { more?: boolean }) {
  * page will have, so a cold load shows one skeleton and then the list. */
 export function NotesHomeSkeleton() {
   return <section className="notes-home" aria-busy="true"><div className="notes-column">
-    <HeaderActions><span className="header-pending" aria-hidden="true"><span className="site-link"><span>Download</span></span></span><span className="site-avatar is-placeholder" aria-hidden="true" /></HeaderActions>
-    <header className="notes-head"><h1 className="app-heading">My notes</h1><span className="app-tool" aria-hidden="true"><Icon name="search" size={15} /></span></header>
+    <HeaderActions><span className="site-avatar is-placeholder" aria-hidden="true" /></HeaderActions>
+    <header className="notes-head"><h1 className="app-heading">My notes</h1><span className="app-tool" aria-hidden="true"><Icon name="search" size={15} /></span><span className="app-tool" aria-hidden="true"><Icon name="trash" size={15} /></span></header>
     <div className="notes-list"><NoteRowsSkeleton /></div>
   </div></section>
 }

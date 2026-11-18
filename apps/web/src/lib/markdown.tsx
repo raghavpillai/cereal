@@ -145,11 +145,6 @@ function words(text: string, key: string, before: boolean): { nodes: ReactNode[]
   return { nodes, spaced }
 }
 
-/** Plain text (a transcript bubble) with the app's line breaks. */
-export function Words({ text }: { text: string }) {
-  return <>{words(text, 'w', false).nodes}</>
-}
-
 /** Where an address may start, and what it may be made of: everything up to white space or a delimiter. */
 const ADDRESS_START = /https?:\/\//gi
 const ADDRESS_END = /[\s<>"'`]/u

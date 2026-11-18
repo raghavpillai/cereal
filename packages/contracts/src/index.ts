@@ -646,6 +646,10 @@ export const UpdateNoteContextInput = Schema.Struct({ eventId: Schema.NullOr(UUI
  * never a note body or a transcript; the single-note read stays the source of both. */
 export const NoteListFilter = Schema.Literals(["all", "summarized", "transcribed"]).annotate({ identifier: "NoteListFilter" })
 export type NoteListFilter = typeof NoteListFilter.Type
+/** Whether a list or a search reaches into Trash. "include" (the default): every note, as an app that keeps
+ * its own Trash needs. "exclude": the notes that are not in Trash. "only": Trash. */
+export const NoteTrashScope = Schema.Literals(["include", "exclude", "only"]).annotate({ identifier: "NoteTrashScope" })
+export type NoteTrashScope = typeof NoteTrashScope.Type
 export const NoteAttendeeDTO = Schema.Struct({
   name: Schema.String.check(Schema.isMaxLength(254)),
   /** Given name, or the first word of the name: what fits in a row. */
@@ -684,6 +688,9 @@ export const NoteSummaryDTO = Schema.Struct({
   meeting: Schema.NullOr(NoteMeetingTimeDTO),
   attendees: NoteAttendeesDTO,
   organizationId: Schema.NullOr(UUID),
+  /** The owner put the note in Trash (its sharing is suspended, `NoteAccessDTO.suspended`): it is kept, read by
+   * nobody else, and listed apart from the other notes. Absent from a server that predates it. */
+  trashed: Schema.optionalKey(Schema.Boolean),
 }).annotate({ identifier: "NoteSummaryDTO" })
 export type NoteSummaryDTO = typeof NoteSummaryDTO.Type
 /** Newest meeting first: date, then creation time, then ID, all descending. `nextCursor`

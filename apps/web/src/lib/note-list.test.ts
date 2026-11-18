@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import type { NoteListFilter, NoteSearchPageDTO, NoteSearchResultDTO, NoteSummaryDTO } from '@meeting-notes/contracts'
 import { noteFacts } from './notes'
-import { createFeed, createNoteSearch, finishedResults, finishedSummaries, groupSummariesByDay, provisionalNote, searchableTerms, summaryFacts, summaryStatus, type FeedPage } from './note-list'
+import { PAGE, createFeed, createNoteSearch, finishedResults, finishedSummaries, groupSummariesByDay, provisionalNote, searchableTerms, summaryFacts, summaryStatus, type FeedPage } from './note-list'
+import { createNotesStore, type NotesTransport } from '../components/notes/notes-context'
 
 const now = new Date(2026, 10, 13, 15, 30) // Friday 13 November 2026, local time
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
@@ -121,6 +122,25 @@ describe('a paged feed', () => {
     const recovered = createFeed(load, note => note.id, { seed: refused })
     await recovered.load()
     expect(recovered.get()).toMatchObject({ error: null, items: [row(2)] })
+  })
+
+  test('a row taken out leaves at once, the count follows, and the next page continues from the same place', async () => {
+    const { load, calls } = pages(5, 3), feed = createFeed(load, note => note.id)
+    await feed.load()
+    feed.remove(id(1))
+    expect(feed.get()).toMatchObject({ total: 4, hasMore: true })
+    expect(feed.get().items!.map(note => note.id)).toEqual([id(0), id(2)])
+    // A row that is not here changes nothing, and nor does a feed that has not loaded.
+    const before = feed.get()
+    feed.remove(id(9))
+    expect(feed.get()).toBe(before)
+    createFeed(load, note => note.id).remove(id(0))
+    await feed.more()
+    expect(calls[1]!.cursor).toBe('3')
+    expect(feed.get().items!.map(note => note.id)).toEqual([id(0), id(2), id(3), id(4)])
+    // The last row taken out leaves an empty list, not a list that is still loading.
+    for (const n of [0, 2, 3, 4]) feed.remove(id(n))
+    expect(feed.get()).toMatchObject({ items: [], hasMore: false, loading: null })
   })
 
   test('cancelling stops the request and listeners hear every change', async () => {
@@ -243,6 +263,18 @@ describe('search', () => {
     expect(requests.length).toBe(3)
   })
 
+  test('a note taken out leaves the results on screen at once', async () => {
+    const { search, requests, pause, page } = harness()
+    search.set('plan', 'all'); pause(); requests[0]!.answer.resolve(page([1, 2, 3])); await settle()
+    search.remove(id(2))
+    expect(search.get().results!.map(found => found.note.id)).toEqual([id(1), id(3)])
+    expect(search.get().total).toBe(2)
+    const before = search.get()
+    search.remove(id(9))
+    expect(search.get()).toBe(before)
+    expect(requests.length).toBe(1)
+  })
+
   test('a failed search keeps the earlier results and can be tried again at once', async () => {
     const reported: unknown[] = [], requests: Array<ReturnType<typeof deferred<NoteSearchPageDTO>>> = []
     let due: (() => void) | null = null
@@ -264,6 +296,118 @@ describe('search', () => {
     expect(searchableTerms('  Hiring   PLAN ')).toEqual(['hiring', 'plan'])
     expect(searchableTerms('one two three four five six seven eight nine ten').length).toBe(8)
     for (const nothing of ['', ' ', 'a', '%', '_ -']) expect(searchableTerms(nothing)).toEqual([])
+  })
+})
+
+describe('Trash', () => {
+  /** A server with notes in and out of Trash, answering as the real one does for each `trash` scope: a cursor is
+   * the last row of the page before it, so a row that leaves does not shift the pages after it. `hold` keeps
+   * the next answers back until released, so a test can change something while a page is on its way. */
+  function server(live: number[], trashed: number[]) {
+    const state = { live: new Set(live), trashed: new Set(trashed) }
+    const asked: Array<{ trash: string | undefined; cursor: string | undefined; q?: string }> = []
+    let gate: Promise<void> | null = null, open = () => {}
+    const scope = (trash: string | undefined) => [...(trash === 'only' ? state.trashed : trash === 'exclude' ? state.live : new Set([...state.live, ...state.trashed]))].sort((a, b) => a - b)
+    const transport: NotesTransport = {
+      async listNoteSummaries(page = {}) {
+        asked.push({ trash: page.trash, cursor: page.cursor })
+        const all = scope(page.trash), rest = all.filter(n => page.cursor === undefined || n > Number(page.cursor)), size = page.limit ?? 50
+        const notes = rest.slice(0, size).map(n => row(n, state.trashed.has(n) ? { trashed: true } : {}))
+        if (gate) await gate
+        return { notes, nextCursor: rest.length > size ? String(rest[size - 1]) : null, total: all.length }
+      },
+      async searchNotes(search) {
+        asked.push({ trash: search.trash, cursor: search.cursor, q: search.q })
+        const all = scope(search.trash)
+        if (gate) await gate
+        return { results: all.map(result), total: all.length, nextCursor: null, terms: [] }
+      },
+      async getNote() { throw new Error('not read in these tests') },
+      async setNoteTrashed(noteId, to) {
+        const n = Number(noteId.slice(-12))
+        if (!state.live.has(n) && !state.trashed.has(n)) throw new Error('not found')
+        state.live.delete(n); state.trashed.delete(n); (to ? state.trashed : state.live).add(n)
+        return {} as never
+      },
+      async deleteNote(noteId) { const n = Number(noteId.slice(-12)); state.live.delete(n); state.trashed.delete(n); return { deleted: true } },
+    }
+    return { transport, state, asked, hold() { gate = new Promise(done => { open = done }) }, release() { open(); gate = null } }
+  }
+  const ids = (items: readonly NoteSummaryDTO[] | null) => items?.map(note => Number(note.id.slice(-12))) ?? null
+
+  test('the list and the search ask for the notes outside Trash, and Trash for the ones in it', async () => {
+    const { transport, asked } = server([1, 2, 3], [4, 5]), store = createNotesStore(transport, () => {})
+    await store.list('all').load()
+    store.showTrash(); await settle()
+    expect(asked).toEqual([{ trash: 'exclude', cursor: undefined }, { trash: 'only', cursor: undefined }])
+    expect(ids(store.list('all').get().items)).toEqual([1, 2, 3])
+    expect(ids(store.trash.get().items)).toEqual([4, 5])
+    expect(store.trash.get().items!.every(note => note.trashed)).toBe(true)
+    // A note in Trash is still found by its id, so it can be opened from its row there.
+    expect(store.summary(id(4))?.trashed).toBe(true)
+  })
+
+  test('a note moved to Trash leaves the list at once and is in Trash; restored, it is back', async () => {
+    const { transport } = server([1, 2, 3], []), store = createNotesStore(transport, () => {})
+    await store.list('all').load()
+    await store.moveToTrash(id(2))
+    expect(ids(store.list('all').get().items)).toEqual([1, 3])
+    expect(store.list('all').get().total).toBe(2)
+    store.showTrash(); await settle()
+    expect(ids(store.trash.get().items)).toEqual([2])
+    await store.restore(id(2))
+    expect(store.trash.get()).toMatchObject({ items: [], total: 0, hasMore: false })
+    // The list is out of date until it is shown again, and then it is read again.
+    store.show('all'); await settle()
+    expect(ids(store.list('all').get().items)).toEqual([1, 2, 3])
+  })
+
+  test('a note deleted forever leaves Trash and does not come back', async () => {
+    const { transport, state } = server([1], [2, 3]), store = createNotesStore(transport, () => {})
+    store.showTrash(); await settle()
+    await store.deleteForever(id(2))
+    expect(ids(store.trash.get().items)).toEqual([3])
+    expect(state.trashed.has(2) || state.live.has(2)).toBe(false)
+    store.showTrash(); await settle()
+    expect(ids(store.trash.get().items)).toEqual([3])
+    store.show('all'); await settle()
+    expect(ids(store.list('all').get().items)).toEqual([1])
+  })
+
+  test('a page asked for before a note moved does not bring it back; a page asked for afterwards is taken as it is', async () => {
+    const backend = server([1, 2, 3], []), store = createNotesStore(backend.transport, () => {})
+    await store.list('all').load()
+    // The list is being read again while the note is moved: the answer still has the note in it.
+    backend.hold()
+    const reading = store.list('all').load()
+    await settle()
+    await store.moveToTrash(id(2))
+    backend.release(); await reading
+    expect(ids(store.list('all').get().items)).toEqual([1, 3])
+    // Restored somewhere else (one of the apps): the next read says so, and this session believes it.
+    await backend.transport.setNoteTrashed(id(2), false)
+    await store.list('all').load()
+    expect(ids(store.list('all').get().items)).toEqual([1, 2, 3])
+  })
+
+  test('a refusal changes nothing on screen', async () => {
+    const { transport } = server([1, 2], []), store = createNotesStore(transport, () => {})
+    await store.list('all').load()
+    await expect(store.moveToTrash(id(9))).rejects.toThrow()
+    expect(ids(store.list('all').get().items)).toEqual([1, 2])
+  })
+
+  test('Trash is paged, and emptying a page by hand still reaches the rest', async () => {
+    const all = Array.from({ length: 60 }, (_, n) => n + 1)
+    const { transport } = server([], all), store = createNotesStore(transport, () => {})
+    store.showTrash(); await settle()
+    expect(store.trash.get()).toMatchObject({ total: 60, hasMore: true })
+    expect(store.trash.get().items!.length).toBe(PAGE)
+    await store.restore(id(1))
+    expect(store.trash.get()).toMatchObject({ total: 59, hasMore: true })
+    await store.trash.more()
+    expect(store.trash.get().items!.length).toBe(59)
+    expect(store.trash.get().hasMore).toBe(false)
   })
 })
 

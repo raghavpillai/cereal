@@ -75,7 +75,7 @@ function TranscriptChat({ noteId, title, hasTranscript, expired }: { noteId: str
       {turns.length === 0 && hasTranscript && <p className="note-quiet">Ask anything about what was said in this meeting. Answers cite the moments of the transcript they come from.</p>}
       <div className="chat-thread" aria-live="polite">
         {turns.map((turn, index) => turn.role === 'user'
-          ? <div key={index} className="utterance" data-own="" data-first=""><div className="utterance-stack"><p className="utterance-bubble chat-question">{turn.content}</p></div></div>
+          ? <p key={index} className="chat-question">{turn.content}</p>
           : turn.state === 'failed' ? null : <Answer key={index} turn={turn} />)}
         {error && <p className="note-quiet is-warning" role="alert">{error}</p>}
         <div ref={end} />

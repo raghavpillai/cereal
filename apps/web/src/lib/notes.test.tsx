@@ -3,10 +3,9 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import type { MeetingParticipantDTO, NoteDTO, TranscriptSegmentDTO } from '@meeting-notes/contracts'
 import { Segmented } from '../components/kit/segmented'
 import { MeetingCard } from '../components/notes/meeting-card'
-import { TranscriptPanel } from '../components/notes/transcript'
 import {
   chipDayLabel, clockParts, createNoteSearch, createdClock, dayOffset, findNotes, formatClock, highlight, initials, isFinished, listDayLabel, localDateKey, markdownFileName,
-  noteDay, noteFacts, noteIsFinished, noteMarkdown, noteMatch, notePreview, noteStatus, noteTitle, plainText, proseText, searchNotes, searchTerms, stampLabel, timelineDate, transcriptTurns, transcriptUtterances, turnSource,
+  noteDay, noteFacts, noteIsFinished, noteMarkdown, noteMatch, notePreview, noteStatus, noteTitle, plainText, proseText, searchNotes, searchTerms, stampLabel, timelineDate, transcriptTurns, turnSource,
 } from './notes'
 
 const now = new Date(2026, 10, 13, 15, 30) // Friday 13 November 2026, local time
@@ -173,37 +172,8 @@ describe('transcript presentation', () => {
     const odd = [segment('mic', `system:${chunkA}:speaker_1`, 'a', 0), segment('mic', `mic:${chunkB}:speaker_1`, 'b', 1), segment('mic', `mic:${chunkA}:speaker_x`, 'c', 2), segment('mic', `mic:${chunkA}:speaker_1:extra`, 'd', 3)]
     expect(transcriptTurns(odd).map(turn => turn.part)).toEqual([null, null, null, null])
   })
-  test('the transcript panel: one bubble for each thing said, mine on the right, named where a source has several voices', () => {
+  test('a clock from the start of the recording', () => {
     expect([0, 999, 65_000, 3_599_000, 3_725_000, -5].map(formatClock)).toEqual(['0:00', '0:00', '1:05', '59:59', '1:02:05', '0:00'])
-    const rows = transcriptUtterances(segments)
-    // The blank segment is not a bubble; consecutive segments of one voice stay separate bubbles.
-    expect(rows.map(row => row.text)).toEqual(['Thanks for joining.', 'Let us begin.', 'Agreed.', 'I can do that.', 'One more thing.', 'Older recording.'])
-    expect(rows.map(row => row.own)).toEqual([true, true, false, false, false, true])
-    expect(rows.map(row => [row.sameBefore, row.sameAfter])).toEqual([[false, true], [true, false], [false, false], [false, false], [false, false], [false, false]])
-    // A speaker id that carries an audio part is named with its source and part; a legacy id is not named.
-    expect(rows.map(row => row.speaker)).toEqual(['Speaker 1 · Mic · Part 1', 'Speaker 1 · Mic · Part 1', 'Speaker 1 · System · Part 1', 'Speaker 2 · System · Part 1', 'Speaker 1 · System · Part 2', null])
-    expect(rows.map(row => row.names)).toEqual([true, false, true, true, true, false])
-    expect(rows.map(row => row.time)).toEqual(['00:00', '00:04', '00:09', '00:13', '62:05', '62:10'])
-    expect(rows[3]!.final).toBe(false)
-    expect(rows[5]!.source).toBe('Microphone')
-    // One voice on each side and no audio parts: nobody needs naming.
-    const plain = transcriptUtterances([segment('mic', 'mic', 'Mine.', 0), segment('system', 'them', 'Theirs.', 1000, { speakerLabel: 'Speaker 1' }), segment('mic', 'mic', 'Mine again.', 2000)])
-    expect(plain.map(row => row.names)).toEqual([false, false, false])
-    // A second voice on the other side names both of them, and still not me.
-    const two = transcriptUtterances([segment('mic', 'mic', 'Mine.', 0), segment('system', 'a', 'One.', 1000, { speakerLabel: 'Speaker 1' }), segment('system', 'b', 'Two.', 2000, { speakerLabel: 'Speaker 2' })])
-    expect(two.map(row => [row.names, row.speaker])).toEqual([[false, null], [true, 'Speaker 1'], [true, 'Speaker 2']])
-    expect(transcriptUtterances([])).toEqual([])
-
-    const html = renderToStaticMarkup(<TranscriptPanel segments={[...segments, segment('system', `system:${chunkB}:speaker_2`, '<script>alert(1)</script>', 3_740_000)]} close={() => {}} copy={async () => true} />)
-    expect((html.match(/<li class="utterance"/g) ?? []).length).toBe(7)
-    expect((html.match(/data-own="true"/g) ?? []).length).toBe(3)
-    expect(html).toContain('Speaker 1 · System · Part 2')
-    expect(html).toContain('is-interim')
-    expect(html).toContain('&lt;script&gt;')
-    expect(html).not.toContain('<script>')
-    expect(html).toContain('aria-label="Hide transcript"')
-    // Recording controls belong to the apps.
-    expect(html).not.toContain('Resume')
   })
   test('copied Markdown follows the view on screen', () => {
     const item = note(1, { title: ' Launch ', enhanced: 'Summary text', body: 'Own text', transcriptSegments: segments.slice(0, 3) })

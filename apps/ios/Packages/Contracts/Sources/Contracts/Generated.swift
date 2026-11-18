@@ -197,6 +197,7 @@ public struct NoteSummaryDTO: Codable, Sendable {
     public let speakerCount: Int
     public let title: String
     public let transcriptRevision: Int
+    public let trashed: Bool?
     public let updatedAt: String
 
     public enum CodingKeys: String, CodingKey {
@@ -217,10 +218,11 @@ public struct NoteSummaryDTO: Codable, Sendable {
         case speakerCount = "speakerCount"
         case title = "title"
         case transcriptRevision = "transcriptRevision"
+        case trashed = "trashed"
         case updatedAt = "updatedAt"
     }
 
-    public init(attendees: NoteAttendeesDTO, createdAt: String, date: String, duration: String, excerpt: String, generatedRevision: Int?, generationState: GenerationState, hasBody: Bool, hasSummary: Bool, hasTranscript: Bool, id: String, meeting: NoteMeetingTimeDTO?, organizationId: String?, recordingState: RecordingState, speakerCount: Int, title: String, transcriptRevision: Int, updatedAt: String) {
+    public init(attendees: NoteAttendeesDTO, createdAt: String, date: String, duration: String, excerpt: String, generatedRevision: Int?, generationState: GenerationState, hasBody: Bool, hasSummary: Bool, hasTranscript: Bool, id: String, meeting: NoteMeetingTimeDTO?, organizationId: String?, recordingState: RecordingState, speakerCount: Int, title: String, transcriptRevision: Int, trashed: Bool? = nil, updatedAt: String) {
         self.attendees = attendees
         self.createdAt = createdAt
         self.date = date
@@ -238,6 +240,7 @@ public struct NoteSummaryDTO: Codable, Sendable {
         self.speakerCount = speakerCount
         self.title = title
         self.transcriptRevision = transcriptRevision
+        self.trashed = trashed
         self.updatedAt = updatedAt
     }
 }
@@ -4163,6 +4166,7 @@ extension NoteSummaryDTO {
         case meeting
         case attendees
         case organizationId
+        case trashed
     }
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: ContractWireKeys.self)
@@ -4184,6 +4188,7 @@ extension NoteSummaryDTO {
         try container.encode(meeting, forKey: .meeting)
         try container.encode(attendees, forKey: .attendees)
         try container.encode(organizationId, forKey: .organizationId)
+        try container.encodeIfPresent(trashed, forKey: .trashed)
     }
 }
 

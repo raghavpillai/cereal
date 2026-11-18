@@ -5,9 +5,14 @@
    column is centred in what is left, and so sits 5 px left of the window's centre. */
 .notes-home { display: flex; flex-direction: column; align-items: center; width: 100%; padding-right: 10px; }
 .notes-column { display: flex; flex-direction: column; width: 100%; max-width: 674px; padding: 0 24px 130px; }
-.notes-head { position: relative; display: flex; justify-content: space-between; align-items: center; padding: 14px 8px 4px; }
-/* The search field opens over the row, so the list below it does not move. */
-.notes-head .app-find { position: absolute; right: 8px; top: 12px; background: var(--app-bg); }
+.notes-head { position: relative; display: flex; align-items: center; gap: 4px; padding: 14px 8px 4px; }
+.notes-head .app-heading { flex: 1; min-width: 0; }
+/* The search field opens over the row, beside the way to Trash, so the list below it does not move. */
+/* It never reaches the heading: on a phone it is as wide as the room between "My notes" (105 px wide, 8 px in, 8 px clear) and the Trash button. */
+.notes-head .app-find { position: absolute; right: 40px; top: 12px; max-width: calc(100% - 162px); background: var(--app-bg); }
+/* Trash says under its name what it is, in the words of the app's own Trash. */
+.notes-head.is-trash { flex-direction: column; align-items: flex-start; gap: 4px; }
+.notes-head.is-trash .app-heading { flex: none; }
 .notes-column > .admin-notice { margin: 12px 8px 0; }
 
 /* On Home the list sits a pixel inside the column above it. */
@@ -40,6 +45,29 @@
 .note-row-snippet { position: relative; top: -1px; display: block; margin-bottom: 4px; padding: 0 8px 0 52px; color: var(--app-muted); font-size: 12px; line-height: 16px; overflow-wrap: anywhere; }
 .note-row mark { background: var(--app-search-hit); color: inherit; }
 
+/* ── Trash: the list's rows, each with its two actions at the trailing edge ── */
+.trash-list { padding-top: 20px; }
+.trash-row { display: flex; align-items: center; gap: 8px; min-height: 44px; margin-bottom: 4px; padding-right: 8px; border-radius: 12px; transition: background-color var(--dur-hover-out) var(--ease-fade); }
+.trash-row:hover, .trash-row.is-asking { background: var(--app-hover); }
+.trash-row:hover { transition-duration: var(--dur-hover-in); }
+.trash-row .note-row { flex: 1; min-width: 0; }
+.trash-row .note-row-box { margin-bottom: 0; }
+.trash-row .note-row:hover .note-row-box { background: transparent; }
+/* The app's Trash buttons: 28 px, 2 px apart, a 16 px glyph. */
+.trash-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+/* A row that is asking: the tile stays beside the first lines of the question when the answers go under it. */
+.trash-row.is-asking { align-items: flex-start; gap: 16px; padding: 6px 8px; }
+.trash-row.is-asking > .note-row-tile { margin-top: 4px; }
+/* The question a row or a note turns into before it is deleted for good. */
+.trash-question { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; flex: 1; min-width: 0; }
+.trash-question > p { display: flex; flex-direction: column; flex: 1 1 180px; min-width: 0; margin: 0; font-size: 14px; line-height: 20px; }
+.trash-question-title { position: relative; top: 1px; display: flex; min-width: 0; white-space: pre; }
+.trash-question-title > span { flex-shrink: 0; }
+.trash-question-title > span:nth-child(2) { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.trash-question .app-pill { height: 26px; }
+/* The two answers stay side by side: where they do not fit beside the words they go under them together. */
+.trash-answers { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+
 .notes-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 70px 0; color: var(--app-muted); text-align: center; }
 .notes-none { margin: 0; padding: 40px 8px; color: var(--app-muted); font-size: 14px; line-height: var(--app-leading); }
 .notes-more { height: 1px; }
@@ -55,6 +83,11 @@
 
 @media (hover: none) {
   .note-row:hover .note-row-box { background: transparent; }
+  .trash-row:hover:not(.is-asking) { background: transparent; }
+}
+@media (pointer: coarse) {
+  /* Each button is pressed over 44 px; apart, so that the two areas do not meet. */
+  .trash-actions { gap: 12px; padding-right: 4px; }
 }
 @media (max-width: 720px) {
   /* A phone has no scroll gutter to leave, and the column's own gutters come in to 16 px. */

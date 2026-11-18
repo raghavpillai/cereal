@@ -20,6 +20,7 @@ import { Route as McpConnectRouteImport } from './routes/mcp.connect'
 import { Route as McpConsentRouteImport } from './routes/mcp.consent'
 import { Route as NotesIndexRouteImport } from './routes/notes.index'
 import { Route as NotesNoteIdRouteImport } from './routes/notes.$noteId'
+import { Route as NotesTrashRouteImport } from './routes/notes.trash'
 import { Route as STokenRouteImport } from './routes/s.$token'
 import { Route as NotesNoteIdChatRouteImport } from './routes/notes.$noteId_.chat'
 
@@ -78,6 +79,11 @@ const NotesNoteIdRoute = NotesNoteIdRouteImport.update({
   path: '/$noteId',
   getParentRoute: () => NotesRoute,
 } as any)
+const NotesTrashRoute = NotesTrashRouteImport.update({
+  id: '/trash',
+  path: '/trash',
+  getParentRoute: () => NotesRoute,
+} as any)
 const STokenRoute = STokenRouteImport.update({
   id: '/s/$token',
   path: '/s/$token',
@@ -100,6 +106,7 @@ export interface FileRoutesByFullPath {
   '/mcp/connect': typeof McpConnectRoute
   '/mcp/consent': typeof McpConsentRoute
   '/notes/$noteId': typeof NotesNoteIdRoute
+  '/notes/trash': typeof NotesTrashRoute
   '/s/$token': typeof STokenRoute
   '/notes/': typeof NotesIndexRoute
   '/notes/$noteId/chat': typeof NotesNoteIdChatRoute
@@ -114,6 +121,7 @@ export interface FileRoutesByTo {
   '/mcp/connect': typeof McpConnectRoute
   '/mcp/consent': typeof McpConsentRoute
   '/notes/$noteId': typeof NotesNoteIdRoute
+  '/notes/trash': typeof NotesTrashRoute
   '/s/$token': typeof STokenRoute
   '/notes': typeof NotesIndexRoute
   '/notes/$noteId/chat': typeof NotesNoteIdChatRoute
@@ -130,6 +138,7 @@ export interface FileRoutesById {
   '/mcp/connect': typeof McpConnectRoute
   '/mcp/consent': typeof McpConsentRoute
   '/notes/$noteId': typeof NotesNoteIdRoute
+  '/notes/trash': typeof NotesTrashRoute
   '/s/$token': typeof STokenRoute
   '/notes/': typeof NotesIndexRoute
   '/notes/$noteId_/chat': typeof NotesNoteIdChatRoute
@@ -147,6 +156,7 @@ export interface FileRouteTypes {
     | '/mcp/connect'
     | '/mcp/consent'
     | '/notes/$noteId'
+    | '/notes/trash'
     | '/s/$token'
     | '/notes/'
     | '/notes/$noteId/chat'
@@ -161,6 +171,7 @@ export interface FileRouteTypes {
     | '/mcp/connect'
     | '/mcp/consent'
     | '/notes/$noteId'
+    | '/notes/trash'
     | '/s/$token'
     | '/notes'
     | '/notes/$noteId/chat'
@@ -176,6 +187,7 @@ export interface FileRouteTypes {
     | '/mcp/connect'
     | '/mcp/consent'
     | '/notes/$noteId'
+    | '/notes/trash'
     | '/s/$token'
     | '/notes/'
     | '/notes/$noteId_/chat'
@@ -273,6 +285,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof NotesNoteIdRouteImport
       parentRoute: typeof NotesRoute
     }
+    '/notes/trash': {
+      id: '/notes/trash'
+      path: '/trash'
+      fullPath: '/notes/trash'
+      preLoaderRoute: typeof NotesTrashRouteImport
+      parentRoute: typeof NotesRoute
+    }
     '/s/$token': {
       id: '/s/$token'
       path: '/s/$token'
@@ -292,12 +311,14 @@ declare module '@tanstack/react-router' {
 
 interface NotesRouteChildren {
   NotesNoteIdRoute: typeof NotesNoteIdRoute
+  NotesTrashRoute: typeof NotesTrashRoute
   NotesIndexRoute: typeof NotesIndexRoute
   NotesNoteIdChatRoute: typeof NotesNoteIdChatRoute
 }
 
 const NotesRouteChildren: NotesRouteChildren = {
   NotesNoteIdRoute: NotesNoteIdRoute,
+  NotesTrashRoute: NotesTrashRoute,
   NotesIndexRoute: NotesIndexRoute,
   NotesNoteIdChatRoute: NotesNoteIdChatRoute,
 }

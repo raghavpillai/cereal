@@ -42,6 +42,9 @@
   --app-fill: #56512e1f;
   --app-accent: #835e00;
   --app-danger: #cf3527;
+  /* Text on a danger fill. The desktop sets white on both themes; on the dark theme's lighter red that is 2.6:1,
+     so dark takes the page colour instead (6.1:1). */
+  --app-on-danger: #ffffff;
   --app-focus: #a5790099;
   /* Text of generated notes, a list tile and its edge, a bullet, the two transcript bubbles. */
   --app-prose: #6e6e6a;
@@ -53,6 +56,11 @@
   --app-bubble-other: #f2f2ec;
   --app-bubble-other-ink: #292929;
   --app-search-hit: #b9853455;
+  /* A note's view tabs (apps/desktop/src/note.rs): the track's edge is the hairline at 0.55 of its strength, the
+     selected capsule's at 1.25; the selected label is secondary ink, and on dark half-way from it to the text. */
+  --app-tab-edge: #47432a1c;
+  --app-tab-capsule-edge: #47432a40;
+  --app-tab-ink: #4e4d4b;
   /* The app's shadows. Its blur radius is the blur's standard deviation; a CSS blur is twice that. */
   --app-shadow-sm: 0 1px 6px #0000001a, 0 1px 4px -1px #0000001a;
   --app-shadow-lg: 0 10px 30px -3px #0000001a, 0 4px 12px -4px #0000001a;
@@ -201,10 +209,14 @@
     --app-fill: #ffffff1f;
     --app-accent: #e0af2f;
     --app-danger: #f0806e;
+    --app-on-danger: #292929;
     --app-focus: #e0af2f99;
     --app-prose: #b0b1ac;
     --app-tile: #515150;
     --app-tile-edge: #ffffff26;
+    --app-tab-edge: #ffffff15;
+    --app-tab-capsule-edge: #ffffff30;
+    --app-tab-ink: #d4d5d0;
     --app-bubble-own: #292929;
     --app-bubble-own-ink: #fcf2df;
     --app-bubble-other: #4e4d4b;
@@ -250,10 +262,14 @@
   --app-fill: #ffffff1f;
   --app-accent: #e0af2f;
   --app-danger: #f0806e;
+  --app-on-danger: #292929;
   --app-focus: #e0af2f99;
   --app-prose: #b0b1ac;
   --app-tile: #515150;
   --app-tile-edge: #ffffff26;
+  --app-tab-edge: #ffffff15;
+  --app-tab-capsule-edge: #ffffff30;
+  --app-tab-ink: #d4d5d0;
   --app-bubble-own: #292929;
   --app-bubble-own-ink: #fcf2df;
   --app-bubble-other: #4e4d4b;

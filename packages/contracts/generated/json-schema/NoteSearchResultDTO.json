@@ -232,6 +232,9 @@
               "type": "null"
             }
           ]
+        },
+        "trashed": {
+          "type": "boolean"
         }
       },
       "required": [

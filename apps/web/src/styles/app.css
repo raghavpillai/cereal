@@ -11,7 +11,7 @@
    measured against the app, 13 px labels, 14/20 and 16/24 text stand one pixel lower there than a
    browser sets them, and 12 px text and the 24/28 display face one pixel higher. Each style is moved
    by that pixel, so glyphs land where the app draws them; boxes are untouched. */
-:is(.app-pill, .app-menu-row, .site-back, .site-link, .share-button, .note-view, .note-chip, .share-anyone) > span,
+:is(.app-pill, .app-menu-row, .site-back, .share-button, .note-chip, .share-anyone) > span,
 .share-owner-name > span:first-child, .app-menu-who > span { position: relative; top: 1px; }
 .app-small, .app-heading, .share-label, .share-hint { position: relative; top: -1px; }
 
@@ -20,15 +20,17 @@
 .app-small { font-size: 12px; line-height: 16px; color: var(--app-muted); }
 
 /* The keyboard focus outline: 1.5 px of the focus gold, 1 px clear of the control. */
-:is(.app-tool, .app-pill, .app-menu-row, .site-back, .site-link, .site-avatar, .site-mark, .note-row, .note-view, .note-chip.is-button, .share-button, .share-link-button, .share-revoke, .transcript-toggle, .transcript-body, .transcript-panel):focus-visible {
+:is(.app-tool, .app-pill, .app-menu-row, .site-back, .site-avatar, .site-mark, .note-row, .note-view, .note-chip.is-button, .share-button, .share-link-button, .share-revoke):focus-visible {
   outline: 1.5px solid var(--app-focus); outline-offset: 1px;
 }
 
-/* ── Header: where the app has its title bar, and as tall ──────────────── */
+/* ── Header: where the app has its title bar, and as tall ────────────────
+   The app's bar starts after the window's own buttons; here the mark stands in their place, 8 px from the edge
+   as the last control is at the other end, and everything in the bar is 28 px tall and 8 px from its neighbour. */
 .site-header {
   position: sticky; top: 0; z-index: 30;
   display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
-  height: 48px; padding: 8px 8px 0 88px;
+  height: 48px; padding: 8px 8px 0 44px;
   background: var(--app-bg);
   view-transition-name: site-header;
 }
@@ -36,7 +38,7 @@
    is marked before first paint, so this header is not shown for a moment and then taken away. */
 :root[data-setup] .site-header { display: none; }
 .site-mark {
-  position: absolute; left: 16px; top: 8px;
+  position: absolute; left: 8px; top: 8px;
   display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px;
   color: var(--app-text);
 }
@@ -51,11 +53,7 @@
   border: 1px solid var(--app-hairline); border-radius: 999px;
   color: var(--app-secondary); font-size: 13px; line-height: var(--app-leading); text-decoration: none; white-space: nowrap;
 }
-.site-link {
-  display: flex; align-items: center; height: 28px; padding: 0 8px; border-radius: 999px;
-  color: var(--app-secondary); font-size: 13px; line-height: var(--app-leading); text-decoration: none; white-space: nowrap;
-}
-:is(.site-back, .site-link, .site-mark):hover { background: var(--app-hover); }
+:is(.site-back, .site-mark):hover { background: var(--app-hover); }
 .site-avatar {
   display: grid; place-items: center; flex-shrink: 0; width: 28px; height: 28px; padding: 0;
   border: 0; border-radius: 50%; background: var(--app-fill); color: var(--app-text);
@@ -68,8 +66,6 @@
 .account-popover { top: 32px; right: 0; min-width: 200px; max-width: min(280px, calc(100vw - 16px)); }
 .app-menu-who { display: flex; flex-direction: column; gap: 2px; padding: 6px 6px 4px; font-size: 13px; line-height: var(--app-leading); overflow-wrap: anywhere; }
 .app-menu-who small { font-size: 12px; line-height: 16px; color: var(--app-muted); }
-/* On a phone the administration link moves into the menu behind the initial. */
-.site-link-row { display: none; }
 
 /* ── Controls ──────────────────────────────────────────────────────────── */
 .app-tool {
@@ -88,10 +84,13 @@
 .app-pill.is-primary { border-color: transparent; background: var(--app-text); color: var(--app-bg); }
 .app-pill.is-primary:hover { background: var(--app-text); opacity: 0.9; }
 .app-pill .mark { width: 16px; height: 16px; }
-:is(.app-tool, .app-pill, .app-menu-row, .site-back, .site-link, .site-avatar, .note-view, .share-button, .share-link-button, .transcript-toggle) {
+/* The one answer that cannot be taken back ("Delete" forever): the app's danger fill. */
+.app-pill.is-danger { border-color: var(--app-danger); background: var(--app-danger); color: var(--app-on-danger); }
+.app-pill.is-danger:hover:not(:disabled) { background: var(--app-danger); opacity: 0.9; }
+:is(.app-tool, .app-pill, .app-menu-row, .site-back, .site-avatar, .note-view, .share-button, .share-link-button) {
   transition: background-color var(--dur-hover-out) var(--ease-fade), opacity var(--dur-hover-out) var(--ease-fade), transform var(--dur-snappy) var(--spring-snappy);
 }
-:is(.app-tool, .app-pill, .site-back, .site-link, .site-avatar, .share-button, .share-link-button, .transcript-toggle):active:not(:disabled) { transform: scale(var(--squash)); transition-duration: var(--dur-hover-in), var(--dur-hover-in), var(--dur-press); }
+:is(.app-tool, .app-pill, .site-back, .site-avatar, .share-button, .share-link-button):active:not(:disabled) { transform: scale(var(--squash)); transition-duration: var(--dur-hover-in), var(--dur-hover-in), var(--dur-press); }
 .app-separator { flex-shrink: 0; height: 1px; background: var(--app-border); }
 .app-separator.is-roomy { margin: 6px 0; }
 
@@ -117,6 +116,18 @@
 .app-menu-row .icon { color: var(--app-secondary); }
 .app-menu-row:is(:hover, :focus-visible):not(:disabled) { background: var(--app-hover); }
 .app-menu-row:disabled { opacity: 0.45; }
+/* A row that puts something away or deletes it, in the app's danger red, glyph and all. */
+.app-menu-row.is-danger, .app-menu-row.is-danger .icon { color: var(--app-danger); }
+
+/* A notice that something has just been done, where the app shows its own: the corner of the window, for four seconds. */
+.app-toast-place { position: fixed; z-index: 50; left: 16px; right: 16px; bottom: 16px; display: flex; justify-content: flex-end; pointer-events: none; }
+.app-toast {
+  display: flex; align-items: center; width: 384px; max-width: 100%; min-height: 56px; padding: 10px 8px 10px 16px;
+  border: 1px solid var(--app-border); border-radius: 12px; background: var(--app-card); color: var(--app-text);
+  box-shadow: var(--app-shadow-lg); font-size: 13px; line-height: var(--app-leading); pointer-events: auto;
+  transform-origin: 100% 100%;
+  animation: panel-in var(--dur-gooey) var(--spring-gooey) backwards, fade-in calc(var(--dur-gooey) * 0.4) var(--ease-fade) backwards;
+}
 
 /* The find capsule: a search field the size of the app's own. */
 .app-find {
@@ -155,7 +166,7 @@
 .reader-state-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 10px; }
 
 @media (hover: none) {
-  :is(.app-tool, .app-menu-row, .site-back, .site-link, .site-mark):hover:not(:disabled) { background: transparent; }
+  :is(.app-tool, .app-menu-row, .site-back, .site-mark):hover:not(:disabled) { background: transparent; }
   .app-pill:hover:not(:disabled) { background: transparent; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -165,8 +176,8 @@
    keeps its look and is pressed over a taller area that reaches into the empty room around it, the rows of a
    menu stand 44 px apart, and the choices in the Share card are as tall. */
 @media (pointer: coarse) {
-  :is(.site-back, .site-link, .site-avatar, .app-tool, .app-pill, .share-button, .share-link-button, .share-revoke, .note-chip.is-button, .sign-in-download) { position: relative; }
-  :is(.site-mark, .site-back, .site-link, .site-avatar, .app-tool, .app-pill, .share-button, .share-link-button, .share-revoke, .note-chip.is-button, .sign-in-download)::after { content: ''; position: absolute; inset: -8px -3px; }
+  :is(.site-back, .site-avatar, .app-tool, .app-pill, .share-button, .share-link-button, .share-revoke, .note-chip.is-button, .sign-in-download) { position: relative; }
+  :is(.site-mark, .site-back, .site-avatar, .app-tool, .app-pill, .share-button, .share-link-button, .share-revoke, .note-chip.is-button, .sign-in-download)::after { content: ''; position: absolute; inset: -8px -3px; }
   /* The outlined pills are measured from inside their 1 px edge. */
   :is(.site-back, .app-pill, .note-chip.is-button)::after { inset: -9px -4px; }
   .share-button::after { right: 0; }
@@ -178,16 +189,16 @@
   .share-include label { min-height: 44px; }
 }
 @media (max-width: 600px) {
-  .site-header { padding-left: 48px; }
-  .site-mark { left: 10px; }
   .site-actions { gap: 6px; }
-  .site-actions > .site-link, .header-slot > .site-link, .header-pending > .site-link { display: none; }
-  .site-link-row { display: flex; }
+  /* A card opened from the bar hangs from the bar itself, 8 px in from the window's edge, wherever its control
+     stands: hung from a control part-way along the bar, a card as wide as the screen would leave it. */
+  .site-actions :is(.app-popover-root, .share-split) { position: static; }
+  .site-actions .app-popover { top: 40px; right: 8px; max-width: calc(100vw - 16px); }
   .open-in-app { width: 28px; padding: 0; }
   .open-in-app-label { display: none; }
   .open-in-app.is-prominent { width: auto; padding: 0 12px; }
   .open-in-app.is-prominent .open-in-app-label { display: inline; }
 }
 @media print {
-  .site-header { display: none; }
+  .site-header, .app-toast-place { display: none; }
 }

@@ -12406,6 +12406,14 @@
               "$ref": "#/components/schemas/NoteListFilter"
             },
             "required": false
+          },
+          {
+            "name": "trash",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/NoteTrashScope"
+            },
+            "required": false
           }
         ],
         "security": [
@@ -12622,6 +12630,14 @@
             "in": "query",
             "schema": {
               "$ref": "#/components/schemas/NoteListFilter"
+            },
+            "required": false
+          },
+          {
+            "name": "trash",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/NoteTrashScope"
             },
             "required": false
           }
@@ -20209,6 +20225,9 @@
                 "type": "null"
               }
             ]
+          },
+          "trashed": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -20232,6 +20251,14 @@
           "organizationId"
         ],
         "additionalProperties": false
+      },
+      "NoteTrashScope": {
+        "type": "string",
+        "enum": [
+          "include",
+          "exclude",
+          "only"
+        ]
       },
       "NoteListFilter": {
         "type": "string",

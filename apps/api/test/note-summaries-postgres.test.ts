@@ -243,4 +243,40 @@ describe.skipIf(!enabled)("notes list and search on PostgreSQL",()=>{
     expect((await search(ada,{q:"boardroom"})).total).toBe(0)
     expect((await search(bob,{q:"hopper"})).total).toBe(0)
   },60_000)
+  test("notes in Trash are marked, left out when asked, and listed by themselves",async()=>{
+    // Trash is the owner suspending a note's sharing (note-access.ts). The three newest notes, and the one with the title word.
+    const away=[noteIds[NOTES-1]!,noteIds[NOTES-2]!,noteIds[NOTES-3]!,noteIds[412]!]
+    for(const noteId of away)await db!.noteSharing.upsert({where:{noteId},create:{noteId,suspended:true},update:{suspended:true}})
+    // Sharing that is not suspended is not Trash.
+    await db!.noteSharing.upsert({where:{noteId:noteIds[NOTES-4]!},create:{noteId:noteIds[NOTES-4]!,level:"organization"},update:{}})
+    const everything=await list(ada,{limit:"5"})
+    expect(everything.total).toBe(NOTES)
+    expect(everything.notes.map(note=>note.trashed)).toEqual([true,true,true,false,false])
+    const kept=await list(ada,{limit:"5",trash:"exclude"})
+    expect(kept.total).toBe(NOTES-away.length)
+    expect(kept.notes.every(note=>note.trashed===false&&!away.includes(note.id))).toBe(true)
+    expect(kept.notes[0]!.id).toBe(noteIds[NOTES-4]!)
+    const trash=await list(ada,{limit:"3",trash:"only"})
+    expect(trash.total).toBe(away.length)
+    expect(trash.notes.map(note=>note.id)).toEqual(away.slice(0,3))
+    const rest=await list(ada,{limit:"3",trash:"only",cursor:trash.nextCursor!})
+    expect(rest.notes.map(note=>[note.id,note.trashed])).toEqual([[noteIds[412]!,true]]);expect(rest.nextCursor).toBeNull()
+    // The walk without Trash has every other note once, across pages.
+    const walked:string[]=[];let cursor:string|null=null
+    do{const page:Awaited<ReturnType<typeof list>>=await list(ada,{limit:"100",trash:"exclude",...(cursor?{cursor}:{})});walked.push(...page.notes.map(note=>note.id));cursor=page.nextCursor}while(cursor)
+    expect(walked.length).toBe(NOTES-away.length);expect(new Set(walked).size).toBe(walked.length);expect(walked.some(id=>away.includes(id))).toBe(false)
+    // Search follows the same scope, and it combines with a filter.
+    expect((await search(ada,{q:needle.title})).results.map(result=>[result.note.id,result.note.trashed])).toEqual([[noteIds[412]!,true]])
+    expect((await search(ada,{q:needle.title,trash:"exclude"})).total).toBe(0)
+    expect((await search(ada,{q:needle.title,trash:"only"})).total).toBe(1)
+    const summarized=await list(ada,{filter:"summarized"}),summarizedKept=await list(ada,{filter:"summarized",trash:"exclude"}),summarizedAway=await list(ada,{filter:"summarized",trash:"only"})
+    expect(summarizedKept.total+summarizedAway.total).toBe(summarized.total)
+    // Over HTTP, and a cursor does not cross from one scope to another.
+    expect((await get(ada,"/api/v1/notes/summaries?trash=only")).json().total).toBe(away.length)
+    expect((await get(ada,`/api/v1/notes/summaries?trash=exclude&cursor=${trash.nextCursor}`)).status).toBe(400)
+    expect((await get(ada,"/api/v1/notes/summaries?trash=bin")).status).toBe(400)
+    // Another account's Trash is its own.
+    expect((await list(bob,{trash:"only"})).total).toBe(0)
+    await db!.noteSharing.deleteMany({where:{noteId:{in:[...away,noteIds[NOTES-4]!]}}})
+  },60_000)
 })

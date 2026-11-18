@@ -41,8 +41,8 @@ export const Route = createRootRoute({
   component: Root,
 })
 
-/** The header stands where the desktop app's title bar does and is as tall: the mark,
- * the way back to the notes, then who is signed in, the theme, and what the page can do. */
+/** The header stands where the desktop app's title bar does and is as tall: the mark and
+ * the way back to the notes, then what the page can do, the theme, and who is signed in. */
 function Root() {
   const [account, setAccount] = useState<HTMLElement | null>(null), [page, setPage] = useState<HTMLElement | null>(null)
   const slots = useMemo(() => ({ account, page }), [account, page])
@@ -62,9 +62,9 @@ function Root() {
       {/* Shown once the page is running: by then each page has put its own controls, or their placeholders, into the
           slots, so the theme control appears where it will stay and is not seen sliding there. */}
       <div className="site-actions" data-ready={mounted ? '' : undefined}>
-        <span className="header-slot" ref={setAccount} />
-        <ThemeToggle />
         <span className="header-slot is-page" ref={setPage} />
+        <ThemeToggle />
+        <span className="header-slot" ref={setAccount} />
       </div>
     </header>
     <HeaderSlotContext value={slots}><main id="main-content" tabIndex={-1}><Outlet /></main></HeaderSlotContext>

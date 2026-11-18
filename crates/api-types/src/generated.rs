@@ -61,6 +61,9 @@ pub struct NoteSummaryDTO {
 
     pub transcript_revision: i64,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trashed: Option<bool>,
+
     pub updated_at: String,
 }
 
