@@ -75,6 +75,9 @@ struct ChatView: View {
                     .onChange(of: messages.count) { followsTail = true; proxy.scrollTo("bottom", anchor: .chatEnd) }
                     // The composer floats over the conversation, so messages pass
                     // under its glass instead of being cut off above it.
+                    // The bar draws its own fade into the page (`chatBarBackdrop`). The system's
+                    // edge effect under it showed as a paler band with a hard top edge.
+                    .scrollEdgeEffectHidden(true, for: .bottom)
                     .safeAreaBar(edge: .bottom, spacing: 0) {
                         ChatComposer(draft: $draft, model: $model, isGenerating: isGenerating, focused: $focused,
                                  onSend: send, onStop: stop,
@@ -224,7 +227,6 @@ struct ChatMessageView: View {
     @State private var copied = false
     @State private var copyCount = 0
     @State private var expanded = false
-    @State private var feedback: Bool?
     @Environment(\.motion) private var motion
 
     var body: some View {
@@ -253,16 +255,6 @@ struct ChatMessageView: View {
                         }
                             .accessibilityLabel(copied ? "Copied answer" : "Copy answer")
                         Button { expanded = true } label: { Image(systemName: "viewfinder").chatActionTarget() }.accessibilityLabel("Expand answer")
-                        Button { withAnimation(motion.snappy) { feedback = feedback == true ? nil : true } } label: {
-                            Image(systemName: feedback == true ? "hand.thumbsup.fill" : "hand.thumbsup").contentTransition(motion.symbolReplace)
-                                .symbolEffect(.bounce, value: feedback == true).chatActionTarget()
-                        }
-                            .accessibilityLabel("Mark answer helpful").accessibilityAddTraits(feedback == true ? .isSelected : [])
-                        Button { withAnimation(motion.snappy) { feedback = feedback == false ? nil : false } } label: {
-                            Image(systemName: feedback == false ? "hand.thumbsdown.fill" : "hand.thumbsdown").contentTransition(motion.symbolReplace)
-                                .symbolEffect(.bounce, value: feedback == false).chatActionTarget()
-                        }
-                            .accessibilityLabel("Mark answer unhelpful").accessibilityAddTraits(feedback == false ? .isSelected : [])
                     }.font(.system(size: 15)).foregroundStyle(Theme.textTertiary).buttonStyle(SquashButtonStyle(scale: 0.86)).haptic(.done, trigger: copyCount)
                         .padding(.leading, -11).padding(.vertical, -14)
                         // The tick confirms the copy, then gives the control back.
@@ -607,9 +599,9 @@ struct ChatComposer: View {
             card
         }
         .animation(motion.snappy, value: recipes.isEmpty)
-        // The bar is wider than the text column and sits 12 pt above the
-        // keyboard or the home indicator. Both chat screens get the same margins.
-        .padding(.bottom, verticalSizeClass == .compact ? 6 : RailMetrics.composerBottom)
+        // The bar is wider than the text column and sits just above the home
+        // indicator, or the keyboard. Both chat screens get the same margins.
+        .padding(.bottom, verticalSizeClass == .compact ? 6 : rail.composerBottom)
     }
 
     private var card: some View {

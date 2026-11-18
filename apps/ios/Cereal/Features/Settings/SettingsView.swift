@@ -10,8 +10,8 @@ enum SettingsPage: Hashable {
 // MARK: - Home navigation
 
 /// The navigation controls of Home, as in the reference: a single folder circle
-/// (the notes library) and a capsule of phone calls, search and the account
-/// avatar, which opens Settings. On a Duo the system stacks them in the
+/// (the notes library) and a capsule of search and the account avatar, which
+/// opens Settings. On a Duo the system stacks them in the
 /// trailing rail; on an ordinary iPhone they stay in the top bar.
 enum HomeNavigation {
     struct Notes: View {
@@ -23,18 +23,11 @@ enum HomeNavigation {
     struct Group: View {
         let name: String
         @Environment(Router.self) private var router
-        @State private var callsComingSoon = false
 
         var body: some View {
             RailGroup {
-                RailIcon(systemImage: "phone") { callsComingSoon = true }
                 RailIcon(systemImage: "magnifyingglass") { router.path.append(.search) }
                 RailAvatar(name: name) { router.path.append(.settings(.main)) }
-            }
-            .alert("Phone calls", isPresented: $callsComingSoon) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text("Recording phone calls is coming soon to Cereal. Record a meeting with + for now.")
             }
         }
     }
@@ -72,12 +65,6 @@ struct SettingsView: View {
                     SettingsRow("Profile", systemImage: "person") { router.path.append(.settings(.profile)) }
                     SettingsRow("Notifications", systemImage: "bell") { router.path.append(.settings(.notifications)) }
                     SettingsRow("Server and accounts", systemImage: "server.rack") { router.showConnection = true }
-                }
-                SettingsSection("Features") {
-                    SettingsRow("Chat", systemImage: "bubble.left", comingSoon: true)
-                    SettingsRow("Phone calls", systemImage: "phone", comingSoon: true)
-                    SettingsRow("Voice typing", systemImage: "keyboard", comingSoon: true)
-                    SettingsRow("Watch", systemImage: "applewatch", comingSoon: true)
                 }
                 SettingsSection("Appearance") {
                     ThemeRow(theme: $theme)
@@ -137,7 +124,7 @@ private struct HapticsRow: View {
     var body: some View {
         Toggle(isOn: $enabled) {
             HStack(spacing: 14) {
-                Image(systemName: "iphone.radiowaves.left.and.right")
+                Image(systemName: "hand.tap")
                     .font(.system(size: 16))
                     .foregroundStyle(Theme.textPrimary.opacity(0.85))
                     .frame(width: SettingsMetrics.iconTile, height: SettingsMetrics.iconTile)
@@ -145,7 +132,7 @@ private struct HapticsRow: View {
                 Text("Haptics").font(.system(size: SettingsMetrics.label)).foregroundStyle(Theme.textPrimary)
             }
         }
-        .tint(Color(hex: 0x34C759))
+        .tint(Theme.accent)
         .padding(.leading, 11).padding(.trailing, 18)
         .frame(minHeight: SettingsMetrics.rowHeight)
         // Turned on, it says so in the hand.
@@ -318,7 +305,7 @@ struct NotificationSettingsView: View {
                             .font(.system(size: 15)).foregroundStyle(Theme.textSecondary)
                     }
                 }
-                .tint(Color(hex: 0x34C759))
+                .tint(Theme.accent)
                 .accessibilityIdentifier("notifications-upcoming")
                 // Asked for and refused: the line under it says how to turn them on.
                 .haptic(.warning, trigger: denied) { _, now in now }

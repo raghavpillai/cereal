@@ -71,8 +71,6 @@ enum Theme {
     static let floatingEdge = Color(light: .black.withAlphaComponent(0.06), dark: .clear)
     /// Search and other floating text fields.
     static let fieldTint = Color(light: .white.withAlphaComponent(0.55), dark: .white.withAlphaComponent(0.08))
-    /// The lighter tone under floating bottom bars.
-    static let bottomFade = Color(light: 0xF6F6F2, dark: 0x2A2A2A)
     /// The bar beside an empty day's line and beside events without a colour.
     static let eventsBar = Color(light: 0xC8C8C4, dark: 0x464640)
     /// The day pager's circles on a day other than today (#E7E4DC on light).

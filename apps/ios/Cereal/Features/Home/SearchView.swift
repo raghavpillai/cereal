@@ -50,16 +50,16 @@ enum NoteSearch {
         }
     }
 
-    /// The server's results, in its order. The tile follows Home: audio still on
-    /// this phone first, then the other party's initial, then a document.
+    /// The server's results, in its order. The tile follows Home: the other
+    /// party's initial, otherwise a document.
     /// `title` is the newest title known for a result: a note renamed, or given
     /// a title by generating its notes, since the search ran is shown under that one.
-    static func server(_ hits: [ServerNoteSearchHit], account: AccountID, onThisPhone: (NoteRef) -> Bool = { _ in false },
+    static func server(_ hits: [ServerNoteSearchHit], account: AccountID,
                        title: (ServerNoteRow) -> String = { $0.title }) -> [SearchHit] {
         hits.map { hit in
             let title = title(hit.row)
             let ref = NoteRef(account: account, id: hit.id)
-            return SearchHit(route: .serverNote(ref), tile: onThisPhone(ref) ? .phone : ServerHomeGrouping.tile(for: hit.row),
+            return SearchHit(route: .serverNote(ref), tile: ServerHomeGrouping.tile(for: hit.row),
                       title: title.isEmpty ? "Untitled note" : title,
                       subtitle: subtitle(Date.serverTimestamp(hit.row.createdAt) ?? .distantPast, attendees: hit.row.attendeeTotal),
                       excerpt: hit.excerpt.map { $0.map(\.text).joined() }, excerptParts: hit.excerpt)
@@ -128,7 +128,7 @@ struct SearchView: View {
         mode.isDemo
             ? NoteSearch.local(store.activeNotes, query: query, currentUser: store.currentUser)
             : searchedAccount.map { account, notes in
-                NoteSearch.server(search?.hits ?? [], account: account, onThisPhone: { recording.isActive($0) },
+                NoteSearch.server(search?.hits ?? [], account: account,
                                   title: notes.latestTitle(of:))
             } ?? []
     }

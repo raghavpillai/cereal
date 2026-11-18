@@ -143,42 +143,62 @@ struct ChatModelMenu: View {
     }
 }
 
-/// The spiral beside "Thinking", drawn rather than taken from a symbol set: an
-/// Archimedean spiral of two and a half turns from the centre out.
-struct ThinkingSpiral: Shape {
-    var turns: Double = 2.4
+/// The Cereal mark, the desktop's `icons/cereal.svg` (a 24 pt box): the bowl
+/// and its two flakes, straight segments filled even-odd.
+struct CerealMarkShape: Shape {
+    private static let outlines: [[CGPoint]] = {
+        let data = "M22.535,2.125 22.517,1.989 22.473,1.859 22.404,1.741 22.314,1.637 22.205,1.554 22.082,1.493 21.949,1.458 21.812,1.449 21.676,1.467 21.546,1.511 21.427,1.579 21.324,1.67 21.241,1.779 21.18,1.902 21.144,2.034 21.135,2.171 21.153,2.307 21.197,2.437 21.266,2.556 21.357,2.659 21.465,2.743 21.588,2.803 21.721,2.839 21.858,2.848 21.994,2.83 22.124,2.786 22.243,2.717 22.346,2.627 22.429,2.518 22.49,2.395 22.526,2.262ZM23.299,6.518 23.288,6.406 23.265,6.295 23.233,6.187 23.189,6.082 23.136,5.982 23.073,5.888 23.001,5.801 22.921,5.721 22.834,5.649 22.74,5.586 22.64,5.533 22.535,5.489 22.427,5.457 22.316,5.435 22.204,5.423 22.091,5.423 21.978,5.435 21.867,5.457 21.759,5.489 21.654,5.533 21.554,5.586 21.46,5.649 21.373,5.721 21.293,5.801 21.221,5.888 21.158,5.982 21.105,6.082 21.062,6.187 21.029,6.295 21.007,6.406 20.996,6.518 20.996,6.632 21.007,6.744 21.029,6.855 21.062,6.963 21.105,7.068 21.158,7.168 21.221,7.262 21.293,7.349 21.373,7.429 21.46,7.501 21.554,7.564 21.654,7.617 21.759,7.66 21.867,7.693 21.978,7.715 22.091,7.726 22.204,7.726 22.316,7.715 22.427,7.693 22.535,7.66 22.64,7.617 22.74,7.564 22.834,7.501 22.921,7.429 23.001,7.349 23.073,7.262 23.136,7.168 23.189,7.068 23.233,6.963 23.265,6.855 23.288,6.744 23.299,6.632ZM13.882,2.719 13.884,2.616 13.859,2.521 13.808,2.433 13.735,2.361 13.682,2.329 13.62,2.305 13.171,2.197 12.834,2.13 12.502,2.075 12.168,2.031 11.833,1.998 11.497,1.976 11.16,1.965 10.823,1.965 10.486,1.976 9.983,2.014 9.648,2.052 9.321,2.101 8.818,2.196 8.327,2.315 7.843,2.458 7.524,2.566 7.214,2.683 6.743,2.882 6.289,3.102 5.845,3.344 5.414,3.608 4.996,3.892 4.593,4.196 4.205,4.52 3.833,4.862 3.479,5.223 3.253,5.472 3.039,5.724 2.724,6.128 2.434,6.541 2.163,6.968 1.914,7.407 1.687,7.859 1.483,8.321 1.301,8.792 1.143,9.272 1.008,9.759 0.897,10.252 0.811,10.75 0.749,11.251 0.712,11.755 0.7,12.26 0.713,12.765 0.75,13.269 0.812,13.771 0.898,14.268 1.009,14.761 1.144,15.248 1.303,15.728 1.484,16.199 1.689,16.661 1.917,17.112 2.166,17.552 2.436,17.979 2.727,18.392 3.038,18.79 3.368,19.172 3.717,19.538 4.083,19.887 4.465,20.217 4.864,20.527 5.277,20.818 5.704,21.088 6.143,21.337 6.595,21.564 7.057,21.769 7.528,21.951 8.008,22.109 8.495,22.244 8.982,22.353 9.319,22.415 9.82,22.485 10.323,22.53 10.822,22.55 11.165,22.55 11.67,22.53 12.173,22.484 12.667,22.415 13.004,22.353 13.497,22.243 13.979,22.11 14.305,22.005 14.779,21.83 15.239,21.636 15.549,21.489 15.996,21.254 16.432,20.998 16.854,20.721 17.258,20.427 17.526,20.214 17.909,19.883 18.27,19.539 18.509,19.293 18.845,18.916 19.162,18.522 19.456,18.119 19.647,17.834 19.91,17.403 20.152,16.959 20.298,16.662 20.345,16.553 20.359,16.469 20.355,16.389 20.333,16.307 20.293,16.234 20.24,16.174 20.097,16.054 19.972,15.939 19.776,15.733 19.668,15.604 19.566,15.468 19.471,15.328 19.382,15.183 19.252,14.934 19.142,14.675 19.068,14.458 18.979,14.13 18.934,14.052 18.875,13.99 18.798,13.941 18.708,13.911 18.45,13.889 18.223,13.861 17.996,13.822 17.771,13.771 17.405,13.663 17.046,13.525 16.701,13.358 16.37,13.164 16.179,13.034 15.996,12.896 15.653,12.6 15.581,12.559 15.506,12.536 15.452,12.53 15.396,12.532 15.338,12.543 15.286,12.561 15.237,12.588 15.19,12.623 15.152,12.662 15.119,12.708 15.094,12.756 15.077,12.808 15.004,13.192 14.915,13.515 14.823,13.773 14.687,14.08 14.525,14.375 14.34,14.657 14.133,14.922 13.905,15.17 13.66,15.396 13.445,15.566 13.168,15.755 12.877,15.919 12.63,16.037 12.318,16.157 11.997,16.251 11.73,16.309 11.397,16.356 11.061,16.375 10.724,16.366 10.389,16.331 10.058,16.268 9.734,16.178 9.418,16.062 9.112,15.92 8.819,15.754 8.54,15.565 8.278,15.353 8.035,15.121 7.811,14.869 7.608,14.6 7.428,14.316 7.271,14.016 7.19,13.833 7.118,13.647 7.017,13.326 6.943,12.996 6.896,12.661 6.877,12.323 6.879,12.122 6.89,11.924 6.931,11.586 7,11.255 7.053,11.063 7.116,10.873 7.242,10.56 7.395,10.257 7.572,9.968 7.686,9.806 7.81,9.647 8.036,9.394 8.281,9.161 8.434,9.033 8.594,8.912 8.876,8.726 9.171,8.566 9.42,8.453 9.737,8.337 10.06,8.248 10.391,8.185 10.725,8.149 11.061,8.141 11.398,8.16 11.733,8.207 11.93,8.248 12.122,8.298 12.445,8.404 12.755,8.536 13.052,8.691 13.339,8.873 13.661,9.117 13.709,9.144 13.766,9.165 13.825,9.177 13.886,9.178 13.946,9.17 14.003,9.152 14.057,9.125 14.106,9.089 14.149,9.046 14.184,8.997 14.212,8.937 14.229,8.875 14.269,8.53 14.324,8.228 14.378,8.004 14.444,7.783 14.546,7.495 14.638,7.279 14.773,7.006 14.941,6.708 14.965,6.627 14.97,6.543 14.953,6.448 14.914,6.365 14.698,6.099 14.573,5.928 14.422,5.693 14.317,5.508 14.222,5.319 14.112,5.066 14.039,4.867 13.976,4.665 13.909,4.396 13.869,4.187 13.833,3.912 13.817,3.699 13.812,3.422 13.821,3.209 13.848,2.933Z"
+        return data.split(separator: "M").map { outline in
+            outline.replacingOccurrences(of: "Z", with: "").split(separator: " ").compactMap { pair -> CGPoint? in
+                let xy = pair.split(separator: ",").compactMap { Double($0) }
+                return xy.count == 2 ? CGPoint(x: xy[0], y: xy[1]) : nil
+            }
+        }.filter { !$0.isEmpty }
+    }()
+
     func path(in rect: CGRect) -> Path {
+        let scale = min(rect.width, rect.height) / 24
+        let origin = CGPoint(x: rect.midX - 12 * scale, y: rect.midY - 12 * scale)
         var path = Path()
-        let center = CGPoint(x: rect.midX, y: rect.midY)
-        let radius = min(rect.width, rect.height) / 2
-        let steps = 160
-        for step in 0...steps {
-            let t = Double(step) / Double(steps)
-            let angle = t * turns * 2 * .pi
-            let r = radius * t
-            let point = CGPoint(x: center.x + r * cos(angle), y: center.y + r * sin(angle))
-            if step == 0 { path.move(to: point) } else { path.addLine(to: point) }
+        for outline in Self.outlines {
+            path.addLines(outline.map { CGPoint(x: origin.x + $0.x * scale, y: origin.y + $0.y * scale) })
+            path.closeSubpath()
         }
         return path
     }
 }
 
-/// The spiral, turning while an answer is thought about.
+/// The Cereal mark beside "Thinking", moving as on the desktop: one turn a loop,
+/// swung rather than ticked, breathing smaller and paler twice a turn. Still
+/// with Reduce Motion.
 struct ThinkingIndicator: View {
     var size: CGFloat = 13
-    @State private var turning = false
     @Environment(\.motion) private var motion
+    private static let loop: Double = 2.4
 
     var body: some View {
-        ThinkingSpiral()
-            .stroke(style: StrokeStyle(lineWidth: size * 0.12, lineCap: .round, lineJoin: .round))
-            .frame(width: size, height: size)
-            .rotationEffect(.degrees(turning ? 360 : 0))
-            .onAppear {
-                guard !motion.reduceMotion else { return }
-                withAnimation(.linear(duration: 1.6).repeatForever(autoreverses: false)) { turning = true }
+        Group {
+            if motion.reduceMotion {
+                mark
+            } else {
+                TimelineView(.animation) { context in
+                    let pose = Self.pose(context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: Self.loop) / Self.loop)
+                    mark.rotationEffect(.degrees(pose.turn * 360)).scaleEffect(pose.scale).opacity(pose.ink)
+                }
             }
-            .accessibilityHidden(true)
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+
+    private var mark: some View { CerealMarkShape().fill(style: FillStyle(eoFill: true)) }
+
+    /// The desktop's `thinking_mark_pose`: turn (0...1), scale and ink at `progress` through the loop.
+    static func pose(_ progress: Double) -> (turn: Double, scale: Double, ink: Double) {
+        let p = min(max(progress, 0), 1)
+        let breath = 0.5 - 0.5 * cos(2 * 2 * .pi * p)
+        let turn = min(max(p - 0.55 * sin(2 * .pi * p) / (2 * .pi), 0), 1)
+        return (turn, 1 - 0.12 * breath, 1 - 0.35 * breath)
     }
 }
 
@@ -377,10 +397,15 @@ struct ChatHistorySheet: View {
         }
         static func of(_ date: Date?, now: Date = .now, calendar: Calendar = .current) -> Day {
             guard let date else { return .earlier }
-            if calendar.isDateInToday(date) { return .today }
-            if calendar.isDateInYesterday(date) { return .yesterday }
+            // Counted in days from `now`, not from the clock, so a list opened
+            // just before midnight is grouped by the moment it was drawn.
             let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: date), to: calendar.startOfDay(for: now)).day ?? 99
-            return days < 7 ? .week : .earlier
+            switch days {
+            case ...0: return .today
+            case 1: return .yesterday
+            case 2..<7: return .week
+            default: return .earlier
+            }
         }
     }
 

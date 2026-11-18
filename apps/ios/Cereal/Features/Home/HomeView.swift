@@ -44,7 +44,7 @@ struct HomeView: View {
             .scrollIndicators(.hidden)
         } leading: {
             // As in the reference: the notes library leads the bar on a phone and heads the
-            // rail on a Duo; phone calls, search and the account trail it in one capsule.
+            // rail on a Duo; search and the account trail it in one capsule.
             HomeNavigation.Notes()
         } rail: {
             HomeNavigation.Group(name: store.currentUser.name)
@@ -162,13 +162,12 @@ struct NoteRow: View {
 }
 
 extension Note {
-    /// A meeting shows the other party's initial; a note recorded here shows a
-    /// phone; anything else is a document.
+    /// A meeting shows the other party's initial; anything else is a document.
     func tile(currentUser: Person) -> NoteTile {
         if attendees.count >= 2, let other = attendees.first(where: { $0.name != currentUser.name }) ?? attendees.first {
             return .meeting(with: other.name)
         }
-        return hasCapture ? .phone : .document
+        return .document
     }
 
     var rowSubtitle: String {

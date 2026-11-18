@@ -226,7 +226,7 @@ struct NoteSearchTests {
 
     @Test func anEmptyQueryFindsNothing() {
         #expect(NoteSearch.local(notes, query: "   ", currentUser: me).isEmpty)
-        #expect(NoteSearch.server([], account: AccountID(address: "https://example.test", userID: "00000000-0000-4000-8000-000000000001"), onThisPhone: { _ in true }).isEmpty)
+        #expect(NoteSearch.server([], account: AccountID(address: "https://example.test", userID: "00000000-0000-4000-8000-000000000001")).isEmpty)
     }
 
     @Test func searchCoversTitleNotesAndPeople() {
@@ -245,10 +245,11 @@ struct NoteSearchTests {
         #expect(byPerson.first?.route == .note(notes[1].id) || byPerson.first?.title == "Weekly sync")
     }
 
-    @Test func rowsShowAMeetingInitialAPhoneOrADocument() {
+    @Test func rowsShowAMeetingInitialOrADocument() {
         #expect(notes[0].tile(currentUser: me) == .document)
         #expect(notes[1].tile(currentUser: me) == .letter("M"))
-        #expect(notes[2].tile(currentUser: me) == .phone)
+        // A note recorded on this phone is a document like any other: no phone glyph.
+        #expect(notes[2].tile(currentUser: me) == .document)
         #expect(NoteTile.meeting(with: "  ") == .document)
         #expect(NoteTile.colour(for: "M") == NoteTile.colour(for: "M"))
         #expect(NoteTile.colour(for: "M") != NoteTile.colour(for: "S"))

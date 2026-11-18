@@ -112,7 +112,7 @@ enum ChatCitationMarkup {
     /// about one note shows none, as on the desktop (everything in it is from that note).
     static func withoutMarkers(_ text: String) -> String { rewrite(text) { _ in nil } }
 
-    /// Each issued marker becomes a word space and what `link` gives for it, and a marker
+    /// Each issued marker becomes a no-break space and what `link` gives for it, and a marker
     /// with nothing to show goes with the space before it. Code spans are left as written.
     private static func rewrite(_ text: String, link: (String) -> String?) -> String {
         func replace(_ value: String) -> String {
@@ -123,7 +123,8 @@ enum ChatCitationMarkup {
                 while range.lowerBound > result.startIndex, result[result.index(before: range.lowerBound)] == " " {
                     range = result.index(before: range.lowerBound)..<range.upperBound
                 }
-                let replacement = link(String(value[idRange])).map { " " + $0 } ?? ""
+                // A no-break space: a chip never wraps away from the word it follows.
+                let replacement = link(String(value[idRange])).map { "\u{00A0}" + $0 } ?? ""
                 result.replaceSubrange(range, with: replacement)
             }
             return result

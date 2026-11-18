@@ -16,10 +16,11 @@ struct CitationChipMark: TextAttribute {
 /// change size within a line, so the room is laid out by the text and the chip is
 /// painted there; the room's own figures are not drawn.
 struct CitationChipRenderer: TextRenderer {
-    /// The desktop's chip: its hover fill with a little of the text's colour in it.
-    static let fill = Color.white.opacity(0.1)
-    /// The desktop's muted ink.
-    static let ink = Color(hex: 0x9E9E99)
+    /// The desktop's chip: a quiet fill with a little of the text's colour in it,
+    /// dark on the light page and light on the dark one, so it reads on both.
+    static let fill = Color(light: .black.withAlphaComponent(0.07), dark: .white.withAlphaComponent(0.1))
+    /// The desktop's muted ink, a step darker on the light page.
+    static let ink = Color(light: 0x76766F, dark: 0x9E9E99)
 
     func draw(layout: Text.Layout, in context: inout GraphicsContext) {
         for line in layout {

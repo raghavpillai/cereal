@@ -94,7 +94,7 @@ struct ServerHomeView: View {
             .onChange(of: listSignature, initial: true) { regroup() }
         } leading: {
             // As in the reference: the notes library leads the bar on a phone and heads the
-            // rail on a Duo; phone calls, search and the account trail it in one capsule.
+            // rail on a Duo; search and the account trail it in one capsule.
             HomeNavigation.Notes()
         } rail: {
             HomeNavigation.Group(name: accounts.defaultSession?.notes.accountIdentity.map { _ in "Me" } ?? "Me")
@@ -476,8 +476,8 @@ private struct ServerHomeNoteRow: View {
             // While a stopped recording becomes notes, its row says which step it is at.
             DraftNoteRow(title: item.title, subtitle: step, working: true)
         } else {
-            // The note being recorded on this phone comes first; otherwise a meeting shows the other party's initial.
-            NoteListRow(tile: recording.isActive(item.ref) ? .phone : item.tile,
+            // A meeting shows the other party's initial.
+            NoteListRow(tile: item.tile,
                         title: item.title, subtitle: item.subtitle)
         }
     }

@@ -41,15 +41,9 @@ struct ChatTailTests {
         #expect(ChatColumn.latestGap == 8)
     }
 
-    @Test func theComposerBackdropFadesOverTheSameDistanceWithOrWithoutAKeyboard() {
-        // Bar 118 pt plus the 18 pt above it; home indicator 34 pt: opaque 71.4 pt down, as before.
-        let resting = ChatTail.backdropRamp(height: 136, bottomInset: 34) * (136 + 34)
-        #expect(abs(resting - 0.42 * 170) < 0.01)
-        // With a 336 pt keyboard the backdrop is much taller, and the fade is still 71.4 pt,
-        // not 42% of the whole (198 pt, which is below the composer).
-        let typing = ChatTail.backdropRamp(height: 136, bottomInset: 336) * (136 + 336)
-        #expect(abs(typing - resting) < 0.01)
-        #expect(ChatTail.backdropRamp(height: 0, bottomInset: 0) == 0.42)
+    @Test func aConversationRestingAtItsEndIsClearOfTheFadeAboveTheComposer() {
+        // 22 pt between rows plus the end space: the last line sits above the fade, not in it.
+        #expect(22 + ChatTail.endSpace >= ChatTail.fade)
     }
 
     @Test func aShortConversationIsLaidOutAsTallAsItsRoomSoItsEndIsHeldFromTheStart() {

@@ -227,6 +227,9 @@ struct ServerChatView: View {
                     // The composer floats over the conversation, so messages pass
                     // under its glass. It shares one glass group with the
                     // jump-to-latest control, which buds off its top edge.
+                    // The bar draws its own fade into the page (`chatBarBackdrop`). The system's
+                    // edge effect under it showed as a paler band with a hard top edge.
+                    .scrollEdgeEffectHidden(true, for: .bottom)
                     .safeAreaBar(edge: .bottom, spacing: 0) {
                         GlassChromeGroup(spacing: 16) {
                             ChatComposer(draft: $draft, model: $model, isGenerating: busy, focused: $focused,

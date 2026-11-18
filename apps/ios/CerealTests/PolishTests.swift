@@ -451,7 +451,7 @@ struct RecordingPolishTests {
 
     @Test func aRowMeasuresTheSameWhateverItsTile() {
         // The row itself is untouched; this pins that a letter tile cannot move it.
-        let tiles: [NoteTile] = [.document, .phone, .letter("G"), .letter("W"), .letter("É")]
+        let tiles: [NoteTile] = [.document, .letter("G"), .letter("W"), .letter("É")]
         let squares = tiles.map { size(NoteTileView(tile: $0)) }
         #expect(squares.allSatisfy { $0 == CGSize(width: 44, height: 44) })
         for width in [320.0, 393.0, 430.0] {
@@ -472,9 +472,9 @@ struct RecordingPolishTests {
             ServerNoteSearchHit(row: row("33333333-3333-4333-8333-333333333333", "Recorded here", created: "2026-11-11T10:00:00Z", attendees: ["Alan Turing"], total: 2), excerpt: nil),
         ]
         let account = AccountID(address: "https://example.test", userID: "00000000-0000-4000-8000-000000000001")
-        let rows = NoteSearch.server(hits, account: account) { $0.account == account && $0.id.hasPrefix("3333") }
+        let rows = NoteSearch.server(hits, account: account)
         #expect(rows.map(\.route) == hits.map { Route.serverNote(NoteRef(account: account, id: $0.id)) })
-        #expect(rows.map(\.tile) == [.letter("G"), .document, .phone])
+        #expect(rows.map(\.tile) == [.letter("G"), .document, .letter("A")])
         #expect(rows.map(\.title) == ["Roadmap review", "Untitled note", "Recorded here"])
         #expect(rows[0].excerpt == nil && rows[1].excerpt == "… slips the roadmap to next quarter")
         let marked = NoteSearch.marked(hits[1].excerpt ?? [])

@@ -142,9 +142,9 @@ struct ChatThoughtsView: View {
                 } label: {
                     HStack(spacing: 6) {
                         if thinking {
-                            // The reference's turning spiral.
+                            // The Cereal mark, turning, as on the desktop.
                             // Darker than the words beside it, as measured (#797975 against #A4A49E on light).
-                            ThinkingIndicator(size: 13).foregroundStyle(Theme.textSecondary.opacity(0.8)).transition(motion.fade)
+                            ThinkingIndicator(size: 15).foregroundStyle(Theme.textSecondary.opacity(0.8)).transition(motion.fade)
                         }
                         ZStack(alignment: .leading) {
                             if thinking { SheenLabel(text: label).id(label).transition(motion.swap) }

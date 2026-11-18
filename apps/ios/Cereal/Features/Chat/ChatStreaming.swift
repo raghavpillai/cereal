@@ -131,8 +131,9 @@ enum ChatTail {
     /// Room the jump-to-latest control takes above the composer: its gap, its
     /// 36 pt circle and the same gap again above it.
     static let latestZone: CGFloat = ChatColumn.latestGap + 36 + ChatColumn.latestGap
-    /// Height over which the conversation fades out above the composer's backdrop.
-    static let fade: CGFloat = 18
+    /// Height over which the conversation fades out above the composer. The last
+    /// line rests 35 pt above it (22 between rows plus `endSpace`), clear of the fade.
+    static let fade: CGFloat = 20
     /// Height of the fade under the chat title: the conversation's own top padding, so a
     /// conversation resting at its start is not dimmed.
     static let topFade: CGFloat = 8
@@ -147,15 +148,6 @@ enum ChatTail {
         readerIsScrolling ? nearEnd : current
     }
 
-    /// Where the composer's backdrop becomes opaque, as a fraction of its height.
-    /// `height` is the backdrop above the bottom inset; the inset beyond a home
-    /// indicator's worth is the keyboard and does not lengthen the fade.
-    static func backdropRamp(height: CGFloat, bottomInset: CGFloat) -> CGFloat {
-        let total = height + bottomInset
-        guard total > 0 else { return 0.42 }
-        return min(1, 0.42 * (height + min(bottomInset, homeIndicatorInset)) / total)
-    }
-    static let homeIndicatorInset: CGFloat = 34
 
     /// Height the conversation has to itself: the scroll view less what its bars cover.
     static func room(visibleHeight: CGFloat, topInset: CGFloat, bottomInset: CGFloat) -> CGFloat {
@@ -231,23 +223,17 @@ extension View {
             }
         }
         .background {
-            GeometryReader { proxy in
-                // The fade is a fixed distance, measured on a screen without a keyboard:
-                // 42% of the bar, the 18 pt above it and the home-indicator inset below.
-                // The backdrop also runs down under the keyboard; counting that height
-                // into the percentage stretched the fade past the composer, and the
-                // conversation showed through beside and below it.
-                let inset = proxy.safeAreaInsets.bottom
-                let ramp = ChatTail.backdropRamp(height: proxy.size.height, bottomInset: inset)
-                LinearGradient(stops: [
-                    .init(color: Theme.bgTop.opacity(0), location: 0),
-                    .init(color: Theme.bgTop, location: ramp),
-                    .init(color: Theme.bgTop, location: 1),
-                ], startPoint: .top, endPoint: .bottom)
-                .ignoresSafeArea(edges: .bottom)
+            // The conversation fades out over `ChatTail.fade` just above the bar, so no
+            // line runs into the composer's edge, and the page is solid from there down
+            // to the screen's edge (or the keyboard) beside and below the composer.
+            VStack(spacing: 0) {
+                LinearGradient(colors: [Theme.bgTop.opacity(0), Theme.bgTop], startPoint: .top, endPoint: .bottom)
+                    .frame(height: ChatTail.fade)
+                Theme.bgTop
             }
-            .padding(.top, -18)
+            .padding(.top, -ChatTail.fade)
             .padding(.horizontal, -40)
+            .ignoresSafeArea(edges: .bottom)
             .allowsHitTesting(false)
         }
     }

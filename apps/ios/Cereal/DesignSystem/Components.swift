@@ -385,7 +385,14 @@ struct RailMetrics: Equatable, Sendable {
     var composerMargin: CGFloat { hasRail ? gutter - 7 : 12 }
     var composerLeading: CGFloat { composerMargin - extraLeading }
     var composerTrailing: CGFloat { composerMargin - extraTrailing }
-    static let composerBottom: CGFloat = 12
+    /// The chat composer sits just above the home indicator, its bottom 22 pt
+    /// from the screen's edge (inside the inset), and 10 pt above the keyboard
+    /// while that is up. On a screen without an indicator, 8 pt from the edge.
+    var composerBottom: CGFloat {
+        if bottomInset > Self.keyboardInsetThreshold { return 10 }
+        return bottomInset > 0 ? Self.composerEdgeMargin - bottomInset : 8
+    }
+    static let composerEdgeMargin: CGFloat = 22
     /// Recording cover: text column and floating controls (28 / 24 pt beside a rail).
     var captureGutter: CGFloat { hasRail ? 28 : Theme.gutter }
     /// Vertical insets of the chat title and composer field. A landscape
@@ -495,7 +502,10 @@ struct RailScaffold<Content: View, Rail: View, Bottom: View>: View {
                     .ignoresSafeArea()
                 if Bottom.self != EmptyView.self {
                     // Edge to edge, so the fade has no visible sides on the flat background.
-                    BottomFade(height: 64)
+                    // Text is gone before it reaches the bar: it fades over the 28 pt above
+                    // the bar's top, and the page is solid from the bar's middle down.
+                    let barTop = metrics.bottomInset + metrics.bottomPadding + bottomHeight
+                    BottomFade(height: max(64, barTop + 28), solid: max(0, barTop - bottomHeight / 2))
                         .frame(maxHeight: .infinity, alignment: .bottom)
                         .ignoresSafeArea()
                 }
@@ -571,12 +581,11 @@ struct AskAnythingPill: View {
     var action: () -> Void
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 5) {
-                // The reference's bubble is an oval with its tail at the bottom right.
-                Image(systemName: "message.fill")
-                    .font(.system(size: 19))
-                    .scaleEffect(x: -1)
-                    .foregroundStyle(Theme.textPrimary)
+            HStack(spacing: 8) {
+                // Cereal's own mark, in its gold, leads the question.
+                CerealMarkShape().fill(Theme.accent, style: FillStyle(eoFill: true))
+                    .frame(width: 20, height: 20)
+                    .accessibilityHidden(true)
                 Text("Ask anything")
                     .font(.system(size: 18))
                     .foregroundStyle(Theme.textPrimary)
@@ -867,8 +876,6 @@ struct HomeSectionHeader: View {
 /// The square at the head of a note row.
 enum NoteTile: Equatable {
     case document
-    /// Audio for this note was captured on this phone.
-    case phone
     /// A meeting with other people, shown as the other party's initial.
     case letter(String)
 
@@ -900,8 +907,8 @@ struct NoteTileView: View {
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
         switch tile {
-        case .document, .phone:
-            Image(systemName: tile == .phone ? "iphone" : "doc.text")
+        case .document:
+            Image(systemName: "doc.text")
                 .font(.system(size: 19, weight: tinted ? .regular : .light))
                 .foregroundStyle(tinted ? Theme.accentTintGlyph : Theme.tileGlyph)
                 .frame(width: 44, height: 44)
@@ -933,8 +940,7 @@ struct NoteListRow: View {
     var body: some View {
         HStack(spacing: 11) {
             NoteTileView(tile: tile, tinted: tinted)
-                .accessibilityHidden(tile != .phone)
-                .accessibilityLabel("Recorded on this iPhone")
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 0) {
                 Text(markedTitle ?? AttributedString(title)).readingFont(.rowTitle)
                     .foregroundStyle(Theme.textPrimary).lineLimit(1)
@@ -1006,20 +1012,23 @@ private func railLabel(_ symbol: String) -> String {
     case "gearshape": "Connection settings"
     case "sidebar.left": "Sidebar"
     case "folder": "Notes and spaces"
-    case "phone": "Phone calls"
     case "ellipsis": "More options"
     default: symbol
     }
 }
 
-/// Fades content out under floating bottom chrome.
+/// Fades content out under floating bottom chrome, into the page's own colour so
+/// it has no edge: clear at its top, solid from `solid` points above the bottom.
 struct BottomFade: View {
     var height: CGFloat = 64
-    /// Measured in the reference: the last 50 pt or so of the screen lighten to
-    /// about #2A2A2A on dark and #F6F6F2 on light.
-    private static let end = Theme.bottomFade
+    var solid: CGFloat = 0
     var body: some View {
-        LinearGradient(colors: [Self.end.opacity(0), Self.end], startPoint: .top, endPoint: .bottom)
+        let start = height > 0 ? max(0, min(1, 1 - solid / height)) : 1
+        LinearGradient(stops: [
+            .init(color: Theme.bgTop.opacity(0), location: 0),
+            .init(color: Theme.bgTop, location: start),
+            .init(color: Theme.bgTop, location: 1),
+        ], startPoint: .top, endPoint: .bottom)
             .frame(height: height)
             .allowsHitTesting(false)
     }
