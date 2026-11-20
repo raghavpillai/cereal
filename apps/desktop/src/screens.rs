@@ -348,9 +348,60 @@ impl Cereal {
             .into_any_element()
     }
 
+    /// The Chat page. It has two faces: a greeting with the composer as a
+    /// card in the middle and the recent chats under it, and a conversation
+    /// with the composer as a pill at the foot. Going from one to the
+    /// other (the first question, a recent chat opened, "New chat") is one
+    /// movement: the composer travels to its other place and changes shape
+    /// on the way, the face being left fades out and the other arrives.
     fn render_chat_screen(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let t = self.theme();
+        use crate::motion::{PANEL, Pop};
         let empty = self.chat_messages.is_empty();
+        let (talk_key, greet_key) = (("chat-page-conversation", 0), ("chat-page-greeting", 0));
+        if !self.stage.continuous(("chat-page", 0)) {
+            // The page has just come on screen: it is simply as it is.
+            self.stage.settle(talk_key, !empty);
+            self.stage.settle(greet_key, empty);
+            self.chat_ui.composer_from.set(None);
+        } else if (self.stage.target(talk_key).unwrap_or(0.) > 0.5) == empty {
+            // It changes face on this frame: the composer leaves from
+            // where it was last drawn.
+            self.chat_ui
+                .composer_from
+                .set(crate::onboarding_view::placed(crate::chat::COMPOSER));
+        }
+        let talk = self.stage.presence(talk_key, !empty, PANEL);
+        let greet = self.stage.presence(greet_key, empty, PANEL);
+        let reduced = crate::motion::reduce_motion();
+        // How what is on a face arrives behind its composer.
+        let arriving = |pose: crate::motion::Pose| {
+            if pose.value < 1. {
+                crate::motion::content_fade(pose.value)
+            } else {
+                pose.fade
+            }
+        };
+        let rest = self.chat_page_composer(empty, window);
+        // The composer's way here from where it stood on the other face.
+        let travel = |pose: crate::motion::Pose| {
+            let from = self.chat_ui.composer_from.get().filter(|_| !reduced && !pose.at_rest())?;
+            let (from_tall, rest_tall) = (f32::from(from.size.height), f32::from(rest.size.height));
+            Some(Pop {
+                // The pill is pinned by its foot, the card by its head.
+                anchor: (0.5, if empty { 0. } else { 1. }),
+                scale: (
+                    f32::from(from.size.width) / f32::from(rest.size.width).max(1.),
+                    from_tall / rest_tall.max(1.),
+                ),
+                travel: 0.,
+                rise: if empty {
+                    f32::from(from.top() - rest.top())
+                } else {
+                    f32::from(from.bottom() - rest.bottom())
+                },
+            })
+        };
+        let focused = self.ask.read(cx).focus_handle.is_focused(window);
         let mut column = div()
             // A width in pixels, not "as wide as the page, up to 672": with
             // only a maximum the column was first sized with nothing in it
@@ -368,79 +419,73 @@ impl Cereal {
             .flex_col()
             .flex_shrink_0();
         if empty {
-            let greeting = crate::accounts::default_session()
-                .map(|session| {
-                    session
-                        .user
-                        .name
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or_default()
-                        .chars()
-                        .take(40)
-                        .collect::<String>()
-                })
-                .filter(|name| !name.is_empty())
-                .map(|name| format!("Hi {name}, ask anything"))
-                .unwrap_or_else(|| "Ask anything".into());
-            let recents = self.render_workspace_chat_recents(cx);
+            let level = greet.value.clamp(0., 1.);
+            let card = self
+                .render_personal_chat_composer(window, cx)
+                // A pill's corners on the way from the foot.
+                .rounded(px(crate::motion::ASK_PILL / 2. + (18. - crate::motion::ASK_PILL / 2.) * level));
             column = column
-                .child(
-                    div()
-                        .pl(px(11.))
-                        .pr(px(8.))
-                        .mb(px(22.))
-                        .font_family(DISPLAY)
-                        .text_size(px(26.))
-                        .line_height(px(32.))
-                        .child(greeting),
-                )
-                .child(self.render_personal_chat_composer(window, cx))
-                .when_some(recents, |column, recents| column.child(recents));
+                .child(self.chat_greeting().opacity(arriving(greet)))
+                .child(match travel(greet) {
+                    Some(pop) => crate::motion::pop(card, pop, greet.solid()),
+                    None => card.into_any_element(),
+                })
+                .children(
+                    self.render_workspace_chat_recents(true, cx)
+                        .map(|recents| recents.opacity(arriving(greet))),
+                );
         } else {
-            column = column.child(self.render_chat_turns(0, false, window, cx));
-            if let Some(queue) = self.render_chat_queue(false, window, cx) {
-                column = column.child(queue);
-            }
+            column = column
+                .child(self.render_chat_turns(0, false, window, cx))
+                .children(self.render_chat_queue(false, window, cx))
+                .opacity(arriving(talk));
         }
-        div()
+        let scroll = self
+            .render_chat_page_scroll("chat-messages", column, cx)
+            // The greeting as it was, fading out over the conversation that
+            // replaces it. Nothing in it answers the pointer any more.
+            .when(!empty && greet.visible, |scroll| {
+                let room = self
+                    .chat_ui
+                    .composer_from
+                    .get()
+                    .map_or(82.5, |from| f32::from(from.size.height));
+                scroll.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .opacity(greet.fade * greet.value.clamp(0., 1.))
+                        .child(
+                            div()
+                                .w(px(self.chat_column_width(window)))
+                                .px(px(22.))
+                                .pt(px(114.))
+                                .flex()
+                                .flex_col()
+                                .flex_shrink_0()
+                                .child(self.chat_greeting())
+                                // Where the composer stood: it is on its
+                                // way to the foot.
+                                .child(div().h(px(room)).flex_shrink_0())
+                                .children(self.render_workspace_chat_recents(false, cx)),
+                        ),
+                )
+            });
+        let page = div()
             .relative()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
             .items_center()
-            .child(
-                div()
-                    .id("chat-messages")
-                    .track_scroll(&self.chat_scroll)
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .overflow_y_scroll()
-                    .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .child(column),
-            )
-            .when(!empty, |d| {
-                d.child(
-                    div()
-                        .w_full()
-                        .max_w(px(672.))
-                        .px(px(8.))
-                        .pb(px(8.))
-                        .when(self.chat_editing.is_some(), |d| {
-                            d.child(div().mb(px(8.)).child(self.render_chat_edit_banner(cx)))
-                        })
-                        .child(self.render_chat_composer_focused(
-                            self.ask.read(cx).focus_handle.is_focused(window),
-                            cx,
-                        )),
-                )
-            })
-            .child(
+            .child(scroll);
+        let page = if empty {
+            let t = self.theme();
+            page.child(
                 div()
                     .pb(px(7.))
                     .text_size(px(10.))
@@ -448,18 +493,73 @@ impl Cereal {
                     .text_color(t.muted)
                     .child("AI can make mistakes. Check important details."),
             )
-            // The way down to the newest answer; an empty page has none.
-            .when(!empty && self.chat_can_scroll_down(), |d| {
-                d.child(self.render_chat_scroll_down(cx))
-            })
-            .into_any_element()
+        } else {
+            let level = talk.value.clamp(0., 1.);
+            let pill = self
+                .render_chat_composer_focused(focused, cx)
+                // The card's corners on the way from the middle.
+                .rounded(px(18. + (crate::motion::ASK_PILL / 2. - 18.) * level));
+            let composer = match travel(talk) {
+                Some(pop) => crate::motion::pop(pill, pop, talk.solid()),
+                None => pill.into_any_element(),
+            };
+            page.child(self.render_chat_page_foot(composer, cx))
+        };
+        // Opened wide from the panel over Home: it grows out of the panel.
+        self.chat_widened(page, window)
     }
 
-    fn render_workspace_chat_recents(&self, cx: &mut Context<Self>) -> Option<Div> {
+    /// Where the Chat page's composer rests: the card of the page's
+    /// greeting (`empty`), or the pill at the foot of a conversation.
+    fn chat_page_composer(&self, empty: bool, window: &Window) -> Bounds<Pixels> {
+        let viewport = window.viewport_size();
+        chat_page_composer_rest(
+            empty,
+            (f32::from(viewport.width), f32::from(viewport.height)),
+            self.sidebar_inset(),
+            f32::from(self.chat_scroll.offset().y),
+        )
+    }
+
+    /// "Hi Ada, ask anything": the page's greeting.
+    fn chat_greeting(&self) -> Div {
+        let greeting = crate::accounts::default_session()
+            .map(|session| {
+                session
+                    .user
+                    .name
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(40)
+                    .collect::<String>()
+            })
+            .filter(|name| !name.is_empty())
+            .map(|name| format!("Hi {name}, ask anything"))
+            .unwrap_or_else(|| "Ask anything".into());
+        div()
+            .pl(px(11.))
+            .pr(px(8.))
+            .mb(px(22.))
+            .font_family(DISPLAY)
+            .text_size(px(26.))
+            .line_height(px(32.))
+            .child(greeting)
+    }
+
+    /// The three most recent chats under the greeting, and the way to all
+    /// of them. `live` is false for the copy that fades out as a
+    /// conversation takes the page: it is a picture and answers nothing.
+    fn render_workspace_chat_recents(&self, live: bool, cx: &mut Context<Self>) -> Option<Div> {
         let t = self.theme();
         let chats: Vec<_> = self.chat_threads().into_iter().take(3).collect();
         if chats.is_empty() {
             return None;
+        }
+        // The list hangs from this link, and the link stays lit meanwhile.
+        if live && self.chat_history_open && self.chat_ui.history_from == Some(SEE_ALL) {
+            crate::motion::hold("workspace-chat-all-recents");
         }
         let mut section = div().mt(px(54.)).child(
             div()
@@ -474,28 +574,40 @@ impl Cereal {
                 .line_height(px(16.))
                 .text_color(t.muted)
                 .child("Recents")
-                .child(
+                .child(if live {
+                    let hover = crate::motion::reveal_key("workspace-chat-all-recents");
+                    let ink = crate::motion::mix(t.muted, t.text, crate::motion::revealed(hover));
                     div()
                         .id("workspace-chat-all-recents")
+                        .relative()
                         .flex()
                         .items_center()
-                        .gap(px(4.))
+                        .gap(px(3.))
                         .cursor_default()
-                        .map(|link| {
-                            crate::motion::warms(
-                                link,
-                                crate::motion::reveal_key("workspace-chat-all-recents"),
-                                t.muted,
-                                t.text,
-                            )
-                        })
+                        .text_color(ink)
+                        .child(crate::motion::hover_probe(hover))
+                        .child(crate::onboarding_view::place(SEE_ALL))
                         .child("See all")
-                        .child(icon("plus", 11., t.muted))
-                        .reach().on_click(cx.listener(|this, _, _, cx| {
-                            this.chat_history_open = true;
+                        // It opens a list under itself: a chevron, not a plus.
+                        .child(icon("chevron-down", 11., ink))
+                        .reach()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let open = !(this.chat_history_open
+                                && this.chat_ui.history_from == Some(SEE_ALL));
+                            this.chat_history_open = open;
+                            this.chat_ui.history_from = Some(SEE_ALL);
                             cx.notify();
-                        })),
-                ),
+                        }))
+                        .into_any_element()
+                } else {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(3.))
+                        .child("See all")
+                        .child(icon("chevron-down", 11., t.muted))
+                        .into_any_element()
+                }),
         );
         let now = chrono::Utc::now();
         // The reference's rows, measured: the highlight runs the column's
@@ -509,64 +621,89 @@ impl Cereal {
         for chat in chats {
             let (archive_id, account) = (chat.id.clone(), chat.account.clone());
             let updated = crate::chat::thread_age(&chat.updated_at, now);
-            rows = rows.child(
-                div()
-                    .id(SharedString::from(format!("workspace-recent-{}", chat.id)))
-                    .h(px(40.5))
-                    .pl(px(6.))
-                    .pr(px(7.))
-                    .rounded(px(7.))
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .cursor_default()
-                    .child(crate::motion::tactile(t.hover).radius(7.))
-                    .child(
+            let row = div()
+                .h(px(40.5))
+                .pl(px(6.))
+                .pr(px(7.))
+                .rounded(px(7.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .child(
+                    div()
+                        .size(px(30.))
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(tile_edge)
+                        .bg(t.card)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon(
+                            if chat.note_id == Some(0) { "chat" } else { "file" },
+                            15.,
+                            t.muted,
+                        )),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(13.))
+                        .truncate()
+                        .child(chat.display_title().to_owned()),
+                )
+                .when_some(updated, |row, label| {
+                    row.child(
                         div()
-                            .size(px(30.))
-                            .rounded(px(8.))
-                            .border_1()
-                            .border_color(tile_edge)
-                            .bg(t.card)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon(
-                                if chat.note_id == Some(0) { "chat" } else { "file" },
-                                15.,
-                                t.muted,
-                            )),
+                            .text_size(px(12.))
+                            .text_color(time_ink)
+                            .child(label),
                     )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(13.))
-                            .truncate()
-                            .child(chat.display_title().to_owned()),
-                    )
-                    .when_some(updated, |row, label| {
-                        row.child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(time_ink)
-                                .child(label),
-                        )
-                    })
-                    .reach().on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_chat_thread(&account, &archive_id, true, cx);
-                    })),
-            );
+                });
+            rows = if live {
+                rows.child(
+                    row.id(SharedString::from(format!("workspace-recent-{}", chat.id)))
+                        .relative()
+                        .cursor_default()
+                        .child(crate::motion::tactile(t.hover).radius(7.))
+                        .reach()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_chat_thread(&account, &archive_id, true, cx);
+                        })),
+                )
+            } else {
+                rows.child(row)
+            };
         }
         section = section.child(rows);
         Some(section)
     }
 
-    fn render_personal_chat_composer(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    /// The Chat page's composer while the page greets: a card with the
+    /// field on its first line and the model and send controls under it.
+    /// Its gold edge and halo swell in with the focus and fade with it, on
+    /// the track every chat composer's ring rides.
+    fn render_personal_chat_composer(&self, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = self.theme();
         let focused = self.ask.read(cx).focus_handle.is_focused(window);
         let active = self.chat_stream.is_some();
         let can_send = !self.ask.read(cx).content().trim().is_empty() && !active;
+        // Back on screen: the ring is simply as the focus is.
+        if !self.stage.continuous(("chat-composer", 0)) {
+            self.stage.settle(("chat-composer-ring", 0), focused);
+        }
+        let ring = crate::motion::ask_shape(self.stage.presence(
+            ("chat-composer-ring", 0),
+            focused,
+            crate::motion::ASK_TRAY,
+        ));
+        let edge_hover = crate::motion::reveal_key("personal-chat-composer");
+        let edge = crate::motion::mix(
+            t.border,
+            t.accent.opacity(0.33),
+            crate::motion::revealed(edge_hover),
+        );
         div()
             .id("personal-chat-composer")
             .relative()
@@ -577,35 +714,32 @@ impl Cereal {
             .min_h(px(82.5))
             .pl(px(12.))
             .pr(px(10.))
-            .pt(px(14.))
+            .pt(px(9.))
             .pb(px(5.5))
             .rounded(px(18.))
             .border_1()
-            .border_color(if focused { t.accent } else { t.border })
+            .border_color(crate::motion::mix(edge, t.accent, ring.ring_fade))
             .bg(t.card)
-            .shadow_sm()
-            .when(focused, |d| {
-                d.shadow(vec![BoxShadow {
-                    color: t.accent.opacity(0.13),
+            .child(crate::onboarding_view::place(crate::chat::COMPOSER))
+            .child(crate::motion::hover_probe(edge_hover))
+            .shadow(vec![
+                BoxShadow {
+                    color: hsla(0., 0., 0., 0.05 * (1. - ring.ring_fade)),
+                    offset: point(px(0.), px(1.)),
+                    blur_radius: px(2.),
+                    spread_radius: px(0.),
+                },
+                BoxShadow {
+                    color: t.accent.opacity(0.13 * ring.ring_fade),
                     offset: point(px(0.), px(0.)),
                     blur_radius: px(0.),
-                    spread_radius: px(3.),
-                }])
-            })
+                    spread_radius: px(ring.ring),
+                },
+            ])
             .flex()
             .flex_col()
-            .gap(px(7.))
-            .child(
-                div()
-                    .id("personal-chat-composer-text")
-                    .px(px(6.))
-                    .min_h(px(22.))
-                    .max_h(px(130.))
-                    .overflow_y_scroll()
-                    .text_size(px(14.))
-                    .line_height(px(20.))
-                    .child(self.ask.clone()),
-            )
+            .gap(px(2.))
+            .child(div().px(px(6.)).child(self.render_chat_field(1, 20.)))
             .child(
                 div()
                     .h(px(32.))
@@ -639,7 +773,6 @@ impl Cereal {
                         crate::ui::send_button("send-chat-idle", "Type a question to send", false, t)
                     }),
             )
-            .into_any_element()
     }
 
     /// The sidebar of settings mode: who is signed in, the settings pages, and
@@ -2123,6 +2256,43 @@ impl Cereal {
                 .child(card);
         }
         column
+    }
+}
+
+/// The name the Chat page's "See all" link is `place`d under: what the
+/// full list of recent chats hangs from.
+const SEE_ALL: &str = "chat-see-all";
+
+/// Where the Chat page's composer rests in a `window` whose page starts at
+/// `page_left` (the sidebar's edge), scrolled by `scrolled` (0 or less):
+/// while the page greets (`empty`), a card 22 px inside the page's column
+/// and 216 px down the window (48 of header, 114 of padding, the greeting's
+/// 32 and the 22 under it), 82.5 px tall; under a conversation, a pill 8 px
+/// inside the 672 px foot, 58 px tall, 27 px above the window's edge (8 of
+/// padding and the 19 of the line under it).
+pub(crate) fn chat_page_composer_rest(
+    empty: bool,
+    window: (f32, f32),
+    page_left: f32,
+    scrolled: f32,
+) -> Bounds<Pixels> {
+    let page = (window.0 - page_left).max(0.);
+    let column = page.clamp(240., 672.);
+    if empty {
+        let wide = column - 44.;
+        Bounds::new(
+            point(px(page_left + (page - wide) / 2.), px(216. + scrolled)),
+            size(px(wide), px(82.5)),
+        )
+    } else {
+        let wide = page.min(672.) - 16.;
+        Bounds::new(
+            point(
+                px(page_left + (page - wide) / 2.),
+                px(window.1 - 27. - crate::motion::ASK_PILL),
+            ),
+            size(px(wide), px(crate::motion::ASK_PILL)),
+        )
     }
 }
 

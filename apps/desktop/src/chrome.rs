@@ -979,14 +979,20 @@ impl Cereal {
                 .pl(px(88. - 80. * self.sidebar_level))
                 .pr(px(8.))
                 .pt(px(8.))
-                .child(
+                // Opened from a conversation's source mark, the pill leads
+                // back to that conversation.
+                .child(if self.chat_to_return_to() {
+                    back_pill("back-to-chat", BackLabel::Icon("chat"), t).on_click(cx.listener(
+                        |this, _, window, cx| this.return_to_chat(window, cx),
+                    ))
+                } else {
                     back_pill("back-to-notes", BackLabel::Icon("home"), t).on_click(cx.listener(
                         |this, _, window, cx| {
                             this.navigate(Screen::Home, cx);
                             this.focus.focus(window);
                         },
-                    )),
-                )
+                    ))
+                })
                 .when(
                     self.current_note
                         .and_then(|id| self.workspace.note(id))
@@ -2708,6 +2714,7 @@ pub fn back_pill(id: &'static str, label: BackLabel, t: Theme) -> Stateful<Div> 
             tip(
                 match id {
                     "back-to-notes" => "Home · ⌘1",
+                    "back-to-chat" => "Back to chat",
                     _ => "Back · Esc",
                 },
                 t,

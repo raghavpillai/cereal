@@ -35,6 +35,7 @@
 //! | A value that changes: a width, an offset, a rotation | [`Stage::aim`] |
 //! | Something that shares the window with its neighbour: a sidebar, a side panel | [`Stage::presence`] for its pose and [`Stage::room`] for the room it takes |
 //! | A group of items arriving together | [`Stage::mark`] then [`Stage::cascade_next`] with [`lift`] |
+//! | A scrolled view that stays at the end of content that is growing: an answer arriving | [`trail`] for what is left of the distance each frame; a scroll that travels to a place rides [`crate::lazy::glide_at`] |
 use crate::ui::{FONT, Theme, icon};
 use gpui::{prelude::*, *};
 use std::{
@@ -2336,6 +2337,18 @@ pub fn revealed(key: u64) -> f32 {
     })
 }
 
+/// Ease a hover level towards lit or unlit, as [`tactile`] eases its wash:
+/// for something painted by hand that answers the pointer (a chip drawn
+/// over text) and cannot hold a feedback layer. `track` is its level, kept
+/// by the caller between frames; read it with [`Track::value`] and ask for
+/// frames until it has [`Track::settled`].
+pub fn hover_to(track: &mut Track, lit: bool, now: Instant) {
+    let to = if lit { 1. } else { 0. };
+    if track.target() != to {
+        track.retarget(to, now, slow(if lit { HOVER_IN } else { HOVER_OUT }), Curve::Fade);
+    }
+}
+
 /// `from` blended toward `to` by `level`, for text that warms on hover.
 pub fn mix(from: Hsla, to: Hsla, level: f32) -> Hsla {
     let level = level.clamp(0., 1.);
@@ -3410,6 +3423,27 @@ pub fn follow_height(stage: &Stage, key: TrackKey, content: impl IntoElement) ->
             .child(inner),
         _ => shell.child(inner),
     }
+}
+
+/// How quickly a view catches up with something it follows (see [`trail`]):
+/// the time in which what is left of the distance falls to about a third.
+pub const TRAIL: Duration = Duration::from_millis(70);
+
+/// A scrolled view that stays at the end of content while it grows (an
+/// answer arriving line by line): what is left of `distance`, the view's
+/// distance from where it should be, `elapsed` after it was last measured.
+/// Call it every frame with the distance as it is then. The view leaves at
+/// once and closes most of the gap within a few frames, and because every
+/// frame starts from where the last one ended, growth that keeps coming
+/// never restarts the movement or steps it: the view reads as attached to
+/// the end rather than jumping a line at a time. With reduced motion, put
+/// the view where it belongs instead.
+pub fn trail(distance: f32, elapsed: Duration) -> f32 {
+    if !distance.is_finite() {
+        return 0.;
+    }
+    let time = slow(TRAIL).as_secs_f32().max(0.001);
+    distance * (-elapsed.as_secs_f32() / time).exp()
 }
 
 // ---------------------------------------------------------------------------

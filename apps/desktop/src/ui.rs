@@ -755,6 +755,88 @@ pub fn floating<E: InteractiveElement>(element: E) -> E {
         .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
 }
 
+/// An [`overlay`] added from inside the page instead of at the window's
+/// root: for a menu or popover that belongs to a control deep in the tree
+/// (the composer's model menu, the chat panel's recent chats). Wherever it
+/// is added, `layer` covers the whole window, above everything drawn in the
+/// normal pass and outside any clipping, so it takes the pointer exactly as
+/// a root overlay does. What it shows is placed in window coordinates: read
+/// where the control was drawn (`onboarding_view::placed`).
+pub fn lifted(layer: Div) -> AnyElement {
+    deferred(
+        anchored()
+            .position(Point::default())
+            .snap_to_window()
+            .child(Lifted { layer: Some(layer) }),
+    )
+    .with_priority(2)
+    .into_any_element()
+}
+
+/// A window-sized box for [`lifted`]'s layer: the window's size is only
+/// known when the frame is laid out.
+struct Lifted {
+    layer: Option<Div>,
+}
+
+impl IntoElement for Lifted {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for Lifted {
+    type RequestLayoutState = AnyElement;
+    type PrepaintState = ();
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, AnyElement) {
+        let viewport = window.viewport_size();
+        let mut page = div()
+            .relative()
+            .w(viewport.width)
+            .h(viewport.height)
+            .children(self.layer.take())
+            .into_any_element();
+        let layout = page.request_layout(window, cx);
+        (layout, page)
+    }
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        page: &mut AnyElement,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        page.prepaint(window, cx);
+    }
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        page: &mut AnyElement,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        page.paint(window, cx);
+    }
+}
+
 /// What lies behind a bar floating 26 px above the bottom of a page: the page
 /// colour from just below the bar's top down to the window edge, easing in
 /// over the 54 px above that. Content fades out as it nears the bar and nothing peeks

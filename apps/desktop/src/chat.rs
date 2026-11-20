@@ -50,6 +50,7 @@ pub(crate) enum Thought<'a> {
 pub(crate) fn reasoning_sections(text: &str) -> Vec<(Option<&str>, &str)> {
     let mut sections = Vec::new();
     let (mut heading, mut start, mut offset) = (None, 0, 0);
+    let mut end = text.len();
     for line in text.split_inclusive('\n') {
         let trimmed = line.trim();
         let title = trimmed
@@ -57,17 +58,29 @@ pub(crate) fn reasoning_sections(text: &str) -> Vec<(Option<&str>, &str)> {
             .and_then(|rest| rest.strip_suffix("**"))
             .map(str::trim)
             .filter(|title| !title.is_empty() && !title.contains("**"));
-        if let Some(title) = title {
+        // A heading that is still arriving: the last line, opened with "**"
+        // and not closed yet. It is a heading from its first letter, and
+        // its asterisks are never drawn (nor is a line that is so far only
+        // asterisks).
+        let arriving = (title.is_none() && !line.ends_with('\n'))
+            .then(|| {
+                let rest = trimmed.strip_prefix("**").or_else(|| trimmed.strip_prefix('*').filter(|rest| rest.is_empty()))?;
+                (!rest.contains("**")).then(|| rest.trim_end_matches('*').trim())
+            })
+            .flatten();
+        if let Some(title) = title.or(arriving.filter(|title| !title.is_empty())) {
             let body = text[start..offset].trim();
             if heading.is_some() || !body.is_empty() {
                 sections.push((heading, body));
             }
             heading = Some(title);
             start = offset + line.len();
+        } else if arriving.is_some() {
+            end = offset;
         }
         offset += line.len();
     }
-    let body = text[start..].trim();
+    let body = text[start.min(end)..end].trim();
     if heading.is_some() || !body.is_empty() {
         sections.push((heading, body));
     }
@@ -490,6 +503,343 @@ pub(crate) fn floating_workspace_chat(screen: crate::app::Screen) -> bool {
     matches!(screen, crate::app::Screen::Home)
 }
 
+/// Where the chat composer (Home's pill, the Chat page's card) was last
+/// drawn, for the menu that opens from it (`onboarding_view::placed`).
+pub(crate) const COMPOSER: &str = "chat-composer";
+const MODEL_MENU_WIDTH: f32 = 232.;
+
+/// The edge of the window a menu is placed from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum MenuEdge {
+    /// Its top edge, this far down the window.
+    Top(f32),
+    /// Its bottom edge, this far down the window: it grows upward.
+    Bottom(f32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MenuPlace {
+    pub left: f32,
+    pub edge: MenuEdge,
+}
+
+/// Where the model menu goes for a composer drawn at `composer`: above the
+/// pill, clear of its top edge however tall the draft has made it, and
+/// ending where the model button ends; or (`below`) under the leading end
+/// of the Chat page's card. Never out of the window's left side.
+pub(crate) fn model_menu_place(composer: Bounds<Pixels>, below: bool) -> MenuPlace {
+    let (left, right) = (f32::from(composer.left()), f32::from(composer.right()));
+    if below {
+        MenuPlace {
+            left: (left + 9.).max(12.),
+            edge: MenuEdge::Top(f32::from(composer.bottom()) + 2.5),
+        }
+    } else {
+        MenuPlace {
+            left: (right - 47. - MODEL_MENU_WIDTH).max(12.),
+            edge: MenuEdge::Bottom(f32::from(composer.top()) - 7.),
+        }
+    }
+}
+
+/// What chat's surfaces keep between frames that is not the conversation
+/// itself: where its views are scrolled and what the pointer is on.
+pub struct ChatUi {
+    /// The composer's own scroll, for a draft taller than its field: the
+    /// input keeps its caret in view through it.
+    pub ask_scroll: ScrollHandle,
+    /// The recent-chats list's scroll, for its thumb and its fades.
+    pub history_scroll: ScrollHandle,
+    /// The control the recent-chats list of a chat page hangs from, by the
+    /// name it was `place`d under. `None`: the header's History button.
+    pub history_from: Option<&'static str>,
+    /// How the conversation's view keeps up with its end.
+    pub follow: std::cell::Cell<Follow>,
+    /// The source mark under the pointer, and its card.
+    pub cite: Cite,
+    /// The conversation a source was opened from, to go back to.
+    pub back: Option<ChatReturn>,
+    /// Where the Chat page's composer stood when the page last changed
+    /// between its greeting and a conversation: what the composer travels
+    /// from.
+    pub composer_from: std::cell::Cell<Option<Bounds<Pixels>>>,
+    /// "Maximize" is still playing: the page holds its place while the
+    /// sidebar slides in beside it (`Cereal::chat_widened`).
+    pub widening: std::cell::Cell<bool>,
+}
+
+impl ChatUi {
+    pub fn new(ask: &Entity<crate::input::TextInput>, cx: &mut App) -> Self {
+        let ask_scroll = ScrollHandle::new();
+        ask.update(cx, |input, _| input.attach_scroll(ask_scroll.clone()));
+        Self {
+            ask_scroll,
+            history_scroll: ScrollHandle::new(),
+            history_from: None,
+            follow: Default::default(),
+            cite: Cite::default(),
+            back: None,
+            composer_from: Default::default(),
+            widening: Default::default(),
+        }
+    }
+}
+
+/// How a conversation's view keeps up with its end. A reader at the end
+/// stays attached to it while the conversation grows (an answer arriving,
+/// a question sent): the view trails the end by a few frames instead of
+/// stepping a line at a time ([`crate::motion::trail`]). A reader who
+/// scrolls away is left alone until they come back to the end, and nothing
+/// moves while the conversation stands still (opening a fold does not pull
+/// the page down). "Scroll to latest" rides to the end on the glide every
+/// scroll to a place uses ([`crate::lazy::glide_at`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Follow {
+    /// The reader is at the end, and is kept there.
+    pub attached: bool,
+    /// Where this last left the view (how far it is scrolled from the top).
+    /// A view found anywhere else was moved by the reader.
+    placed: Option<f32>,
+    /// When it last looked, for the time between frames.
+    seen: Option<std::time::Instant>,
+    /// The conversation counts as changing until then: what an answer's end
+    /// brings in (its buttons, a fold closing) is still followed.
+    busy_until: Option<std::time::Instant>,
+    /// A ride to the end the reader asked for: how far from the end it
+    /// started (`None` until its first frame), and when.
+    ride: Option<(Option<f32>, std::time::Instant)>,
+    /// Put the view at the end at once on the next frame.
+    snap: bool,
+}
+
+/// What a frame of [`Follow`] asks for.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct FollowStep {
+    /// Scroll this far from the top.
+    pub scroll_to: Option<f32>,
+    /// Put the view at the end, whatever is laid out this frame.
+    pub snap: bool,
+    /// Still on its way: draw another frame.
+    pub moving: bool,
+}
+
+/// A reader this close to the end is at it.
+const AT_END: f32 = 8.;
+
+impl Follow {
+    /// At the end, now, with no travel: a conversation that has just been
+    /// opened or replaced.
+    pub(crate) fn at_end() -> Self {
+        Self { attached: true, snap: true, ..Self::default() }
+    }
+
+    /// Attach to the end and travel there: a question has been sent.
+    pub(crate) fn attach(&mut self, now: std::time::Instant) {
+        self.attached = true;
+        self.ride = None;
+        self.busy_until = Some(now + crate::motion::GOOEY.duration());
+    }
+
+    /// Ride to the end: the reader pressed "Scroll to latest".
+    pub(crate) fn ride(&mut self, now: std::time::Instant) {
+        self.ride = Some((None, now));
+    }
+
+    /// One frame. `scrolled` is how far the view is from the top and `max`
+    /// how far it can go, as last laid out; `changing` is whether the
+    /// conversation itself is (an answer arriving, a turn just added).
+    pub(crate) fn step(
+        &mut self,
+        scrolled: f32,
+        max: f32,
+        changing: bool,
+        now: std::time::Instant,
+        reduced: bool,
+    ) -> FollowStep {
+        let frame = std::time::Duration::from_millis(16);
+        let elapsed = self
+            .seen
+            .map_or(frame, |seen| now.saturating_duration_since(seen))
+            .min(frame * 2);
+        self.seen = Some(now);
+        if std::mem::take(&mut self.snap) {
+            self.attached = true;
+            self.placed = None;
+            self.ride = None;
+            return FollowStep { snap: true, ..FollowStep::default() };
+        }
+        let behind = (max - scrolled).max(0.);
+        let moved = self.placed.is_some_and(|placed| (placed - scrolled).abs() > 1.);
+        self.placed = Some(scrolled);
+        if moved {
+            // The reader took over.
+            self.ride = None;
+        }
+        if let Some((from, start)) = self.ride {
+            let from = from.unwrap_or(behind).min(crate::lazy::GLIDE_REACH);
+            let length = crate::motion::PANEL.duration().as_secs_f32().max(0.001);
+            let t = if reduced {
+                1.
+            } else {
+                crate::motion::shown_at(now).saturating_duration_since(start).as_secs_f32() / length
+            };
+            let left = crate::lazy::glide_at(from, 0., t.min(1.));
+            let to = (max - left).max(0.);
+            self.placed = Some(to);
+            if t >= 1. {
+                self.ride = None;
+                self.attached = true;
+            } else {
+                self.ride = Some((Some(from), start));
+            }
+            return FollowStep { scroll_to: Some(to), snap: false, moving: t < 1. };
+        }
+        if changing {
+            self.busy_until = Some(now + crate::motion::GOOEY.duration());
+        }
+        let busy = self.busy_until.is_some_and(|until| now < until);
+        if !busy {
+            self.busy_until = None;
+        }
+        if moved || !busy {
+            self.attached = behind <= AT_END;
+        }
+        if !(busy && self.attached) || behind <= 0.5 {
+            // What this frame lays out is only seen by the next one.
+            return FollowStep { moving: changing && self.attached, ..FollowStep::default() };
+        }
+        let left = if reduced {
+            0.
+        } else {
+            crate::motion::trail(behind.min(crate::lazy::GLIDE_REACH), elapsed)
+        };
+        let left = if left < 0.5 { 0. } else { left };
+        let to = (max - left).max(0.);
+        self.placed = Some(to);
+        FollowStep { scroll_to: Some(to), snap: false, moving: true }
+    }
+}
+
+/// The source mark under the pointer and the card that names its source.
+#[derive(Default)]
+pub struct Cite {
+    /// The mark the pointer is on.
+    pub hover: Option<CiteMark>,
+    /// Its card is showing: the pointer has rested on it.
+    pub open: bool,
+    /// The mark the card was last shown for; it is drawn from this while
+    /// it leaves.
+    pub shown: Option<CiteMark>,
+    /// When a card last closed.
+    pub closed: Option<std::time::Instant>,
+    /// Counts the pointer's arrivals and departures, so a card's wait is
+    /// only kept by the arrival that started it.
+    serial: u64,
+}
+
+/// One source mark of an answer: the turn it is in, the block of the
+/// answer's text, its id ("S12") and where its chip is in the window.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CiteMark {
+    pub turn: usize,
+    pub block: usize,
+    pub id: String,
+    pub chip: Bounds<Pixels>,
+}
+
+impl CiteMark {
+    fn same(&self, other: &Self) -> bool {
+        self.turn == other.turn && self.block == other.block && self.id == other.id
+    }
+}
+
+/// The conversation a source was opened from, and where it was being read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChatReturn {
+    /// The note the source opened: this is only a way back from there.
+    pub note: u64,
+    pub thread: String,
+    /// It was on the Chat page (otherwise in the panel over Home).
+    pub page: bool,
+    pub scrolled: Point<Pixels>,
+}
+
+/// What stands in for the answer of a turn that was stopped before any of
+/// it arrived. It is kept with the conversation (here and on the server)
+/// and never drawn: such a turn says "Stopped" on its line instead.
+pub(crate) const STOPPED: &str = "Response stopped.";
+
+/// An answer (or a thought) that is still arriving, as it is shown
+/// meanwhile: markup that has opened and not closed yet is not drawn raw
+/// for the moment before the rest of it comes. In the last line only:
+/// an unfinished source mark ("[[S1") and the address of an unfinished link
+/// are left out; a line that is so far only the start of a block ("##", "-",
+/// "1.", a table's first row) waits for its text; and bold or code that has
+/// opened is styled from its first letter. Text inside a code fence is left
+/// exactly as it is. Nothing here changes the stored answer.
+pub(crate) fn settle_stream(text: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    let cut = text.rfind('\n').map_or(0, |end| end + 1);
+    let (head, last) = text.split_at(cut);
+    if last.is_empty() || head.matches("```").count() % 2 == 1 {
+        return Cow::Borrowed(text);
+    }
+    let mut line = last.to_owned();
+    // A source mark: "[", "[[", "[[S", "[[S12", "[[S12]".
+    if let Some(open) = line.rfind("[[").filter(|open| !line[*open..].contains("]]")) {
+        line.truncate(open);
+    } else if line.ends_with('[') {
+        line.pop();
+    }
+    // A link whose address is arriving: its words alone.
+    if let Some(close) = line.rfind("](").filter(|close| !line[*close..].contains(')'))
+        && let Some(open) = line[..close].rfind('[')
+    {
+        let label = line[open + 1..close].to_owned();
+        line.truncate(open);
+        line.push_str(&label);
+    }
+    let bare = line.trim();
+    let numbered = bare
+        .strip_suffix('.')
+        .is_some_and(|digits| !digits.is_empty() && digits.len() <= 3 && digits.bytes().all(|b| b.is_ascii_digit()));
+    let block_start = !bare.is_empty()
+        && (bare.bytes().all(|b| b == b'#') && bare.len() <= 6
+            || bare.bytes().all(|b| b == b'`')
+            || matches!(bare, "-" | "*" | "**" | "•" | ">" | "_" | "__" | "--")
+            || numbered);
+    // A table's first row reads as a paragraph until the rule under it
+    // arrives; a row of a table that has begun is shown as it comes.
+    let table_start = bare.starts_with('|')
+        && !head
+            .lines()
+            .next_back()
+            .is_some_and(|before| before.trim_start().starts_with('|'));
+    if block_start || table_start {
+        line.clear();
+    } else {
+        // Half of a closing (or opening) "**".
+        if line.ends_with('*') && !line.ends_with("**") {
+            line.pop();
+        }
+        for marker in ["**", "`"] {
+            if line.matches(marker).count() % 2 == 1 {
+                if line.trim_end().ends_with(marker) {
+                    let end = line.trim_end().len() - marker.len();
+                    line.truncate(end);
+                } else {
+                    line.push_str(marker);
+                }
+            }
+        }
+    }
+    if line == last {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(format!("{head}{line}"))
+    }
+}
+
 pub struct ActiveChat {
     pub epoch: u64,
     pub index: usize,
@@ -850,7 +1200,7 @@ impl Chats<'_> {
         if let Some((_, answer)) = self.messages.get_mut(active.index)
             && answer.is_empty()
         {
-            *answer = "Response stopped.".into();
+            *answer = STOPPED.into();
         }
         self.interrupted.insert(active.index);
         *self.epoch = self.epoch.wrapping_add(1);
@@ -870,7 +1220,7 @@ impl Chats<'_> {
                 if let Some((_, answer)) = archive.messages.get_mut(index)
                     && answer.is_empty()
                 {
-                    *answer = "Response stopped.".into();
+                    *answer = STOPPED.into();
                 }
                 if !archive.interrupted.contains(&index) {
                     archive.interrupted.push(index);
@@ -1184,9 +1534,73 @@ impl crate::app::Cereal {
             );
             return;
         };
+        let origin = self.chat_source_origin(id);
         self.open_note(id, cx);
         self.chat_maximized = false;
         self.assistant_open = false;
+        self.chat_ui.back = origin.filter(|_| self.current_note == Some(id));
+        cx.notify();
+    }
+
+    /// The conversation on screen, as somewhere to come back to from `note`,
+    /// a source of it that is about to be opened. Only a conversation
+    /// across meetings has sources to open; it is saved first, so that it
+    /// is there to come back to.
+    fn chat_source_origin(&mut self, note: u64) -> Option<ChatReturn> {
+        if self.current_note.is_some() || self.chat_messages.is_empty() {
+            return None;
+        }
+        // The mark's card goes with the conversation.
+        self.chat_ui.cite = Cite::default();
+        self.save_chat_history();
+        Some(ChatReturn {
+            note,
+            thread: self.chat_thread_id.clone(),
+            page: self.screen == crate::app::Screen::Chat,
+            scrolled: self.chat_scroll.offset(),
+        })
+    }
+
+    /// Whether the note on screen was opened from a conversation's source
+    /// mark, so its back pill leads back to that conversation.
+    pub(crate) fn chat_to_return_to(&self) -> bool {
+        self.chat_ui
+            .back
+            .as_ref()
+            .is_some_and(|back| Some(back.note) == self.current_note)
+    }
+
+    /// Back from a source to the conversation it was opened from: on the
+    /// page or in the panel it was on, scrolled to where it was being read.
+    pub(crate) fn return_to_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(back) = self.chat_ui.back.take() else {
+            return;
+        };
+        self.navigate(
+            if back.page { crate::app::Screen::Chat } else { crate::app::Screen::Home },
+            cx,
+        );
+        // Leaving the note put the newest conversation on screen; this may
+        // be another one.
+        if self.chat_thread_id != back.thread
+            && let Some(chat) = self
+                .chat_archives
+                .iter()
+                .find(|chat| chat.id == back.thread)
+                .cloned()
+        {
+            self.park_chat_stream();
+            self.save_chat_history();
+            self.chat_messages = chat.messages;
+            self.chat_thread_id = chat.id;
+            self.chat_interrupted = chat.interrupted.into_iter().collect();
+            self.chat_annotations = chat.annotations;
+            self.chats().attach();
+        }
+        self.assistant_open = !back.page && self.chat_thread_id == back.thread;
+        self.chat_scroll.set_offset(back.scrolled);
+        self.chat_ui.follow.set(Follow::default());
+        self.focus.focus(window);
         cx.notify();
     }
 
@@ -1212,6 +1626,7 @@ impl crate::app::Cereal {
                 self.show_toast("This source quotation is no longer available.", cx);
                 return;
             }
+            let origin = self.chat_source_origin(id);
             self.jump_to_transcript_quote(
                 id,
                 citation.segment_id.as_deref(),
@@ -1220,7 +1635,9 @@ impl crate::app::Cereal {
                 window,
                 cx,
             );
+            self.chat_ui.back = origin.filter(|_| self.current_note == Some(id));
         } else {
+            let origin = self.chat_source_origin(id);
             self.open_note(id, cx);
             self.active_tab = if citation.source == meeting_notes_api_types::ChatCitationDtoSource::Summary {
                 crate::app::NoteTab::Enhanced
@@ -1229,6 +1646,7 @@ impl crate::app::Cereal {
             };
             self.chat_maximized = false;
             self.assistant_open = false;
+            self.chat_ui.back = origin.filter(|_| self.current_note == Some(id));
             cx.notify();
         }
     }
@@ -1320,21 +1738,23 @@ impl crate::app::Cereal {
             .when(mark.visible, |line| {
                 let level = mark.value.clamp(0., 1.);
                 // Room for its corners as it turns: 20 px square, the
-                // mark centred in it.
+                // mark centred in it. The mark grows with its room and is
+                // never wider than it, so it cannot lie on the words while
+                // the room opens or closes.
                 line.child(
                     div()
                         .flex_shrink_0()
                         .w(px(24. * level))
                         .h(px(20.))
-                        .overflow_hidden()
                         .opacity(mark.fade)
                         .child(
                             div()
-                                .size(px(20.))
+                                .w(px(20. * level))
+                                .h(px(20.))
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .child(crate::motion::thinking_mark(15., t.text)),
+                                .child(crate::motion::thinking_mark(15. * level, t.text)),
                         ),
                 )
             })
@@ -1367,10 +1787,19 @@ impl crate::app::Cereal {
             .flex_col()
             .gap(px(10.));
         let today = chrono::Local::now().date_naive();
-        for (position, thought) in annotations.thoughts().into_iter().enumerate() {
+        let thoughts = annotations.thoughts();
+        let last = thoughts.len().saturating_sub(1);
+        for (position, thought) in thoughts.into_iter().enumerate() {
             rail = rail.child(match thought {
                 Thought::Reasoning { heading, body } => {
-                    self.render_chat_reasoning(index, position, heading, body)
+                    // The thought being written: its unclosed markup is
+                    // not shown raw meanwhile.
+                    let body = if thinking && position == last {
+                        settle_stream(body)
+                    } else {
+                        std::borrow::Cow::Borrowed(body)
+                    };
+                    self.render_chat_reasoning(index, position, heading, &body)
                 }
                 Thought::Step(step) => {
                     self.render_chat_step(index, &annotations.tools[step], annotations, active, today, cx)
@@ -1573,11 +2002,12 @@ impl crate::app::Cereal {
             .filter(|_| self.current_note.is_none())
             .map(|item| item.citations.clone())
             .unwrap_or_default();
-        self.sourced_chat_markdown(answer, compact, citations, cx)
+        self.sourced_chat_markdown(index, answer, compact, citations, cx)
     }
 
     fn sourced_chat_markdown(
         &self,
+        turn: usize,
         answer: &str,
         compact: bool,
         citations: Vec<ChatCitationDTO>,
@@ -1585,6 +2015,14 @@ impl crate::app::Cereal {
     ) -> Div {
         let t = self.theme();
         let weak = cx.weak_entity();
+        // The mark the pointer is on, when it is one of this answer's.
+        let lit = self
+            .chat_ui
+            .cite
+            .hover
+            .as_ref()
+            .filter(|mark| mark.turn == turn)
+            .map(|mark| (mark.block, mark.id.clone()));
         markdown_with_inline(answer, t, compact, move |text, block| {
             let (text, highlights, links) = linked_inline_with_citations(text, t, &citations);
             let ranges: Vec<_> = links.iter().map(|(range, _)| range.clone()).collect();
@@ -1596,10 +2034,22 @@ impl crate::app::Cereal {
                 .iter()
                 .filter_map(|(range, destination)| {
                     let number = destination.strip_prefix("minutes-source:S")?.parse::<u32>().ok()?;
-                    Some((range.clone(), number))
+                    // The chip covers the room, not the gap before it.
+                    Some((range.start + CITATION_GAP.len()..range.end, number))
                 })
                 .collect();
-            let chips = (!marks.is_empty()).then(|| citation_chips(styled.layout().clone(), marks, t));
+            let chips = (!marks.is_empty()).then(|| CitationChips {
+                layout: styled.layout().clone(),
+                marks,
+                theme: t,
+                view: weak.clone(),
+                turn,
+                block,
+                lit: lit
+                    .as_ref()
+                    .filter(|(lit_block, _)| *lit_block == block)
+                    .and_then(|(_, id)| id.strip_prefix('S')?.parse().ok()),
+            });
             let text = InteractiveText::new(("chat-sourced-markdown", block), styled)
             .on_click(ranges, move |clicked, window, cx| {
                 let Some((_, destination)) = links.get(clicked) else {
@@ -1614,8 +2064,214 @@ impl crate::app::Cereal {
                     cx.open_url(destination);
                 }
             });
-            div().relative().children(chips).child(text).into_any_element()
+            // The chips come after the text, whose layout places them.
+            div().relative().child(text).children(chips).into_any_element()
         })
+    }
+
+    /// The pointer came onto a source mark, or moved along it.
+    pub(crate) fn chat_cite_enter(&mut self, mark: CiteMark, cx: &mut Context<Self>) {
+        let now = std::time::Instant::now();
+        let cite = &mut self.chat_ui.cite;
+        if let Some(hover) = cite.hover.as_mut().filter(|hover| hover.same(&mark)) {
+            // The same mark somewhere else: the conversation scrolled.
+            if hover.chip != mark.chip {
+                hover.chip = mark.chip;
+                if cite.open {
+                    cite.shown = Some(mark);
+                }
+                cx.notify();
+            }
+            return;
+        }
+        cite.serial = cite.serial.wrapping_add(1);
+        // While a card is showing, and for a moment after, the next mark's
+        // shows at once: reading along a row of marks takes one wait.
+        let warm = cite.open
+            || cite
+                .closed
+                .is_some_and(|at| now.saturating_duration_since(at) < crate::motion::TIP_WARM);
+        cite.hover = Some(mark.clone());
+        cite.open = warm;
+        if warm {
+            cite.shown = Some(mark);
+        } else {
+            let serial = cite.serial;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(crate::motion::slow(crate::motion::TIP_DELAY))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    let cite = &mut this.chat_ui.cite;
+                    if cite.serial == serial && cite.hover.is_some() {
+                        cite.open = true;
+                        cite.shown = cite.hover.clone();
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// The pointer left the source mark `turn`, `block`, `number` (or, with
+    /// `None`, whichever it was on: the conversation is going away).
+    pub(crate) fn chat_cite_leave(&mut self, mark: Option<(usize, usize, u32)>, cx: &mut Context<Self>) {
+        let cite = &mut self.chat_ui.cite;
+        let on = cite.hover.as_ref().is_some_and(|hover| {
+            mark.is_none_or(|(turn, block, number)| {
+                hover.turn == turn && hover.block == block && hover.id == format!("S{number}")
+            })
+        });
+        if !on {
+            return;
+        }
+        cite.serial = cite.serial.wrapping_add(1);
+        cite.hover = None;
+        if std::mem::take(&mut cite.open) {
+            cite.closed = Some(std::time::Instant::now());
+        }
+        cx.notify();
+    }
+
+    /// The card of the source mark the pointer rests on: which meeting the
+    /// statement came from, its day and where in the meeting, and the
+    /// passage itself. It grows out of the mark, above it (below when the
+    /// mark is near the top of the window), and takes no part in the
+    /// pointer's business: a click on the mark opens the source.
+    fn render_chat_cite_card(&self, window: &Window) -> Option<AnyElement> {
+        use meeting_notes_api_types::ChatCitationDtoSource as Source;
+        let t = self.theme();
+        let cite = &self.chat_ui.cite;
+        let pose = self
+            .stage
+            .presence(("chat-cite-card", 0), cite.open, crate::motion::SNAPPY);
+        if !pose.visible {
+            return None;
+        }
+        let mark = cite.shown.as_ref()?;
+        let citation = self
+            .chat_annotations
+            .get(&mark.turn)?
+            .citations
+            .iter()
+            .find(|citation| citation.id == mark.id)?;
+        let note = self
+            .local_chat_source(&citation.note_id)
+            .and_then(|id| self.workspace.note(id));
+        let title = note
+            .map(|note| note.title.trim())
+            .filter(|title| !title.is_empty())
+            .unwrap_or(citation.title.trim());
+        let title = if title.is_empty() { "New note" } else { title };
+        let kind = match citation.source {
+            Source::Transcript => match citation.start_ms {
+                Some(start) => format!("Transcript · {}", clock(start)),
+                None => "Transcript".to_owned(),
+            },
+            Source::Summary => "Summary".to_owned(),
+            Source::Notes => "Notes".to_owned(),
+        };
+        let line = match note {
+            Some(note) => format!(
+                "{} · {kind}",
+                relative_day(&note.date, chrono::Local::now().date_naive())
+            ),
+            None => format!("{kind} · no longer on this Mac"),
+        };
+        let quote = citation.quote.trim();
+        let card = div()
+            .w(px(CITE_CARD))
+            .p(px(12.))
+            .rounded(px(crate::ui::POPOVER_RADIUS))
+            .bg(t.card)
+            .border_1()
+            .border_color(t.border)
+            .shadow(vec![
+                BoxShadow {
+                    color: hsla(0., 0., 0., 0.16),
+                    offset: point(px(0.), px(8.)),
+                    blur_radius: px(24.),
+                    spread_radius: px(0.),
+                },
+                BoxShadow {
+                    color: hsla(0., 0., 0., 0.08),
+                    offset: point(px(0.), px(1.)),
+                    blur_radius: px(3.),
+                    spread_radius: px(0.),
+                },
+            ])
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(8.))
+                    .child(
+                        div().h(px(18.)).flex().items_center().flex_shrink_0().child(icon(
+                            if citation.source == Source::Transcript { "footer-transcript" } else { "file" },
+                            14.,
+                            t.muted,
+                        )),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .line_height(px(18.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(t.text)
+                                    .truncate()
+                                    .child(title.to_owned()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .line_height(px(16.))
+                                    .text_color(t.muted)
+                                    .truncate()
+                                    .child(line),
+                            ),
+                    ),
+            )
+            .when(!quote.is_empty(), |card| {
+                card.child(
+                    div()
+                        .pl(px(10.))
+                        .border_l_2()
+                        .border_color(t.border)
+                        .text_size(px(13.))
+                        .line_height(px(19.))
+                        .text_color(t.secondary)
+                        .line_clamp(4)
+                        .child(quote.to_owned()),
+                )
+            });
+        let place = cite_card_place(mark.chip, window.viewport_size());
+        Some(
+            deferred(
+                anchored()
+                    .position(place.at)
+                    .anchor(if place.above { Corner::BottomLeft } else { Corner::TopLeft })
+                    .snap_to_window()
+                    .child(crate::motion::pop(
+                        card,
+                        crate::motion::Pop::menu((place.stem, if place.above { 1. } else { 0. })),
+                        pose,
+                    )),
+            )
+            .with_priority(3)
+            .into_any_element(),
+        )
     }
 
     pub fn save_chat_history(&mut self) {
@@ -1917,7 +2573,7 @@ impl crate::app::Cereal {
             // Sent as soon as the answer that is arriving has finished.
             self.chat_queue.push(question);
             self.ask.update(cx, |input, cx| input.set_content("", cx));
-            self.chat_to_bottom();
+            self.chat_follow_end();
             cx.notify();
             return true;
         }
@@ -1963,9 +2619,10 @@ impl crate::app::Cereal {
         }
         if begun.index == 0 {
             self.chat_scroll.set_offset(Point::default());
-        } else {
-            self.chat_to_bottom();
         }
+        // The new turn arrives, and the view travels to it.
+        self.stage.mark("chat-turn");
+        self.chat_follow_end();
         self.spawn_chat_stream(thread, begun, note, question, replacing, script, cx);
         cx.notify();
         true
@@ -2117,64 +2774,85 @@ impl crate::app::Cereal {
     }
 
     /// The questions waiting behind the answer that is arriving, shown under
-    /// the conversation.
+    /// the conversation. Each opens into its place as it is queued and its
+    /// place closes up when it is sent or taken out (`Stage::roster`).
     pub fn render_chat_queue(
         &self,
         compact: bool,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
-        if self.chat_queue.is_empty() {
+        let t = self.theme();
+        // A question by its words, and which of several alike it is.
+        let keys: Vec<u64> = self
+            .chat_queue
+            .iter()
+            .enumerate()
+            .map(|(index, question)| {
+                let twin = self.chat_queue[..index].iter().filter(|other| *other == question).count();
+                crate::lazy::key((question, twin))
+            })
+            .collect();
+        let rows = self
+            .stage
+            .roster("chat-queue", crate::lazy::key(&self.chat_thread_id), &keys);
+        if rows.is_empty() {
             return None;
         }
-        let t = self.theme();
         let (_, widest) = self.chat_question_width(compact, window);
+        let queued = |index: usize, question: &String| {
+            div()
+                .flex()
+                .flex_col()
+                .items_end()
+                .gap(px(4.))
+                .pb(px(8.))
+                .when(compact, |d| d.pr(px(10.)))
+                .child(
+                    div()
+                        .max_w(px(widest))
+                        .rounded(px(if compact { 10. } else { 12. }))
+                        .px(px(if compact { 11. } else { 16. }))
+                        .py(px(6.))
+                        .bg(t.hover)
+                        .opacity(0.6)
+                        .text_size(px(if compact { 14. } else { 15. }))
+                        .line_height(px(if compact { 20. } else { 21. }))
+                        .child(question.clone()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .h(px(22.))
+                        .child(small("Queued · sends when this answer finishes", t))
+                        .child(
+                            tool_tip(
+                                ("remove-queued-chat", index),
+                                "close",
+                                "Remove queued question",
+                                t,
+                            )
+                            .size(px(22.))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.remove_queued_chat(index, cx)
+                            })),
+                        ),
+                )
+        };
         Some(
             div()
                 .flex()
                 .flex_col()
-                .gap(px(8.))
-                .mb(px(24.))
-                .children(self.chat_queue.iter().enumerate().map(|(index, question)| {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_end()
-                        .gap(px(4.))
-                        .when(compact, |d| d.pr(px(10.)))
-                        .child(
-                            div()
-                                .max_w(px(widest))
-                                .rounded(px(12.))
-                                .rounded_br(px(3.))
-                                .px(px(if compact { 11. } else { 14. }))
-                                .py(px(if compact { 6. } else { 9. }))
-                                .bg(t.hover)
-                                .opacity(0.6)
-                                .text_size(px(if compact { 14. } else { 16. }))
-                                .line_height(px(if compact { 20. } else { 24. }))
-                                .child(question.clone()),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(4.))
-                                .h(px(22.))
-                                .child(small("Queued · sends when this answer finishes", t))
-                                .child(
-                                    tool_tip(
-                                        ("remove-queued-chat", index),
-                                        "close",
-                                        "Remove queued question",
-                                        t,
-                                    )
-                                    .size(px(22.))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.remove_queued_chat(index, cx)
-                                    })),
-                                ),
-                        )
+                .flex_shrink_0()
+                .mb(px(16.))
+                .children(rows.into_iter().filter_map(|row| {
+                    let content = keys
+                        .iter()
+                        .position(|key| *key == row.key)
+                        .map(|index| queued(index, &self.chat_queue[index]));
+                    crate::motion::roster_row(&self.stage, "chat-queue", row, content)
                 })),
         )
     }
@@ -2229,8 +2907,25 @@ impl crate::app::Cereal {
         // stands still (opening a fold does not pull the page down).
         let signature = self.chat_follow_signature();
         let grew = self.chat_follow.replace(signature) != signature;
-        if (grew || self.chat_stream.is_some()) && chat_at_end(&self.chat_scroll) {
-            self.chat_to_bottom();
+        let scroll = &self.chat_scroll;
+        let mut follow = self.chat_ui.follow.get();
+        let step = follow.step(
+            -f32::from(scroll.offset().y),
+            f32::from(scroll.max_offset().height),
+            grew || self.chat_stream.is_some(),
+            std::time::Instant::now(),
+            crate::motion::reduce_motion(),
+        );
+        self.chat_ui.follow.set(follow);
+        if let Some(to) = step.scroll_to {
+            scroll.set_offset(point(scroll.offset().x, px(-to)));
+        }
+        if step.snap {
+            scroll.scroll_to_bottom();
+            crate::lazy::to_end("chat-turns");
+        }
+        if step.moving {
+            self.stage.keep_alive();
         }
         let (wraps_to, widest) = self.chat_question_width(compact, window);
         crate::lazy::column(
@@ -2249,6 +2944,8 @@ impl crate::app::Cereal {
         // As tall as its turns, whatever container it is in: see the
         // conversation's column in `render_context_chat`.
         .flex_shrink_0()
+        // The card of the source mark the pointer rests on, over everything.
+        .children(self.render_chat_cite_card(window))
     }
 
     /// The width a conversation's turns wrap to, and the widest a question's
@@ -2293,10 +2990,18 @@ impl crate::app::Cereal {
         ((self.chat_messages.len() as u64) << 40) ^ last as u64
     }
 
-    /// Show the newest end of the conversation.
+    /// Show the newest end of the conversation, at once: it has just been
+    /// put on screen.
     pub(crate) fn chat_to_bottom(&self) {
-        self.chat_scroll.scroll_to_bottom();
-        crate::lazy::to_end("chat-turns");
+        self.chat_ui.follow.set(Follow::at_end());
+    }
+
+    /// Keep the view at the end of the conversation and travel there from
+    /// wherever it is: something has been added to it.
+    pub(crate) fn chat_follow_end(&self) {
+        let mut follow = self.chat_ui.follow.get();
+        follow.attach(std::time::Instant::now());
+        self.chat_ui.follow.set(follow);
     }
 
     pub fn render_chat_turn(
@@ -2313,6 +3018,42 @@ impl crate::app::Cereal {
         let shown = crate::motion::revealed(turn_hover);
         let active = self.chat_stream.as_ref().is_some_and(|a| a.index == index);
         let thinking = active && answer.is_empty();
+        let interrupted = self.chat_interrupted.contains(&index);
+        // Stopped before any of it arrived: there is nothing to read, to
+        // copy or to say more about. Its line says "Stopped"; Retry stays.
+        let unanswered = !active && interrupted && answer == STOPPED;
+        // The turn that has just been added arrives: its question, then
+        // its line (`try_start_chat_from` marks the moment).
+        let newest = index + 1 == self.chat_messages.len();
+        let arriving = |beat: usize| {
+            if newest {
+                self.stage.cascade("chat-turn", beat)
+            } else {
+                crate::motion::Pose::REST
+            }
+        };
+        // What an answer's end brings in opens into its place. A turn
+        // that comes on screen as it already is (scrolled to, or another
+        // conversation's) is simply there.
+        let turn = crate::lazy::key((&self.chat_thread_id, index));
+        let actions_key = ("chat-turn-actions", turn);
+        let error_key = ("chat-turn-error", turn);
+        let finished = !active && !answer.is_empty();
+        let error = self
+            .chat_annotations
+            .get(&index)
+            .and_then(|item| item.error.clone());
+        if !self.stage.continuous(("chat-turn-seen", turn)) {
+            self.stage.settle(actions_key, finished);
+            self.stage.settle(error_key, error.is_some());
+        }
+        // While it is arriving, markup that has not closed yet is not shown
+        // raw (see `settle_stream`).
+        let shown_answer = if active {
+            settle_stream(answer)
+        } else {
+            std::borrow::Cow::Borrowed(answer)
+        };
         div()
             .id(("chat-turn", index))
             .child(crate::motion::hover_probe(turn_hover))
@@ -2323,7 +3064,7 @@ impl crate::app::Cereal {
             // the status line 45 px under the question as in the reference.
             .gap(px(if compact { 10. } else { 16. }))
             .mb(px(24.))
-            .child(
+            .child(crate::motion::lift(
                 div()
                     .flex()
                     .justify_end()
@@ -2341,7 +3082,8 @@ impl crate::app::Cereal {
                             .line_height(px(if compact { 20. } else { 21. }))
                             .child(question.to_string()),
                     ),
-            )
+                arriving(0),
+            ))
             .child(
                 div()
                     .flex()
@@ -2371,55 +3113,57 @@ impl crate::app::Cereal {
                     ),
             )
             // One status line, whether or not the answer searched meetings.
-            .children(self.render_chat_status(index, active, thinking, cx))
-            .when(!thinking, |container| {
-                container.child(self.chat_markdown(index, answer, compact, cx))
-            })
-            .when_some(
-                self.chat_annotations
-                    .get(&index)
-                    .and_then(|item| item.error.clone()),
-                |container, error| {
-                    container.child(
-                        div()
-                            .min_w_0()
-                            .px(px(10.))
-                            .py(px(8.))
-                            .rounded(px(8.))
-                            .bg(t.hover)
-                            .text_size(px(12.))
-                            .line_height(px(18.))
-                            .text_color(t.muted)
-                            .flex()
-                            .flex_col()
-                            .gap(px(6.))
-                            .child(error)
-                            .child(
-                                pill(
-                                    ("retry-interrupted-chat", index),
-                                    "Retry answer",
-                                    "chat-retry",
-                                    t,
-                                )
-                                .h(px(28.))
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| this.retry_chat(index, cx)),
-                                ),
-                            ),
-                    )
-                },
+            .children(
+                self.render_chat_status(index, active, thinking, cx)
+                    .map(|status| crate::motion::lift(status, arriving(1))),
             )
-            .when(!active && !answer.is_empty(), |d| {
-                d.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        // On a page of its own: a 31 pt pill in full ink,
-                        // 35 pt under the answer's last line (the reference).
-                        .h(px(if compact { 30. } else { 33. }))
-                        .when(!compact, |row| row.mt(px(10.)))
-                        .child(
+            .when(!thinking && !unanswered, |container| {
+                container.child(self.chat_markdown(index, &shown_answer, compact, cx))
+            })
+            .children(crate::motion::appear(
+                &self.stage,
+                error_key,
+                error.is_some(),
+                div()
+                    .min_w_0()
+                    .px(px(10.))
+                    .py(px(8.))
+                    .rounded(px(8.))
+                    .bg(t.hover)
+                    .text_size(px(12.))
+                    .line_height(px(18.))
+                    .text_color(t.muted)
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(error.unwrap_or_default())
+                    .child(
+                        div().flex().child(
+                            pill(
+                                ("retry-interrupted-chat", index),
+                                "Retry answer",
+                                "chat-retry",
+                                t,
+                            )
+                            .h(px(28.))
+                            .on_click(cx.listener(move |this, _, _, cx| this.retry_chat(index, cx))),
+                        ),
+                    ),
+            ))
+            .children(crate::motion::appear(
+                &self.stage,
+                actions_key,
+                finished,
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    // On a page of its own: a 31 pt pill in full ink,
+                    // 35 pt under the answer's last line (the reference).
+                    .h(px(if compact { 30. } else { 33. }))
+                    .when(!compact, |row| row.mt(px(10.)))
+                    .when(!unanswered, |row| {
+                        row.child(
                             pill(("chat-say-more", index), "Say more", "", t)
                                 .h(px(if compact { 28. } else { 31. }))
                                 .when(!compact, |pill| pill.px(px(14.)).border_color(t.border))
@@ -2439,11 +3183,7 @@ impl crate::app::Cereal {
                         .child(
                             tool_tip(("copy-chat-response", index), "copy", "Copy response", t)
                                 .size(px(28.))
-                                .opacity(if self.chat_interrupted.contains(&index) {
-                                    1.
-                                } else {
-                                    shown
-                                })
+                                .opacity(if interrupted { 1. } else { shown })
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     // The citation-rewritten copy is only
                                     // needed here, so it is built here.
@@ -2456,25 +3196,22 @@ impl crate::app::Cereal {
                                     crate::ui::confirm(("copy-chat-response", index), cx);
                                 })),
                         )
-                        .child(
-                            tool_tip(
-                                ("retry-chat-response", index),
-                                "chat-retry",
-                                "Retry response",
-                                t,
-                            )
-                            .size(px(28.))
-                            .opacity(if self.chat_interrupted.contains(&index) {
-                                1.
-                            } else {
-                                shown
-                            })
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.retry_chat(index, cx)),
-                            ),
-                        ),
-                )
-            })
+                    })
+                    .child(
+                        tool_tip(
+                            ("retry-chat-response", index),
+                            "chat-retry",
+                            if unanswered { "Ask again" } else { "Retry response" },
+                            t,
+                        )
+                        .size(px(28.))
+                        // Off the row's leading edge by its own padding, so
+                        // the glyph alone lines up with the text above.
+                        .when(unanswered, |tool| tool.ml(px(-6.)))
+                        .opacity(if interrupted { 1. } else { shown })
+                        .on_click(cx.listener(move |this, _, _, cx| this.retry_chat(index, cx))),
+                    ),
+            ))
     }
 
     pub fn render_chat_composer_focused(
@@ -2504,7 +3241,13 @@ impl crate::app::Cereal {
     }
 
     /// The model picker's button: the model the next question goes to and
-    /// a small chevron. The list of the server's models opens from it.
+    /// a small chevron. The list of the server's models opens from it, and
+    /// the button stays lit while the list is open.
+    ///
+    /// Opening the list gives the keyboard back to the field: the arrows,
+    /// Return and Escape are the list's while it is open, and a Return that
+    /// chooses a model must not also press this button again (a focused
+    /// control is pressed by Return's release).
     pub(crate) fn render_chat_model_button(
         &self,
         id: &'static str,
@@ -2512,8 +3255,10 @@ impl crate::app::Cereal {
     ) -> Stateful<Div> {
         let t = self.theme();
         let hover = crate::motion::reveal_key(("chat-model-button", id));
-        let warmth = crate::motion::revealed(hover).max(if self.chat_model_picker_open { 1. } else { 0. });
-        let ink = crate::motion::mix(t.muted, t.text, warmth);
+        if self.chat_model_picker_open {
+            crate::motion::hold(id);
+        }
+        let ink = crate::motion::mix(t.muted, t.text, crate::motion::revealed(hover));
         div()
             .id(id)
             .relative()
@@ -2531,9 +3276,10 @@ impl crate::app::Cereal {
             .child(icon("chevron-down", 11., ink))
             .cursor_default()
             .reach()
-            .on_click(cx.listener(|this, _, _, cx| {
+            .on_click(cx.listener(|this, _, window, cx| {
                 if crate::server::enabled() || !this.chat_models.is_empty() {
                     this.toggle_chat_model_picker(cx);
+                    this.ask.read(cx).focus_handle.focus(window);
                 }
             }))
     }
@@ -2586,10 +3332,16 @@ impl crate::app::Cereal {
     }
 
     /// The list of models, growing out of the model button and folding back
-    /// into it: above the button and ending where it ends, or (`below`)
-    /// under the leading end of the Chat page's composer. A quiet "Models"
-    /// heading, then a row a model: a glyph for who makes it, its name, a
-    /// "Default" tag on the instance default, and a check on the one in use.
+    /// into it: above the composer and ending where the button ends, or
+    /// (`below`) under the leading end of the Chat page's composer. A quiet
+    /// "Models" heading, then a row a model: a glyph for who makes it, its
+    /// name, a "Default" tag on the instance default, and a check on the one
+    /// in use. One highlight follows the pointer and the arrow keys and
+    /// glides between rows; the model in use is marked by its check alone.
+    ///
+    /// It is drawn on an overlay over the whole window: a press outside it
+    /// closes it and does nothing else, and nothing behind it answers the
+    /// pointer.
     pub(crate) fn render_chat_model_picker(
         &self,
         shown: bool,
@@ -2597,11 +3349,10 @@ impl crate::app::Cereal {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let t = self.theme();
-        let picker = self.stage.presence(
-            ("chat-model-picker", 0),
-            self.chat_model_picker_open && shown,
-            crate::motion::SNAPPY,
-        );
+        let open = self.chat_model_picker_open && shown;
+        let picker = self
+            .stage
+            .presence(("chat-model-picker", 0), open, crate::motion::SNAPPY);
         if !picker.visible {
             return None;
         }
@@ -2609,18 +3360,11 @@ impl crate::app::Cereal {
             .chat_model_choice()
             .and_then(|chosen| self.chat_models.iter().position(|choice| choice == chosen));
         let cursor = self.chat_model_cursor;
-        let list = div()
-            .id("chat-model-options")
-            .absolute()
-            .map(|list| {
-                if below {
-                    list.top(px(84.)).left(px(8.))
-                } else {
-                    // Clear of the pill's top edge, ending where the button ends.
-                    list.bottom(px(64.)).right(px(46.))
-                }
-            })
-            .w(px(232.))
+        let glide = self.stage.glide("chat-models");
+        // Where the composer it opened from was last drawn.
+        let composer = crate::onboarding_view::placed(COMPOSER)?;
+        let list = crate::ui::floating(div().id("chat-model-options"))
+            .w(px(MODEL_MENU_WIDTH))
             .max_h(px(320.))
             .overflow_y_scroll()
             .p(px(4.))
@@ -2642,21 +3386,13 @@ impl crate::app::Cereal {
                     spread_radius: px(0.),
                 },
             ])
-            .occlude()
             .cursor_default()
-            // A press anywhere else closes the menu, and only the menu.
-            .on_mouse_down_out(cx.listener(|this, _, window, cx| {
-                // The press closes the menu and nothing else: the field
-                // keeps the keyboard, so the bar stays open until the next.
-                if this.chat_model_picker_open {
-                    window.prevent_default();
-                }
-                this.dismiss_chat_model_picker(cx)
-            }))
+            .child(glide.indicator(t.hover, 6.))
             .child(
                 div()
                     .h(px(26.))
                     .px(px(8.))
+                    .flex_shrink_0()
                     .flex()
                     .items_center()
                     .text_size(px(12.))
@@ -2665,12 +3401,11 @@ impl crate::app::Cereal {
             )
             .children(self.chat_models.iter().enumerate().map(|(index, choice)| {
                 let selected = chosen == Some(index);
-                // The row the arrows are on, else the one in use.
-                let lit = cursor.map_or(selected, |cursor| cursor == index);
                 div()
                     .id(("chat-model-option", index))
                     .relative()
                     .h(px(28.))
+                    .flex_shrink_0()
                     .px(px(8.))
                     .rounded(px(6.))
                     .cursor_default()
@@ -2680,8 +3415,15 @@ impl crate::app::Cereal {
                     .text_size(px(13.5))
                     .line_height(px(18.))
                     .text_color(t.text)
-                    .when(lit, |row| row.bg(t.hover))
-                    .child(crate::motion::tactile(t.hover).radius(6.))
+                    // Squash on press; the shared highlight is the hover.
+                    .child(crate::motion::tactile(t.border.opacity(0.)).press(t.fill))
+                    .when(cursor == Some(index), |row| row.child(glide.probe(index)))
+                    .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                        if this.chat_model_cursor != Some(index) {
+                            this.chat_model_cursor = Some(index);
+                            cx.notify();
+                        }
+                    }))
                     .child(icon(model_glyph(choice), 14., t.secondary).flex_shrink_0())
                     .child(
                         div()
@@ -2696,7 +3438,7 @@ impl crate::app::Cereal {
                                 .h(px(16.))
                                 .px(px(5.))
                                 .rounded(px(4.))
-                                .bg(t.hover)
+                                .bg(t.fill)
                                 .flex()
                                 .items_center()
                                 .text_size(px(10.))
@@ -2712,18 +3454,33 @@ impl crate::app::Cereal {
                     .reach()
                     .on_click(cx.listener(move |this, _, _, cx| this.choose_chat_model(index, cx)))
             }));
-        // Painted after everything else and outside any clipping: Home's
-        // floating chat panel is shorter than the menu while it is empty,
-        // and would otherwise cut its first rows off.
-        Some(
-            deferred(crate::motion::pop(
-                list,
-                crate::motion::Pop::menu(if below { (0., 0.) } else { (1., 1.) }),
-                picker,
-            ))
-            .with_priority(2)
-            .into_any_element(),
+        let place = model_menu_place(composer, below);
+        let layer = crate::ui::overlay(
+            open,
+            cx.listener(|this, _, _, cx| this.dismiss_chat_model_picker(cx)),
         )
+        // The pointer has left the menu (its body takes the pointer for
+        // itself): no row is under it, and the highlight eases away.
+        .on_mouse_move(cx.listener(|this, _, _, cx| {
+            if this.chat_model_picker_open && this.chat_model_cursor.take().is_some() {
+                cx.notify();
+            }
+        }))
+        .child(
+            div()
+                .absolute()
+                .left(px(place.left))
+                .map(|slot| match place.edge {
+                    MenuEdge::Top(top) => slot.top(px(top)),
+                    MenuEdge::Bottom(bottom) => slot.top_0().h(px(bottom)).flex().flex_col().justify_end(),
+                })
+                .child(crate::motion::pop(
+                    list,
+                    crate::motion::Pop::menu(if below { (0., 0.) } else { (1., 1.) }),
+                    picker,
+                )),
+        );
+        Some(crate::ui::lifted(layer))
     }
 
     /// The composer pill. `folded` is Home's bar at rest (not focused,
@@ -2812,13 +3569,17 @@ impl crate::app::Cereal {
             .w_full()
             // 58 px tall at rest, the field 21 px in from the leading edge
             // and the round button 10 px from the trailing one (measured
-            // against the reference at 1.25 px per point).
+            // against the reference at 1.25 px per point). Each further
+            // line of a draft adds its 22 px, up to six; past that the
+            // field scrolls and keeps the caret's line in view.
             .min_h(px(crate::motion::ASK_PILL))
-            .max_h(px(170.))
             .pl(px(21.))
             .pr(px(10.))
             .py(px(12.))
-            .rounded_full()
+            // A capsule at rest; a taller draft keeps the same corners, so
+            // its first and last lines never run into them, and they stay
+            // concentric with the tray's.
+            .rounded(px(crate::motion::ASK_PILL / 2.))
             .border_1()
             // The resting edge gives way to the gold line as it arrives. In
             // a tray the line is drawn further in, and the edge it leaves
@@ -2829,6 +3590,7 @@ impl crate::app::Cereal {
                 crate::motion::mix(edge, line, ring.ring_fade)
             })
             .bg(t.card)
+            .child(crate::onboarding_view::place(COMPOSER))
             .child(crate::motion::hover_probe(composer_hover))
             .shadow(vec![BoxShadow {
                 color: hsla(0., 0., 0.16, 0.04 * (1. - ring.ring_fade)),
@@ -2847,17 +3609,7 @@ impl crate::app::Cereal {
             .flex()
             .items_center()
             .gap(px(12.))
-            .child(
-                div()
-                    .id("chat-composer-text")
-                    .flex_1()
-                    .min_w_0()
-                    .max_h(px(130.))
-                    .overflow_y_scroll()
-                    .text_size(px(14.))
-                    .line_height(px(22.))
-                    .child(self.ask.clone()),
-            )
+            .child(div().flex_1().min_w_0().child(self.render_chat_field(0, 22.)))
             // Focused, the controls come in from the trailing edge; they
             // leave the same way when the bar folds. They are laid out past
             // the placeholder, which stays where it is.
@@ -2868,6 +3620,31 @@ impl crate::app::Cereal {
                     controls,
                 ))
             })
+    }
+
+    /// The composer's field: the draft, at most six lines of it showing. Its
+    /// room follows the draft's height on a spring, so the composer round
+    /// it grows and shrinks a line at a time without jumping, and the text
+    /// rides its top edge. `surface` tells the pill (0) from the Chat
+    /// page's card (1); `line` is the text's line height there.
+    pub(crate) fn render_chat_field(&self, surface: u64, line: f32) -> Div {
+        crate::motion::follow_height(
+            &self.stage,
+            ("chat-composer-field", surface),
+            div().w_full().min_w_0().py(px(5.)).child(
+                div()
+                    .id(("chat-composer-text", surface))
+                    // The input scrolls this to its caret (`ChatUi::new`).
+                    .track_scroll(&self.chat_ui.ask_scroll)
+                    .w_full()
+                    .min_w_0()
+                    .max_h(px(6. * line))
+                    .overflow_y_scroll()
+                    .text_size(px(14.))
+                    .line_height(px(line))
+                    .child(self.ask.clone()),
+            ),
+        )
     }
 
     pub fn render_chat_edit_banner(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -2896,49 +3673,51 @@ impl crate::app::Cereal {
             )
     }
 
-    /// The recent-chats button: open the list, or close it.
-    ///
-    /// A press anywhere outside the open list closes it. When that press was
-    /// on this button, the click it completes must not open the list again,
-    /// so a list that a press closed a moment ago stays closed.
+    /// The recent-chats button: open the list, or close it. (A press
+    /// outside the open list is taken by its overlay, so it never reaches
+    /// this button.)
     pub(crate) fn toggle_chat_history(&mut self, cx: &mut Context<Self>) {
-        let just_closed = self
-            .chat_history_closed_at
-            .take()
-            .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(500));
-        if !just_closed {
-            self.chat_history_open = !self.chat_history_open;
-        }
+        self.chat_history_open = !self.chat_history_open;
+        self.chat_ui.history_from = None;
         cx.notify();
     }
 
-    /// The model button: open the menu, or close it. A press outside the
-    /// open menu closes it; when that press was on the button, the click it
-    /// completes must not open the menu again (as `toggle_chat_history`).
-    pub(crate) fn toggle_chat_model_picker(&mut self, cx: &mut Context<Self>) {
-        let just_closed = self
-            .chat_model_picker_closed_at
-            .take()
-            .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(500));
-        if !just_closed {
-            self.chat_model_picker_open = !self.chat_model_picker_open;
+    /// Where the recent-chats list of a chat page goes: its top, its left
+    /// and the point of it that stays on the control it grows out of. Under
+    /// the link that opened it ("See all"), ending where the link ends;
+    /// otherwise under the header's History button.
+    pub(crate) fn chat_history_place(&self, window: &Window) -> (f32, f32, (f32, f32)) {
+        if let Some(link) = self.chat_ui.history_from.and_then(crate::onboarding_view::placed) {
+            let limit = (f32::from(window.viewport_size().width) - 320. - 12.).max(12.);
+            let left = (f32::from(link.right()) - 320. + 6.).clamp(12., limit);
+            return (f32::from(link.bottom()) + 6., left, (0.92, 0.));
         }
+        let left = self.sidebar_inset()
+            + if self.current_note.is_some() {
+                62.
+            } else if self.screen == crate::app::Screen::Chat && self.sidebar_away() {
+                // Under the bar's own History button: past the traffic
+                // lights, the two window tools and the back pill (8 + 80,
+                // two 28 pt tools and a 43 pt pill, 5 pt apart).
+                202.
+            } else {
+                8.
+            };
+        (42., left, (0.1, 0.))
+    }
+
+    /// The model button: open the menu, or close it.
+    pub(crate) fn toggle_chat_model_picker(&mut self, cx: &mut Context<Self>) {
+        self.chat_model_picker_open = !self.chat_model_picker_open;
         self.chat_model_cursor = None;
         cx.notify();
     }
 
     /// Whether a popover of the composer (the model menu, the recent chats)
-    /// is open, or was closed by the press being handled now. A press
-    /// outside the composer that closes one of them does only that, as
-    /// Escape does; the next one folds the bar.
+    /// is open. A press outside the composer then closes only the popover,
+    /// as Escape does; the next one folds the bar.
     pub(crate) fn chat_popover_open(&self) -> bool {
-        let now = |at: Option<std::time::Instant>| {
-            at.is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(80))
-        };
-        self.chat_model_picker_open
-            || self.chat_history_open
-            || now(self.chat_model_picker_closed_at)
-            || now(self.chat_history_closed_at)
+        self.chat_model_picker_open || self.chat_history_open
     }
 
     /// A press outside the model menu: close it.
@@ -2946,7 +3725,6 @@ impl crate::app::Cereal {
         if self.chat_model_picker_open {
             self.chat_model_picker_open = false;
             self.chat_model_cursor = None;
-            self.chat_model_picker_closed_at = Some(std::time::Instant::now());
             cx.notify();
         }
     }
@@ -2955,36 +3733,36 @@ impl crate::app::Cereal {
     pub(crate) fn dismiss_chat_history(&mut self, cx: &mut Context<Self>) {
         if self.chat_history_open {
             self.chat_history_open = false;
-            self.chat_history_closed_at = Some(std::time::Instant::now());
             cx.notify();
         }
     }
 
+    /// The recent chats, newest first under the day they were last used: a
+    /// card 320 px wide and at most 340 tall. Its rows keep their 30 px
+    /// however many there are; a longer list scrolls inside the card, with
+    /// a thumb while it is scrolled and a fade at whichever edge cuts it.
     pub fn render_chat_history(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = self.theme();
+        let scroll = &self.chat_ui.history_scroll;
         let mut rows = div()
-            .id("chat-history-menu")
-            .occlude()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .w(px(320.))
-            .max_h(px(340.))
+            .id("chat-history-rows")
+            .track_scroll(scroll)
+            .flex_1()
+            .min_h_0()
             .overflow_y_scroll()
+            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
             .p(px(6.))
-            .rounded(px(12.))
-            .bg(t.card)
-            .border_1()
-            .border_color(t.border)
-            .shadow_lg()
             .flex()
             .flex_col();
-        let archives: Vec<_> = self
-            .chat_archives
-            .iter()
-            .enumerate()
-            .rev()
-            // A chat about a note in Trash is still listed: it opens by itself.
-            .map(|(i, a)| (i, a.title.clone()))
-            .collect();
+        // By when each was last used, whatever order they are kept in. A
+        // chat about a note in Trash is still listed: it opens by itself.
+        let mut archives: Vec<usize> = (0..self.chat_archives.len()).collect();
+        archives.sort_by(|a, b| {
+            self.chat_archives[*b]
+                .updated_at
+                .cmp(&self.chat_archives[*a].updated_at)
+                .then(b.cmp(a))
+        });
         if archives.is_empty() {
             rows = rows.child(
                 div()
@@ -2995,26 +3773,30 @@ impl crate::app::Cereal {
             );
         }
         let mut previous_group = String::new();
-        for (index, title) in archives {
+        for index in archives {
             let archive = &self.chat_archives[index];
             let date_group = chat_date_group(archive.updated_at.as_deref());
             if date_group != previous_group {
                 previous_group = date_group.clone();
                 rows = rows.child(
                     div()
+                        .flex_shrink_0()
                         .px(px(6.))
                         .pt(px(6.))
                         .pb(px(4.))
                         .text_size(px(12.))
+                        .line_height(px(16.))
                         .text_color(t.muted)
                         .child(date_group),
                 );
             }
             let note_id = archive.note_id;
-            let archive_id = self.chat_archives[index].id.clone();
+            let archive_id = archive.id.clone();
             rows = rows.child(
                 div()
                     .id(("archived-chat", index))
+                    .relative()
+                    .flex_shrink_0()
                     .px(px(10.))
                     .h(px(30.))
                     .rounded(px(7.))
@@ -3028,56 +3810,138 @@ impl crate::app::Cereal {
                         if note_id == 0 { "chat" } else { "file" },
                         14.,
                         t.muted,
-                    ))
-                    .child(div().flex_1().min_w_0().truncate().child(title))
+                    ).flex_shrink_0())
+                    .child(div().flex_1().min_w_0().truncate().child(if archive.title.trim().is_empty() {
+                        crate::chat_sync::UNTITLED.to_owned()
+                    } else {
+                        archive.title.clone()
+                    }))
                     .reach().on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.restore_archived_chat(&archive_id, this.chat_maximized, cx);
                     })),
             );
         }
-        rows
+        // How much of the list is out of sight above and below, as last
+        // laid out.
+        let above = -f32::from(scroll.offset().y);
+        let below = f32::from(scroll.max_offset().height) - above;
+        let edge = |top: bool, hidden: f32| {
+            let (from, to) = if top { (1., 0.) } else { (0., 1.) };
+            div()
+                .absolute()
+                .left(px(1.))
+                .right(px(1.))
+                .map(|fade| if top { fade.top(px(1.)) } else { fade.bottom(px(1.)) })
+                .h(px(22.))
+                .map(|fade| {
+                    if top {
+                        fade.rounded_t(px(11.))
+                    } else {
+                        fade.rounded_b(px(11.))
+                    }
+                })
+                .bg(linear_gradient(
+                    180.,
+                    linear_color_stop(t.card.opacity(from), 0.),
+                    linear_color_stop(t.card.opacity(to), 1.),
+                ))
+                .opacity((hidden / 12.).clamp(0., 1.))
+        };
+        crate::ui::floating(div().id("chat-history-menu"))
+            .relative()
+            .w(px(320.))
+            .max_h(px(340.))
+            .rounded(px(12.))
+            .bg(t.card)
+            .border_1()
+            .border_color(t.border)
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .child(rows)
+            .when(above > 0.5, |card| card.child(edge(true, above)))
+            .when(below > 0.5, |card| card.child(edge(false, below)))
+            .child(crate::ui::scroll_thumb("chat-history", scroll))
     }
     pub fn chat_can_scroll_down(&self) -> bool {
-        // The button is 28 px and floats over the end of the conversation.
+        // The button is 26 px and floats over the end of the conversation.
         // With less hidden than it would itself cover, it only gets in the
-        // way.
-        self.chat_scroll.max_offset().height + self.chat_scroll.offset().y > px(44.)
+        // way; and a reader who is being kept at the end has no use for it
+        // while the view catches up with an answer.
+        !self.chat_ui.follow.get().attached
+            && self.chat_scroll.max_offset().height + self.chat_scroll.offset().y > px(44.)
     }
-    /// Scroll to latest: a filled capsule with a down arrow, centred and
-    /// floating just above the composer on a soft shadow. Only there while
-    /// the end of the conversation is out of sight (`chat_can_scroll_down`).
-    pub fn render_chat_scroll_down(&self, cx: &mut Context<Self>) -> Div {
+
+    /// The foot of a conversation's view, drawn over its last 56 px: "Scroll
+    /// to latest", a filled capsule with a down arrow, centred and floating
+    /// 10 px above whatever is under the view (the composer, or the edit
+    /// warning over it), on a fade of the surface's own colour (`ground`)
+    /// so no line of text runs under it. Only there while the end of the
+    /// conversation is out of sight (`chat_can_scroll_down`); it pops out
+    /// of the composer's edge and goes back into it. Add it to the box the
+    /// conversation scrolls in, after the scroll.
+    pub fn render_chat_scroll_foot(&self, ground: Hsla, cx: &mut Context<Self>) -> Option<Div> {
         let t = self.theme();
-        div()
-            .absolute()
-            .left_0()
-            .right_0()
-            .bottom(px(if self.chat_editing.is_some() {
-                118.
-            } else {
-                74.
-            }))
-            .flex()
-            .justify_center()
-            .child(
-                round_tool("chat-scroll-down", "arrow-down", "Scroll to latest", t)
-                    .w(px(36.))
-                    .h(px(26.))
-                    .rounded_full()
-                    .bg(crate::motion::mix(t.card, t.text, 0.12))
-                    .text_color(t.text)
-                    .shadow(vec![BoxShadow {
-                        color: hsla(0., 0., 0., 0.16),
-                        offset: point(px(0.), px(3.)),
-                        blur_radius: px(10.),
-                        spread_radius: px(0.),
-                    }])
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.chat_to_bottom();
-                        cx.notify();
-                    })),
-            )
+        let pose = self.stage.presence(
+            ("chat-scroll-down", 0),
+            self.chat_can_scroll_down(),
+            crate::motion::SNAPPY,
+        );
+        if !pose.visible {
+            return None;
+        }
+        let capsule = round_tool("chat-scroll-down", "arrow-down", "Scroll to latest", t)
+            .w(px(36.))
+            .h(px(26.))
+            .rounded_full()
+            .bg(crate::motion::mix(t.card, t.text, 0.12))
+            .text_color(t.text)
+            .shadow(vec![BoxShadow {
+                color: hsla(0., 0., 0., 0.16),
+                offset: point(px(0.), px(3.)),
+                blur_radius: px(10.),
+                spread_radius: px(0.),
+            }])
+            .on_click(cx.listener(|this, _, _, cx| {
+                let mut follow = this.chat_ui.follow.get();
+                follow.ride(std::time::Instant::now());
+                this.chat_ui.follow.set(follow);
+                cx.notify();
+            }));
+        Some(
+            div()
+                .absolute()
+                .bottom_0()
+                .left_0()
+                .right_0()
+                .h(px(56.))
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .bg(linear_gradient(
+                            180.,
+                            linear_color_stop(ground.opacity(0.), 0.),
+                            linear_color_stop(ground, 1.),
+                        ))
+                        .opacity(pose.fade),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .bottom(px(10.))
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .child(crate::motion::pop(
+                            capsule,
+                            crate::motion::Pop::chip((0.5, 1.)),
+                            pose,
+                        )),
+                ),
+        )
     }
 
     pub fn render_context_chat_header(&self, cx: &mut Context<Self>) -> Div {
@@ -3166,7 +4030,10 @@ impl crate::app::Cereal {
         if !self.chat_messages.is_empty() {
             content = content.child(self.render_chat_turns(2, false, window, cx));
         }
-        div()
+        if let Some(queue) = self.render_chat_queue(false, window, cx) {
+            content = content.child(queue);
+        }
+        let page = div()
             .relative()
             .flex_1()
             .min_h_0()
@@ -3174,9 +4041,37 @@ impl crate::app::Cereal {
             .flex_col()
             .items_center()
             .bg(t.bg)
+            .child(self.render_chat_page_scroll("full-context-chat-scroll", content, cx))
+            .child(self.render_chat_page_foot(
+                self.render_chat_composer_focused(
+                    self.ask.read(cx).focus_handle.is_focused(window),
+                    cx,
+                )
+                .into_any_element(),
+                cx,
+            ));
+        self.chat_widened(page, window)
+    }
+
+    /// The box a conversation scrolls in on a page of its own, with the
+    /// way back down to its end floating over its foot.
+    pub(crate) fn render_chat_page_scroll(
+        &self,
+        id: &'static str,
+        content: impl IntoElement,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let t = self.theme();
+        div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .flex()
+            .flex_col()
             .child(
                 div()
-                    .id("full-context-chat-scroll")
+                    .id(id)
                     .track_scroll(&self.chat_scroll)
                     .flex_1()
                     .min_h_0()
@@ -3188,19 +4083,33 @@ impl crate::app::Cereal {
                     .items_center()
                     .child(content),
             )
+            .children(self.render_chat_scroll_foot(t.bg, cx))
+    }
+
+    /// What stands under a conversation on a page of its own: the edit
+    /// warning, opening above the composer and closing again; `composer`;
+    /// and the line under it.
+    pub(crate) fn render_chat_page_foot(&self, composer: AnyElement, cx: &mut Context<Self>) -> Div {
+        let t = self.theme();
+        div()
+            .w_full()
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .items_center()
             .child(
                 div()
                     .w_full()
                     .max_w(px(672.))
                     .px(px(8.))
                     .pb(px(8.))
-                    .when(self.chat_editing.is_some(), |d| {
-                        d.child(div().mb(px(8.)).child(self.render_chat_edit_banner(cx)))
-                    })
-                    .child(self.render_chat_composer_focused(
-                        self.ask.read(cx).focus_handle.is_focused(window),
-                        cx,
-                    )),
+                    .children(crate::motion::appear(
+                        &self.stage,
+                        ("chat-edit-banner-page", 0),
+                        self.chat_editing.is_some(),
+                        div().pb(px(8.)).child(self.render_chat_edit_banner(cx)),
+                    ))
+                    .child(composer),
             )
             .child(
                 div()
@@ -3210,10 +4119,106 @@ impl crate::app::Cereal {
                     .text_color(t.muted)
                     .child("AI can make mistakes. Check important details."),
             )
-            .when(self.chat_can_scroll_down(), |d| {
-                d.child(self.render_chat_scroll_down(cx))
-            })
-            .into_any_element()
+    }
+
+    /// "Maximize" was pressed in the chat panel: the page it opens grows
+    /// out of the panel (see [`Self::chat_widened`]) and holds its place
+    /// while the sidebar comes in beside it.
+    pub(crate) fn chat_widen(&mut self) {
+        self.stage.kick(("chat-widen", 0), 0., crate::motion::PANEL);
+        self.chat_ui.widening.set(true);
+    }
+
+    /// A conversation's page as it arrives from the chat panel: its frame
+    /// grows from where the panel stood to the page's bounds while what is
+    /// on it comes in behind the moving edge, instead of the panel being
+    /// replaced by the page in one frame. The page is laid out where it
+    /// will rest from the start, so the sidebar sliding in beside it does
+    /// not carry the conversation sideways. At rest, and with reduced
+    /// motion, the page is returned as it is.
+    pub(crate) fn chat_widened(&self, page: Div, window: &Window) -> AnyElement {
+        let t = self.theme();
+        // Half of the room the sidebar has still to take (or give back).
+        let hold = if self.chat_ui.widening.get() {
+            let room = self.stage.target(("sidebar", 0)).unwrap_or(0.).clamp(0., 1.);
+            let hold = self.sidebar_span * (room - self.sidebar_level) / 2.;
+            if hold.abs() < 0.5 && self.stage.target(("chat-widen", 0)).is_none() {
+                self.chat_ui.widening.set(false);
+            }
+            hold
+        } else {
+            0.
+        };
+        let page = if hold > 0. {
+            page.pl(px(2. * hold))
+        } else {
+            page.pr(px(-2. * hold))
+        };
+        let key = ("chat-widen", 0);
+        if self.stage.target(key).is_none() {
+            return page.into_any_element();
+        }
+        let pose = self.stage.presence(key, true, crate::motion::PANEL);
+        if pose.at_rest() {
+            self.stage.forget(key);
+            return page.into_any_element();
+        }
+        if crate::motion::reduce_motion() {
+            return page.opacity(pose.fade).into_any_element();
+        }
+        let viewport = window.viewport_size();
+        let (wide, tall) = (f32::from(viewport.width), f32::from(viewport.height));
+        let pop = widen_from(
+            (wide, tall),
+            self.sidebar_inset(),
+            // Over Home the panel stood beside the sidebar; a note has the
+            // window to itself.
+            if self.current_note.is_some() { 0. } else { self.sidebar_inset() },
+            self.current_note.is_some(),
+            self.stage.target(("assistant-height", 0)).unwrap_or(465.) + 2.,
+        );
+        let level = pose.value.clamp(0., 1.);
+        crate::motion::pop(
+            page.rounded(px(crate::motion::ASK_FRAME_RADIUS * (1. - level)))
+                .border_1()
+                .border_color(t.border.opacity(1. - level))
+                .bg(crate::motion::mix(t.card, t.bg, level)),
+            pop,
+            pose.solid(),
+        )
+    }
+}
+
+/// How a conversation's page grows out of the chat panel: the page is the
+/// `window` right of `page_left` and under the 48 px header; the panel
+/// stood centred in the window right of `panel_left` (683 px wide over
+/// Home, 680 over a `note`, `panel_tall` high, 24 px above the window's
+/// bottom edge).
+pub(crate) fn widen_from(
+    window: (f32, f32),
+    page_left: f32,
+    panel_left: f32,
+    note: bool,
+    panel_tall: f32,
+) -> crate::motion::Pop {
+    let (page_wide, page_tall) = ((window.0 - page_left).max(1.), (window.1 - 48.).max(1.));
+    let room = window.0 - panel_left;
+    let panel_wide = if note {
+        (672. + 2. * crate::motion::ASK_INSET).min(room - 48. + 2. * crate::motion::ASK_INSET)
+    } else {
+        683_f32.min(room - 40.)
+    }
+    .clamp(1., page_wide);
+    let left = panel_left + (room - panel_wide) / 2.;
+    let slack = page_wide - panel_wide;
+    crate::motion::Pop {
+        anchor: (
+            if slack > 0.5 { ((left - page_left) / slack).clamp(0., 1.) } else { 0.5 },
+            1.,
+        ),
+        scale: (panel_wide / page_wide, (panel_tall / page_tall).clamp(0.05, 1.)),
+        travel: 0.,
+        rise: -24.,
     }
 }
 
@@ -3440,57 +4445,255 @@ fn citation_room(number: u32) -> String {
 }
 /// What a citation's room is made of: a figure, drawn in no colour.
 const CITATION_ROOM: &str = "0";
+/// What sets a chip a hair apart from the word before it (and from a chip
+/// before it): a point, drawn in no colour like the room, and not a space.
+/// A line may break at a space, which left a chip alone at the head of the
+/// next line, away from the sentence it belongs to; a point is part of the
+/// word, so a chip always stays with the word it follows.
+const CITATION_GAP: &str = ".";
 
 /// The chips of a paragraph's sources: a light grey disc (a capsule for two
 /// or more digits) in the room each one has in the text, centred on its
 /// line, with its number in small grey figures. A text background cannot
 /// draw them (it fills the whole line box) and text cannot change size
 /// within a line, so both are painted where the text laid the room out.
-fn citation_chips(layout: TextLayout, marks: Vec<(std::ops::Range<usize>, u32)>, t: Theme) -> AnyElement {
-    let chip = crate::motion::mix(t.hover, t.text, 0.04);
-    let ink = t.muted;
-    canvas(
-        |_, _, _| (),
-        move |_, _, window, cx| {
-            let line = layout.line_height();
-            let tall = (line * 0.78).min(px(18.));
-            for (range, number) in &marks {
-                let (Some(start), Some(end)) = (
-                    layout.position_for_index(range.start),
-                    layout.position_for_index(range.end),
-                ) else {
-                    continue;
-                };
-                // A mark the line breaks inside is left without a chip.
-                if start.y != end.y {
-                    continue;
-                }
-                let wide = end.x - start.x;
-                let top = start.y + (line - tall) / 2.;
-                window.paint_quad(
-                    fill(Bounds::new(point(start.x, top), size(wide, tall)), chip)
-                        .corner_radii(tall / 2.),
-                );
-                let label = SharedString::from(number.to_string());
-                let run = TextRun {
-                    len: label.len(),
-                    font: gpui::font(crate::ui::FONT),
-                    color: ink,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                };
-                let shaped = window
-                    .text_system()
-                    .shape_line(label, px(11.), &[run], None);
-                let origin = point(start.x + (wide - shaped.width) / 2., top);
-                let _ = shaped.paint(origin, tall, window, cx);
+///
+/// A chip answers the pointer like any control: under it the chip darkens
+/// and its number takes full ink, eased in and out, and the conversation is
+/// told which mark it is on (`chat_cite_enter`), so the mark's card can
+/// open. Its click is the text's (`sourced_chat_markdown`).
+struct CitationChips {
+    layout: TextLayout,
+    marks: Vec<(std::ops::Range<usize>, u32)>,
+    theme: Theme,
+    view: WeakEntity<crate::app::Cereal>,
+    turn: usize,
+    block: usize,
+    /// The mark of these the conversation has the pointer on.
+    lit: Option<u32>,
+}
+
+/// Each chip's eased hover, by its number, and which one the pointer was on
+/// when they were last painted.
+#[derive(Default)]
+struct ChipsState {
+    hover: std::collections::HashMap<u32, crate::motion::Track>,
+    on: std::rc::Rc<std::cell::Cell<Option<u32>>>,
+}
+
+/// Where the chip of a mark that spans `range` of `layout` is painted. A
+/// mark the line breaks inside has none.
+fn chip_bounds(layout: &TextLayout, range: &std::ops::Range<usize>) -> Option<Bounds<Pixels>> {
+    let (start, end) = (
+        layout.position_for_index(range.start)?,
+        layout.position_for_index(range.end)?,
+    );
+    if start.y != end.y {
+        return None;
+    }
+    let line = layout.line_height();
+    let tall = (line * 0.78).min(px(18.));
+    Some(Bounds::new(
+        point(start.x, start.y + (line - tall) / 2.),
+        size(end.x - start.x, tall),
+    ))
+}
+
+impl IntoElement for CitationChips {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for CitationChips {
+    type RequestLayoutState = ();
+    type PrepaintState = Vec<(u32, Bounds<Pixels>, Hitbox)>;
+
+    fn id(&self) -> Option<ElementId> {
+        Some(("chat-citation-chips", self.block).into())
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let mut style = Style::default();
+        style.refine(&StyleRefinement::default().absolute().size_full());
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        _: &mut App,
+    ) -> Self::PrepaintState {
+        self.marks
+            .iter()
+            .filter_map(|(range, number)| {
+                let chip = chip_bounds(&self.layout, range)?;
+                Some((*number, chip, window.insert_hitbox(chip, HitboxBehavior::Normal)))
+            })
+            .collect()
+    }
+
+    fn paint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        chips: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let Some(id) = id else { return };
+        let t = self.theme;
+        let now = std::time::Instant::now();
+        let on = chips
+            .iter()
+            .find(|(_, _, hitbox)| hitbox.is_hovered(window))
+            .map(|(number, chip, _)| (*number, *chip));
+        let lit = self.lit;
+        let (levels, moving, seen) = window.with_element_state::<ChipsState, _>(id, |state, _| {
+            let mut state = state.unwrap_or_default();
+            state.on.set(on.map(|(number, _)| number));
+            let mut moving = false;
+            let levels: Vec<f32> = chips
+                .iter()
+                .map(|(number, _, _)| {
+                    let to = on.is_some_and(|(on, _)| on == *number) || lit == Some(*number);
+                    let track = state
+                        .hover
+                        .entry(*number)
+                        .or_insert_with(|| crate::motion::Track::rest(0., now));
+                    crate::motion::hover_to(track, to, now);
+                    moving |= !track.settled(now);
+                    track.value(now)
+                })
+                .collect();
+            state.hover.retain(|_, track| track.target() > 0. || !track.settled(now));
+            ((levels, moving, state.on.clone()), state)
+        });
+        if moving {
+            window.request_animation_frame();
+        }
+        // Tell the conversation which mark the pointer is on, once this
+        // frame is done with.
+        let (turn, block) = (self.turn, self.block);
+        match on {
+            Some((number, chip)) => {
+                let view = self.view.clone();
+                window.defer(cx, move |_, cx| {
+                    let _ = view.update(cx, |this, cx| {
+                        this.chat_cite_enter(
+                            CiteMark { turn, block, id: format!("S{number}"), chip },
+                            cx,
+                        )
+                    });
+                });
             }
-        },
-    )
-    .absolute()
-    .size_full()
-    .into_any_element()
+            None => {
+                if let Some(number) = lit {
+                    let view = self.view.clone();
+                    window.defer(cx, move |_, cx| {
+                        let _ = view.update(cx, |this, cx| {
+                            this.chat_cite_leave(Some((turn, block, number)), cx)
+                        });
+                    });
+                }
+            }
+        }
+        let rest = crate::motion::mix(t.hover, t.text, 0.04);
+        for ((number, chip, _), level) in chips.iter().zip(levels) {
+            let fill_color = crate::motion::mix(rest, t.text, 0.14 * level);
+            window.paint_quad(fill(*chip, fill_color).corner_radii(chip.size.height / 2.));
+            let label = SharedString::from(number.to_string());
+            let run = TextRun {
+                len: label.len(),
+                font: gpui::font(crate::ui::FONT),
+                color: crate::motion::mix(t.muted, t.text, level),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let shaped = window
+                .text_system()
+                .shape_line(label, px(11.), &[run], None);
+            let origin = point(chip.origin.x + (chip.size.width - shaped.width) / 2., chip.origin.y);
+            let _ = shaped.paint(origin, chip.size.height, window, cx);
+        }
+        // The pointer came onto a chip or left one: paint again.
+        let hits: Vec<(u32, Hitbox)> = chips
+            .iter()
+            .map(|(number, _, hitbox)| (*number, hitbox.clone()))
+            .collect();
+        window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, _| {
+            if phase != DispatchPhase::Capture {
+                return;
+            }
+            let now = hits
+                .iter()
+                .find(|(_, hitbox)| hitbox.is_hovered(window))
+                .map(|(number, _)| *number);
+            if now != seen.get() {
+                window.refresh();
+            }
+        });
+    }
+}
+
+/// A source card's width.
+const CITE_CARD: f32 = 300.;
+
+/// Where a source card stands for a mark whose chip is at `chip`: its
+/// corner nearest the chip, whether it is above the chip, and how far along
+/// its width the chip's centre is (what it grows out of).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CiteCardPlace {
+    pub at: Point<Pixels>,
+    pub above: bool,
+    pub stem: f32,
+}
+
+/// A source card is centred on its chip, 6 pt clear of it and inside the
+/// window; above the chip unless that is too near the top of the window
+/// for a card with a passage of four lines.
+pub(crate) fn cite_card_place(chip: Bounds<Pixels>, viewport: Size<Pixels>) -> CiteCardPlace {
+    let centre = f32::from(chip.center().x);
+    let limit = (f32::from(viewport.width) - CITE_CARD - 12.).max(12.);
+    let left = (centre - CITE_CARD / 2.).clamp(12., limit);
+    let above = f32::from(chip.top()) >= 48. + 170.;
+    CiteCardPlace {
+        at: point(
+            px(left),
+            if above { chip.top() - px(6.) } else { chip.bottom() + px(6.) },
+        ),
+        above,
+        stem: ((centre - left) / CITE_CARD).clamp(0.05, 0.95),
+    }
+}
+
+/// A moment of a recording as its transcript prints it: "4:07", "1:02:30".
+pub(crate) fn clock(ms: i64) -> String {
+    let seconds = (ms.max(0) / 1000) as u64;
+    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
 }
 
 /// Each mark is a small chip: its raised number padded by a thin space on
@@ -3500,8 +4703,9 @@ fn citation_chips(layout: TextLayout, marks: Vec<(std::ops::Range<usize>, u32)>,
 fn citation_tokens(source: &str, citations: &[ChatCitationDTO]) -> String {
     rewrite_citation_tokens(source, citations, |id| {
         let room = citation_room(id[1..].parse::<u32>().unwrap_or(0));
-        // A word space before each chip, so two side by side stay apart.
-        format!(" [{room}](minutes-source:{id})")
+        // The gap before each chip is part of its mark, so two side by
+        // side stay apart and neither is ever parted from its sentence.
+        format!("[{CITATION_GAP}{room}](minutes-source:{id})")
     })
 }
 
@@ -3779,7 +4983,12 @@ fn ask_ring_overlay(width: f32, line: Hsla, halo: Hsla, inset: bool) -> impl Int
             } else {
                 (bounds.dilate(width), bounds)
             };
-            let round = |rect: Bounds<Pixels>| Corners::all(rect.size.height / 2.);
+            // The pill's own corners (a capsule at rest, the same radius
+            // when a draft has made it taller), moved out or in with the rect.
+            let round = |rect: Bounds<Pixels>| {
+                let grown = (rect.size.height - bounds.size.height) / 2.;
+                Corners::all((px(crate::motion::ASK_PILL / 2.) + grown).min(rect.size.height / 2.))
+            };
             if width > px(0.) {
                 window.paint_quad(quad(
                     band,
@@ -4858,10 +6067,4 @@ mod account_tests {
         assert_eq!(kept[0].id, "a-10");
     }
 
-}
-
-/// Whether the conversation shows its end: within a few points of the bottom,
-/// as the last frame laid it out. A wheel turn up of any size leaves it.
-pub(crate) fn chat_at_end(scroll: &ScrollHandle) -> bool {
-    scroll.max_offset().height + scroll.offset().y <= px(8.)
 }

@@ -4126,6 +4126,17 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
         }) {
             let _ = handle.update(cx, |_, window, _| window.resize(size(px(width), px(height))));
         }
+        // `CEREAL_TOUR_AT=40,60` puts the window's top-left corner that far
+        // from the screen's (debug builds): several windows opened for
+        // filming otherwise stand on top of each other, and one that is
+        // wholly covered draws no frames.
+        #[cfg(all(debug_assertions, target_os = "macos"))]
+        if let Some((left, top)) = std::env::var("CEREAL_TOUR_AT").ok().and_then(|at| {
+            let (left, top) = at.split_once(',')?;
+            Some((left.parse::<f64>().ok()?, top.parse::<f64>().ok()?))
+        }) {
+            let _ = handle.update(cx, |_, window, _| place_window(window, left, top));
+        }
         let shots = std::env::var_os("CEREAL_TOUR_SHOTS").map(std::path::PathBuf::from);
         // Without `--motion-tour` the tour runs against the server the data
         // directory is signed in to: wait for its notes before starting.
@@ -6145,4 +6156,32 @@ pub fn welcome(handle: WindowHandle<Cereal>, name: String, cx: &mut App) {
         finish(cx).await;
     })
     .detach();
+}
+
+/// Move `window` so its top-left corner is `left`, `top` points from the
+/// top-left corner of the screen it is on (see `CEREAL_TOUR_AT`).
+#[cfg(all(debug_assertions, target_os = "macos"))]
+fn place_window(window: &Window, left: f64, top: f64) {
+    use cocoa::base::id;
+    use cocoa::foundation::{NSPoint, NSRect};
+    use objc::{msg_send, sel, sel_impl};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    unsafe {
+        let view = handle.ns_view.as_ptr() as id;
+        let native: id = msg_send![view, window];
+        let screen: id = msg_send![native, screen];
+        if native.is_null() || screen.is_null() {
+            return;
+        }
+        // The screen's origin is its bottom-left corner.
+        let frame: NSRect = msg_send![screen, frame];
+        let corner = NSPoint::new(frame.origin.x + left, frame.origin.y + frame.size.height - top);
+        let _: () = msg_send![native, setFrameTopLeftPoint: corner];
+    }
 }
