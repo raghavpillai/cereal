@@ -2229,8 +2229,10 @@ impl Cereal {
                 } else if menu == Menu::Shortcuts {
                     // Each shortcut as the palette and the menus draw one:
                     // keycaps, and the keys the menu bar shows.
-                    let rows: [(&str, &[&[&'static str]]); 8] = [
+                    let rows: [(&str, &[&[&'static str]]); 10] = [
                         ("New note", &[&["⇧", "⌘", "N"]]),
+                        ("Start or stop recording", &[crate::recording_view::RECORD_KEYS.1]),
+                        ("Show or hide transcript", &[crate::recording_view::TRANSCRIPT_KEYS.1]),
                         ("Search notes", &[&["⌘", "K"], &["⌘", "F"]]),
                         ("Go home", &[&["⌘", "1"]]),
                         ("Toggle sidebar", &[&["⌘", "B"]]),

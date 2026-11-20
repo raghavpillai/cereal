@@ -1882,6 +1882,37 @@ pub fn pop<E: Styled + IntoElement + 'static>(element: E, pop: Pop, pose: Pose) 
     Morph::new(element).posed(pop, pose).into_any_element()
 }
 
+/// [`pop`] for a surface that is alone in a see-through window of its own
+/// (the recording pill and its transcript popup). Such a window is faded as
+/// one piece by the window server: set the window's opacity to `pose.fade`
+/// and draw the surface with this. The shell, its hairline, its shadow and
+/// its content then keep their full strength, so none of them can show
+/// through another or outlast it, and the content arrives and leaves with
+/// the shell (clipped to it while it grows) instead of on its own.
+pub fn pop_whole<E: Styled + IntoElement + 'static>(element: E, pop: Pop, pose: Pose) -> AnyElement {
+    if pose.settled && pose.value == 1. {
+        return element.into_any_element();
+    }
+    let mut morph = Morph::new(element).posed(pop, pose.solid());
+    morph.content = 1.;
+    morph.into_any_element()
+}
+
+/// The opacity of a window whose surface is drawn with [`pop_whole`] at
+/// `pose`. It follows the shell the way a menu's content does
+/// ([`content_fade`]): nothing while the shell is still small enough to cut
+/// into what it holds, whole before it lands. With reduced motion it is the
+/// plain short fade.
+pub fn whole_fade(pose: Pose) -> f32 {
+    if reduce_motion() {
+        pose.fade.clamp(0., 1.)
+    } else if pose.value >= 1. {
+        1.
+    } else {
+        content_fade(pose.value)
+    }
+}
+
 /// The pose of something `progress` of the way through arriving on `spring`.
 pub fn mount_pose(spring: Spring, progress: f32, reduced: bool) -> Pose {
     if reduced {
@@ -2257,6 +2288,7 @@ pub struct Tactile {
     /// left), for a control joined to a neighbour inside one capsule.
     corners: Option<[f32; 4]>,
     reveals: Option<u64>,
+    presses: Option<u64>,
 }
 
 thread_local! {
@@ -2394,7 +2426,31 @@ pub fn tactile(hover: Hsla) -> Tactile {
         radius: Some(6.),
         corners: None,
         reveals: None,
+        presses: None,
     }
+}
+
+thread_local! {
+    /// Press levels published by [`Tactile::presses`], by key.
+    static PRESSES: RefCell<HashMap<u64, f32>> = RefCell::new(HashMap::new());
+}
+
+/// How far the control whose feedback layer [`Tactile::presses`] under `key`
+/// is held down: 0 at rest, 1 held, sprung back through 0 on release. A
+/// glyph inside a pressed control rides the squash with this (drawn a little
+/// smaller by [`squashed`]), since nothing here can scale an element. It
+/// trails the pointer by one frame, and is always 0 with reduced motion.
+pub fn pressed(key: u64) -> f32 {
+    if reduce_motion() {
+        return 0.;
+    }
+    PRESSES.with(|levels| levels.borrow().get(&key).copied().unwrap_or(0.))
+}
+
+/// The size a glyph of `size` points is drawn at inside a control held down
+/// by `level` (see [`pressed`]): it gives by twice the control's own squash.
+pub fn squashed(size: f32, level: f32) -> f32 {
+    size * (1. - 2. * SQUASH * level)
 }
 
 impl Tactile {
@@ -2438,6 +2494,13 @@ impl Tactile {
     /// background on the control itself for filled buttons.
     pub fn base(mut self, color: Hsla) -> Self {
         self.base = Some(color);
+        self
+    }
+
+    /// Publish how far this control is held down under `key` for [`pressed`],
+    /// so its glyph can squash with it.
+    pub fn presses(mut self, key: u64) -> Self {
+        self.presses = Some(key);
         self
     }
 }
@@ -2569,6 +2632,23 @@ impl Element for Tactile {
         {
             stats::cause("hover");
             window.request_animation_frame();
+        }
+        if let Some(key) = self.presses {
+            let changed = PRESSES.with(|levels| {
+                let mut levels = levels.borrow_mut();
+                let before = if press.abs() <= 0.001 {
+                    levels.remove(&key)
+                } else {
+                    levels.insert(key, press)
+                };
+                (before.unwrap_or(0.) - press).abs() > 0.001
+            });
+            // The glyph is drawn by the view from last frame's level: when
+            // the level settles, one more frame lets it land.
+            if changed && !moving {
+                stats::cause("pointer");
+                window.request_animation_frame();
+            }
         }
 
         let inset = if reduced {

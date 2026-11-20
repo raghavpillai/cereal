@@ -42,6 +42,12 @@ struct Host {
     review_expanded: bool,
     nub: Option<WindowHandle<Nub>>,
     bubble: Option<WindowHandle<TranscriptBubble>>,
+    /// A panel that has been closed and is playing its exit, with the
+    /// number of that exit (see `retire`). Asked for again meanwhile, it
+    /// turns round where it is: there is never a second window.
+    nub_leaving: Option<(WindowHandle<Nub>, u64)>,
+    bubble_leaving: Option<(WindowHandle<TranscriptBubble>, u64)>,
+    exits: u64,
     position: Option<Bounds<Pixels>>,
     available: Bounds<Pixels>,
     display: Option<DisplayId>,
@@ -99,6 +105,9 @@ pub fn install(main: WindowHandle<Cereal>, mode: &str, cx: &mut App) {
         review_expanded: mode == "pill-expanded",
         nub: None,
         bubble: None,
+        nub_leaving: None,
+        bubble_leaving: None,
+        exits: 0,
         position,
         available,
         display,
@@ -120,7 +129,9 @@ pub fn install(main: WindowHandle<Cereal>, mode: &str, cx: &mut App) {
     let _ = main.update(cx, |view, window, cx| {
         view._subscriptions
             .push(cx.observe_window_activation(window, move |_, window, cx| {
-                if let Some(host) = weak.upgrade() {
+                if let Some(host) = weak.upgrade()
+                    && !driven()
+                {
                     host.borrow_mut().active = window.is_window_active();
                 }
                 schedule_sync(&weak, cx);
@@ -418,6 +429,22 @@ fn sync(host: &SharedHost, cx: &mut App) {
         close_all(host, cx);
         return;
     }
+    // A capsule still on its way out turns round where it is.
+    let turning = {
+        let mut h = host.borrow_mut();
+        if h.nub.is_none() { h.nub_leaving.take() } else { None }
+    };
+    if let Some((nub, _)) = turning {
+        let turned = nub
+            .update(cx, |nub, _, cx| {
+                nub.leaving = false;
+                cx.notify();
+            })
+            .is_ok();
+        if turned {
+            host.borrow_mut().nub = Some(nub);
+        }
+    }
     if host.borrow().nub.is_none() {
         let (bounds, display, review) = {
             let h = host.borrow();
@@ -439,10 +466,19 @@ fn sync(host: &SharedHost, cx: &mut App) {
                 native::configure(window, true);
                 native::track(window, NUB_SHADOW);
                 window.set_window_title("Nub");
-                cx.new(|_| Nub {
-                    host: weak,
-                    drag: None,
-                    stage: Default::default(),
+                cx.new(|_| {
+                    // Opened by hand, so the entrance is started by hand.
+                    let stage = crate::motion::Stage::default();
+                    stage.kick(("nub", 0), 0., crate::motion::GOOEY);
+                    Nub {
+                        host: weak,
+                        drag: None,
+                        stage,
+                        leaving: false,
+                        last: None,
+                        rest: None,
+                        alpha: 1.,
+                    }
                 })
             })
         {
@@ -504,6 +540,10 @@ fn install_tracking(weak: WeakHost, cx: &mut App) {
     }
     let async_cx = cx.to_async();
     native::on_crossing(Box::new(move || {
+        // The real pointer crossing a panel a script is driving says nothing.
+        if driven() {
+            return;
+        }
         let weak = weak.clone();
         // Queued, never run inside the event that delivered it.
         async_cx
@@ -519,6 +559,216 @@ fn smoke_test() -> bool {
     *SMOKE.get_or_init(|| std::env::args().any(|arg| arg == "--smoke-test"))
 }
 
+/// A script's pointer standing in for the real one (debug builds; see
+/// [`drive`]): where it is on the screen, in AppKit's coordinates, and
+/// whether the event being handled now is one of its own.
+#[derive(Clone, Copy, Default)]
+struct Driver {
+    at: Option<(f64, f64)>,
+    own: bool,
+}
+thread_local! {
+    static DRIVER: std::cell::Cell<Option<Driver>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether a script is driving the panels. Never in a release build.
+fn driven() -> bool {
+    cfg!(debug_assertions) && DRIVER.with(std::cell::Cell::get).is_some()
+}
+
+/// A pointer event that is not the panels' to act on: the real pointer's,
+/// while a script drives them.
+fn foreign() -> bool {
+    cfg!(debug_assertions) && DRIVER.with(std::cell::Cell::get).is_some_and(|driver| !driver.own)
+}
+
+/// Where the pointer is on the screen (AppKit's coordinates): the real one,
+/// or the script's while it drives the panels.
+fn screen_pointer() -> Option<(f64, f64)> {
+    match DRIVER.with(std::cell::Cell::get).filter(|_| cfg!(debug_assertions)) {
+        Some(driver) => driver.at,
+        None => native::pointer(),
+    }
+}
+
+/// Whether the pointer is over a panel's rectangle (its window less the
+/// shadow `margin`): asked of AppKit, or worked out from the script's
+/// pointer while it drives the panels.
+#[cfg(target_os = "macos")]
+fn pointer_over(window: &Window, margin: f32) -> Option<bool> {
+    let Some(driver) = DRIVER.with(std::cell::Cell::get).filter(|_| cfg!(debug_assertions)) else {
+        return native::pointer_inside(window, margin);
+    };
+    let (Some(at), Some(corner)) = (driver.at, native::origin(window)) else {
+        return Some(false);
+    };
+    let (size, margin) = (window.viewport_size(), f64::from(margin));
+    let (x, y) = (at.0 - corner.0, at.1 - corner.1);
+    Some(
+        x >= margin
+            && y >= margin
+            && x < f64::from(f32::from(size.width)) - margin
+            && y < f64::from(f32::from(size.height)) - margin,
+    )
+}
+
+/// What a script's pointer does to a panel (debug builds; see [`drive`]).
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Driven {
+    Move,
+    /// A move with the left button held.
+    Drag,
+    Down,
+    Up,
+    RightDown,
+    RightUp,
+    /// One wheel event; negative moves down the content.
+    Scroll(f32),
+}
+
+/// Debug builds: hand the panels to a script. From here on they take their
+/// pointer from [`drive`] and what they know of the main window's focus from
+/// [`drive_focus`], and ignore the real pointer and the real focus, so a
+/// review can be filmed while the owner of the Mac works in another app.
+#[cfg(debug_assertions)]
+pub fn drive_begin(cx: &mut App) {
+    if DRIVER.with(std::cell::Cell::get).is_none() {
+        DRIVER.with(|driver| driver.set(Some(Driver::default())));
+        refresh(cx);
+    }
+}
+
+/// Debug builds: the main window gains or loses the focus, as far as the
+/// panels know (the capsule shows only while it does not have it).
+#[cfg(debug_assertions)]
+pub fn drive_focus(active: bool, cx: &mut App) {
+    drive_begin(cx);
+    if let Some(host) = cx.try_global::<Registry>().map(|r| r._host.clone()) {
+        host.borrow_mut().active = active;
+        schedule_sync(&Rc::downgrade(&host), cx);
+    }
+}
+
+/// Debug builds: a panel's rectangle on the screen now (the UI framework's
+/// coordinates: points from the primary display's top-left corner), without
+/// its shadow margin; `None` while that panel is not up. With no capsule up,
+/// `rest` gives where it would come to rest.
+#[cfg(debug_assertions)]
+pub fn driven_frame(popup: bool, rest: bool, cx: &mut App) -> Option<Bounds<Pixels>> {
+    let host = cx.try_global::<Registry>()?._host.clone();
+    let (nub, bubble, saved, available) = {
+        let h = host.borrow();
+        (h.nub, h.bubble, h.position, h.available)
+    };
+    let of = |panel: AnyWindowHandle, margin: f32, cx: &mut App| {
+        panel
+            .update(cx, |_, window, _| {
+                native::bounds(window).unwrap_or_else(|| window.bounds()).inset(px(margin))
+            })
+            .ok()
+    };
+    if popup {
+        return of(bubble?.into(), BUBBLE_SHADOW, cx);
+    }
+    match nub {
+        Some(nub) => of(nub.into(), NUB_SHADOW, cx),
+        None if rest => Some(
+            saved
+                .and_then(|position| resting_place(position, &screens(cx)))
+                .map_or_else(|| nub_bounds(available), |(position, _)| position),
+        ),
+        None => None,
+    }
+}
+
+/// Debug builds: the script's pointer does `input` at `at` on the screen
+/// (the UI framework's coordinates), delivered to the capsule's window or
+/// the popup's as the window server would deliver it, through the window's
+/// own listeners. False if that panel is not up.
+#[cfg(debug_assertions)]
+pub fn drive(popup: bool, at: Point<Pixels>, input: Driven, cx: &mut App) -> bool {
+    drive_begin(cx);
+    let Some(host) = cx.try_global::<Registry>().map(|r| r._host.clone()) else {
+        return false;
+    };
+    let (target, other): (Option<AnyWindowHandle>, Option<AnyWindowHandle>) = {
+        let h = host.borrow();
+        let (nub, bubble) = (h.nub.map(Into::into), h.bubble.map(Into::into));
+        if popup { (bubble, nub) } else { (nub, bubble) }
+    };
+    let Some(target) = target else { return false };
+    let Some(screen) = native::to_screen(at) else {
+        return false;
+    };
+    let own = |own: bool| DRIVER.with(|driver| driver.set(Some(Driver { at: Some(screen), own })));
+    own(true);
+    // The window the pointer has left hears that it has gone.
+    if let Some(other) = other.filter(|_| input == Driven::Move) {
+        let _ = other.update(cx, |_, window, cx| {
+            let frame = native::bounds(window).unwrap_or_else(|| window.bounds());
+            if !frame.contains(&at) {
+                window.dispatch_event(
+                    PlatformInput::MouseExited(MouseExitEvent {
+                        position: at - frame.origin,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            }
+        });
+    }
+    let ran = target
+        .update(cx, |_, window, cx| {
+            let origin = native::bounds(window).unwrap_or_else(|| window.bounds()).origin;
+            let position = at - origin;
+            let button = |button, down: bool| {
+                if down {
+                    PlatformInput::MouseDown(MouseDownEvent {
+                        button,
+                        position,
+                        click_count: 1,
+                        ..Default::default()
+                    })
+                } else {
+                    PlatformInput::MouseUp(MouseUpEvent {
+                        button,
+                        position,
+                        click_count: 1,
+                        ..Default::default()
+                    })
+                }
+            };
+            let event = match input {
+                Driven::Move => PlatformInput::MouseMove(MouseMoveEvent {
+                    position,
+                    ..Default::default()
+                }),
+                Driven::Drag => PlatformInput::MouseMove(MouseMoveEvent {
+                    position,
+                    pressed_button: Some(MouseButton::Left),
+                    ..Default::default()
+                }),
+                Driven::Down => button(MouseButton::Left, true),
+                Driven::Up => button(MouseButton::Left, false),
+                Driven::RightDown => button(MouseButton::Right, true),
+                Driven::RightUp => button(MouseButton::Right, false),
+                Driven::Scroll(by) => PlatformInput::ScrollWheel(ScrollWheelEvent {
+                    position,
+                    delta: ScrollDelta::Pixels(point(px(0.), px(by))),
+                    ..Default::default()
+                }),
+            };
+            window.dispatch_event(event, cx);
+        })
+        .is_ok();
+    own(false);
+    // Both panels look again at where the pointer is, as a crossing or a
+    // move makes them.
+    pointer_moved(&Rc::downgrade(&host), cx);
+    ran
+}
+
 /// Set each panel's hover from the pointer's actual position.
 #[cfg(target_os = "macos")]
 fn refresh_hover(weak: &WeakHost, cx: &mut App) {
@@ -531,7 +781,7 @@ fn refresh_hover(weak: &WeakHost, cx: &mut App) {
         && let Ok(Some(inside)) = nub.update(cx, |nub, window, _| {
             nub.drag
                 .is_none()
-                .then(|| native::pointer_inside(window, NUB_SHADOW))
+                .then(|| pointer_over(window, NUB_SHADOW))
                 .flatten()
         })
     {
@@ -539,7 +789,7 @@ fn refresh_hover(weak: &WeakHost, cx: &mut App) {
     }
     if let Some(bubble) = bubble
         && let Ok(Some(inside)) =
-            bubble.update(cx, |_, window, _| native::pointer_inside(window, BUBBLE_SHADOW))
+            bubble.update(cx, |_, window, _| pointer_over(window, BUBBLE_SHADOW))
     {
         set_hover(weak, true, inside, cx);
     }
@@ -617,6 +867,13 @@ fn panel_options(
     }
 }
 
+/// How long a closed panel is given to play its exit before its window goes.
+fn exit_time() -> Duration {
+    use crate::motion::{GOOEY, REDUCED_FADE, reduce_motion, slow};
+    let exit = if reduce_motion() { slow(REDUCED_FADE) } else { GOOEY.exit_duration() };
+    exit + Duration::from_millis(30)
+}
+
 fn close_bubble(host: &SharedHost, cx: &mut App) {
     let panel = host.borrow_mut().bubble.take();
     let Some(panel) = panel else { return };
@@ -630,31 +887,85 @@ fn close_bubble(host: &SharedHost, cx: &mut App) {
     if !leaving {
         return;
     }
-    let exit = if crate::motion::reduce_motion() {
-        crate::motion::REDUCED_FADE
-    } else {
-        crate::motion::GOOEY.exit_duration()
+    let exit = {
+        let mut h = host.borrow_mut();
+        h.exits = h.exits.wrapping_add(1);
+        h.bubble_leaving = Some((panel, h.exits));
+        h.exits
     };
+    let weak = Rc::downgrade(host);
     cx.spawn(async move |cx| {
-        cx.background_executor()
-            .timer(exit + Duration::from_millis(30))
-            .await;
-        let _ = panel.update(cx, |_, window, _| window.remove_window());
+        cx.background_executor().timer(exit_time()).await;
+        let _ = cx.update(|cx| {
+            // Opened again meanwhile, it turned round and is not this
+            // exit's to remove.
+            let ours = weak.upgrade().is_none_or(|host| {
+                let mut h = host.borrow_mut();
+                let ours = h.bubble_leaving == Some((panel, exit));
+                if ours {
+                    h.bubble_leaving = None;
+                }
+                ours
+            });
+            if ours {
+                let _ = panel.update(cx, |_, window, _| window.remove_window());
+            }
+        });
     })
     .detach();
 }
+
+/// The capsule tucks back toward the screen edge it sits by, then its
+/// window goes.
+fn close_nub(host: &SharedHost, cx: &mut App) {
+    let panel = host.borrow_mut().nub.take();
+    let Some(panel) = panel else { return };
+    let leaving = panel
+        .update(cx, |nub, _, cx| {
+            nub.leaving = true;
+            nub.drag = None;
+            cx.notify();
+        })
+        .is_ok();
+    if !leaving {
+        return;
+    }
+    let exit = {
+        let mut h = host.borrow_mut();
+        h.exits = h.exits.wrapping_add(1);
+        h.nub_leaving = Some((panel, h.exits));
+        h.exits
+    };
+    let weak = Rc::downgrade(host);
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(exit_time()).await;
+        let _ = cx.update(|cx| {
+            let ours = weak.upgrade().is_none_or(|host| {
+                let mut h = host.borrow_mut();
+                let ours = h.nub_leaving == Some((panel, exit));
+                if ours {
+                    h.nub_leaving = None;
+                }
+                ours
+            });
+            if ours {
+                let _ = panel.update(cx, |_, window, _| window.remove_window());
+            }
+        });
+    })
+    .detach();
+}
+
 fn close_all(host: &SharedHost, cx: &mut App) {
-    let nub = {
+    {
         let mut h = host.borrow_mut();
         h.hover_epoch = h.hover_epoch.wrapping_add(1);
         h.hover_nub = false;
         h.hover_bubble = false;
-        h.nub.take()
-    };
-    close_bubble(host, cx);
-    if let Some(nub) = nub {
-        let _ = nub.update(cx, |_, window, _| window.remove_window());
     }
+    // Both leave together, each the way it came.
+    close_bubble(host, cx);
+    close_nub(host, cx);
 }
 
 fn set_hover(weak: &WeakHost, bubble: bool, hovered: bool, cx: &mut App) {
@@ -717,10 +1028,32 @@ fn open_bubble(host: &SharedHost, cx: &mut App) {
         (h.nub, h.available, h.display, h.review_expanded)
     };
     let Some(nub) = nub else { return };
-    let Ok(bounds) = nub.update(cx, |_, window, _| window.bounds()) else {
+    // Beside the capsule: where it is, or where it is springing to.
+    let Ok(bounds) = nub.update(cx, |nub, window, _| {
+        nub.rest
+            .map_or_else(|| window.bounds().inset(px(NUB_SHADOW)), |rest| rest.to)
+    }) else {
         return;
     };
-    let bounds = bubble_bounds(bounds.inset(px(NUB_SHADOW)), available).dilate(px(BUBBLE_SHADOW));
+    let bounds = bubble_bounds(bounds, available).dilate(px(BUBBLE_SHADOW));
+    // A popup still on its way out turns round where it is (or beside the
+    // capsule, if that has moved meanwhile).
+    let turning = host.borrow_mut().bubble_leaving.take();
+    if let Some((panel, _)) = turning {
+        let turned = panel
+            .update(cx, |bubble, window, cx| {
+                bubble.leaving = false;
+                if native::bounds(window).is_some_and(|now| now.origin != bounds.origin) {
+                    native::place(window, bounds.origin);
+                }
+                cx.notify();
+            })
+            .is_ok();
+        if turned {
+            host.borrow_mut().bubble = Some(panel);
+            return;
+        }
+    }
     let weak = Rc::downgrade(host);
     if let Ok(panel) = cx.open_window(panel_options(bounds, display, review), move |window, cx| {
         native::configure(window, false);
@@ -735,8 +1068,14 @@ fn open_bubble(host: &SharedHost, cx: &mut App) {
                 scroll: ScrollHandle::new(),
                 stored: None,
                 followed: None,
+                pinned: true,
+                shown: Shown::default(),
+                known: None,
+                arriving: Vec::new(),
+                firming: Vec::new(),
                 stage,
                 leaving: false,
+                alpha: 1.,
                 copied: 0,
                 copied_shown: false,
             }
@@ -813,6 +1152,7 @@ fn reveal_note(weak: &WeakHost, cx: &mut App) {
     let main = host.borrow().main;
     host.borrow_mut().force_preview = false;
     host.borrow_mut().review_expanded = false;
+    let weak = weak.clone();
     cx.defer(move |cx| {
         let _ = main.update(cx, |view, window, cx| {
             view.open_note(id, cx);
@@ -820,6 +1160,14 @@ fn reveal_note(weak: &WeakHost, cx: &mut App) {
             window.activate_window();
             cx.activate(true);
         });
+        // A script stands in for the window server's word that the window
+        // is in front again.
+        if driven()
+            && let Some(host) = weak.upgrade()
+        {
+            host.borrow_mut().active = true;
+            schedule_sync(&weak, cx);
+        }
     });
 }
 
@@ -827,7 +1175,35 @@ struct Nub {
     host: WeakHost,
     drag: Option<PillDrag>,
     stage: crate::motion::Stage,
+    /// Set when the capsule has been closed and is animating out; its
+    /// window is removed when the exit has played (see `close_nub`).
+    leaving: bool,
+    /// What the capsule last showed of the recording, which it goes on
+    /// showing while it leaves (the recording it showed has ended by then).
+    last: Option<(Phase, TranscriptionAttention, f32)>,
+    /// The capsule let go off-limits, on its way to where it may rest.
+    rest: Option<Rest>,
+    /// The window's opacity as last set (see `native::set_alpha`).
+    alpha: f32,
 }
+/// A capsule that was let go where it may not stay (under the menu bar,
+/// behind the Dock, past a screen edge) springing `from` there `to` the
+/// nearest place it may rest. Both are its rectangle on the screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Rest {
+    from: Bounds<Pixels>,
+    to: Bounds<Pixels>,
+}
+
+/// Where a capsule springing to its resting place is, `level` of the way
+/// there (the spring passes 1 a little before it settles on it).
+fn rest_origin(rest: Rest, level: f32) -> Point<Pixels> {
+    rest.from.origin + (rest.to.origin - rest.from.origin) * level
+}
+
+/// The share of a capsule's width its shell starts at, and how far it
+/// travels, as it swells out of the screen edge it sits by and tucks back.
+const NUB_POP: (f32, f32, f32) = (0.62, 0.86, 8.);
 /// A press on the capsule that may become a drag.
 ///
 /// The drag is worked out from where the pointer really is on the screen
@@ -852,7 +1228,7 @@ impl Nub {
         viewport: Size<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        if self.drag.is_none() {
+        if self.drag.is_none() && !self.leaving {
             set_hover(&self.host, false, pointer_inside(position, viewport, NUB_SHADOW), cx);
             pointer_moved(&self.host, cx);
         }
@@ -864,7 +1240,7 @@ impl Nub {
         if event.pressed_button != Some(MouseButton::Left) {
             return;
         }
-        if let Some(now) = native::pointer() {
+        if let Some(now) = screen_pointer() {
             let (dx, dy) = (now.0 - drag.pressed.0, now.1 - drag.pressed.1);
             drag.moved |= dx * dx + dy * dy > 9.;
             if drag.moved {
@@ -887,7 +1263,7 @@ impl Nub {
         };
         if drag.moved {
             // Where the pointer is now, in case the last move is still queued.
-            if let Some(now) = native::pointer() {
+            if let Some(now) = screen_pointer() {
                 native::set_origin(window, (now.0 - drag.grab.0, now.1 - drag.grab.1));
             }
             let bounds = native::bounds(window)
@@ -899,7 +1275,15 @@ impl Nub {
             let available = rest.map_or(host.borrow().available, |(_, screen)| screen.visible);
             let now = rest.map_or_else(|| clamp_nub(bounds, available), |(now, _)| now);
             if now.origin != bounds.origin {
-                native::place(window, now.origin - point(px(NUB_SHADOW), px(NUB_SHADOW)));
+                // It springs there from where it was let go (`render` moves
+                // the window); with reduced motion it is simply put there.
+                if crate::motion::reduce_motion() {
+                    native::place(window, now.origin - point(px(NUB_SHADOW), px(NUB_SHADOW)));
+                } else {
+                    self.rest = Some(Rest { from: bounds, to: now });
+                    self.stage.forget(("nub-rest", 0));
+                    self.stage.kick(("nub-rest", 0), 0., crate::motion::GOOEY);
+                }
             }
             {
                 let mut h = host.borrow_mut();
@@ -917,23 +1301,57 @@ impl Nub {
 }
 impl Render for Nub {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        use crate::motion::SNAPPY;
+        use crate::motion::{GOOEY, SNAPPY};
         self.stage.begin();
         let rim = nub_rim(window);
         let pointer_events = nub_pointer_events(cx.weak_entity());
-        let (phase, attention, hovered, level) = self
+        // It grows out of the screen edge it sits by and tucks back into it,
+        // and its window fades with it as one piece.
+        let pose = self.stage.presence(("nub", 0), !self.leaving, GOOEY);
+        let alpha = crate::motion::whole_fade(pose);
+        if (self.alpha - alpha).abs() > 0.001 {
+            self.alpha = alpha;
+            native::set_alpha(window, alpha);
+        }
+        // Let go off-limits: the window springs to where it may rest.
+        if let Some(rest) = self.rest {
+            let travel = self.stage.presence(("nub-rest", 0), true, GOOEY);
+            let margin = point(px(NUB_SHADOW), px(NUB_SHADOW));
+            if travel.settled || self.drag.is_some() {
+                if self.drag.is_none() {
+                    native::place(window, rest.to.origin - margin);
+                }
+                self.rest = None;
+                self.stage.forget(("nub-rest", 0));
+            } else {
+                native::place(window, rest_origin(rest, travel.value) - margin);
+            }
+        }
+        let (live, hovered, right) = self
             .host
             .upgrade()
-            .and_then(|h| {
+            .map(|h| {
                 let h = h.borrow();
-                live(&h, cx).map(|s| (s.phase, s.attention, h.hover_nub, s.audio_level))
+                let right = h.position.unwrap_or_else(|| nub_bounds(h.available)).center().x
+                    >= h.available.center().x;
+                (
+                    live(&h, cx).map(|s| (s.phase, s.attention, s.audio_level)),
+                    h.hover_nub,
+                    right,
+                )
             })
-            .unwrap_or((Phase::Idle, TranscriptionAttention::None, false, 0.));
+            .unwrap_or((None, false, true));
+        // A capsule that is leaving goes on showing what it showed.
+        if let Some(live) = live.filter(|_| !self.leaving) {
+            self.last = Some(live);
+        }
+        let (phase, attention, level) =
+            self.last.unwrap_or((Phase::Idle, TranscriptionAttention::None, 0.));
         let heights = voice_bar_targets(level);
         let badge = self.stage.presence(
             ("nub-attention", 0),
             attention == TranscriptionAttention::Warning,
-            crate::motion::GOOEY,
+            GOOEY,
         );
         // The hover tint eases in, and the capsule squashes while it is held
         // (including for the whole of a drag) and springs back on release.
@@ -948,6 +1366,94 @@ impl Render for Nub {
         );
         let skin = skin();
         let mark = Hsla::from(skin.ink).opacity(if skin.dark { 0.86 } else { 0.8 });
+        let capsule = div()
+            .id("desktop-recording-nub")
+            .relative()
+            .w(px(34. - 1.4 * held))
+            .h(px(62. - 2.5 * held))
+            .rounded_full()
+            .border(px(rim))
+            .border_color(skin.edge)
+            .bg(blend(skin.capsule, skin.capsule_lit, lit))
+            .shadow(lifted(NUB_SHADOW + INSET, skin.dark))
+            .flex()
+            .flex_col()
+            .items_center()
+            // The mark as far from the top as the tallest level bars
+            // come from the bottom, so the pair sits centred whether
+            // the room is quiet or loud.
+            .pt(px(11. - rim))
+            .gap(px(6.))
+            .cursor(CursorStyle::Arrow)
+            .child(icon("cereal", 16., mark).mb(px(2.)))
+            .child(nub_indicator(phase, attention, heights, skin))
+            .when(badge.visible, |d| {
+                d.child(crate::motion::pop(
+                    div()
+                        .id("nub-transcription-attention")
+                        .absolute()
+                        // On the capsule's shoulder, clear of the mark: the
+                        // capsule's edge turns away under it, and the mark's
+                        // corner is two points from its rim.
+                        .top(px(-NUB_BADGE_OUT))
+                        .right(px(-NUB_BADGE_OUT))
+                        .size(px(NUB_BADGE))
+                        .rounded_full()
+                        .bg(rgb(0xed9212))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .font_family(FONT)
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(12.))
+                        .line_height(px(NUB_BADGE))
+                        .text_color(rgb(0xffffff))
+                        .child("!"),
+                    crate::motion::Pop::BLOB,
+                    badge,
+                ))
+            })
+            .child(
+                div()
+                    .id("nub-whole-surface-hit-target")
+                    .absolute()
+                    .inset_0()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            if foreign() || this.leaving {
+                                return;
+                            }
+                            let Some(host) = this.host.upgrade() else {
+                                return;
+                            };
+                            {
+                                let mut h = host.borrow_mut();
+                                h.hover_epoch = h.hover_epoch.wrapping_add(1);
+                                h.hover_nub = false;
+                                h.hover_bubble = false;
+                            }
+                            close_bubble(&host, cx);
+                            // Where on the capsule it was taken hold
+                            // of comes from the press itself: by the
+                            // time the press is handled the pointer
+                            // may already have moved on.
+                            let corner = native::origin(window).unwrap_or_default();
+                            let grab = (
+                                f64::from(f32::from(event.position.x)),
+                                f64::from(f32::from(window.bounds().size.height - event.position.y)),
+                            );
+                            this.drag = Some(PillDrag {
+                                pressed: (corner.0 + grab.0, corner.1 + grab.1),
+                                grab,
+                                origin: window.bounds().origin,
+                                pointer: window.bounds().origin + event.position,
+                                moved: false,
+                            });
+                            cx.notify();
+                        }),
+                    ),
+            );
         let nub = div()
             .relative()
             .size_full()
@@ -956,94 +1462,26 @@ impl Render for Nub {
             .flex()
             .items_center()
             .justify_center()
-            .child(
-                div()
-                    .id("desktop-recording-nub")
-                    .relative()
-                    .w(px(34. - 1.4 * held))
-                    .h(px(62. - 2.5 * held))
-                    .rounded_full()
-                    .border(px(rim))
-                    .border_color(skin.edge)
-                    .bg(blend(skin.capsule, skin.capsule_lit, lit))
-                    .shadow(lifted(NUB_SHADOW + INSET, skin.dark))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    // The mark as far from the top as the tallest level bars
-                    // come from the bottom, so the pair sits centred whether
-                    // the room is quiet or loud.
-                    .pt(px(11. - rim))
-                    .gap(px(6.))
-                    .cursor(CursorStyle::Arrow)
-                    .child(icon("cereal", 16., mark).mb(px(2.)))
-                    .child(nub_indicator(phase, attention, heights, skin))
-                    .when(badge.visible, |d| {
-                        d.child(crate::motion::pop(
-                            div()
-                                .id("nub-transcription-attention")
-                                .absolute()
-                                .top(px(-4.))
-                                .right(px(-4.))
-                                .size(px(18.))
-                                .rounded_full()
-                                .bg(rgb(0xed9212))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .font_family(FONT)
-                                .font_weight(FontWeight::BOLD)
-                                .text_size(px(13.))
-                                .line_height(px(18.))
-                                .text_color(rgb(0xffffff))
-                                .child("!"),
-                            crate::motion::Pop::BLOB,
-                            badge,
-                        ))
-                    })
-                    .child(
-                        div()
-                            .id("nub-whole-surface-hit-target")
-                            .absolute()
-                            .inset_0()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                                    let Some(host) = this.host.upgrade() else {
-                                        return;
-                                    };
-                                    {
-                                        let mut h = host.borrow_mut();
-                                        h.hover_epoch = h.hover_epoch.wrapping_add(1);
-                                        h.hover_nub = false;
-                                        h.hover_bubble = false;
-                                    }
-                                    close_bubble(&host, cx);
-                                    // Where on the capsule it was taken hold
-                                    // of comes from the press itself: by the
-                                    // time the press is handled the pointer
-                                    // may already have moved on.
-                                    let corner = native::origin(window).unwrap_or_default();
-                                    let grab = (
-                                        f64::from(f32::from(event.position.x)),
-                                        f64::from(f32::from(window.bounds().size.height - event.position.y)),
-                                    );
-                                    this.drag = Some(PillDrag {
-                                        pressed: (corner.0 + grab.0, corner.1 + grab.1),
-                                        grab,
-                                        origin: window.bounds().origin,
-                                        pointer: window.bounds().origin + event.position,
-                                        moved: false,
-                                    });
-                                    cx.notify();
-                                }),
-                            ),
-                    ),
-            );
+            .child(crate::motion::pop_whole(
+                capsule,
+                crate::motion::Pop {
+                    // The side of the screen it sits by.
+                    anchor: (if right { 1. } else { 0. }, 0.5),
+                    scale: (NUB_POP.0, NUB_POP.1),
+                    travel: NUB_POP.2,
+                    rise: 0.,
+                },
+                pose,
+            ));
         self.stage.flush_as("nub", window);
         nub
     }
 }
+
+/// The warning badge on the capsule: its size, and how far it stands out
+/// from the capsule's top and right edges.
+const NUB_BADGE: f32 = 16.;
+const NUB_BADGE_OUT: f32 = 5.;
 
 fn nub_pointer_events(entity: WeakEntity<Nub>) -> AnyElement {
     canvas(
@@ -1055,6 +1493,7 @@ fn nub_pointer_events(entity: WeakEntity<Nub>) -> AnyElement {
                 // position without a preceding MouseMove. Treat that position
                 // as entry too; only the primary button begins a drag.
                 if phase == DispatchPhase::Bubble
+                    && !foreign()
                     && event.button != MouseButton::Left
                     && pointer_inside(event.position, window.viewport_size(), NUB_SHADOW)
                 {
@@ -1063,7 +1502,7 @@ fn nub_pointer_events(entity: WeakEntity<Nub>) -> AnyElement {
             });
             let weak = entity.clone();
             window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-                if phase == DispatchPhase::Bubble {
+                if phase == DispatchPhase::Bubble && !foreign() {
                     let _ = weak.update(cx, |this, cx| {
                         this.move_pointer(event, window);
                         this.hover_pointer(event.position, window.viewport_size(), cx);
@@ -1072,13 +1511,13 @@ fn nub_pointer_events(entity: WeakEntity<Nub>) -> AnyElement {
             });
             let weak = entity.clone();
             window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
-                if phase == DispatchPhase::Bubble {
+                if phase == DispatchPhase::Bubble && !foreign() {
                     let _ = weak.update(cx, |this, cx| set_hover(&this.host, false, false, cx));
                 }
             });
             let weak = entity.clone();
             window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
-                if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
+                if phase == DispatchPhase::Bubble && event.button == MouseButton::Left && !foreign() {
                     let _ = weak.update(cx, |this, cx| this.release_pointer(window, cx));
                 }
             });
@@ -1318,10 +1757,27 @@ struct TranscriptBubble {
     stored: Option<(StoredKey, Rc<Vec<TranscriptSegment>>)>,
     /// The transcript state the view last followed to the bottom.
     followed: Option<(StoredKey, u64)>,
+    /// The view is kept on the newest line: until the reader scrolls up,
+    /// and again once new words arrive while they are back near the end.
+    pinned: bool,
+    /// What the popup last showed of the recording besides the stored rows.
+    /// It goes on showing it while it leaves: a recording that has just
+    /// stopped must not wipe the popup on its way out.
+    shown: Shown,
+    /// The rows of the last frame, to tell which have just arrived.
+    known: Option<Vec<u64>>,
+    /// Rows that are opening their space and fading in.
+    arriving: Vec<u64>,
+    /// Lines that have just firmed up (a finished line took the place of
+    /// the one being spoken), with the height the spoken one had: the row
+    /// travels from it to its own, and its colour firms up with it.
+    firming: Vec<(u64, f32)>,
     stage: crate::motion::Stage,
     /// Set when the bubble has been closed and is animating out; its window
     /// is removed when the exit has played.
     leaving: bool,
+    /// The window's opacity as last set (see `native::set_alpha`).
+    alpha: f32,
     /// Bumped by each press of the copy button; the button says "Copied"
     /// until `COPIED_FOR` after the latest one. This window has no toast.
     copied: u64,
@@ -1329,6 +1785,55 @@ struct TranscriptBubble {
 }
 /// How long the copy button confirms a copy.
 const COPIED_FOR: Duration = Duration::from_millis(1600);
+
+/// What the popup shows of the recording besides the note's stored rows.
+#[derive(Clone, Default)]
+struct Shown {
+    phase: Phase,
+    attention: TranscriptionAttention,
+    /// The lines still being spoken.
+    speaking: Vec<TranscriptSegment>,
+    /// The quiet line under the rows, and the last one shown: it is what
+    /// fades as its space closes.
+    status: Option<crate::live_view::LiveStatus>,
+    last_status: Option<crate::live_view::LiveStatus>,
+    listening: bool,
+}
+
+/// Which of `rows` have arrived since the last frame showed `known`: rows
+/// added after the ones that were there. A row that took another's place (a
+/// line being spoken that firmed up) is the same row to the reader, and a
+/// list that changed by more than a few rows is another list, shown as it is.
+fn arrivals(known: &[u64], rows: &[u64]) -> Vec<u64> {
+    if rows.len() <= known.len() || rows.len() - known.len() > crate::motion::ROSTER_MOST {
+        return Vec::new();
+    }
+    rows[known.len()..]
+        .iter()
+        .copied()
+        .filter(|row| !known.contains(row))
+        .collect()
+}
+
+/// A status line as the popup sets it, `width` points wide: on one line if
+/// it fits (`measure` gives a text's width), otherwise broken where its two
+/// halves meet (" · ") instead of wherever the words run out, which left one
+/// word alone on the second line.
+fn status_lines(text: &str, width: f32, measure: impl Fn(&str) -> f32) -> Vec<String> {
+    if measure(text) <= width {
+        return vec![text.to_owned()];
+    }
+    match text.split_once(" · ") {
+        Some((first, second)) => {
+            let mut second = second.to_owned();
+            if let Some(initial) = second.get_mut(..1) {
+                initial.make_ascii_uppercase();
+            }
+            vec![first.to_owned(), second]
+        }
+        None => vec![text.to_owned()],
+    }
+}
 
 /// The transcript as plain text, one paragraph per row, each run of rows
 /// from one voice headed by who spoke ("Me" for the microphone).
@@ -1378,33 +1883,50 @@ impl TranscriptBubble {
 
 /// The popup's copy button: a small capsule at its top-right corner on the
 /// popup's own surface. After a press it shows a tick and "Copied", and
-/// widens to fit, until `COPIED_FOR` has passed.
-fn copy_button(skin: Skin, copied: bool, stage: &crate::motion::Stage) -> Stateful<Div> {
-    let shown = stage
-        .aim(("nub-copied", 0), if copied { 1. } else { 0. }, crate::motion::SNAPPY)
-        .clamp(0., 1.);
-    let ink: Hsla = if copied { skin.ink } else { skin.muted }.into();
+/// springs wider to fit them, until `COPIED_FOR` has passed. `label` is how
+/// wide the word is drawn.
+fn copy_button(skin: Skin, copied: bool, label: f32, stage: &crate::motion::Stage) -> Stateful<Div> {
+    use crate::motion::SNAPPY;
+    let wide = copied_width(label);
+    let width = stage
+        .aim(("nub-copy-width", 0), if copied { wide } else { COPY_SIZE }, SNAPPY)
+        .max(COPY_SIZE);
+    // The word is shown once the button is wide enough to hold it whole.
+    let shown = copied_label_fade(width, wide);
+    let ink: Hsla = crate::motion::mix(skin.muted.into(), skin.ink.into(), shown);
     div()
         .id("nub-transcript-copy")
-        .h(px(24.))
-        .min_w(px(24.))
-        .px(px(if copied { 8. } else { 0. }))
+        .relative()
+        .h(px(COPY_SIZE))
+        .w(px(width))
+        .flex_shrink_0()
         .rounded_full()
+        .overflow_hidden()
         .flex()
         .items_center()
         .justify_center()
-        .gap(px(4.))
-        .bg(skin.surface)
+        .gap(px(COPY_GAP))
         .border(px(0.5))
         .border_color(skin.edge)
-        .cursor(CursorStyle::PointingHand)
-        .hover(|d| d.bg(if skin.dark { skin.theirs } else { skin.capsule_lit }))
-        .child(icon(if copied { "check" } else { "copy" }, 13., ink))
-        .when(copied, |d| {
+        .cursor(CursorStyle::Arrow)
+        // The one hover wash and pressed state, on the popup's own surface.
+        .child(
+            crate::motion::tactile(if skin.dark { skin.theirs } else { skin.capsule_lit }.into())
+                .base(skin.surface.into())
+                .press(Hsla::from(skin.ink).opacity(0.08))
+                .round(),
+        )
+        .child(crate::motion::swapped(
+            icon(if copied { "check" } else { "copy" }, COPY_ICON, ink),
+            stage.swap(("nub-copy-icon", 0), u64::from(copied)),
+        ))
+        .when(shown > 0., |d| {
             d.child(
                 div()
+                    .flex_shrink_0()
                     .text_size(px(11.))
                     .line_height(px(14.))
+                    .whitespace_nowrap()
                     .text_color(ink)
                     .opacity(shown)
                     .child("Copied"),
@@ -1412,14 +1934,41 @@ fn copy_button(skin: Skin, copied: bool, stage: &crate::motion::Stage) -> Statef
         })
 }
 
+/// The copy button at rest (a circle), its glyph, the gap before its word
+/// and the padding either side of the two once it has widened.
+const COPY_SIZE: f32 = 24.;
+const COPY_ICON: f32 = 13.;
+const COPY_GAP: f32 = 4.;
+const COPY_PAD: f32 = 8.;
+
+/// How wide the copy button is while it says "Copied", `label` points wide.
+fn copied_width(label: f32) -> f32 {
+    (2. * COPY_PAD + COPY_ICON + COPY_GAP + label).ceil()
+}
+
+/// The opacity of "Copied" while the button is `width` wide on its way to
+/// or from `wide`: nothing until the whole word fits beside the glyph, full
+/// when the padding has opened too. Never a cut word.
+fn copied_label_fade(width: f32, wide: f32) -> f32 {
+    let fits = wide - 2. * COPY_PAD;
+    crate::motion::fade_curve(((width - fits) / (wide - fits).max(1.)).clamp(0., 1.))
+}
+
 impl Render for TranscriptBubble {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::motion::{GOOEY, SNAPPY};
         self.stage.begin();
         let rim = nub_rim(window);
         let skin = skin();
-        let pose = self
-            .stage
-            .presence(("bubble", 0), !self.leaving, crate::motion::GOOEY);
+        // It grows out of the capsule's side and folds back into it, and its
+        // window fades with it as one piece: surface, hairline, shadow and
+        // what it shows.
+        let pose = self.stage.presence(("bubble", 0), !self.leaving, GOOEY);
+        let alpha = crate::motion::whole_fade(pose);
+        if (self.alpha - alpha).abs() > 0.001 {
+            self.alpha = alpha;
+            native::set_alpha(window, alpha);
+        }
         let leaving = self.leaving;
         let weak = self.host.clone();
         // The bubble normally opens to the left of the capsule and flips to
@@ -1434,13 +1983,13 @@ impl Render for TranscriptBubble {
             move |_, _, window, _| {
                 let exit = weak.clone();
                 window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
-                    if phase == DispatchPhase::Bubble {
+                    if phase == DispatchPhase::Bubble && !foreign() {
                         set_hover(&exit, true, false, cx);
                     }
                 });
                 let weak = weak.clone();
                 window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-                    if phase == DispatchPhase::Bubble {
+                    if phase == DispatchPhase::Bubble && !foreign() {
                         set_hover(
                             &weak,
                             true,
@@ -1457,11 +2006,6 @@ impl Render for TranscriptBubble {
         // What the recording shows now. Nothing is copied out of the note
         // unless its stored transcript changed since the last frame.
         let model = self.host.upgrade().and_then(|host| host.borrow().model.upgrade());
-        let mut phase = Phase::Idle;
-        let mut attention = TranscriptionAttention::None;
-        let mut speaking: Vec<TranscriptSegment> = Vec::new();
-        let mut status = None;
-        let mut listening = false;
         let mut seen = None;
         if let Some(model) = &model {
             let model = model.read(cx);
@@ -1472,8 +2016,6 @@ impl Render for TranscriptBubble {
                 .and_then(|id| model.workspace.note(id))
                 .filter(|note| !note.trashed);
             if let Some(note) = note {
-                phase = model.recording.phase;
-                attention = model.recording.transcription_attention;
                 let key = (
                     note.id,
                     note.transcript_revision,
@@ -1484,28 +2026,47 @@ impl Render for TranscriptBubble {
                     let rows = bubble_segments(&note.transcript, &note.server_transcript_segments);
                     self.stored = Some((key, Rc::new(rows)));
                 }
-                speaking = model.live.tail(note).iter().cloned().map(segment_of).collect();
-                status = model.live.status(note.id);
-                listening = model.live.listening(note.id);
+                let status = model.live.status(note.id);
+                if status.is_some() {
+                    self.shown.last_status = status.clone();
+                }
+                self.shown = Shown {
+                    phase: model.recording.phase,
+                    attention: model.recording.transcription_attention,
+                    speaking: model.live.tail(note).iter().cloned().map(segment_of).collect(),
+                    status,
+                    last_status: self.shown.last_status.take(),
+                    listening: model.live.listening(note.id),
+                };
                 seen = Some((key, model.live.revision()));
             }
         }
-        if seen.is_none() {
-            self.stored = None;
-        }
+        // A recording that has ended leaves the popup as it was: the popup
+        // is on its way out, showing what it showed.
+        let Shown { phase, attention, speaking, status, last_status, listening } = self.shown.clone();
         let stored = self
             .stored
             .as_ref()
             .map(|(_, rows)| rows.clone())
             .unwrap_or_default();
-        // Follow the live tail until the reader scrolls more than 48px up.
-        if seen != self.followed {
-            let near_bottom = self.scroll.max_offset().height + self.scroll.offset().y <= px(48.);
-            if self.followed.is_none() || near_bottom {
-                self.scroll.scroll_to_bottom();
-                crate::lazy::to_end("nub-transcript");
+        // Follow the live tail until the reader scrolls up, and again when
+        // new words arrive while they are within 48px of the end (or they
+        // have scrolled back to it).
+        let from_end = self.scroll.max_offset().height + self.scroll.offset().y;
+        if seen.is_some() && seen != self.followed {
+            if self.followed.is_none() || from_end <= px(48.) {
+                self.pinned = true;
             }
             self.followed = seen;
+        } else if from_end <= px(1.) {
+            self.pinned = true;
+        }
+        // Kept there on every frame, so that a row opening its space, a line
+        // growing or the status line folding in moves the rows above it up
+        // smoothly instead of landing under the edge.
+        if self.pinned {
+            self.scroll.scroll_to_bottom();
+            crate::lazy::to_end("nub-transcript");
         }
         let count = stored.len() + speaking.len();
         let row = |index: usize| {
@@ -1513,6 +2074,58 @@ impl Render for TranscriptBubble {
                 .checked_sub(stored.len())
                 .map_or_else(|| stored.get(index), |live| speaking.get(live))
         };
+        // Rows that arrived since the last frame open their space and fade
+        // in; every other row is simply there.
+        let ids: Vec<u64> = (0..count)
+            .map(|index| row(index).map_or(0, |segment| segment.id))
+            .collect();
+        if let Some(known) = &self.known {
+            for id in arrivals(known, &ids) {
+                if !self.arriving.contains(&id) {
+                    self.arriving.push(id);
+                }
+            }
+            // A finished line in the place of the one that was being spoken.
+            for (index, (before, now)) in known.iter().zip(&ids).enumerate() {
+                if before != now
+                    && !ids.contains(before)
+                    && row(index).is_some_and(|segment| segment.is_final)
+                    && let Some(tall) = self.stage.target(("nub-row-tall", *before))
+                {
+                    self.stage.forget(("nub-row-tall", *before));
+                    if !self.firming.iter().any(|(id, _)| id == now) {
+                        self.firming.push((*now, tall));
+                    }
+                }
+            }
+        }
+        self.known = Some(ids.clone());
+        let mut firmed: Vec<(u64, f32, crate::motion::Pose)> = Vec::new();
+        {
+            let stage = &self.stage;
+            self.firming.retain(|(id, from)| {
+                let pose = stage.presence(("nub-row-firm", *id), true, SNAPPY);
+                if pose.at_rest() || !ids.contains(id) {
+                    stage.forget(("nub-row-firm", *id));
+                    return false;
+                }
+                firmed.push((*id, *from, pose));
+                true
+            });
+        }
+        let mut opening: Vec<(u64, crate::motion::Pose)> = Vec::new();
+        {
+            let stage = &self.stage;
+            self.arriving.retain(|id| {
+                let pose = stage.presence(("nub-row", *id), true, GOOEY);
+                if pose.at_rest() || !ids.contains(id) {
+                    stage.forget(("nub-row", *id));
+                    return false;
+                }
+                opening.push((*id, pose));
+                true
+            });
+        }
         let several = (
             several_voices(stored.iter().chain(&speaking), true),
             several_voices(stored.iter().chain(&speaking), false),
@@ -1528,9 +2141,18 @@ impl Render for TranscriptBubble {
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
+            // Scrolling up lets go of the newest line.
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, _| {
+                if event.delta.pixel_delta(window.line_height()).y > px(0.) {
+                    this.pinned = false;
+                }
+            }))
             .flex()
             .flex_col()
             .py(px(1.));
+        // The popup's own width: its window is wider by the clear space and
+        // the shadow's margin on each side.
+        let width = f32::from(window.viewport_size().width) - 2. * (INSET + BUBBLE_SHADOW);
         if count == 0 {
             content = content
                 .items_center()
@@ -1593,12 +2215,6 @@ impl Render for TranscriptBubble {
                     ))
                 })
                 .collect();
-            // The popup's own width: its window is wider by the clear
-            // space and the shadow's margin on each side.
-            let width = f32::from(window.viewport_size().width) - 2. * (INSET + BUBBLE_SHADOW);
-            let ids: Vec<u64> = (0..count)
-                .map(|index| row(index).map_or(0, |segment| segment.id))
-                .collect();
             // Rows that have not been on screen stand in the scroll range at
             // a guessed height (the numbers the rows below are laid out
             // with), so hovering the pill an hour into a meeting builds one
@@ -1609,6 +2225,7 @@ impl Render for TranscriptBubble {
             let stack_width = width - 2. * rim - 2. * ROW_MARGIN - ROW_INDENT;
             let text_width = stack_width - 2. * ROW_PAD.0;
             let texts = window.text_system().clone();
+            let stage = &self.stage;
             content = content.child(crate::lazy::estimated(
                 "nub-transcript",
                 &ids,
@@ -1641,12 +2258,39 @@ impl Render for TranscriptBubble {
                     // has not quite arrived. Mixed rather than see-through,
                     // so a draft row stays a clean shape.
                     let fill = if own { skin.own } else { skin.theirs };
-                    let (ink, fill) = if segment.is_final {
-                        (ink, fill)
-                    } else {
-                        (ink.opacity(0.62), blend(skin.surface, fill, 0.6))
+                    let draft = (ink.opacity(0.62), blend(skin.surface, fill, 0.6));
+                    let firming = firmed.iter().find(|(id, _, _)| *id == segment.id);
+                    let (ink, fill) = match firming {
+                        _ if !segment.is_final => draft,
+                        // Just finished: its colour firms up rather than switching.
+                        Some((_, _, pose)) => (
+                            crate::motion::mix(draft.0, ink, pose.value),
+                            blend(draft.1, fill, pose.value.clamp(0., 1.)),
+                        ),
+                        None => (ink, fill),
                     };
                     let corner = |joined: bool| px(if joined { ROW_JOINED } else { ROW_RADIUS });
+                    let (text, tall) =
+                        transcript_text(&segment.text, segment.is_final, text_width, ink, &texts);
+                    let text = match (tall, firming) {
+                        // A line still being spoken grows a line at a time:
+                        // its bubble's edge travels to each new height.
+                        (Some(tall), _) => div()
+                            .h(px(stage.aim(("nub-row-tall", segment.id), tall, SNAPPY).max(ROW_LINE)))
+                            .overflow_hidden()
+                            .child(text)
+                            .into_any_element(),
+                        // And from the height it had to the finished line's.
+                        (None, Some((_, from, pose))) => {
+                            let tall = text_lines(&segment.text, text_width, ink, &texts).0 as f32 * ROW_LINE;
+                            div()
+                                .h(px((from + (tall - from) * pose.value).max(ROW_LINE)))
+                                .overflow_hidden()
+                                .child(text)
+                                .into_any_element()
+                        }
+                        (None, None) => text,
+                    };
                     let paragraph = div()
                         .max_w_full()
                         .min_w_0()
@@ -1662,13 +2306,7 @@ impl Render for TranscriptBubble {
                         .line_height(px(ROW_LINE))
                         .bg(fill)
                         .text_color(ink)
-                        .child(transcript_text(
-                            &segment.text,
-                            segment.is_final,
-                            text_width,
-                            ink,
-                            &texts,
-                        ));
+                        .child(text);
                     let mut stack = div()
                         .w(px(stack_width.max(1.)))
                         .min_w_0()
@@ -1691,7 +2329,7 @@ impl Render for TranscriptBubble {
                         );
                     }
                     stack = stack.child(paragraph);
-                    div()
+                    let built = div()
                         .id(("nub-transcript", i))
                         .flex()
                         .mx(px(ROW_MARGIN))
@@ -1700,28 +2338,70 @@ impl Render for TranscriptBubble {
                         .when(!same_after, |d| d.mb(px(GROUP_GAP)))
                         .when(own, |d| d.pl(px(ROW_INDENT)).justify_end())
                         .when(!own, |d| d.pr(px(ROW_INDENT)).justify_start())
-                        .child(stack)
-                        .into_any_element()
+                        .child(stack);
+                    // A row that has just arrived opens its space as it
+                    // fades in, and the rows above ride up on it.
+                    match opening.iter().find(|(id, _)| *id == segment.id) {
+                        Some((id, pose)) => {
+                            match crate::motion::fold(stage, ("nub-row", *id), *pose, built) {
+                                Some(row) => row.into_any_element(),
+                                None => div().into_any_element(),
+                            }
+                        }
+                        None => built.into_any_element(),
+                    }
                 },
             ));
         }
-        // The same quiet line as under the note's transcript.
-        if let Some(status) = status {
-            let ink: Hsla = if status.warning { skin.warning } else { skin.muted }.into();
-            // Padding, not margin: see the note's transcript panel. A plain
-            // block, so a longer line wraps inside the popup.
-            content = content.child(
-                div().w_full().flex_shrink_0().px(px(16.)).pt(px(2.)).pb(px(8.)).child(
-                    div()
-                        .id("nub-live-status")
-                        .w_full()
-                        .text_size(px(11.))
-                        .line_height(px(15.))
-                        .text_align(TextAlign::Center)
-                        .text_color(ink)
-                        .child(status.text),
-                ),
+        // The same quiet line as under the note's transcript. Its space
+        // opens and closes with it, and it goes on saying what it said
+        // while it leaves.
+        if let Some(said) = status.clone().or(last_status) {
+            let ink: Hsla = if said.warning { skin.warning } else { skin.muted }.into();
+            let face = cx.text_system().resolve_font(&font(FONT));
+            let lines = status_lines(&said.text, width - 2. * rim - 2. * STATUS_PAD, |text| {
+                text.chars()
+                    .map(|character| {
+                        cx.text_system()
+                            .advance(face, px(STATUS_SIZE), character)
+                            .map_or(6., |size| f32::from(size.width))
+                    })
+                    .sum()
+            });
+            // A longer status takes a second line: the block's edge travels
+            // there, and the words hand over softly.
+            let tall = self.stage.aim(
+                ("nub-status-tall", 0),
+                lines.len() as f32 * STATUS_LINE,
+                SNAPPY,
             );
+            let words = crate::motion::swapped(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .children(lines.into_iter().map(|line| div().whitespace_nowrap().child(line))),
+                self.stage
+                    .swap(("nub-status-words", 0), crate::lazy::key(said.text.as_ref())),
+            );
+            // Padding, not margin: see the note's transcript panel.
+            let block = div().w_full().flex_shrink_0().px(px(STATUS_PAD)).pt(px(2.)).pb(px(8.)).child(
+                div()
+                    .id("nub-live-status")
+                    .w_full()
+                    .h(px(tall.max(STATUS_LINE)))
+                    .overflow_hidden()
+                    .text_size(px(STATUS_SIZE))
+                    .line_height(px(STATUS_LINE))
+                    .text_color(ink)
+                    .child(words),
+            );
+            if let Some(block) =
+                crate::motion::appear(&self.stage, ("nub-status", 0), status.is_some(), block)
+            {
+                content = content.child(block.flex_shrink_0());
+            }
         }
 
         // One shape carries the surface, its hairline and its shadow, so
@@ -1763,13 +2443,24 @@ impl Render for TranscriptBubble {
                     .when(count > 0, |header| {
                         // The stored rows are shared, not copied, until a press.
                         let (stored, speaking) = (stored.clone(), speaking.clone());
-                        header.child(copy_button(skin, self.copied_shown, &self.stage).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                let rows: Vec<_> =
-                                    stored.iter().chain(&speaking).cloned().collect();
-                                this.copy(&rows, cx);
-                            }),
-                        ))
+                        let face = cx.text_system().resolve_font(&font(FONT));
+                        let label: f32 = "Copied"
+                            .chars()
+                            .map(|character| {
+                                cx.text_system()
+                                    .advance(face, px(11.), character)
+                                    .map_or(6., |size| f32::from(size.width))
+                            })
+                            .sum();
+                        header.child(
+                            copy_button(skin, self.copied_shown, label, &self.stage).on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    let rows: Vec<_> =
+                                        stored.iter().chain(&speaking).cloned().collect();
+                                    this.copy(&rows, cx);
+                                },
+                            )),
+                        )
                     }),
             )
             .child(
@@ -1788,7 +2479,7 @@ impl Render for TranscriptBubble {
             // A bubble on its way out no longer keeps itself open.
             .when(!leaving, |root| root.child(pointer_events))
             .p(px(INSET + BUBBLE_SHADOW))
-            .child(crate::motion::pop(
+            .child(crate::motion::pop_whole(
                 card,
                 crate::motion::Pop {
                     // The capsule's side, at the capsule's height.
@@ -1803,6 +2494,12 @@ impl Render for TranscriptBubble {
         root
     }
 }
+
+/// The status line under the popup's rows: its text size, line height and
+/// the padding either side of it.
+const STATUS_SIZE: f32 = 11.;
+const STATUS_LINE: f32 = 15.;
+const STATUS_PAD: f32 = 16.;
 
 #[derive(Clone, Debug, PartialEq)]
 struct TranscriptSegment {
@@ -1924,49 +2621,13 @@ fn transcript_text(
     wrap: f32,
     ink: Hsla,
     texts: &std::sync::Arc<WindowTextSystem>,
-) -> AnyElement {
+) -> (AnyElement, Option<f32>) {
     if is_final {
-        return StyledText::new(text.to_owned()).into_any_element();
+        return (StyledText::new(text.to_owned()).into_any_element(), None);
     }
     // Where the text's last line ends decides where the dots go, as inline
     // content would place them.
-    let run = TextRun {
-        len: text.len(),
-        font: font(FONT),
-        color: ink,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    let shaped = texts
-        .shape_text(
-            text.to_owned().into(),
-            px(13.),
-            &[run],
-            Some(px(wrap.max(1.))),
-            None,
-        )
-        .ok();
-    let (lines, last, baseline) = shaped
-        .as_ref()
-        .and_then(|lines| {
-            let count: usize = lines
-                .iter()
-                .map(|line| line.wrap_boundaries().len() + 1)
-                .sum();
-            let line = lines.last()?;
-            let start = line.wrap_boundaries().last().map_or(px(0.), |boundary| {
-                line.runs()
-                    .get(boundary.run_ix)
-                    .and_then(|run| run.glyphs.get(boundary.glyph_ix))
-                    .map_or(px(0.), |glyph| glyph.position.x)
-            });
-            let width = line.unwrapped_layout.width - start;
-            let glyphs = line.ascent() + line.descent();
-            let baseline = (px(ROW_LINE) - glyphs) / 2. + line.ascent();
-            Some((count, f32::from(width), f32::from(baseline)))
-        })
-        .unwrap_or((1, 0., 13.6));
+    let (lines, last, baseline) = text_lines(text, wrap, ink, texts);
     let inline = text.is_empty() || last + DOTS_LEAD + DOTS_WIDTH <= wrap;
     let (left, top) = if text.is_empty() {
         (0., 0.)
@@ -2006,7 +2667,7 @@ fn transcript_text(
             }))
         },
     );
-    div()
+    let element = div()
         .relative()
         .min_w_0()
         // A single line grows by the dots; wrapped text already spans the
@@ -2018,7 +2679,58 @@ fn transcript_text(
         .when(!inline, |d| d.pb(px(ROW_LINE)))
         .child(StyledText::new(text.to_owned()))
         .child(dots)
-        .into_any_element()
+        .into_any_element();
+    // How tall that is: the text's lines, and one more for dots that did
+    // not fit beside its last word.
+    let tall = (lines.max(1) + usize::from(!inline)) as f32 * ROW_LINE;
+    (element, Some(tall))
+}
+
+/// A row's text as it wraps at `wrap` points: how many lines it takes, how
+/// wide the last of them is, and where its baseline lies within a line.
+fn text_lines(
+    text: &str,
+    wrap: f32,
+    ink: Hsla,
+    texts: &std::sync::Arc<WindowTextSystem>,
+) -> (usize, f32, f32) {
+    let run = TextRun {
+        len: text.len(),
+        font: font(FONT),
+        color: ink,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let shaped = texts
+        .shape_text(
+            text.to_owned().into(),
+            px(13.),
+            &[run],
+            Some(px(wrap.max(1.))),
+            None,
+        )
+        .ok();
+    shaped
+        .as_ref()
+        .and_then(|lines| {
+            let count: usize = lines
+                .iter()
+                .map(|line| line.wrap_boundaries().len() + 1)
+                .sum();
+            let line = lines.last()?;
+            let start = line.wrap_boundaries().last().map_or(px(0.), |boundary| {
+                line.runs()
+                    .get(boundary.run_ix)
+                    .and_then(|run| run.glyphs.get(boundary.glyph_ix))
+                    .map_or(px(0.), |glyph| glyph.position.x)
+            });
+            let width = line.unwrapped_layout.width - start;
+            let glyphs = line.ascent() + line.descent();
+            let baseline = (px(ROW_LINE) - glyphs) / 2. + line.ascent();
+            Some((count, f32::from(width), f32::from(baseline)))
+        })
+        .unwrap_or((1, 0., 13.6))
 }
 
 /// One dot of the reference's `oats-jumping-dots`: a one-second loop that
@@ -2249,6 +2961,12 @@ mod native {
         let global: NSPoint = unsafe { msg_send![class!(NSEvent), mouseLocation] };
         Some((global.x, global.y))
     }
+    /// A point of the UI framework's (points from the primary display's
+    /// top-left corner) in AppKit's coordinates.
+    #[cfg(debug_assertions)]
+    pub fn to_screen(at: gpui::Point<gpui::Pixels>) -> Option<(f64, f64)> {
+        Some((f64::from(f32::from(at.x)), primary_height()? - f64::from(f32::from(at.y))))
+    }
     /// The window's bottom-left corner, in the same coordinates.
     pub fn origin(window: &Window) -> Option<(f64, f64)> {
         let window = native(window)?;
@@ -2345,6 +3063,16 @@ mod native {
             }
         }
     }
+    /// The opacity of the whole window, as the window server composites it:
+    /// a panel fades as one piece (its surface, hairline, shadow and content
+    /// together), which no fading of its parts can do.
+    pub fn set_alpha(window: &Window, alpha: f32) {
+        if let Some(window) = native(window) {
+            unsafe {
+                let _: () = msg_send![window, setAlphaValue: f64::from(alpha.clamp(0., 1.))];
+            }
+        }
+    }
     pub fn reveal(window: &Window) {
         if let Some(window) = native(window) {
             unsafe {
@@ -2363,9 +3091,14 @@ mod native {
 #[cfg(not(target_os = "macos"))]
 mod native {
     pub fn configure(_: &gpui::Window, _: bool) {}
+    pub fn set_alpha(_: &gpui::Window, _: f32) {}
     pub fn track(_: &gpui::Window, _: f32) {}
     pub fn move_to(_: &gpui::Window, _: gpui::Point<gpui::Pixels>) {}
     pub fn pointer() -> Option<(f64, f64)> {
+        None
+    }
+    #[cfg(debug_assertions)]
+    pub fn to_screen(_: gpui::Point<gpui::Pixels>) -> Option<(f64, f64)> {
         None
     }
     pub fn screens() -> Vec<(gpui::Bounds<gpui::Pixels>, gpui::Bounds<gpui::Pixels>)> {
@@ -2394,6 +3127,87 @@ mod tests {
         transcript_speaker_heading, voice_bar_targets,
     };
     use gpui::{Bounds, point, px, size};
+    #[test]
+    fn only_rows_added_after_the_ones_that_were_there_arrive() {
+        use super::arrivals;
+        // A new line under the others opens its space.
+        assert_eq!(arrivals(&[1, 2, 3], &[1, 2, 3, 4]), [4]);
+        assert_eq!(arrivals(&[1, 2], &[1, 2, 3, 4]), [3, 4]);
+        // A line that firmed up took another's place: nothing new to open.
+        assert_eq!(arrivals(&[1, 2, 9], &[1, 2, 3]), Vec::<u64>::new());
+        // The same rows, fewer rows, or the first rows of an empty popup.
+        assert_eq!(arrivals(&[1, 2, 3], &[1, 2, 3]), Vec::<u64>::new());
+        assert_eq!(arrivals(&[1, 2, 3], &[1]), Vec::<u64>::new());
+        assert_eq!(arrivals(&[], &[1]), [1]);
+        // A whole transcript arriving at once is another list, simply shown.
+        let many: Vec<u64> = (1..=20).collect();
+        assert_eq!(arrivals(&[1], &many), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn a_status_too_long_for_the_popup_breaks_where_its_halves_meet() {
+        use super::status_lines;
+        // Six points a character, as good as any face for this.
+        let measure = |text: &str| text.chars().count() as f32 * 6.;
+        assert_eq!(status_lines("Catching up…", 260., measure), ["Catching up…"]);
+        assert_eq!(
+            status_lines("Reconnecting · audio is saved on this Mac", 260., measure),
+            ["Reconnecting · audio is saved on this Mac"]
+        );
+        // The warning ran to a second line with "Mac" alone on it.
+        assert_eq!(
+            status_lines("Live transcript unavailable · audio is saved on this Mac", 260., measure),
+            ["Live transcript unavailable", "Audio is saved on this Mac"]
+        );
+        // Nothing to break at: it wraps as it will.
+        let long = "A status with no separator that is far too long for the popup to hold";
+        assert_eq!(status_lines(long, 260., measure), [long]);
+    }
+
+    #[test]
+    fn copied_is_never_shown_cut_while_the_button_widens() {
+        use super::{COPY_SIZE, copied_label_fade, copied_width};
+        let wide = copied_width(38.);
+        assert_eq!(wide, 8. + 13. + 4. + 38. + 8.);
+        // The circle, and every width at which the word would not fit whole.
+        assert_eq!(copied_label_fade(COPY_SIZE, wide), 0.);
+        assert_eq!(copied_label_fade(wide - 16., wide), 0.);
+        let partly = copied_label_fade(wide - 8., wide);
+        assert!(partly > 0. && partly < 1.);
+        assert_eq!(copied_label_fade(wide, wide), 1.);
+        // The spring's overshoot is still the whole word.
+        assert_eq!(copied_label_fade(wide + 2., wide), 1.);
+    }
+
+    #[test]
+    fn a_capsule_let_go_off_limits_travels_to_where_it_may_rest() {
+        use super::{Rest, rest_origin};
+        let nub = |x: f32, y: f32| Bounds::new(point(px(x), px(y)), size(px(42.), px(70.)));
+        // Let go under the menu bar, 30 pt above where it may rest.
+        let rest = Rest { from: nub(500., 0.), to: nub(500., 30.) };
+        assert_eq!(rest_origin(rest, 0.), point(px(500.), px(0.)));
+        assert_eq!(rest_origin(rest, 0.5), point(px(500.), px(15.)));
+        assert_eq!(rest_origin(rest, 1.), point(px(500.), px(30.)));
+        // The spring passes its target a little before it settles on it.
+        let past = rest_origin(rest, 1.05);
+        assert!(past.x == px(500.) && (f32::from(past.y) - 31.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_warning_badge_clears_the_mark() {
+        use super::{NUB_BADGE, NUB_BADGE_OUT};
+        // The capsule is 34 pt wide; the 16 pt mark is centred in it, 11 pt
+        // from its top: its top-right corner is at (25, 11).
+        let (corner_x, corner_y) = (25_f32, 11_f32);
+        // The badge is a circle standing out from the top and right edges.
+        let radius = NUB_BADGE / 2.;
+        let (centre_x, centre_y) = (34. + NUB_BADGE_OUT - radius, radius - NUB_BADGE_OUT);
+        let gap = ((centre_x - corner_x).powi(2) + (centre_y - corner_y).powi(2)).sqrt() - radius;
+        assert!(gap >= 1.5, "the badge is {gap} pt from the mark");
+        // And it stays inside the window's margin round the capsule.
+        assert!(NUB_BADGE_OUT <= super::INSET + super::NUB_SHADOW);
+    }
+
     #[test]
     fn default_nub_tracks_right_edge_and_seventy_percent_height() {
         let screen = Bounds::new(point(px(1440.), px(0.)), size(px(1920.), px(1080.)));

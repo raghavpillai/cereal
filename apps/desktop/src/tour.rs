@@ -4264,6 +4264,29 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
 ///   settle                until the window has stopped drawing
 ///   stats NAME            the frame accounting since the last report, as `stats`
 ///   quit                  leave
+///
+/// The floating recording pill is two windows of its own, and reads the real
+/// pointer and the real focus. These hand it to the script instead (from the
+/// first of them on, the pill ignores the real pointer and the real focus):
+///
+///   window pill|popup|main   where later pointer commands go: the pill's
+///                         capsule, its transcript popup, or the main window.
+///                         Coordinates are then points from that panel's
+///                         top-left corner (the capsule is 42 by 70, the
+///                         popup 300 by 350) and may lie outside it: `move
+///                         -200 30` with `window pill` is the pointer 200 pt
+///                         to the capsule's left. A `drag` is measured from
+///                         where the panel was when it was pressed.
+///   focus out|in          the main window loses or gains the focus, as far as
+///                         the pill knows: the capsule shows while a recording
+///                         runs and the window does not have it
+///   pill                  where the pill is and what it is doing, as
+///                         `script-pill …` (and where it rests when it is up)
+///   view NAME [ARGS]      recording states that have no pointer route:
+///                         `view level 0.8` (how loud the room is, 0 to 1),
+///                         `view attention on|off` (the transcription warning),
+///                         `view said N` (N more finished lines of made-up speech
+///                         and one being spoken; not together with `step p-live`)
 #[cfg(debug_assertions)]
 async fn script(handle: WindowHandle<Cereal>, path: std::path::PathBuf, steps: Vec<Step>, cx: &mut AsyncApp) {
     fn numbers(words: &[&str]) -> Option<Vec<f32>> {
@@ -4284,6 +4307,11 @@ async fn script(handle: WindowHandle<Cereal>, path: std::path::PathBuf, steps: V
         }
     }
     let pause = |cx: &mut AsyncApp, ms: u64| cx.background_executor().timer(Duration::from_millis(ms));
+    // The pill's panel the pointer commands go to, if not the main window:
+    // false for the capsule, true for the popup.
+    let mut panel: Option<bool> = None;
+    // How many made-up lines `view said` has added.
+    let mut said = 0usize;
     let mut done = 0;
     loop {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
@@ -4321,6 +4349,133 @@ async fn script(handle: WindowHandle<Cereal>, path: std::path::PathBuf, steps: V
                 }
                 ("stats", _) => {
                     crate::motion::stats::report(rest);
+                    true
+                }
+                ("window", _) => {
+                    panel = match rest {
+                        "pill" => Some(false),
+                        "popup" => Some(true),
+                        _ => None,
+                    };
+                    if panel.is_some() {
+                        let _ = cx.update(crate::pill::drive_begin);
+                    }
+                    true
+                }
+                ("focus", _) => cx.update(|cx| crate::pill::drive_focus(rest == "in", cx)).is_ok(),
+                ("pill", _) => {
+                    let place = |bounds: Option<Bounds<Pixels>>| {
+                        bounds.map_or("nowhere".to_owned(), |bounds| {
+                            format!("{:.0},{:.0}", f32::from(bounds.origin.x), f32::from(bounds.origin.y))
+                        })
+                    };
+                    let told = cx.update(|cx| {
+                        let rest = crate::pill::driven_frame(false, true, cx);
+                        format!("{}; rests at {}", crate::pill::describe(cx), place(rest))
+                    });
+                    eprintln!("script-pill {}", told.unwrap_or_default());
+                    true
+                }
+                ("view", _) => {
+                    let said_before = said;
+                    if words.first() == Some(&"said") {
+                        said += words.get(1).and_then(|count| count.parse::<usize>().ok()).unwrap_or(1);
+                    }
+                    let words: Vec<String> = words.iter().map(|word| (*word).to_owned()).collect();
+                    let said = said;
+                    handle
+                        .update(cx, |view, _, cx| {
+                            match (words.first().map(String::as_str), words.get(1).map(String::as_str)) {
+                                (Some("level"), Some(level)) => {
+                                    let level = level.parse::<f32>().unwrap_or(0.).clamp(0., 1.);
+                                    view.recording.set_audio_levels(level, level * 0.4);
+                                }
+                                (Some("attention"), Some(state)) => {
+                                    view.recording.set_transcription_attention(if state == "on" {
+                                        crate::recording::TranscriptionAttention::Warning
+                                    } else {
+                                        crate::recording::TranscriptionAttention::None
+                                    });
+                                }
+                                (Some("said"), _) => {
+                                    if let Some(id) = view.recording.note_id {
+                                        // The made-up meeting from its start: the note's
+                                        // own transcript makes way for it the first time.
+                                        if said_before == 0
+                                            && let Some(note) = view.workspace.note_mut(id)
+                                        {
+                                            note.replace_transcript("");
+                                        }
+                                        // Finished lines, then one still being spoken.
+                                        let mut events: Vec<_> = (said_before..said).map(speech::stored).collect();
+                                        events.push(speech::spoken(said, 8));
+                                        view.live_preview(id, events, cx);
+                                    }
+                                }
+                                _ => eprintln!("script: view what? {words:?}"),
+                            }
+                            cx.notify();
+                        })
+                        .is_ok()
+                }
+                (command, Some(n))
+                    if panel.is_some()
+                        && matches!(
+                            (command, n.len()),
+                            ("move" | "down" | "up" | "rclick", 2) | ("click", 2 | 3) | ("scroll", 3) | ("drag", 5)
+                        ) =>
+                {
+                    use crate::pill::Driven;
+                    let popup = panel == Some(true);
+                    // The panel's corner now; a drag keeps the one it had when pressed.
+                    let Ok(Some(frame)) = cx.update(|cx| crate::pill::driven_frame(popup, false, cx)) else {
+                        eprintln!("script: the pill's {} is not up", if popup { "popup" } else { "capsule" });
+                        continue;
+                    };
+                    let at = |x: f32, y: f32| frame.origin + point(px(x), px(y));
+                    let act = |cx: &mut AsyncApp, at: Point<Pixels>, input: Driven| {
+                        cx.update(|cx| crate::pill::drive(popup, at, input, cx)).unwrap_or(false)
+                    };
+                    let spot = at(n[0], n[1]);
+                    match command {
+                        "move" => {
+                            act(cx, spot, Driven::Move);
+                        }
+                        "down" => {
+                            act(cx, spot, Driven::Move);
+                            act(cx, spot, Driven::Down);
+                        }
+                        "up" => {
+                            act(cx, spot, Driven::Up);
+                        }
+                        "rclick" => {
+                            act(cx, spot, Driven::Move);
+                            act(cx, spot, Driven::RightDown);
+                            act(cx, spot, Driven::RightUp);
+                        }
+                        "click" => {
+                            act(cx, spot, Driven::Move);
+                            for _ in 0..n.get(2).map_or(1, |count| *count as usize).max(1) {
+                                act(cx, spot, Driven::Down);
+                                act(cx, spot, Driven::Up);
+                            }
+                        }
+                        "scroll" => {
+                            act(cx, spot, Driven::Scroll(n[2]));
+                        }
+                        _ => {
+                            let end = at(n[2], n[3]);
+                            let frames = ((n[4] / 16.) as usize).max(1);
+                            act(cx, spot, Driven::Move);
+                            act(cx, spot, Driven::Down);
+                            for frame in 1..=frames {
+                                let along = frame as f32 / frames as f32;
+                                act(cx, spot + (end - spot) * along, Driven::Drag);
+                                pause(cx, 16).await;
+                            }
+                            act(cx, end, Driven::Up);
+                        }
+                    }
                     true
                 }
                 ("move", Some(n)) if n.len() == 2 => input(cx, Box::new(move |window, cx| pointer(window, cx, n[0], n[1]))),

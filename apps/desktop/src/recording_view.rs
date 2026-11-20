@@ -7,7 +7,150 @@ use crate::{
 use gpui::{prelude::*, *};
 use std::time::{Duration, Instant};
 
+actions!(cereal, [ToggleRecording, ToggleTranscript]);
+
+/// The recording's two shortcuts, as they are bound and as they are shown
+/// (in the capsule's tooltips and the shortcuts dialog). Shift-Command-R and
+/// Shift-Command-T are bound nowhere else in the app (`app::init`,
+/// `input::init`), the system keeps neither, and each sits beside the plain
+/// letter's usual meaning without taking it.
+pub const RECORD_KEYS: (&str, &[&str]) = ("cmd-shift-r", &["⇧", "⌘", "R"]);
+pub const TRANSCRIPT_KEYS: (&str, &[&str]) = ("cmd-shift-t", &["⇧", "⌘", "T"]);
+
+pub fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new(RECORD_KEYS.0, ToggleRecording, Some("Cereal")),
+        KeyBinding::new(TRANSCRIPT_KEYS.0, ToggleTranscript, Some("Cereal")),
+    ]);
+}
+
+/// What Shift-Command-R does, given what is going on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordKey {
+    /// A recording is running, in whichever note: it stops.
+    Stop,
+    /// The note on screen starts (or resumes) recording.
+    Start(u64),
+    /// No note is on screen: a new one, which records.
+    NewNote,
+    /// The note on screen is having its notes written: nothing.
+    Nothing,
+}
+
+pub fn record_key(recording: bool, note: Option<u64>, generating: bool) -> RecordKey {
+    match note {
+        _ if recording => RecordKey::Stop,
+        Some(_) if generating => RecordKey::Nothing,
+        Some(note) => RecordKey::Start(note),
+        None => RecordKey::NewNote,
+    }
+}
+
+/// A note's name in a sentence about its recording: short enough for a toast
+/// or a menu, and never empty.
+pub fn recording_title(title: &str) -> String {
+    let title = title.trim();
+    if title.is_empty() {
+        "New note".into()
+    } else {
+        crate::menubar::shorten(title, 28)
+    }
+}
+
 impl Cereal {
+    /// Shift-Command-R: stop the recording that is running, or start one in
+    /// the note on screen (a new note when there is none).
+    pub fn toggle_recording_key(&mut self, _: &ToggleRecording, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.screen, crate::app::Screen::Welcome | crate::app::Screen::Login) {
+            return;
+        }
+        let generating = self.current_note.is_some_and(|id| self.generation.is_running_for(id));
+        match record_key(self.recording.is_active(), self.current_note, generating) {
+            RecordKey::Stop => self.stop_recording_from_anywhere(cx),
+            RecordKey::Start(id) => self.start_recording_preview(id, cx),
+            RecordKey::NewNote => self.new_note(window, cx),
+            RecordKey::Nothing => {}
+        }
+    }
+
+    /// Stop the recording from somewhere its own note may not be on screen
+    /// (a shortcut, the menu bar): then it says so, and offers the note.
+    pub fn stop_recording_from_anywhere(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.recording.note_id.filter(|_| self.recording.is_active()) else {
+            return;
+        };
+        let elsewhere = self.current_note != Some(id);
+        self.recording_last_click = None;
+        self.recording_changed_at = None;
+        self.stop_recording_preview(cx);
+        if elsewhere && !self.recording.is_active() {
+            let title = recording_title(self.workspace.note(id).map_or("", |note| note.title.as_str()));
+            self.show_toast_with(
+                &format!("Stopped recording “{title}”"),
+                "Show it",
+                move |this, window, cx| {
+                    this.open_note(id, cx);
+                    this.focus.focus(window);
+                },
+                cx,
+            );
+        }
+    }
+
+    /// Shift-Command-T: show or hide the transcript of the note on screen;
+    /// from any other page, the recording's note with its transcript open.
+    pub fn toggle_transcript_key(&mut self, _: &ToggleTranscript, _: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.screen, crate::app::Screen::Welcome | crate::app::Screen::Login) {
+            return;
+        }
+        if self.current_note.is_some() {
+            self.transcript_open = !self.transcript_open;
+        } else if let Some(id) = self.recording.note_id.filter(|_| self.recording.is_active()) {
+            self.open_note(id, cx);
+            self.transcript_open = true;
+        } else {
+            return;
+        }
+        self.transcript_epoch = self.transcript_epoch.wrapping_add(1);
+        cx.notify();
+    }
+
+    /// The note another recording is running in, if `id` is not that note.
+    pub fn recording_elsewhere(&self, id: Option<u64>) -> Option<u64> {
+        self.recording
+            .note_id
+            .filter(|other| self.recording.is_active() && Some(*other) != id)
+    }
+
+    /// The one answer wherever a recording is asked for in note `id` while
+    /// note `other` is recording (New note, Start now, Resume, the shortcut):
+    /// that recording carries on, and a toast names it and offers to record
+    /// here instead. Nothing ends a recording without being told to.
+    pub fn offer_recording_here(&mut self, id: u64, other: u64, cx: &mut Context<Self>) {
+        let title = recording_title(self.workspace.note(other).map_or("", |note| note.title.as_str()));
+        self.show_toast_with(
+            &format!("Still recording “{title}”"),
+            "Record here",
+            move |this, window, cx| {
+                this.focus.focus(window);
+                this.record_here_instead(id, cx);
+            },
+            cx,
+        );
+    }
+
+    /// End the recording under way (it is kept, and can be resumed in its
+    /// own note) and record in note `id`.
+    pub fn record_here_instead(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.workspace.note(id).is_none_or(|note| note.trashed) {
+            return;
+        }
+        self.finish_recording_preview(cx);
+        self.recording_last_click = None;
+        self.recording_changed_at = None;
+        self.start_recording_preview(id, cx);
+    }
+
     fn save_recording_preview(&mut self, cx: &mut Context<Self>) {
         let baseline = self.recording_transcript_start.clone();
         if let Some(note) = self
@@ -81,17 +224,9 @@ impl Cereal {
             return;
         }
         if self.recording.is_active() {
-            // It says where the recording is by offering to go there.
-            match self.recording.note_id.filter(|other| *other != id) {
-                Some(other) => self.show_toast_with(
-                    "Already recording in another note",
-                    "Show it",
-                    move |this, window, cx| {
-                        this.open_note(other, cx);
-                        this.focus.focus(window);
-                    },
-                    cx,
-                ),
+            // Another note's recording carries on until it is told to stop.
+            match self.recording_elsewhere(Some(id)) {
+                Some(other) => self.offer_recording_here(id, other, cx),
                 None => self.show_toast("Already recording", cx),
             }
             return;
@@ -822,6 +957,14 @@ impl Cereal {
         } else {
             rgba(0x625a220f).into()
         };
+        // Held down, the wash deepens by more than it took to appear, so a
+        // press cannot be taken for a hover, and the glyph squashes with it.
+        let press: Hsla = if dark {
+            rgba(0xffffff14).into()
+        } else {
+            rgba(0x625a221f).into()
+        };
+        let stop_key = crate::motion::reveal_key(("recording-stop", id, embedded));
         let open = self.transcript_open;
         let compact_complete = !open
             && !live
@@ -833,11 +976,11 @@ impl Cereal {
         // joins it: the two share the capsule, each rounded concentrically
         // on its outer side and tightly where they meet.
         let joined = live || (!processing && !compact_complete && (scheduled.is_none() || open));
-        let leading_label: SharedString = if open {
-            "Hide transcript"
-        } else {
-            "Show transcript"
-        }
+        let leading_label: SharedString = format!(
+            "{} · {}",
+            if open { "Hide transcript" } else { "Show transcript" },
+            TRANSCRIPT_KEYS.1.concat()
+        )
         .into();
         let leading = div()
             .id("show-transcript-button")
@@ -860,14 +1003,14 @@ impl Cereal {
             .reach()
             .cursor(CursorStyle::Arrow)
             .child(if joined {
-                crate::motion::tactile(hover).corners(
+                crate::motion::tactile(hover).press(press).corners(
                     TILE_OUTER_RADIUS,
                     TILE_INNER_RADIUS,
                     TILE_INNER_RADIUS,
                     TILE_OUTER_RADIUS,
                 )
             } else {
-                crate::motion::tactile(hover).round()
+                crate::motion::tactile(hover).press(press).round()
             })
             .child(
                 div()
@@ -966,15 +1109,21 @@ impl Cereal {
             .stage
             .aim(("recording-capsule", id), capsule_target, GOOEY)
             .max(COMPACT_CAPSULE);
-        // The label only has room once the capsule is most of the way open, so
-        // it fades in over the second half of the morph instead of being cut.
-        let label_fade = if capsule_target > COMPACT_CAPSULE {
-            crate::motion::fade_curve(
-                ((capsule_width - COMPACT_CAPSULE) / (capsule_target - COMPACT_CAPSULE) - 0.5)
-                    / 0.5,
-            )
-        } else {
-            1.
+        // A label is shown only once its part of the capsule is wide enough
+        // to hold the whole of it, whichever width the morph started from: it
+        // fades in as the last of its padding opens, never as a cut word.
+        let beside = 2. * CAPSULE_INSET + LEADING_JOINED;
+        let label_fade = match &scheduled {
+            _ if processing || compact_complete || live => 1.,
+            // The meeting's time, and "Start now" after it in the open panel.
+            Some(label) => label_room_fade(
+                capsule_width - beside - if open { 80. } else { 0. },
+                text_width(label) + SCHEDULED_LABEL_GAP,
+            ),
+            None => label_room_fade(
+                capsule_width - beside,
+                text_width(&trailing_label) + 2. * TRAILING_LABEL_PAD + TRAILING_END,
+            ),
         };
         let mut capsule = div()
             .id("recording-capsule")
@@ -1025,14 +1174,25 @@ impl Cereal {
                     .pr(px(TRAILING_END))
                     .rounded_l(px(TILE_INNER_RADIUS))
                     .rounded_r(px(TILE_OUTER_RADIUS))
-                    .child(crate::motion::tactile(hover).corners(
-                        TILE_INNER_RADIUS,
-                        TILE_OUTER_RADIUS,
-                        TILE_OUTER_RADIUS,
-                        TILE_INNER_RADIUS,
+                    .child(
+                        crate::motion::tactile(hover)
+                            .press(press)
+                            .presses(stop_key)
+                            .corners(
+                                TILE_INNER_RADIUS,
+                                TILE_OUTER_RADIUS,
+                                TILE_OUTER_RADIUS,
+                                TILE_INNER_RADIUS,
+                            ),
+                    )
+                    .child(icon(
+                        "footer-stop",
+                        crate::motion::squashed(16., crate::motion::pressed(stop_key)),
+                        t.muted,
                     ))
-                    .child(icon("footer-stop", 16., t.muted))
-                    .map(|d| self.bar_tip(d, "Stop recording".into(), t))
+                    .map(|d| {
+                        self.bar_tip(d, format!("Stop recording · {}", RECORD_KEYS.1.concat()).into(), t)
+                    })
                     .reach()
                     .focusable()
                     .cursor(CursorStyle::Arrow)
@@ -1101,12 +1261,16 @@ impl Cereal {
                     .opacity(if processing { 0.5 } else { label_fade })
                     .when(!processing, |s| {
                         s.focusable()
-                            .child(crate::motion::tactile(hover).corners(
+                            .child(crate::motion::tactile(hover).press(press).corners(
                                 TILE_INNER_RADIUS,
                                 TILE_OUTER_RADIUS,
                                 TILE_OUTER_RADIUS,
                                 TILE_INNER_RADIUS,
                             ))
+                            .child(crate::ui::tip(
+                                format!("{} recording · {}", start_verb(phase), RECORD_KEYS.1.concat()),
+                                t,
+                            ).above())
                             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
                                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                                     this.start_recording_preview(id, cx);
@@ -1362,6 +1526,26 @@ const TRAILING_END: f32 = 3.;
 const TRAILING_LABEL_PAD: f32 = 8.;
 const LIVE_CAPSULE: f32 = 2. * CAPSULE_INSET + LEADING_JOINED + TRAILING_MIN;
 const COMPACT_CAPSULE: f32 = 2. * CAPSULE_INSET + LEADING_ALONE;
+
+/// What pressing the capsule's trailing label does to the recording, for
+/// its tooltip: "Start now" starts one, "Resume" and "Retry" start it again.
+fn start_verb(phase: Phase) -> &'static str {
+    match phase {
+        Phase::Idle => "Start",
+        Phase::Held | Phase::Failed => "Retry",
+        _ => "Resume",
+    }
+}
+
+/// How much of a label shows while its part of the capsule is `room` points
+/// wide on the way to (or from) the `needed` points the label takes with its
+/// padding: nothing until the words alone would fit, all of it once the
+/// padding has opened too.
+fn label_room_fade(room: f32, needed: f32) -> f32 {
+    /// The share of the padding that must have opened before a word shows.
+    const CLEAR: f32 = 2. * TRAILING_LABEL_PAD;
+    crate::motion::fade_curve(((room - (needed - CLEAR)) / CLEAR).clamp(0., 1.))
+}
 
 /// The capsule of a scheduled meeting: the 48 pt indicator inside 4 pt of
 /// padding, the label (`text` pt wide), and in the open panel the 80 pt
@@ -1625,6 +1809,50 @@ mod tests {
         // Resume: 8 pt either side of the label and 3 pt short of the end.
         assert_eq!(labelled_capsule_width(48.), 4. + 48. + 67. + 4.);
         assert_eq!(labelled_capsule_width(10.), 96.);
+    }
+
+    #[test]
+    fn a_capsule_label_never_shows_cut() {
+        // Stop pressed: the capsule opens from the live width (a 40 pt
+        // trailing control) to hold "Resume" (48 pt of text: 67 pt with its
+        // padding). Nothing shows while the word would be cut…
+        let needed = 48. + 2. * TRAILING_LABEL_PAD + TRAILING_END;
+        assert_eq!(label_room_fade(TRAILING_MIN, needed), 0.);
+        assert_eq!(label_room_fade(48. + TRAILING_END, needed), 0.);
+        // …it is part-way in once the words fit with room to spare, and
+        // whole when the capsule has opened (or overshot).
+        let partly = label_room_fade(needed - TRAILING_LABEL_PAD, needed);
+        assert!(partly > 0. && partly < 1.);
+        assert_eq!(label_room_fade(needed, needed), 1.);
+        assert_eq!(label_room_fade(needed + 3., needed), 1.);
+        // The same from the compact capsule, which the old rule (half-way
+        // through the morph) showed at 39 pt of room for 60 pt of words.
+        let start_now = 60. + 2. * TRAILING_LABEL_PAD + TRAILING_END;
+        assert_eq!(label_room_fade((labelled_capsule_width(60.) + COMPACT_CAPSULE) / 2. - 56., start_now), 0.);
+    }
+
+    #[test]
+    fn the_record_shortcut_stops_what_runs_or_starts_where_you_are() {
+        // A recording anywhere: the key stops it, whatever is on screen.
+        assert_eq!(record_key(true, None, false), RecordKey::Stop);
+        assert_eq!(record_key(true, Some(7), true), RecordKey::Stop);
+        // None running: it starts in the note on screen, or in a new one.
+        assert_eq!(record_key(false, Some(7), false), RecordKey::Start(7));
+        assert_eq!(record_key(false, None, false), RecordKey::NewNote);
+        // Not over notes that are being written.
+        assert_eq!(record_key(false, Some(7), true), RecordKey::Nothing);
+        // The two shortcuts are spelled as they are bound.
+        assert_eq!(RECORD_KEYS.1.concat(), "⇧⌘R");
+        assert_eq!(TRANSCRIPT_KEYS.1.concat(), "⇧⌘T");
+        assert!(gpui::Keystroke::parse(RECORD_KEYS.0).is_ok() && gpui::Keystroke::parse(TRANSCRIPT_KEYS.0).is_ok());
+    }
+
+    #[test]
+    fn a_recording_is_named_briefly_and_never_blank() {
+        assert_eq!(recording_title("  "), "New note");
+        assert_eq!(recording_title("Design sync"), "Design sync");
+        let long = recording_title("Quarterly planning with the whole product and design organisation");
+        assert!(long.ends_with('…') && long.chars().count() <= 28);
     }
 
     #[test]
