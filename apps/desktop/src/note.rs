@@ -3227,6 +3227,7 @@ pub fn local_outline(body: &str) -> String {
 
 #[cfg(test)]
 mod metadata_tests {
+    use crate::note::{transcript_panel_width, DOCUMENT_WIDTH};
     use super::{
         GLYPH_TAB, NOTES_LEAD, SPARKLE_LEAD_COLLAPSED, SPARKLE_TRAIL_COLLAPSED, metadata_anchors,
         note_date_label, note_tab_widths,

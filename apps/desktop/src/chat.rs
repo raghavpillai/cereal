@@ -5071,7 +5071,7 @@ mod tests {
         assert!(
             linked_inline_with_citations(partial, Theme::new(true), &[citation("S1")])
                 .0
-                .contains(" 00.")
+                .contains(".00.")
         );
         let mut annotations = ChatTurnAnnotations::default();
         annotations.error = Some(
@@ -5133,9 +5133,9 @@ mod tests {
             Theme::new(true),
             &citations,
         );
-        assert_eq!(text, "Café 🦊 00 and docs.");
+        assert_eq!(text, "Café 🦊.00 and docs.");
         assert_eq!(links.len(), 2);
-        assert_eq!(&text[links[0].0.clone()], "00");
+        assert_eq!(&text[links[0].0.clone()], ".00"); // the chip covers "00", the point before it keeps it with its word
         assert_eq!(links[0].1, "minutes-source:S1");
         assert_eq!(&text[links[1].0.clone()], "docs");
         assert_eq!(links[1].1, "https://example.test");
@@ -5163,7 +5163,7 @@ mod tests {
             Theme::new(true),
             &later,
         );
-        assert_eq!(text, "Moved. 000 000 Later. 000 000");
+        assert_eq!(text, "Moved..000.000 Later..000.000");
         assert!(!text.contains('('));
         // With no sources (a conversation about one note) the markers and
         // the space before them go, and nothing is left in their place.
