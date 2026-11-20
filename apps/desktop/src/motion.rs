@@ -26,7 +26,7 @@
 //! | A menu, popover, dialog, palette or card opening and closing | [`Stage::presence`] for its pose, [`pop`] with a [`Pop`] anchored on the control that opened it, drawn on [`crate::ui::overlay`]; the control stays lit with [`hold`] |
 //! | A tooltip | [`crate::ui::tip`] (or `with_tooltip`): never GPUI's own `.tooltip` |
 //! | A toast | `Cereal::show_toast` / `show_toast_with` (one action) |
-//! | (a) Something entering or leaving the layout: a row, a banner, a message, a control | [`appear`] (its space opens and closes with it); [`vacate`] when what left can no longer be drawn; [`appear_across`] for a control that comes and goes in a row of controls |
+//! | (a) Something entering or leaving the layout: a row, a banner, a message, a control | [`appear`] (its space opens and closes with it), or [`appear_on_page`] when it is on a page that comes and goes; [`vacate`] when what left can no longer be drawn; [`appear_across`] for a control that comes and goes in a row of controls |
 //! | (b) A container whose content changes height: a list of results, a card with a section that comes and goes | [`follow_height`] |
 //! | (c) A selected fill or a highlight that moves between items: tabs, a sidebar, menu rows | [`Stage::glide`]: one [`Glide::indicator`] before the items, a [`Glide::probe`] in the selected one |
 //! | (d) Content replaced in place when a tab or a page of data is switched | [`crossfade`] (a body of text or a list), [`page`] (a whole screen), [`Stage::swap`] with [`swapped`] or [`swap_in`] (one small piece: an icon, a label), [`swap_layers`] (two whole layouts that take turns in one place) |
@@ -111,6 +111,8 @@ pub const TIP_GAP: f32 = 6.;
 /// More rows than this changing in one frame is a different list, not a
 /// list that changed: a [`Stage::roster`] then simply shows the new rows.
 pub const ROSTER_MOST: usize = 6;
+/// How far the page of a sequence travels sideways as it arrives ([`paged`]).
+pub const PAGED_TRAVEL: f32 = 18.;
 /// Hover washes ease in quickly and out a little slower.
 const HOVER_IN: Duration = Duration::from_millis(110);
 const HOVER_OUT: Duration = Duration::from_millis(220);
@@ -601,6 +603,18 @@ impl Stage {
             tracks.remove(&key);
         }
         pose
+    }
+
+    /// [`Stage::presence`] for something on a page that is not always on
+    /// screen (a control that is there in one state of the page and not in
+    /// another): when the page has only just come on screen it is simply
+    /// there or not, and it opens and closes only while the page is being
+    /// looked at. Call it every frame the page is drawn.
+    pub fn presence_on_page(&self, key: TrackKey, open: bool, spring: Spring) -> Pose {
+        if !self.continuous(key) {
+            self.settle(key, open);
+        }
+        self.presence(key, open, spring)
     }
 
     /// Whether `key` was also rendered in the previous window frame, i.e.
@@ -2080,6 +2094,36 @@ pub fn swapped<E: Styled + IntoElement + 'static>(element: E, pose: Pose) -> Any
         .into_any_element()
 }
 
+/// (d) Apply a [`Stage::swap`] pose to the page of a sequence that has just
+/// replaced its neighbour: the next week of a calendar, the next step of a
+/// form, the next of a set of cards. It arrives from the side that was
+/// paged towards, a few points out, firming up as it settles, so the
+/// movement says which way the sequence went. `direction` is 1 for forward
+/// (it comes in from the trailing side), -1 for back, and 0 when what
+/// arrived is the same page's content (it was being read): then it only
+/// firms up. Key the swap by the page shown. With reduced motion it only
+/// fades.
+pub fn paged<E: Styled + IntoElement + 'static>(element: E, pose: Pose, direction: f32) -> AnyElement {
+    if pose.at_rest() {
+        return element.into_any_element();
+    }
+    Morph::new(element)
+        .opacity(pose.fade)
+        .offset(PAGED_TRAVEL * paged_side(direction) * (1. - pose.value), 0.)
+        .into_any_element()
+}
+
+/// Which side a [`paged`] page comes from: 1, -1, or 0 for neither.
+pub fn paged_side(direction: f32) -> f32 {
+    if direction > 0. {
+        1.
+    } else if direction < 0. {
+        -1.
+    } else {
+        0.
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Glide: a highlight that stretches between positions
 // ---------------------------------------------------------------------------
@@ -3367,6 +3411,19 @@ pub fn fold(stage: &Stage, key: TrackKey, pose: Pose, content: impl IntoElement)
 /// motion it fades in place at its full size and nothing slides.
 pub fn appear(stage: &Stage, key: TrackKey, shown: bool, content: impl IntoElement) -> Option<Div> {
     fold(stage, key, stage.presence(key, shown, GOOEY), content)
+}
+
+/// (a) [`appear`] for something on a page that is not always on screen (a
+/// banner, an empty state, a message under a field): it opens and closes in
+/// place while the page is being looked at, and when the page itself has
+/// only just come on screen it is simply in the state it is in, instead of
+/// unfolding as the page arrives. Call it every frame the page is drawn,
+/// shown or not.
+pub fn appear_on_page(stage: &Stage, key: TrackKey, shown: bool, content: impl IntoElement) -> Option<Div> {
+    if !stage.continuous(key) {
+        stage.settle(key, shown);
+    }
+    appear(stage, key, shown, content)
 }
 
 /// (a) The space of something that has left and can no longer be drawn,

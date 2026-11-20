@@ -130,6 +130,70 @@ impl Drop for CalendarState {
     }
 }
 
+thread_local! {
+    /// The page "Coming up" last showed and which way it was last turned.
+    static PAGE_TURN: std::cell::Cell<(i32, f32)> = const { std::cell::Cell::new((0, 1.)) };
+    /// The page whose events the linked card is still waiting for after
+    /// being paged to it, and the card's height when it was paged.
+    static AWAITED: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+    static CARD_HEIGHT: std::cell::Cell<f32> = const { std::cell::Cell::new(0.) };
+    /// What the linked card's days were last keyed by (the page and whether
+    /// it is awaited; whether anything has been read, or failed), and the
+    /// side they last arrived from.
+    static ARRIVED: std::cell::Cell<(u64, u64, f32)> = const { std::cell::Cell::new((0, 0, 0.)) };
+}
+
+/// The side the linked card's days arrive from when what they are keyed by
+/// changes: the side paged towards when it is the page (or its events
+/// coming in), neither when the same page's state changed (the first read
+/// finishing, an error): that only firms up. `was` is the last answer.
+pub(crate) fn arrival(was: (u64, u64, f32), page: u64, state: u64, turn: f32) -> (u64, u64, f32) {
+    if was.0 != page {
+        (page, state, turn)
+    } else if was.1 != state {
+        (page, state, 0.)
+    } else {
+        was
+    }
+}
+
+/// What the linked card's days are keyed by, so that they arrive once when
+/// the card is paged and its events are here: the page, and whether its
+/// events are still on their way. `paged_to` is the page just turned to (on
+/// the frame it is turned), `loading` whether a read is under way, and
+/// `awaited` what [`awaiting`] last answered. A refresh in the background
+/// of the page already showing is not an arrival.
+pub(crate) fn awaiting(awaited: Option<i32>, page: i32, paged: bool, loading: bool) -> Option<i32> {
+    if paged && loading {
+        Some(page)
+    } else if loading && awaited == Some(page) {
+        awaited
+    } else {
+        None
+    }
+}
+
+/// Which way "Coming up" was last paged, now that it shows `page`: 1 for
+/// forward in time, -1 for back. The days arrive from that side
+/// (`motion::paged`).
+pub(crate) fn page_turn(page: i32) -> f32 {
+    PAGE_TURN.with(|turn| {
+        let (shown, way) = turn.get();
+        let way = turn_way(shown, page).unwrap_or(way);
+        turn.set((page, way));
+        way
+    })
+}
+
+/// The direction of a change of page, when it is one.
+fn turn_way(from: i32, to: i32) -> Option<f32> {
+    match to.cmp(&from) {
+        std::cmp::Ordering::Greater => Some(1.),
+        std::cmp::Ordering::Less => Some(-1.),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
 fn page_day(page: i32) -> NaiveDate {
     crate::menubar::now()
         .date_naive()
@@ -769,8 +833,32 @@ impl Cereal {
         let t = self.theme();
         let day = page_day(self.calendar_page);
         let filter = self.calendars.filter();
+        // Paging: the title swaps, and the days arrive from the side paged
+        // towards once their events are here. Until then the card keeps the
+        // height it had, and then travels to its new one.
+        let before = PAGE_TURN.with(std::cell::Cell::get).0;
+        let turn = page_turn(self.calendar_page);
+        let awaited = awaiting(
+            AWAITED.with(std::cell::Cell::get),
+            self.calendar_page,
+            before != self.calendar_page,
+            self.calendars.loading,
+        );
+        AWAITED.with(|waiting| waiting.set(awaited));
+        let arrived = arrival(
+            ARRIVED.with(std::cell::Cell::get),
+            crate::lazy::key((self.calendar_page, awaited.is_some())),
+            crate::lazy::key((self.calendars.loaded, self.calendars.error.is_some())),
+            turn,
+        );
+        ARRIVED.with(|last| last.set(arrived));
+        let (paged, turn) = (
+            self.stage.swap(("linked-calendar-page", 0), crate::lazy::key((arrived.0, arrived.1))),
+            arrived.2,
+        );
         let mut rows = div()
             .id("connected-calendar-events")
+            .relative()
             .track_scroll(&self.calendars.scroll)
             // The card is as tall as today and the next three days with
             // events; it only scrolls on an unusually crowded stretch.
@@ -778,12 +866,20 @@ impl Cereal {
             .flex_shrink_0()
             .overflow_y_scroll()
             .w_full()
-            .rounded(px(16.))
-            .bg(t.card)
-            .border(px(hairline(0.5)))
-            .border_color(card_edge(t))
             .flex()
             .flex_col();
+        if awaited.is_some() {
+            rows = rows.min_h(px(CARD_HEIGHT.with(std::cell::Cell::get).min(520.)));
+        } else {
+            rows = rows.child(
+                canvas(
+                    |bounds, _, _| CARD_HEIGHT.with(|height| height.set(f32::from(bounds.size.height))),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            );
+        }
         if let Some(error) = &self.calendars.error {
             rows = rows.child(
                 div()
@@ -918,8 +1014,7 @@ impl Cereal {
                         let mut cell = event_cell()
                             .id(SharedString::from(format!("linked-event-{id}-{delta}")))
                             .when(self.calendars.opening.is_none(), |cell| {
-                                cell.child(crate::motion::hover_probe(hover))
-                                    .bg(t.hover.opacity(crate::motion::revealed(hover)))
+                                cell.child(crate::motion::tactile(t.hover).radius(8.).reveals(hover))
                             })
                             .child(event_bar(calendar_color(&event.color)))
                             .child(
@@ -966,18 +1061,25 @@ impl Cereal {
                             .filter(|url| safe_meeting_url(url))
                         {
                             let url = url.clone();
+                            let join = crate::motion::reveal_key(("join-event", id.as_str(), delta));
                             cell = cell.child(
-                                div()
-                                    .id(SharedString::from(format!("join-event-{}-{delta}", event.id)))
-                                    .flex_shrink_0()
-                                    .h(px(28.))
-                                    .flex()
-                                    .items_center()
-                                    .text_size(px(12.))
-                                    .line_height(px(16.))
-                                    .rounded(px(4.))
-                                    .text_color(t.muted)
-                                    .hover(|join| join.text_color(t.text))
+                                // Its words warm under the pointer, eased
+                                // like every link's.
+                                crate::motion::warms(
+                                    div()
+                                        .id(SharedString::from(format!("join-event-{}-{delta}", event.id)))
+                                        .relative()
+                                        .flex_shrink_0()
+                                        .h(px(28.))
+                                        .flex()
+                                        .items_center()
+                                        .text_size(px(12.))
+                                        .line_height(px(16.))
+                                        .rounded(px(4.)),
+                                    join,
+                                    t.muted,
+                                    t.text,
+                                )
                                     .opacity(crate::motion::revealed(hover))
                                     .child("Join")
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1042,7 +1144,11 @@ impl Cereal {
                 tool("linked-calendar-prev", "chevron-left", t)
                     .w(px(24.))
                     .cursor(CursorStyle::Arrow)
-                    .when(at_start, |back| back.opacity(0.4))
+                    .opacity(self.stage.aim(
+                        ("linked-calendar-back", 0),
+                        if at_start { 0.4 } else { 1. },
+                        crate::motion::SNAPPY,
+                    ).clamp(0., 1.))
                     .on_click(cx.listener(|this, _, _, cx| {
                         if this.calendar_page > 0 {
                             this.calendar_page -= 1;
@@ -1081,10 +1187,27 @@ impl Cereal {
                     .flex()
                     .items_start()
                     .justify_between()
-                    .child(heading(title, t))
+                    .child(crate::motion::swapped(
+                        heading(title, t),
+                        self.stage.swap(("linked-calendar-title", 0), self.calendar_page as u64),
+                    ))
                     .child(controls),
             )
-            .child(rows))
+            .child(
+                div()
+                    .w_full()
+                    .flex_shrink_0()
+                    .rounded(px(16.))
+                    .bg(t.card)
+                    .border(px(hairline(0.5)))
+                    .border_color(card_edge(t))
+                    .overflow_hidden()
+                    .child(crate::motion::follow_height(
+                        &self.stage,
+                        ("linked-calendar-card", 0),
+                        crate::motion::paged(rows, paged, turn),
+                    )),
+            ))
     }
 }
 
@@ -1209,6 +1332,38 @@ mod tests {
     fn event(id: &str, calendar: &str, all_day: bool, start: &str, end: &str) -> CalendarEventDTO {
         serde_json::from_value(json!({"id":id,"calendarId":calendar,"calendarName":calendar,"color":"#87e5e8","title":id,"startAt":start,"endAt":end,"allDay":all_day,"startDate":"2026-11-26","endDate":"2026-11-28","timeZone":null,"location":null,"meetingUrl":null,"noteId":null})).unwrap()
     }
+    #[test]
+    fn the_days_arrive_from_the_side_paged_towards_once_their_events_are_here() {
+        use super::{awaiting, turn_way};
+        assert_eq!(turn_way(0, 1), Some(1.));
+        assert_eq!(turn_way(3, 2), Some(-1.));
+        // "Today" from three weeks on is a turn back.
+        assert_eq!(turn_way(3, 0), Some(-1.));
+        assert_eq!(turn_way(2, 2), None);
+        // Paged to a page whose events are being read: it is awaited until
+        // the read ends, and then no longer.
+        let waiting = awaiting(None, 1, true, true);
+        assert_eq!(waiting, Some(1));
+        assert_eq!(awaiting(waiting, 1, false, true), Some(1));
+        assert_eq!(awaiting(waiting, 1, false, false), None);
+        // A refresh of the page already showing is not an arrival, and
+        // neither is paging with nothing to read (no server).
+        assert_eq!(awaiting(None, 1, false, true), None);
+        assert_eq!(awaiting(None, 2, true, false), None);
+        // Paged on again before the first page's events came.
+        assert_eq!(awaiting(waiting, 2, true, true), Some(2));
+        // The days come from the side paged towards; the same page's first
+        // events, or an error, come from neither.
+        use super::arrival;
+        let shown = arrival((0, 0, 0.), 10, 1, 1.);
+        assert_eq!(shown, (10, 1, 1.));
+        assert_eq!(arrival(shown, 11, 1, -1.), (11, 1, -1.));
+        assert_eq!(arrival(shown, 10, 2, -1.), (10, 2, 0.));
+        assert_eq!(arrival(shown, 10, 1, -1.), shown);
+        assert_eq!(crate::motion::paged_side(0.), 0.);
+        assert_eq!(crate::motion::paged_side(-3.), -1.);
+    }
+
     #[test]
     fn capture_requires_an_explicit_active_timed_event_not_future_past_or_all_day() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-11-26T10:00:00Z")

@@ -4126,6 +4126,17 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
         }) {
             let _ = handle.update(cx, |_, window, _| window.resize(size(px(width), px(height))));
         }
+        // `CEREAL_TOUR_ORIGIN=40,110` puts the window's top-left corner
+        // there (points from the screen's top-left): several scripted runs
+        // open at the same place, and a window that another covers entirely
+        // stops drawing, so it cannot be filmed.
+        #[cfg(all(debug_assertions, target_os = "macos"))]
+        if let Some((left, top)) = std::env::var("CEREAL_TOUR_ORIGIN").ok().and_then(|origin| {
+            let (left, top) = origin.split_once(',')?;
+            Some((left.parse::<f64>().ok()?, top.parse::<f64>().ok()?))
+        }) {
+            let _ = handle.update(cx, |_, _, _| place_main_window(left, top));
+        }
         let shots = std::env::var_os("CEREAL_TOUR_SHOTS").map(std::path::PathBuf::from);
         // Without `--motion-tour` the tour runs against the server the data
         // directory is signed in to: wait for its notes before starting.
@@ -6145,4 +6156,35 @@ pub fn welcome(handle: WindowHandle<Cereal>, name: String, cx: &mut App) {
         finish(cx).await;
     })
     .detach();
+}
+
+/// Move the app's main window so that its top-left corner is `left`, `top`
+/// points from the top-left corner of its screen (`CEREAL_TOUR_ORIGIN`).
+#[cfg(all(debug_assertions, target_os = "macos"))]
+#[allow(unexpected_cfgs)]
+fn place_main_window(left: f64, top: f64) {
+    use cocoa::{
+        base::{id, nil},
+        foundation::{NSPoint, NSRect},
+    };
+    use objc::{class, msg_send, sel, sel_impl};
+    unsafe {
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let windows: id = msg_send![app, windows];
+        let count: usize = msg_send![windows, count];
+        for index in 0..count {
+            let window: id = msg_send![windows, objectAtIndex: index];
+            let frame: NSRect = msg_send![window, frame];
+            let screen: id = msg_send![window, screen];
+            if frame.size.height < 300. || screen == nil {
+                continue;
+            }
+            let display: NSRect = msg_send![screen, frame];
+            let corner = NSPoint::new(
+                display.origin.x + left,
+                display.origin.y + display.size.height - top,
+            );
+            let _: () = msg_send![window, setFrameTopLeftPoint: corner];
+        }
+    }
 }

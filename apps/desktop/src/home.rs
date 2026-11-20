@@ -7,10 +7,32 @@ use chrono::{Datelike, Duration, Local, NaiveDate};
 use gpui::{prelude::*, *};
 
 thread_local! {
-    /// Height of the private-space banner as last laid out, so dismissing it
-    /// can close exactly the space it occupied (its text wraps with the
-    /// window, so the height is not a constant).
-    static SPACE_BANNER_HEIGHT: std::cell::Cell<f32> = const { std::cell::Cell::new(75.) };
+    /// What the notes list showed of the captions and rows that have left
+    /// it, drawn while their space closes.
+    static NOTES_LEFT: std::cell::RefCell<crate::lazy::Leavers<Kept>> =
+        std::cell::RefCell::new(Default::default());
+    /// The note whose row the arrow keys have just moved the focus to: the
+    /// list brings it into view when it is next drawn.
+    static REVEAL_NOTE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// A caption or a row of a notes list that has left it.
+#[derive(Clone)]
+enum Kept {
+    Day(String),
+    Row(HomeRow),
+}
+
+/// How much of the bottom of Home's list the Ask bar floats over.
+const ASK_BAR_REACH: f32 = 110.;
+
+/// Which row the arrow keys move the focus to from the row of note `from`
+/// in a list of `ids`: the next or the previous, stopping at the ends.
+/// `None` when there is nowhere to go.
+pub fn row_step(ids: &[u64], from: u64, back: bool) -> Option<u64> {
+    let at = ids.iter().position(|id| *id == from)?;
+    let to = if back { at.checked_sub(1)? } else { at + 1 };
+    ids.get(to).copied()
 }
 
 /// One row of a notes list: everything it draws, and nothing else.
@@ -251,48 +273,133 @@ impl Cereal {
                 Entry::Row(note) => crate::lazy::key(("row", note.id)),
             })
             .collect();
+        // A note that leaves the list (to Trash, out of Favorites) folds
+        // shut and the rows under it close up, its day's caption with it
+        // when it was the day's only note; one that comes back (Undo) opens
+        // its place again. What a row showed is kept while it leaves.
+        let scope = match self.screen {
+            Screen::Favorites => 2,
+            Screen::MyNotes => 1,
+            _ => 0,
+        };
+        NOTES_LEFT.with(|left| {
+            left.borrow_mut().update(crate::lazy::key((self.workspace.revision(), scope)), || {
+                entries
+                    .iter()
+                    .zip(&keys)
+                    .map(|(entry, key)| {
+                        (
+                            *key,
+                            match entry {
+                                Entry::Day(date) => Kept::Day((*date).to_owned()),
+                                Entry::Row(note) => Kept::Row((*note).clone()),
+                            },
+                        )
+                    })
+                    .collect()
+            })
+        });
+        let drawn = crate::lazy::roster(&self.stage, "notes", scope, &keys);
+        let drawn_keys: Vec<u64> = drawn.iter().map(|row| row.key).collect();
+        // Nothing arriving or leaving: the rows are the entries, one to one.
+        let plain = drawn.len() == entries.len();
+        let at: std::collections::HashMap<u64, usize> = if plain {
+            Default::default()
+        } else {
+            keys.iter().enumerate().map(|(index, key)| (*key, index)).collect()
+        };
+        if !plain {
+            let leaving: Vec<u64> = drawn.iter().filter(|row| !row.present).map(|row| row.key).collect();
+            NOTES_LEFT.with(|left| left.borrow_mut().keep(&leaving));
+        }
+        // The row the arrow keys moved to is brought into view, clear of
+        // the Ask bar.
+        if let Some(id) = REVEAL_NOTE.take() {
+            let key = crate::lazy::key(("row", id));
+            if let Some(index) = drawn_keys.iter().position(|drawn| *drawn == key) {
+                crate::lazy::reveal_clear("notes", index, if home { ASK_BAR_REACH } else { 0. });
+            }
+        }
+        // The row that has the keyboard focus carries the list's highlight,
+        // which travels from row to row with the arrow keys.
+        let glide = self.stage.glide("notes");
+        let keyboard = crate::ui::keyboard_focus();
+        let draw_caption = |date: &str| {
+            caption(date_label(date), t)
+                .px(px(8.))
+                .pt(px(25.))
+                .pb(px(2.))
+                .into_any_element()
+        };
         // On Home the list sits a pixel inside the card column above it.
         let mut list = div()
             .flex()
             .flex_col()
             .w_full()
             .px(px(if home { 1. } else { 0. }))
+            .child(glide.indicator(t.hover, 12.))
             .child(crate::lazy::column(
                 "notes",
-                &keys,
+                &drawn_keys,
                 0.,
                 0.,
                 &self.home_scroll,
                 window,
-                |index| match entries[index] {
-                    Entry::Day(date) => caption(date_label(date), t)
-                        .px(px(8.))
-                        .pt(px(25.))
-                        .pb(px(2.))
-                        .into_any_element(),
-                    Entry::Row(note) => self
-                        .list_row(note.id, note.title.clone(), &note.time, cx)
-                        .into_any_element(),
+                |index| {
+                    let row = drawn[index];
+                    let entry = if plain { Some(index) } else { at.get(&row.key).copied() };
+                    let content = match entry.filter(|_| row.present).map(|index| &entries[index]) {
+                        Some(Entry::Day(date)) => Some(draw_caption(date)),
+                        Some(Entry::Row(note)) => {
+                            let focused = keyboard
+                                && crate::ui::reach_handle(("note-row", note.id))
+                                    .is_some_and(|handle| handle.is_focused(window));
+                            Some(
+                                self.list_row(note.id, note.title.clone(), &note.time, cx)
+                                    .when(focused, |row| row.child(glide.probe(note.id)))
+                                    .into_any_element(),
+                            )
+                        }
+                        // Gone from the list: what it showed, answering nothing.
+                        None => NOTES_LEFT.with(|left| left.borrow().left(row.key).cloned()).map(|kept| match kept {
+                            Kept::Day(date) => draw_caption(&date),
+                            Kept::Row(note) => self
+                                .list_row_frame(
+                                    ("note-row-left", note.id),
+                                    crate::motion::reveal_key(("note-row-left", note.id)),
+                                    note.title.clone(),
+                                    "Me",
+                                    &note.time,
+                                    div().id(("note-row-left-more", note.id)),
+                                )
+                                .into_any_element(),
+                        }),
+                    };
+                    crate::motion::roster_row(&self.stage, "notes", row, content)
+                        .map_or_else(|| div().into_any_element(), IntoElement::into_any_element)
                 },
             ));
-        if notes.is_empty() {
-            list = list.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .py(px(70.))
-                    .gap(px(14.))
-                    .child(icon("document", 32., t.muted))
-                    .child(heading("A little space for your thoughts", t))
-                    .child(small("Create a note to get started.", t))
-                    .child(
-                        pill("empty-new", "New note", "plus", t)
-                            .on_click(cx.listener(|this, _, w, cx| this.new_note(w, cx))),
-                    ),
-            );
-        }
+        // The empty page arrives when the last note has left, in the space
+        // that note gave up; shown on arrival, it is simply there.
+        list = list.children(crate::motion::appear_on_page(
+            &self.stage,
+            ("notes-empty", scope),
+            notes.is_empty() && drawn.is_empty(),
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .py(px(70.))
+                .gap(px(14.))
+                .child(icon("document", 32., t.muted))
+                .child(heading("A little space for your thoughts", t))
+                .child(small("Create a note to get started.", t))
+                .child(
+                    pill("empty-new", "New note", "plus", t)
+                        .on_click(cx.listener(|this, _, w, cx| this.new_note(w, cx))),
+                ),
+        ));
         // Space pages (My notes, Favorites) are wider and open with
         // a centred hero; Home keeps the narrower column under "Coming up".
         let space = !home;
@@ -337,6 +444,7 @@ impl Cereal {
                     .items_center()
                     .child(column),
             )
+            .child(scroll_thumb("home", &self.home_scroll))
             // The chat unfolds out of the ask bar and folds back into it.
             // Space pages ask from their inline composer instead of the bar.
             .when(!assistant.visible && !space, |home| {
@@ -383,23 +491,30 @@ impl Cereal {
         time: &str,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let t = self.theme();
         let hovered = crate::motion::reveal_key(("note-row", id));
-        self.list_row_frame(
-            ("note-row", id),
-            hovered,
-            title,
-            "Me",
-            time,
-            tool_tip(("note-row-more", id), "more", "More actions", t)
-                .size(px(24.))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    let at = window.mouse_position();
-                    this.open_row_menu(id, at, cx);
-                })),
+        let more = self.note_row_more(id, cx);
+        self.note_row_actions(
+            self.list_row_frame(("note-row", id), hovered, title, "Me", time, more),
+            id,
+            cx,
         )
-        .on_click(cx.listener(move |this, _, _, cx| this.open_note(id, cx)))
+    }
+
+    /// The "…" at the end of a note's row: its menu, under the pointer.
+    pub(crate) fn note_row_more(&self, id: u64, cx: &mut Context<Self>) -> Stateful<Div> {
+        tool_tip(("note-row-more", id), "more", "More actions", self.theme())
+            .size(px(24.))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                let at = window.mouse_position();
+                this.open_row_menu(id, at, cx);
+            }))
+    }
+
+    /// What a note's row does, wherever it is drawn: a click opens the
+    /// note, a secondary click its menu, and the arrow keys move on.
+    pub(crate) fn note_row_actions(&self, row: Stateful<Div>, id: u64, cx: &mut Context<Self>) -> Stateful<Div> {
+        row.on_click(cx.listener(move |this, _, _, cx| this.open_note(id, cx)))
         // Secondary click opens the row's menu under the pointer.
         .on_mouse_down(
             MouseButton::Right,
@@ -408,6 +523,45 @@ impl Cereal {
                 this.open_row_menu(id, event.position, cx);
             }),
         )
+        // With the keyboard focus on a row, Up and Down move it from row to
+        // row, as in a menu (Return opens the row, as for any control).
+        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+            let back = match event.keystroke.key.as_str() {
+                "up" => true,
+                "down" => false,
+                _ => return,
+            };
+            if event.keystroke.modifiers.modified() {
+                return;
+            }
+            cx.stop_propagation();
+            this.step_note_row(id, back, window, cx);
+        }))
+    }
+
+    /// Move the keyboard focus from the row of note `from` to the row before
+    /// or after it in the list of notes on screen, and bring it into view.
+    fn step_note_row(&mut self, from: u64, back: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let ids: Vec<u64> = if self.screen == Screen::SearchResults {
+            self.search_hits(&self.search_results_query).iter().map(|hit| hit.row.id).collect()
+        } else {
+            self.list_rows(self.screen == Screen::Favorites).iter().map(|row| row.id).collect()
+        };
+        let Some(to) = row_step(&ids, from, back) else {
+            return;
+        };
+        if let Some(handle) = crate::ui::reach_handle(("note-row", to)) {
+            crate::ui::set_keyboard_focus(true);
+            handle.focus(window);
+            REVEAL_NOTE.set(Some(to));
+            cx.notify();
+        }
+    }
+
+    /// The note whose row the arrow keys have just moved the focus to, once:
+    /// for the list that draws it to bring it into view.
+    pub(crate) fn take_note_to_reveal() -> Option<u64> {
+        REVEAL_NOTE.take()
     }
 
     /// One row of a list of notes, as every such list draws it: a document
@@ -423,18 +577,25 @@ impl Cereal {
         time: &str,
         action: Stateful<Div>,
     ) -> Stateful<Div> {
+        self.list_row_shell(id, hovered)
+            .child(self.list_row_line(hovered, title, subtitle, time, action))
+    }
+
+    /// A list row's box and nothing in it: its insets and corners, its
+    /// place in the cascade and the tab order, and its wash under the
+    /// pointer, which covers everything put in it.
+    pub(crate) fn list_row_shell(&self, id: impl Into<ElementId>, hovered: u64) -> Stateful<Div> {
         let t = self.theme();
         div()
             .id(id)
+            .relative()
             .w_full()
             // A 44 px row on a 48 px pitch: the fill never touches its
             // neighbours.
-            .h(px(44.))
             .mb(px(4.))
             .flex_shrink_0()
             .flex()
-            .items_center()
-            .gap(px(16.))
+            .flex_col()
             .px(px(8.))
             .rounded(px(12.))
             .cursor_default()
@@ -442,6 +603,25 @@ impl Cereal {
             .map(|row| crate::motion::lift(row, self.stage.cascade_next("page")))
             .child(row_feedback(t, 12.).reveals(hovered))
             .reach()
+    }
+
+    /// The 44 px line of a list row: the tile, the title over its caption,
+    /// and the time that gives way to `action` under the pointer.
+    pub(crate) fn list_row_line(
+        &self,
+        hovered: u64,
+        title: SharedString,
+        subtitle: impl Into<SharedString>,
+        time: &str,
+        action: Stateful<Div>,
+    ) -> Div {
+        let t = self.theme();
+        div()
+            .h(px(44.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(16.))
             .child(
                 div()
                     .size(px(28.))
@@ -510,16 +690,6 @@ impl Cereal {
     ) -> Div {
         let t = self.theme();
         let private = self.screen == Screen::MyNotes;
-        // The private-space note: simply there until dismissed, then present
-        // only for as long as it takes to leave.
-        let banner = if self.workspace.settings.space_banner_dismissed {
-            let pose = self
-                .stage
-                .presence(("space-banner", 0), false, crate::motion::SNAPPY);
-            pose.visible.then_some(pose)
-        } else {
-            Some(crate::motion::Pose::REST)
-        };
         let (symbol, subtitle) = match self.screen {
             Screen::Favorites => ("star", "Notes you have marked as favorites."),
             _ => ("lock-solid", "All of your private notes."),
@@ -587,32 +757,16 @@ impl Cereal {
                     .child(subtitle),
             )
             .child(meta)
-            .when(private && banner.is_some(), |hero| {
+            .when(private, |hero| {
                 let (fill, edge) = (t.info_fill, t.info_edge);
                 // Dismissed, the banner fades while the space it took (its
-                // measured height and the 40 px above it) closes up, so the
+                // own height and the 40 px above it) closes up, so the
                 // composer below slides into place instead of jumping.
-                let leaving = banner.filter(|_| self.workspace.settings.space_banner_dismissed);
-                let measure = canvas(
-                    |bounds, _, _| SPACE_BANNER_HEIGHT.with(|height| height.set(f32::from(bounds.size.height))),
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .inset_0();
-                hero.child(
+                hero.children(crate::motion::appear_on_page(
+                    &self.stage,
+                    ("space-banner", 0),
+                    !self.workspace.settings.space_banner_dismissed,
                     div()
-                        .w_full()
-                        .when_some(leaving, |shell, pose| {
-                            shell
-                                .h(px((40. + SPACE_BANNER_HEIGHT.with(std::cell::Cell::get))
-                                    * pose.value.clamp(0., 1.)))
-                                .overflow_hidden()
-                                .opacity(pose.fade)
-                        })
-                        .child(
-                    div()
-                        .relative()
-                        .when(leaving.is_none(), |banner| banner.child(measure))
                         .mt(px(40.))
                         .w_full()
                         .px(px(16.))
@@ -653,19 +807,12 @@ impl Cereal {
                                 .mt(px(-6.))
                                 .mr(px(-6.))
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    // Leave from fully present.
-                                    this.stage.kick(
-                                        ("space-banner", 0),
-                                        1.,
-                                        crate::motion::SNAPPY,
-                                    );
                                     this.workspace.settings.space_banner_dismissed = true;
                                     this.persist(cx);
                                     cx.notify();
                                 })),
                         ),
-                ),
-                )
+                ))
             })
             .child(
                 // The composer sits 16 px in from the column.
@@ -744,13 +891,11 @@ impl Cereal {
         } else {
             format!("{} {}", today.format("%B"), today.day())
         };
-        let mut rows = div()
-            .w_full()
-            .rounded(px(17.))
-            .bg(t.card)
-            .border_1()
-            .border_color(t.border)
-            .overflow_hidden();
+        // Paging replaces the days: they arrive from the side paged towards
+        // while the title swaps, and "Today" grows in beside the arrows.
+        let turn = crate::calendar::page_turn(self.calendar_page);
+        let paged = self.stage.swap(("calendar-page", 0), self.calendar_page as u64);
+        let mut rows = div().w_full().flex().flex_col();
         // Today and the next two days with events, as the linked card shows.
         for (i, delta) in [0, 4, 5].iter().enumerate() {
             let day = today + Duration::days(*delta);
@@ -766,20 +911,46 @@ impl Cereal {
                 name = "No events on this day";
             }
             let row_id = i as u64;
-            let event_hover = crate::motion::reveal_key(("calendar-event", row_id));
             let mut row = div()
-                .id(("calendar-event", row_id))
                 .relative()
                 .flex()
                 .items_center()
                 .h(px(60.))
                 .flex_shrink_0()
                 .px(px(16.));
+            // Between days, the same dashed hairline as the signed-in card.
             if i > 0 {
-                row = row
-                    .child(crate::motion::hover_probe(event_hover))
+                row = row.child(
+                    crate::calendar::dashed_rule(t.hairline)
+                        .absolute()
+                        .top(px(-hairline(0.5)))
+                        .left_0()
+                        .right_0()
+                        .h(px(hairline(0.5))),
+                );
+            }
+            // The event is what is pressed, and what lights: from 8 pt
+            // before its colour bar to 8 pt inside the card's edge, never
+            // the date beside it (as on the signed-in card). A day with no
+            // event has nothing to press.
+            let mut cell = div()
+                .id(("calendar-event", row_id))
+                .relative()
+                .flex_1()
+                .min_w_0()
+                .h(px(44.))
+                .ml(px(-8.))
+                .mr(px(-8.))
+                .px(px(8.))
+                .rounded(px(8.))
+                .flex()
+                .items_center();
+            if i > 0 {
+                cell = cell
+                    .child(crate::motion::tactile(t.hover).radius(8.))
                     .cursor_default()
-                    .reach().on_click(cx.listener(move |this, _, w, cx| {
+                    .reach()
+                    .on_click(cx.listener(move |this, _, w, cx| {
                         let existing = this
                             .workspace
                             .notes
@@ -800,17 +971,6 @@ impl Cereal {
                             this.persist(cx);
                         }
                     }));
-            }
-            // Between days, the same dashed hairline as the signed-in card.
-            if i > 0 {
-                row = row.child(
-                    crate::calendar::dashed_rule(t.hairline)
-                        .absolute()
-                        .top(px(-hairline(0.5)))
-                        .left_0()
-                        .right_0()
-                        .h(px(hairline(0.5))),
-                );
             }
             row = row
                 .child(
@@ -853,53 +1013,43 @@ impl Cereal {
                         ),
                 )
                 .child(
-                    div()
-                        .w(px(3.))
-                        .h(px(28.))
-                        .rounded_full()
-                        .flex_shrink_0()
-                        .bg(if i == 0 { rgb(0xb5b6ae) } else { rgb(0x87e5e8) }),
-                )
-                // Only the event cell lights up, not the date beside it.
-                .child(
-                    div()
-                        .relative()
-                        .flex_1()
-                        .min_w_0()
-                        .h(px(44.))
-                        .pl(px(12.))
-                        .flex()
-                        .flex_col()
-                        .justify_center()
-                        .gap(px(2.))
-                        .text_size(px(14.))
-                        .line_height(px(18.))
-                        .when(i > 0, |cell| {
-                            cell.child(
-                                // From just before the colour bar to the
-                                // card's inner edge, 8 px clear of the row.
+                    cell.child(
+                        div()
+                            .w(px(3.))
+                            .h(px(28.))
+                            .rounded_full()
+                            .flex_shrink_0()
+                            .bg(if i == 0 { rgb(0xb5b6ae) } else { rgb(0x87e5e8) }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .pl(px(12.))
+                            .flex()
+                            .flex_col()
+                            .justify_center()
+                            .gap(px(2.))
+                            .text_size(px(14.))
+                            .line_height(px(18.))
+                            .child(
                                 div()
-                                    .absolute()
-                                    .top_0()
-                                    .bottom_0()
-                                    .left(px(-11.))
-                                    .right(px(-8.))
-                                    .rounded(px(8.))
-                                    .bg(t.hover.opacity(crate::motion::revealed(event_hover))),
+                                    .truncate()
+                                    .text_color(if i == 0 { t.muted } else { t.text })
+                                    .child(name),
                             )
-                        })
-                        .child(
-                            div()
-                                .truncate()
-                                .text_color(if i == 0 { t.muted } else { t.text })
-                                .child(name),
-                        )
-                        .when(!time.is_empty(), |s| {
-                            s.child(time_label(time, t).flex_shrink())
-                        }),
+                            .when(!time.is_empty(), |s| {
+                                s.child(time_label(time, t).flex_shrink())
+                            }),
+                    ),
                 );
             rows = rows.child(row);
         }
+        let today_pill = self.stage.presence_on_page(
+            ("calendar-today", 0),
+            self.calendar_page != 0,
+            crate::motion::SNAPPY,
+        );
         div()
             .flex()
             .flex_col()
@@ -915,18 +1065,30 @@ impl Cereal {
                     .flex()
                     .items_start()
                     .justify_between()
-                    .child(heading(title, t))
+                    .child(crate::motion::swapped(heading(title, t), paged))
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap(px(1.))
-                            .when(self.calendar_page != 0, |s| {
-                                s.child(pill("calendar-today", "Today", "", t).on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.calendar_page = 0;
-                                        cx.notify();
-                                    }),
+                            .when(today_pill.visible, |s| {
+                                // On its way out it is only its outline
+                                // and its word: nothing under the pointer
+                                // that pressed it lights as it goes.
+                                let today = if self.calendar_page != 0 {
+                                    pill("calendar-today", "Today", "", t).on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.calendar_page = 0;
+                                            cx.notify();
+                                        },
+                                    ))
+                                } else {
+                                    pill_frame("calendar-today", t).child("Today")
+                                };
+                                s.child(crate::motion::pop(
+                                    today,
+                                    crate::motion::Pop::chip((1., 0.5)),
+                                    today_pill,
                                 ))
                             })
                             .child(
@@ -964,7 +1126,16 @@ impl Cereal {
                             ),
                     ),
             )
-            .child(rows)
+            .child(
+                div()
+                    .w_full()
+                    .rounded(px(17.))
+                    .bg(t.card)
+                    .border_1()
+                    .border_color(t.border)
+                    .overflow_hidden()
+                    .child(crate::motion::paged(rows, paged, turn)),
+            )
     }
 
     /// Home's composer. At rest it is a single "Ask anything" pill; focused
@@ -1151,6 +1322,19 @@ mod tests {
         assert!(rows.windows(2).all(|pair| pair[0].date >= pair[1].date));
         let untitled = Note::default();
         assert_eq!(home_rows(&[&untitled])[0].title.as_ref(), "New note");
+    }
+
+    #[test]
+    fn the_arrow_keys_step_through_the_rows_and_stop_at_the_ends() {
+        let ids = [7, 3, 9];
+        assert_eq!(row_step(&ids, 7, false), Some(3));
+        assert_eq!(row_step(&ids, 3, false), Some(9));
+        assert_eq!(row_step(&ids, 9, false), None);
+        assert_eq!(row_step(&ids, 9, true), Some(3));
+        assert_eq!(row_step(&ids, 7, true), None);
+        // A row that is no longer in the list has no neighbours.
+        assert_eq!(row_step(&ids, 4, false), None);
+        assert_eq!(row_step(&[], 4, true), None);
     }
 
     #[test]

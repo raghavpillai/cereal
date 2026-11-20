@@ -213,11 +213,19 @@ impl Cereal {
         ) else {
             return;
         };
+        // The Trash popover has rules of its own for the arrows and Return
+        // (a row that is asking keeps them; a focused tool takes Return).
+        if matches!(command, MenuKey::Select(_) | MenuKey::Activate(_)) {
+            match self.trash_key(matches!(command, MenuKey::Select(_)), window, cx) {
+                crate::trash::TrashKey::Handled => {
+                    cx.stop_propagation();
+                    return;
+                }
+                crate::trash::TrashKey::Control => return,
+                crate::trash::TrashKey::Menu => {}
+            }
+        }
         match command {
-            // A Trash row that is asking keeps the keys: the arrows stay on
-            // it and Return lets go of the question.
-            MenuKey::Select(_) | MenuKey::Activate(_)
-                if self.trash_key_while_asking(matches!(command, MenuKey::Select(_)), cx) => {}
             MenuKey::Select(index) => {
                 self.menu_keyboard.selected = Some(index);
                 cx.notify();

@@ -11,7 +11,14 @@ use crate::{
     ui::*,
 };
 use gpui::{prelude::*, *};
-use std::{path::Path, sync::mpsc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    ops::Range,
+    path::Path,
+    sync::mpsc,
+    time::{Duration, Instant},
+};
 
 /// What the header says under "Trash". Nothing empties Trash by itself: the
 /// app keeps a trashed note until it is deleted forever, and the server has
@@ -56,6 +63,17 @@ pub mod size {
     pub const BUTTON: f32 = 28.;
     pub const BUTTON_GAP: f32 = 2.;
     pub const BUTTON_ICON: f32 = 16.;
+    /// A question's answers: pills of a fixed width each, so that where they
+    /// stand is known before they are drawn (`super::answers`).
+    pub const ANSWER_HEIGHT: f32 = 26.;
+    pub const ANSWER_GAP: f32 = 6.;
+    /// From the question's words to its answers, and from the answers to
+    /// the row's bottom edge.
+    pub const ANSWER_TOP: f32 = 8.;
+    pub const ANSWER_BOTTOM: f32 = 9.;
+    /// What a row's own content has across: the card less the list's and
+    /// the row's insets.
+    pub const ROW_CONTENT: f32 = CARD_WIDTH - 2. * LIST_X - 2. * ROW_X;
     /// Where the trash button sits in the sidebar until it has been drawn
     /// (afterwards its drawn bounds are used): the footer's left padding
     /// plus the keyboard button (28) and the 1 pt between them.
@@ -118,7 +136,8 @@ pub fn trash_rows(workspace: &crate::model::Workspace) -> Vec<TrashRow> {
         .map(|note| TrashRow {
             id: note.id,
             title: if note.title.trim().is_empty() {
-                "Untitled note".into()
+                // What every list calls a note without a title.
+                "New note".into()
             } else {
                 note.title.clone()
             },
@@ -174,6 +193,117 @@ impl Ask {
 }
 
 pub const CHANGED: &str = "This note was edited elsewhere since it was trashed";
+/// What a row asks before its note is deleted forever, under the note's
+/// title (which stays where it was, whole).
+pub const QUESTION: &str = "Delete this note forever?";
+
+/// One answer to a row's question.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Answer {
+    /// The name of its element (with the note's id).
+    pub name: &'static str,
+    pub label: &'static str,
+    pub width: f32,
+    /// It deletes the note forever.
+    pub destructive: bool,
+}
+
+/// The answers a question offers, in the order they are drawn, and whether
+/// they stand at the row's trailing edge (else under the start of its words).
+///
+/// The rule this encodes: **the answer that destroys never appears under
+/// the pointer that asked.** "Delete forever?" is asked from the row's trash
+/// button, at the row's trailing edge, so the answer drawn there is Cancel;
+/// "edited elsewhere" is asked by pressing Delete, so its answers stand at
+/// the other end of the row with "Delete anyway" clear of where Delete was.
+/// The answers are also on a line of their own under the title, never on
+/// the line that was pressed. The second half of the rule is time
+/// ([`crate::ui::press_confirms`]).
+pub fn answers(ask: Ask) -> (bool, [Answer; 2]) {
+    match ask {
+        Ask::Delete(_) => (
+            true,
+            [
+                Answer { name: "trash-confirm", label: "Delete", width: 68., destructive: true },
+                Answer { name: "trash-cancel", label: "Cancel", width: 68., destructive: false },
+            ],
+        ),
+        Ask::Changed(_) => (
+            false,
+            [
+                Answer { name: "trash-anyway", label: "Delete anyway", width: 116., destructive: true },
+                Answer { name: "trash-changed-restore", label: "Restore", width: 76., destructive: false },
+            ],
+        ),
+    }
+}
+
+/// Where each answer of `ask` stands across the row's content (0 is its
+/// leading edge, [`size::ROW_CONTENT`] its trailing one), in drawing order.
+pub fn answer_spans(ask: Ask) -> [(Answer, Range<f32>); 2] {
+    use size::*;
+    let (trailing, [first, second]) = answers(ask);
+    let start = if trailing {
+        ROW_CONTENT - first.width - ANSWER_GAP - second.width
+    } else {
+        // Under the title: past the tile.
+        TILE + ROW_GAP
+    };
+    let then = start + first.width + ANSWER_GAP;
+    [(first, start..start + first.width), (second, then..then + second.width)]
+}
+
+/// Where across the row's content the control is whose press asks `ask`:
+/// the trash button at the row's trailing edge, or the Delete answer of the
+/// first question.
+pub fn asked_from(ask: Ask) -> Range<f32> {
+    match ask {
+        Ask::Delete(_) => size::ROW_CONTENT - size::BUTTON..size::ROW_CONTENT,
+        Ask::Changed(id) => answer_spans(Ask::Delete(id))
+            .into_iter()
+            .find(|(answer, _)| answer.destructive)
+            .map(|(_, span)| span)
+            .unwrap_or(0.0..0.),
+    }
+}
+
+thread_local! {
+    /// The question now showing and when it was asked: an answer that
+    /// destroys does not count until the double-click interval has passed.
+    static ASKED: Cell<Option<(Ask, Instant)>> = const { Cell::new(None) };
+    /// The question each row last asked, drawn while it folds away.
+    static LAST_ASK: RefCell<HashMap<u64, Ask>> = RefCell::new(HashMap::new());
+    /// The rows that have left the list and are closing up.
+    static LEFT: RefCell<crate::lazy::Leavers<TrashRow>> = RefCell::new(Default::default());
+}
+
+/// What a key pressed in the open Trash popover is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrashKey {
+    /// Dealt with here.
+    Handled,
+    /// The focused control's own: leave it alone.
+    Control,
+    /// The menu's usual.
+    Menu,
+}
+
+/// Where Tab goes next among `count` stops, from the one that has the focus
+/// (`current`) or, when none has, from `resume` (the first stop of the
+/// highlighted row). It never leaves: the popover keeps the keyboard.
+pub fn next_stop(count: usize, current: Option<usize>, resume: Option<usize>, back: bool) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    Some(match (current.filter(|index| *index < count), back) {
+        (Some(index), false) => (index + 1) % count,
+        (Some(index), true) => (index + count - 1) % count,
+        (None, false) => resume.filter(|index| *index < count).unwrap_or(0),
+        (None, true) => resume
+            .filter(|index| *index < count)
+            .map_or(count - 1, |index| (index + count - 1) % count),
+    })
+}
 
 /// Erase what this Mac keeps for a note under its recordings directory: its
 /// own capture directory (`note-<id>`) and, for a note of a server, the
@@ -314,13 +444,25 @@ impl Cereal {
     /// A row asks something: the keyboard highlight goes to it and stays.
     fn ask_in_row(&mut self, ask: Ask, cx: &mut Context<Self>) {
         // Each row registers one keyboard entry, in the order of the rows.
-        if let Some(index) = trash_rows(&self.workspace)
+        let Some(index) = trash_rows(&self.workspace)
             .iter()
             .position(|row| row.id == ask.note())
-        {
-            self.menu_keyboard.selected = Some(index);
-        }
+        else {
+            return;
+        };
+        self.menu_keyboard.selected = Some(index);
         self.trash_ask = Some(ask);
+        // From now, and not before the double-click interval has passed,
+        // the answer that destroys counts. It is drawn dimmed until then.
+        ASKED.with(|asked| asked.set(Some((ask, Instant::now()))));
+        self.stage.forget(("trash-armed", ask.note()));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(crate::ui::double_click_interval() + Duration::from_millis(8))
+                .await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
         cx.notify();
     }
 
@@ -329,17 +471,111 @@ impl Cereal {
         self.ask_in_row(Ask::Delete(id), cx);
     }
 
-    /// The keyboard while a row is asking: the arrows stay on it, Return
-    /// lets go of the question (it never deletes). True when handled.
-    pub(crate) fn trash_key_while_asking(&mut self, moving: bool, cx: &mut Context<Self>) -> bool {
-        if self.menu != Some(Menu::Trash) || self.trash_ask.is_none() {
+    /// Whether the answer that destroys would count if `ask` were answered
+    /// with it now, by a press that is the `clicks`-th of its run.
+    fn trash_answer_counts(&self, ask: Ask, clicks: usize) -> bool {
+        self.trash_ask == Some(ask)
+            && ASKED.with(Cell::get).is_some_and(|(asked, at)| {
+                asked == ask
+                    && crate::ui::press_confirms(at.elapsed(), clicks, crate::ui::double_click_interval())
+            })
+    }
+
+    /// The Tab stops of the popover, in order, each with its row: a row's
+    /// two tools, or, while a row asks, that row's two answers and nothing
+    /// else.
+    fn trash_stops(&self) -> Vec<(usize, ElementId)> {
+        let rows = trash_rows(&self.workspace);
+        if let Some(ask) = self.trash_ask {
+            let Some(index) = rows.iter().position(|row| row.id == ask.note()) else {
+                return Vec::new();
+            };
+            return answers(ask)
+                .1
+                .into_iter()
+                .map(|answer| (index, ElementId::from((answer.name, ask.note()))))
+                .collect();
+        }
+        rows.iter()
+            .enumerate()
+            .filter(|(_, row)| !self.deleting_forever.contains(&row.id))
+            .flat_map(|(index, row)| {
+                [
+                    (index, ElementId::from(("trash-restore", row.id))),
+                    (index, ElementId::from(("trash-delete", row.id))),
+                ]
+            })
+            .collect()
+    }
+
+    /// Whether one of the popover's own controls has the keyboard focus.
+    pub(crate) fn trash_focus_inside(&self, window: &Window) -> bool {
+        self.menu == Some(Menu::Trash)
+            && self.trash_stops().into_iter().any(|(_, id)| {
+                crate::ui::reach_handle(id).is_some_and(|handle| handle.is_focused(window))
+            })
+    }
+
+    /// Tab and Shift-Tab while the popover is open: they go round its own
+    /// controls (and the highlight goes with them), never out to the page
+    /// behind it. True when the popover is open, so the key is its.
+    pub(crate) fn trash_tab(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.menu != Some(Menu::Trash) {
             return false;
         }
-        if !moving {
-            self.trash_ask = None;
+        let stops = self.trash_stops();
+        let handles: Vec<Option<FocusHandle>> = stops
+            .iter()
+            .map(|(_, id)| crate::ui::reach_handle(id.clone()))
+            .collect();
+        let current = handles
+            .iter()
+            .position(|handle| handle.as_ref().is_some_and(|handle| handle.is_focused(window)));
+        let resume = self
+            .menu_keyboard
+            .selected
+            .and_then(|row| stops.iter().position(|(index, _)| *index == row));
+        if let Some(next) = next_stop(stops.len(), current, resume, back)
+            && let Some(handle) = &handles[next]
+        {
+            crate::ui::set_keyboard_focus(true);
+            handle.focus(window);
+            let row = stops[next].0;
+            if self.trash_ask.is_none() {
+                self.menu_keyboard.selected = Some(row);
+            }
+            self.trash_scroll.scroll_to_item(row);
         }
         cx.notify();
         true
+    }
+
+    /// The arrows and Return in the open popover. While a row asks, the
+    /// arrows stay on it and Return lets go of the question (it never
+    /// deletes: the answer that destroys is pressed, or reached with Tab and
+    /// pressed with Space). Otherwise Return on a control that has the
+    /// keyboard focus presses that control, and the arrows take the
+    /// highlight, and the ring with it, from row to row.
+    pub(crate) fn trash_key(&mut self, moving: bool, window: &mut Window, cx: &mut Context<Self>) -> TrashKey {
+        if self.menu != Some(Menu::Trash) {
+            return TrashKey::Menu;
+        }
+        let inside = self.trash_focus_inside(window);
+        if self.trash_ask.is_some() {
+            if !moving {
+                self.trash_ask = None;
+                // The key's release must find nothing to press.
+                self.focus.focus(window);
+            }
+            cx.notify();
+            return TrashKey::Handled;
+        }
+        if inside && moving {
+            self.focus.focus(window);
+        } else if inside {
+            return TrashKey::Control;
+        }
+        TrashKey::Menu
     }
 
     /// Delete a trashed note forever (confirmed in its row). `anyway`: the
@@ -462,15 +698,13 @@ impl Cereal {
         // layout decides where that is); the footer's usual place before it
         // has been drawn once.
         let window_height = f32::from(viewport.height);
-        let (right, centre_y) = crate::onboarding_view::placed("footer-trash")
-            .map(|button| (f32::from(button.right()), f32::from(button.center().y)))
+        let (button_left, centre_y) = crate::onboarding_view::placed("footer-trash")
+            .map(|button| (f32::from(button.left()), f32::from(button.center().y)))
             .unwrap_or((
-                self.sidebar_span * (self.sidebar_level - 1.) + BUTTON_LEFT + BUTTON,
+                self.sidebar_span * (self.sidebar_level - 1.) + BUTTON_LEFT,
                 window_height - BUTTON_CENTRE_FROM_BOTTOM,
             ));
-        // Clear of the workspace's name in the row under the button, as in
-        // the reference (whose trash button is the fifth in its footer).
-        let left = (right + BESIDE_BUTTON).max(self.sidebar_span * (self.sidebar_level - 1.) + CARD_LEFT);
+        let left = card_left(button_left, f32::from(viewport.width));
         // The card grows out of the point level with the button's centre.
         let top = window_height - ABOVE_BOTTOM - height;
         let anchor_y = ((centre_y - top) / height).clamp(0., 1.);
@@ -514,17 +748,45 @@ impl Cereal {
             .px(px(LIST_X))
             .pt(px(LIST_TOP))
             .pb(px(LIST_X));
-        if rows.is_empty() {
-            list = list.items_center().justify_center().pb(px(HEADER_HEIGHT / 2.)).child(
-                div()
-                    .text_size(px(13.))
-                    .line_height(px(18.))
-                    .text_color(t.muted)
-                    .child(EMPTY),
-            );
+        // A row that is restored or deleted folds shut and the rows under
+        // it close up; what it showed is kept for as long as that takes.
+        let ids: Vec<u64> = rows.iter().map(|row| row.id).collect();
+        LEFT.with(|left| {
+            left.borrow_mut().update(crate::lazy::key(&ids), || {
+                rows.iter().map(|row| (row.id, row.clone())).collect()
+            })
+        });
+        let mut listed: HashMap<u64, TrashRow> = rows.into_iter().map(|row| (row.id, row)).collect();
+        let drawn = self.stage.roster("trash", 0, &ids);
+        let leaving: Vec<u64> = drawn.iter().filter(|row| !row.present).map(|row| row.key).collect();
+        let mut position = 0;
+        for row in &drawn {
+            let content = match listed.remove(&row.key) {
+                Some(listed) if row.present => {
+                    position += 1;
+                    Some(self.trash_row(Some(position - 1), listed, live.clone(), cx))
+                }
+                _ => LEFT
+                    .with(|left| left.borrow().left(row.key).cloned())
+                    .map(|left| self.trash_row(None, left, live.clone(), cx)),
+            };
+            list = list.children(crate::motion::roster_row(&self.stage, "trash", *row, content));
         }
-        for (position, row) in rows.into_iter().enumerate() {
-            list = list.child(self.trash_row(position, row, live.clone(), cx));
+        LEFT.with(|left| left.borrow_mut().keep(&leaving));
+        // "Trash is empty" arrives once the last row has gone.
+        let nothing = drawn.is_empty();
+        let arrived = self.stage.swap(("trash-empty", 0), u64::from(nothing));
+        if nothing {
+            list = list.items_center().justify_center().pb(px(HEADER_HEIGHT / 2.)).child(
+                crate::motion::swapped(
+                    div()
+                        .text_size(px(13.))
+                        .line_height(px(18.))
+                        .text_color(t.muted)
+                        .child(EMPTY),
+                    arrived,
+                ),
+            );
         }
         let card = div()
             .w(px(CARD_WIDTH))
@@ -558,7 +820,8 @@ impl Cereal {
             .child(header)
             .child(div().flex_shrink_0().h(px(hairline)).bg(t.hairline))
             .child(list.child(self.stage.glide("menu").indicator(t.hover, 8.)))
-            .occlude().on_any_mouse_down(|_, _, cx| cx.stop_propagation());
+            .child(scroll_thumb("trash", &self.trash_scroll));
+        let card = floating(card);
         div()
             .absolute()
             .left(px(left))
@@ -567,9 +830,12 @@ impl Cereal {
             .into_any_element()
     }
 
+    /// One row of the popover. `position` is its place among the rows, or
+    /// `None` for a row that has left the list and is only closing up:
+    /// that one answers nothing.
     fn trash_row(
         &self,
-        position: usize,
+        position: Option<usize>,
         row: TrashRow,
         live: impl Fn(&Cereal) -> bool + Clone + 'static,
         cx: &mut Context<Self>,
@@ -577,20 +843,29 @@ impl Cereal {
         use size::*;
         let t = self.theme();
         let id = row.id;
-        let asking = self.trash_ask.filter(|ask| ask.note() == id);
+        let inert = position.is_none();
+        let asking = self.trash_ask.filter(|ask| ask.note() == id && !inert);
         let busy = self.deleting_forever.contains(&id);
-        // Return restores the highlighted note; in a row that is asking, it
-        // lets go of the question (Return never deletes). While any row asks,
-        // the keys stay on it (`trash_key_while_asking`).
-        let (index, _) = self.menu_keyboard.register(move |this, _, cx| {
-            if this.trash_ask.is_some() {
-                this.trash_ask = None;
-                cx.notify();
-            } else if !this.deleting_forever.contains(&id) {
-                this.restore_from_trash(id, cx);
+        // The question opens under the title, which stays where it is, and
+        // the row's tools make way for it. What it asked is still drawn
+        // while it folds away.
+        let question_key = ("trash-ask", id);
+        let question = self.stage.presence(question_key, asking.is_some(), crate::motion::GOOEY);
+        let shown = LAST_ASK.with(|last| {
+            let mut last = last.borrow_mut();
+            match asking {
+                Some(ask) => {
+                    last.insert(id, ask);
+                    Some(ask)
+                }
+                None if question.visible => last.get(&id).copied(),
+                None => {
+                    last.remove(&id);
+                    None
+                }
             }
         });
-        let place = |names: &[&'static str; 6]| names.get(position).copied();
+        let place = |names: &[&'static str; 6]| position.and_then(|position| names.get(position).copied());
         let tile = div()
             .size(px(TILE))
             .flex_shrink_0()
@@ -600,11 +875,14 @@ impl Cereal {
             .items_center()
             .justify_center()
             .child(icon("document", TILE_ICON, t.muted.opacity(0.6)));
+        // The tools answer only while the row is not asking: where they
+        // were pressed, nothing is pressable while the question shows.
+        let tools_live = !inert && asking.is_none();
         let button = |name: &'static str,
                       symbol: &'static str,
                       label: &'static str,
                       spot: Option<&'static str>| {
-            div()
+            let button = div()
                 .id((name, id))
                 .relative()
                 .size(px(BUTTON))
@@ -614,167 +892,229 @@ impl Cereal {
                 .justify_center()
                 .rounded(px(6.))
                 .cursor_default()
+                .child(icon(symbol, BUTTON_ICON, t.muted));
+            if !tools_live {
+                return button;
+            }
+            button
                 .child(crate::motion::tactile(t.hover).press(t.fill).radius(6.))
-                .child(icon(symbol, BUTTON_ICON, t.muted))
                 .when_some(spot, |d, spot| d.child(crate::onboarding_view::place(spot)))
                 .child(crate::ui::tip(label, t))
+                .reach()
         };
-        let action = |id: (&'static str, u64), label: &'static str, danger: bool, spot: Option<&'static str>| {
-            pill(id, label, "", t)
-                .h(px(BUTTON - 2.))
-                .flex_shrink_0()
-                .when(danger, |d| d.bg(t.danger).border_color(t.danger).text_color(gpui::white()))
-                .when_some(spot, |d, spot| d.relative().child(crate::onboarding_view::place(spot)))
-        };
+        let live_restore = live.clone();
+        let live_delete = live.clone();
+        let tools = div()
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap(px(BUTTON_GAP))
+            .opacity((1. - question.fade.clamp(0., 1.)) * if busy { DISABLED } else { 1. })
+            .child(
+                button("trash-restore", "restore", "Restore", place(&RESTORE_PLACES)).when(tools_live, |d| {
+                    d.on_click(cx.listener(move |this, _, _, cx| {
+                        if live_restore(this) && !this.deleting_forever.contains(&id) {
+                            this.restore_from_trash(id, cx);
+                        }
+                    }))
+                }),
+            )
+            .child(
+                button("trash-delete", "trash", "Delete forever", place(&DELETE_PLACES)).when(tools_live, |d| {
+                    d.on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        if live_delete(this) && !this.deleting_forever.contains(&id) {
+                            this.ask_delete_forever(id, cx);
+                            // Asked from the keyboard, the focus goes to
+                            // the answer that keeps the note.
+                            if event.is_keyboard()
+                                && let Some(cancel) = crate::ui::reach_handle(("trash-cancel", id))
+                            {
+                                cancel.focus(window);
+                            }
+                        }
+                    }))
+                }),
+            );
+        let head = div()
+            .h(px(ROW_HEIGHT))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(ROW_GAP))
+            .child(tile)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(div().min_w_0().truncate().child(row.title))
+                    // As on the Trash page: its own server no longer has it.
+                    .when(row.gone, |d| {
+                        d.child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(SUBTITLE_SIZE))
+                                .text_color(t.muted)
+                                .child(crate::screens::DELETED_ON_SERVER),
+                        )
+                    }),
+            )
+            .child(tools);
+        let body = shown.map(|ask| {
+            let spans = answer_spans(ask);
+            debug_assert!(spans.iter().all(|(answer, span)| {
+                let from = asked_from(ask);
+                !answer.destructive || span.end <= from.start || span.start >= from.end
+            }));
+            let words = match ask {
+                Ask::Delete(_) => {
+                    let target = self
+                        .workspace
+                        .note(id)
+                        .map(|note| delete_target(note, crate::server::enabled()))
+                        .unwrap_or(DeleteTarget::ThisMac);
+                    let host = crate::accounts::of_note(id).map(|account| account.host());
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(div().line_height(px(TITLE_LINE)).child(QUESTION))
+                        .child(small(confirm_detail(target, host.as_deref()), t).whitespace_normal())
+                }
+                Ask::Changed(_) => div().child(small(CHANGED, t).whitespace_normal()),
+            };
+            let answering = asking == Some(ask);
+            // Where `answer_spans` says: the body starts past the tile.
+            let mut pills = div()
+                .mt(px(ANSWER_TOP))
+                .ml(px(spans[0].1.start - (TILE + ROW_GAP)))
+                .flex()
+                .gap(px(ANSWER_GAP));
+            for (answer, _) in spans {
+                // The answer that destroys is dimmed until a press on it
+                // would count (`ui::press_confirms`).
+                let armed = !answer.destructive || self.trash_answer_counts(ask, 1);
+                let lit = if answer.destructive && answering {
+                    self.stage
+                        .aim(("trash-armed", id), if armed { 1. } else { 0. }, crate::motion::SNAPPY)
+                        .clamp(0., 1.)
+                } else {
+                    1.
+                };
+                let spot = match (answer.destructive, answering) {
+                    (true, true) => place(&CONFIRM_PLACES),
+                    (false, true) => place(&CANCEL_PLACES),
+                    _ => None,
+                };
+                let live = live.clone();
+                let pill = if answering {
+                    pill((answer.name, id), answer.label, "", t).on_click(cx.listener(
+                        move |this, event: &ClickEvent, window, cx| {
+                            if !live(this) {
+                                return;
+                            }
+                            match (ask, answer.destructive) {
+                                (_, true) => {
+                                    if this.trash_answer_counts(ask, event.click_count()) {
+                                        this.delete_forever(id, matches!(ask, Ask::Changed(_)), cx);
+                                    }
+                                }
+                                (Ask::Delete(_), false) => {
+                                    this.trash_ask = None;
+                                    // Back to the tool that asked, for the keyboard.
+                                    if event.is_keyboard()
+                                        && let Some(tool) = crate::ui::reach_handle(("trash-delete", id))
+                                    {
+                                        tool.focus(window);
+                                    }
+                                    cx.notify();
+                                }
+                                (Ask::Changed(_), false) => {
+                                    this.trash_ask = None;
+                                    this.restore_from_trash(id, cx);
+                                }
+                            }
+                        },
+                    ))
+                } else {
+                    // Folding away: the same pill, answering nothing.
+                    pill_frame((answer.name, id), t).child(answer.label)
+                };
+                pills = pills.child(
+                    pill.h(px(ANSWER_HEIGHT))
+                        .w(px(answer.width))
+                        .px(px(0.))
+                        .flex_shrink_0()
+                        .when(answer.destructive, |d| {
+                            d.bg(t.danger)
+                                .border_color(t.danger)
+                                .text_color(gpui::white())
+                                .opacity(DISABLED + (1. - DISABLED) * lit)
+                        })
+                        .when_some(spot, |d, spot| d.relative().child(crate::onboarding_view::place(spot))),
+                );
+            }
+            div()
+                .pl(px(TILE + ROW_GAP))
+                .pb(px(ANSWER_BOTTOM))
+                .flex()
+                .flex_col()
+                .child(words)
+                .child(pills)
+        });
         let mut element = div()
             .id(("trash-row", id))
             .relative()
             .flex_shrink_0()
-            .min_h(px(ROW_HEIGHT))
             .px(px(ROW_X))
             .flex()
-            .items_center()
-            .gap(px(ROW_GAP))
-            .rounded(px(8.))
-            .when(self.menu_keyboard.selected == Some(index), |d| {
-                d.child(self.stage.glide("menu").probe(index))
-            })
-            .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                // A row that is asking keeps the highlight.
-                if this.trash_ask.is_none() && this.menu_keyboard.selected != Some(index) {
-                    this.menu_keyboard.selected = Some(index);
+            .flex_col()
+            .rounded(px(8.));
+        if !inert {
+            // Return restores the highlighted note; in a row that is asking,
+            // it lets go of the question (Return never deletes). While any
+            // row asks, the keys stay on it (`trash_key`).
+            let (index, _) = self.menu_keyboard.register(move |this, _, cx| {
+                if this.trash_ask.is_some() {
+                    this.trash_ask = None;
                     cx.notify();
+                } else if !this.deleting_forever.contains(&id) {
+                    this.restore_from_trash(id, cx);
                 }
-            }))
-            .child(tile);
-        match asking {
-            Some(Ask::Delete(_)) => {
-                let target = self
-                    .workspace
-                    .note(id)
-                    .map(|note| delete_target(note, crate::server::enabled()))
-                    .unwrap_or(DeleteTarget::ThisMac);
-                let host = crate::accounts::of_note(id).map(|account| account.host());
-                let live_cancel = live.clone();
-                let live_confirm = live;
-                element = element
-                    .py(px(6.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            // The title gives way; "forever?" always shows.
-                            .child(
-                                div()
-                                    .flex()
-                                    .min_w_0()
-                                    .child(div().flex_shrink_0().child("Delete “"))
-                                    .child(div().min_w_0().truncate().child(row.title))
-                                    .child(div().flex_shrink_0().child("” forever?")),
-                            )
-                            .child(small(confirm_detail(target, host.as_deref()), t).whitespace_normal()),
-                    )
-                    .child(action(("trash-cancel", id), "Cancel", false, place(&CANCEL_PLACES)).on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            if live_cancel(this) {
-                                this.trash_ask = None;
-                                cx.notify();
-                            }
-                        }),
-                    ))
-                    .child(action(("trash-confirm", id), "Delete", true, place(&CONFIRM_PLACES)).on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            if live_confirm(this) {
-                                this.delete_forever(id, false, cx);
-                            }
-                        }),
-                    ));
-            }
-            Some(Ask::Changed(_)) => {
-                let live_restore = live.clone();
-                let live_anyway = live;
-                element = element
-                    .py(px(6.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(div().truncate().child(row.title))
-                            .child(small(CHANGED, t).whitespace_normal()),
-                    )
-                    .child(action(("trash-changed-restore", id), "Restore", false, place(&CANCEL_PLACES)).on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            if live_restore(this) {
-                                this.trash_ask = None;
-                                this.restore_from_trash(id, cx);
-                            }
-                        }),
-                    ))
-                    .child(
-                        action(("trash-anyway", id), "Delete anyway", true, place(&CONFIRM_PLACES)).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                if live_anyway(this) {
-                                    this.delete_forever(id, true, cx);
-                                }
-                            }),
-                        ),
-                    );
-            }
-            None => {
-                let live_restore = live.clone();
-                let live_delete = live;
-                element = element
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .child(div().min_w_0().truncate().child(row.title))
-                            // As on the Trash page: its own server no longer has it.
-                            .when(row.gone, |d| {
-                                d.child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .text_size(px(SUBTITLE_SIZE))
-                                        .text_color(t.muted)
-                                        .child(crate::screens::DELETED_ON_SERVER),
-                                )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_shrink_0()
-                            .items_center()
-                            .gap(px(BUTTON_GAP))
-                            .when(busy, |d| d.opacity(0.45))
-                            .child(
-                                button("trash-restore", "restore", "Restore", place(&RESTORE_PLACES))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if live_restore(this) && !this.deleting_forever.contains(&id) {
-                                            this.restore_from_trash(id, cx);
-                                        }
-                                    })),
-                            )
-                            .child(
-                                button("trash-delete", "trash", "Delete forever", place(&DELETE_PLACES))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if live_delete(this) && !this.deleting_forever.contains(&id) {
-                                            this.ask_delete_forever(id, cx);
-                                        }
-                                    })),
-                            ),
-                    );
-            }
+            });
+            element = element
+                .when(self.menu_keyboard.selected == Some(index), |d| {
+                    d.child(self.stage.glide("menu").probe(index))
+                })
+                .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                    // A row that is asking keeps the highlight.
+                    if this.trash_ask.is_none() && this.menu_keyboard.selected != Some(index) {
+                        this.menu_keyboard.selected = Some(index);
+                        cx.notify();
+                    }
+                }));
         }
         element
+            .child(head)
+            .children(body.and_then(|body| {
+                crate::motion::fold(&self.stage, question_key, question, body)
+            }))
     }
+}
+
+/// Where the card's left edge is: clear of the trash button, and no nearer
+/// to the sidebar's own left edge than [`size::CARD_LEFT`], so it stands in
+/// the same place beside the sidebar whether that shares the window with
+/// the page or has slid over it (the button is `button_left` from the
+/// window's edge either way, [`size::BUTTON_LEFT`] into the sidebar). It
+/// stays inside a window `window` wide.
+pub fn card_left(button_left: f32, window: f32) -> f32 {
+    use size::*;
+    let sidebar = button_left - BUTTON_LEFT;
+    (button_left + BUTTON + BESIDE_BUTTON)
+        .max(sidebar + CARD_LEFT)
+        .min((window - CARD_WIDTH - 8.).max(8.))
 }
 
 #[cfg(test)]
@@ -802,10 +1142,76 @@ mod tests {
         assert_eq!(
             trash_rows(&workspace),
             [
-                TrashRow { id: 2, title: "Untitled note".into(), gone: false },
+                TrashRow { id: 2, title: "New note".into(), gone: false },
                 TrashRow { id: 3, title: "Gone from the server".into(), gone: true },
             ]
         );
+    }
+
+    #[test]
+    fn the_answer_that_destroys_is_never_where_the_pointer_that_asked_is() {
+        for ask in [Ask::Delete(7), Ask::Changed(7)] {
+            let from = asked_from(ask);
+            assert!(from.start < from.end, "{ask:?} is asked from somewhere");
+            let spans = answer_spans(ask);
+            for (answer, span) in &spans {
+                // Every answer is inside the row.
+                assert!(span.start >= 0. && span.end <= size::ROW_CONTENT, "{ask:?} {answer:?}");
+                if answer.destructive {
+                    assert!(
+                        span.end <= from.start || span.start >= from.end,
+                        "{ask:?}: {} stands at {span:?}, under the press at {from:?}",
+                        answer.label
+                    );
+                }
+            }
+            // One answer destroys, one does not, and they do not overlap.
+            assert_eq!(spans.iter().filter(|(answer, _)| answer.destructive).count(), 1);
+            assert!(spans[0].1.end <= spans[1].1.start);
+        }
+        // "Delete forever?" is asked from the trash button at the row's
+        // trailing edge: what stands there is Cancel.
+        let [(_, delete), (cancel, kept)] = answer_spans(Ask::Delete(7));
+        assert_eq!(cancel.label, "Cancel");
+        assert_eq!(kept.end, size::ROW_CONTENT);
+        let button = asked_from(Ask::Delete(7));
+        assert!(kept.start <= button.start && button.end <= kept.end);
+        assert!(delete.end < button.start);
+    }
+
+    #[test]
+    fn tab_goes_round_the_popovers_own_controls() {
+        // Two rows, two tools each.
+        assert_eq!(next_stop(4, None, None, false), Some(0));
+        assert_eq!(next_stop(4, Some(0), None, false), Some(1));
+        assert_eq!(next_stop(4, Some(3), None, false), Some(0));
+        assert_eq!(next_stop(4, Some(0), None, true), Some(3));
+        assert_eq!(next_stop(4, None, None, true), Some(3));
+        // With the highlight on the second row, Tab starts at its first tool
+        // and Shift-Tab at the tool before it.
+        assert_eq!(next_stop(4, None, Some(2), false), Some(2));
+        assert_eq!(next_stop(4, None, Some(2), true), Some(1));
+        // A row that is asking has its two answers and nothing else.
+        assert_eq!(next_stop(2, Some(1), None, false), Some(0));
+        // An empty Trash has nowhere to stop, and a stop that has gone is
+        // not one to move on from.
+        assert_eq!(next_stop(0, None, None, false), None);
+        assert_eq!(next_stop(2, Some(5), None, false), Some(0));
+    }
+
+    #[test]
+    fn the_card_keeps_its_place_beside_the_sidebar_wherever_the_sidebar_is() {
+        use size::*;
+        // Beside the page: the sidebar starts at the window's edge.
+        let beside = card_left(BUTTON_LEFT, 1200.);
+        assert_eq!(beside, CARD_LEFT);
+        // Slid over a narrow window it starts there too, and so does the card
+        // (it was 73 pt, over the sidebar's own rows).
+        assert_eq!(card_left(BUTTON_LEFT, 760.), beside);
+        // Part of the way in, the card is as far from the sidebar's edge.
+        assert_eq!(card_left(BUTTON_LEFT - 60., 760.), beside - 60.);
+        // Never past the window's trailing edge.
+        assert_eq!(card_left(BUTTON_LEFT + 400., 760.), 760. - CARD_WIDTH - 8.);
     }
 
     #[test]
