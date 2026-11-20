@@ -327,6 +327,13 @@ pub struct Cereal {
     /// The menu bar item (see `menubar.rs`).
     pub menu_bar: crate::menubar::State,
     pub focus: FocusHandle,
+    /// The layer menus, popovers and dialogs are drawn on: whatever has the
+    /// keyboard inside what is open is under this handle (see
+    /// [`focus_strays`]).
+    pub(crate) layer_focus: FocusHandle,
+    /// The control that had the keyboard when a menu opened: it gets it
+    /// back when the menu closes, if the keyboard is what is being used.
+    menu_return: Option<FocusHandle>,
     pub _subscriptions: Vec<Subscription>,
     /// Registered with the window on the first frame: see `render`.
     focus_lost: Option<Subscription>,
@@ -673,6 +680,8 @@ impl Cereal {
             onboarding: crate::onboarding_view::Onboarding::new(welcome, cx),
             menu_bar: Default::default(),
             focus: cx.focus_handle(),
+            layer_focus: cx.focus_handle(),
+            menu_return: None,
             _subscriptions: subscriptions,
             focus_lost: None,
             appearance_watch: None,
@@ -682,7 +691,7 @@ impl Cereal {
         this
     }
     pub fn theme(&self) -> Theme {
-        Theme::new(self.workspace.settings.dark_mode)
+        Theme::current(self.workspace.settings.dark_mode)
     }
     pub fn navigate(&mut self, screen: Screen, cx: &mut Context<Self>) {
         // A row picked in the sidebar over a narrow window: it slides away.
@@ -1125,12 +1134,61 @@ impl Cereal {
             return;
         }
         set_keyboard_focus(true);
-        if back {
-            window.focus_prev();
-        } else {
-            window.focus_next();
+        let step = |window: &mut Window| {
+            if back {
+                window.focus_prev();
+            } else {
+                window.focus_next();
+            }
+        };
+        step(window);
+        // While a menu, popover or dialog is open, Tab stays among its own
+        // controls: the page behind it is not reachable. One with nothing to
+        // stop on leaves the keyboard with the window (its rows are walked
+        // with the arrows).
+        if self.menu.is_some() {
+            let mut left = TAB_STOPS_MOST;
+            while left > 0 && !self.layer_focus.contains_focused(window, cx) {
+                step(window);
+                left -= 1;
+            }
+            if !self.layer_focus.contains_focused(window, cx) {
+                self.focus.focus(window);
+            }
         }
         cx.notify();
+    }
+
+    /// While a menu, popover or dialog is open the keyboard belongs to it:
+    /// the focus is the window's or on something inside it, never on the
+    /// page behind (see [`focus_strays`]). When it closes and the keyboard
+    /// is what is being used, the control that opened it has the focus
+    /// again. Called once a frame, before anything is built.
+    fn keep_focus_in_layer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = &self.menu else {
+            if let Some(opener) = self.menu_return.take()
+                && keyboard_focus()
+                && self.focus.is_focused(window)
+                && self.focus.contains(&opener, window)
+            {
+                opener.focus(window);
+            }
+            return;
+        };
+        let inside = self.layer_focus.contains_focused(window, cx);
+        let drawn = self.focus.contains_focused(window, cx);
+        let was_open = self.visible_menu.is_some() && !self.menu_exiting;
+        if !was_open && self.menu_return.is_none() {
+            // Opening: remember the control it was opened from.
+            self.menu_return = window
+                .focused(cx)
+                .filter(|focused| drawn && !inside && *focused != self.focus);
+        }
+        // These place the keyboard themselves, as they always have.
+        let own = matches!(menu, Menu::NoteDetails | Menu::CalendarEvent | Menu::Share);
+        if !own && focus_strays(drawn, inside) {
+            self.focus.focus(window);
+        }
     }
 
     /// Close the topmost thing that is open over the page, and only that
@@ -1291,6 +1349,8 @@ impl Cereal {
         let natural = 2. + 12. + 16. + 8. + words.ceil() + 2. + action_width + 8. + 22. + 7.;
         let viewport = f32::from(window.viewport_size().width);
         let (reach_left, reach_right) = self.header_reach();
+        // The update's notice sits at the bar's right end: beside it.
+        let reach_right = reach_right + self.update_notice_reach();
         let (width, in_bar) = toast_place(
             natural,
             viewport,
@@ -1450,6 +1510,21 @@ pub(crate) fn top_layer(
     }
 }
 
+/// Whether the keyboard focus has to be given back to the window while a
+/// menu, popover or dialog is open: it is on something `drawn` in the last
+/// frame that is not `inside` what is open, which is to say on the page
+/// behind. A field or a button of the open thing itself keeps the keyboard,
+/// and so does one that was focused as it opened and has not been drawn yet
+/// (the invite dialog's address field): taking the focus from those is how
+/// a dialog ends up with a field nothing can be typed in.
+pub(crate) fn focus_strays(drawn: bool, inside: bool) -> bool {
+    drawn && !inside
+}
+
+/// More presses of Tab than a window has stops: how far [`Cereal::focus_step`]
+/// looks for a stop inside what is open before it gives up.
+const TAB_STOPS_MOST: usize = 512;
+
 /// Which notes "Select calendar event" offers: of `notes` (id, day, title;
 /// newest first), without the note being edited, those from `today` on, or
 /// failing any the three most recent; then only those whose title contains
@@ -1504,6 +1579,18 @@ impl Render for Cereal {
             window.appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         ));
+        // A change of theme is a short crossfade of the whole window, not a
+        // repaint in one frame (opacity only, so it is the same with reduced
+        // motion): every colour is part-way between the two meanwhile.
+        {
+            let pose = self.stage.presence(
+                ("theme-dark", 0),
+                self.workspace.settings.dark_mode,
+                crate::motion::SNAPPY,
+            );
+            let level = if crate::motion::reduce_motion() { pose.fade } else { pose.value.clamp(0., 1.) };
+            crate::ui::set_theme_crossfade((!pose.settled).then_some(level));
+        }
         // The Workspace pages of Settings read their workspace when shown.
         self.organization_frame(cx);
         // The theme menu belongs to its button on the Preferences page.
@@ -1524,6 +1611,7 @@ impl Render for Cereal {
             self.trash_reveal = None;
         }
         self.sync_share(window, cx);
+        self.keep_focus_in_layer(window, cx);
         match self.menu.clone() {
             Some(menu) if self.visible_menu.as_ref() != Some(&menu) || self.menu_exiting => {
                 // One menu replacing another in place pops again from part-way,
@@ -1563,15 +1651,6 @@ impl Render for Cereal {
             self.visible_menu = None;
             self.menu_exiting = false;
             self.menu_keyboard.reset();
-        }
-        if self.menu.is_some()
-            && !matches!(
-                self.menu,
-                // These hold a text field of their own.
-                Some(Menu::NoteDetails | Menu::CalendarEvent | Menu::Share)
-            )
-        {
-            self.focus.focus(window);
         }
         self.stage.begin();
         crate::motion::frame();
@@ -1866,7 +1945,15 @@ impl Render for Cereal {
                 )
             })
             .when(self.visible_menu.is_some(), |s| {
-                s.child(self.render_menu(menu_pose, window, cx))
+                // Under one focus handle, so the keyboard can be told to be
+                // inside what is open (see `keep_focus_in_layer`).
+                s.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .track_focus(&self.layer_focus)
+                        .child(self.render_menu(menu_pose, window, cx)),
+                )
             })
             .when(update_pose.visible, |s| {
                 s.child(self.render_update_notice(update_pose, window, cx))
@@ -1896,7 +1983,17 @@ impl Render for Cereal {
                     let down = view.clone();
                     window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
                         if phase == DispatchPhase::Capture {
-                            let _ = down.update(cx, |this, _| this.press_seq += 1);
+                            let _ = down.update(cx, |this, cx| {
+                                this.press_seq += 1;
+                                // Keyboard focus mode ends here too: the
+                                // root's own listener does not hear a press
+                                // on a floating surface (a menu, a dialog,
+                                // a toast, the update's notice), which takes
+                                // the pointer for itself.
+                                if set_keyboard_focus(false) {
+                                    cx.notify();
+                                }
+                            });
                         }
                     });
                     let up = view.clone();
@@ -1952,7 +2049,19 @@ fn toast_should_expire(
 
 #[cfg(test)]
 mod layer_tests {
-    use super::{Layer, Menu, calendar_event_offer, toast_place, top_layer};
+    use super::{Layer, Menu, calendar_event_offer, focus_strays, toast_place, top_layer};
+
+    #[test]
+    fn a_field_inside_what_is_open_keeps_the_keyboard_and_the_page_behind_does_not() {
+        // The invite dialog's address field is focused as the dialog opens,
+        // before it has ever been drawn: it keeps the keyboard.
+        assert!(!focus_strays(false, false));
+        // A field or a button of the open dialog itself.
+        assert!(!focus_strays(true, true));
+        // A control of the page behind (the button that opened it, a field
+        // that was being typed in): the window takes the keyboard back.
+        assert!(focus_strays(true, false));
+    }
 
     #[test]
     fn escape_closes_the_topmost_layer_and_only_that_one() {

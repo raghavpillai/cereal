@@ -447,6 +447,9 @@ pub struct Updates {
     was_on: bool,
     notice_was_on: bool,
     fresh: std::cell::Cell<bool>,
+    /// How much of the title bar's right end the notice took when it was
+    /// last drawn: what a toast in the bar stays clear of.
+    reach: std::cell::Cell<f32>,
     /// The capsule's face before the one it shows, and the one it shows:
     /// the notice's, and the one of the row in Settings.
     faces: (Face, Face),
@@ -1765,35 +1768,49 @@ impl Cereal {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let t = self.theme();
+        // A notice that has just come on has "Later" or it has not: it does
+        // not open beside the capsule while the notice itself arrives.
         if fresh {
-            self.stage.forget(key);
+            self.stage.settle(key, offered);
         }
-        let later = self
-            .stage
-            .aim(key, if offered { 1. } else { 0. }, GOOEY)
-            .clamp(0., 1.);
-        if later <= 0.001 {
-            return None;
-        }
-        let later_width = (pill_label_width("Later", window) + 26.).round() + 8.;
-        let button = pill(id, "Later", "", t)
-            .flex_shrink_0()
-            .on_click(cx.listener(|this, _, _, cx| this.put_update_away(cx)));
-        if later >= 1. {
-            return Some(button.mr(px(8.)).into_any_element());
-        }
-        // Folding: clipped from its far side, fading.
-        Some(
-            div()
-                .flex_shrink_0()
-                .w(px(later_width * later))
-                .overflow_hidden()
-                .opacity(motion::fade_for(later))
-                .flex()
-                .justify_end()
-                .child(button.mr(px(8.)))
-                .into_any_element(),
+        // It closes as a shape, like the capsule beside it, and its word is
+        // gone before the shape can cut into it.
+        motion::appear_across(
+            &self.stage,
+            key,
+            offered,
+            later_width(window),
+            LATER_GAP,
+            pill(id, "Later", "", t).on_click(cx.listener(|this, _, _, cx| this.put_update_away(cx))),
         )
+        .map(IntoElement::into_any_element)
+    }
+
+    /// The width the capsule in `seat` comes to rest at for what it says now
+    /// (see [`Self::render_update_capsule`]).
+    fn capsule_rest(&self, seat: Seat, window: &Window) -> f32 {
+        let face = match seat {
+            Seat::Notice => self.updates.faces.1,
+            Seat::About => self.updates.row_faces.1,
+        };
+        match face {
+            Face::None => 0.,
+            Face::Label(label) | Face::Plain(label) => {
+                (pill_label_width(&self.updates.says(seat, label), window) + 26.).round()
+            }
+            Face::Percent => (pill_label_width("100%", window) + 26.).round(),
+        }
+    }
+
+    /// How much of the title bar's right end the notice takes, with the gap
+    /// before it: what a toast in the bar stays clear of. Nothing while the
+    /// notice is not shown.
+    pub(crate) fn update_notice_reach(&self) -> f32 {
+        if self.updates.open() && !self.updates.about {
+            self.updates.reach.get()
+        } else {
+            0.
+        }
     }
 
     /// The film's pointer, over everything in the window (debug builds, and
@@ -1805,8 +1822,12 @@ impl Cereal {
         None
     }
 
-    /// The notice, in the toast's corner and face. `open` is its presence;
-    /// while it leaves, the notice last shown is drawn.
+    /// The notice: a card in the title bar, at its right end beside the
+    /// page's own controls, where it covers nothing that can be pressed at
+    /// any window width (see [`notice_place`]). It has the toast's face and
+    /// keeps its mark; where the bar has no room for its words it is the
+    /// mark and its buttons, and says the rest in a tooltip. `pose` is its
+    /// presence; while it leaves, the notice last shown is drawn.
     pub fn render_update_notice(
         &self,
         pose: crate::motion::Pose,
@@ -1814,7 +1835,7 @@ impl Cereal {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         /// The mark's size: the two lines of text beside it are 34 px.
-        const MARK: f32 = 32.;
+        const MARK: f32 = 30.;
         let t = self.theme();
         let notice = self.updates.shown.clone();
         let reduced = motion::reduce_motion();
@@ -1914,47 +1935,85 @@ impl Cereal {
             )),
             (None, None) => None,
         };
-        crate::motion::pop(
+        // How wide it is with its words and without them, and where the
+        // bar has room for it.
+        let buttons = self.capsule_rest(Seat::Notice, window)
+            + if self.updates.faces.1.filled() { later_width(window) + LATER_GAP } else { 0. };
+        let words = text_width(&notice.title, 13., FontWeight::SEMIBOLD, window).max(match notice.counts {
+            Some(total) => text_width(&progress_text(total, total), 12., FontWeight::NORMAL, window),
+            None => notice
+                .detail
+                .as_deref()
+                .map_or(0., |detail| text_width(detail, 12., FontWeight::NORMAL, window)),
+        });
+        let bare = 2. + NOTICE_PAD.0 + MARK + NOTICE_GAP + buttons + NOTICE_PAD.1;
+        let full = bare + words.ceil() + 2. + NOTICE_GAP;
+        let viewport = f32::from(window.viewport_size().width);
+        let (reach_left, reach_right) = self.header_reach();
+        // What is in the middle of the bar: the recording's pill, or the
+        // name of the Settings page.
+        let middle = self
+            .session_pill_width()
+            .or((self.screen == crate::app::Screen::Settings && self.current_note.is_none()).then_some(64.));
+        let (right, width, worded) = notice_place(full, bare, viewport, reach_left, reach_right, middle);
+        if fresh {
+            for key in [("update-notice-width", 0), ("update-notice-right", 0), ("update-notice-words", 0)] {
+                self.stage.forget(key);
+            }
+        }
+        let width = self.stage.aim(("update-notice-width", 0), width, GOOEY).max(NOTICE_HEIGHT);
+        let right = self.stage.aim(("update-notice-right", 0), right, GOOEY);
+        self.updates.reach.set(width + NOTICE_CLEAR);
+        // The words come and go with the room for them.
+        let worded = motion::appear_across(
+            &self.stage,
+            ("update-notice-words", 0),
+            worded,
+            words.ceil() + 2.,
+            NOTICE_GAP,
             div()
-                .id("update-notice")
-                // Nothing behind the notice is under the pointer.
-                .occlude()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(motion::swapped(
+                    title,
+                    self.stage.swap(("update-title", 0), hash(&notice.title)),
+                ))
+                .when_some(detail, |d, (kind, detail)| {
+                    d.child(motion::swapped(
+                        div().w_full().child(detail),
+                        self.stage.swap(("update-detail", 0), kind),
+                    ))
+                }),
+        );
+        let wordless = worded.is_none();
+        crate::motion::pop(
+            // Nothing behind the notice is under the pointer, and a press
+            // on it is not a press on the title bar.
+            crate::ui::floating(div().id("update-notice"))
                 .absolute()
-                .bottom(px(16.))
-                .right(px(16.))
-                .w(px(384.))
-                .max_w(window.viewport_size().width - px(32.))
-                .min_h(px(NOTICE_HEIGHT))
-                .pl(px(16.))
-                .pr(px(12.))
-                .py(px(10.))
+                .top(px(NOTICE_TOP))
+                .right(px(right))
+                .w(px(width))
+                .h(px(NOTICE_HEIGHT))
+                .pl(px(NOTICE_PAD.0))
+                .pr(px(NOTICE_PAD.1))
                 .rounded(px(12.))
                 .bg(t.card)
                 .border_1()
                 .border_color(t.border)
-                .shadow_lg()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .shadow_md()
+                .overflow_hidden()
                 .flex()
                 .items_center()
-                .gap(px(12.))
-                .child(update_bowl::bowl(MARK, self.updates.pour.pose(), t))
                 .child(
                     div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(motion::swapped(
-                            title,
-                            self.stage.swap(("update-title", 0), hash(&notice.title)),
-                        ))
-                        .when_some(detail, |d, (kind, detail)| {
-                            d.child(motion::swapped(
-                                div().w_full().child(detail),
-                                self.stage.swap(("update-detail", 0), kind),
-                            ))
-                        }),
+                        .flex_shrink_0()
+                        .mr(px(NOTICE_GAP))
+                        .child(update_bowl::bowl(MARK, self.updates.pour.pose(), t)),
                 )
+                .children(worded)
+                .child(div().flex_1().min_w_0())
                 .child(
                     div()
                         .flex()
@@ -1962,10 +2021,60 @@ impl Cereal {
                         .items_center()
                         .children(later)
                         .children(capsule),
-                ),
-            crate::motion::Pop::chip((1., 1.)),
+                )
+                // Without its words, it says them when asked.
+                .when(wordless, |card| card.child(crate::ui::tip(notice.title.clone(), t).below())),
+            crate::motion::Pop::chip((1., 0.)),
             pose,
         )
+    }
+}
+
+/// The notice in the title bar: this tall, this far down, its padding
+/// before the mark and after its buttons, the gap between its parts, and
+/// how far it stays from the bar's own controls and from what is in the
+/// middle of the bar.
+pub const NOTICE_HEIGHT: f32 = 44.;
+const NOTICE_TOP: f32 = 2.;
+const NOTICE_PAD: (f32, f32) = (10., 7.);
+const NOTICE_GAP: f32 = 10.;
+const NOTICE_CLEAR: f32 = 10.;
+/// The room after "Later", before the capsule.
+const LATER_GAP: f32 = 8.;
+
+/// "Later" at rest: its label, 12 px either side and its outline.
+fn later_width(window: &Window) -> f32 {
+    (pill_label_width("Later", window) + 26.).round()
+}
+
+/// Where the notice goes in the title bar of a window `viewport` wide whose
+/// own controls reach `left` and `right` in from its edges, and which may
+/// have something `middle` wide at its centre (the recording's pill, the
+/// page's name): how far its right edge is from the window's, its width,
+/// and whether it has its words. It sits at the right end of the bar, beside
+/// the page's own controls and clear of them, so it never lies over the
+/// page or over anything that can be pressed. `full` is its width with its
+/// words and `bare` without them (its mark and its buttons): it is `full`
+/// where the bar has room, else `bare`, which fits beside the controls of
+/// every page at the window's least width.
+pub fn notice_place(
+    full: f32,
+    bare: f32,
+    viewport: f32,
+    left: f32,
+    right: f32,
+    middle: Option<f32>,
+) -> (f32, f32, bool) {
+    let from = match middle {
+        Some(middle) => (viewport / 2. + middle / 2.).max(left),
+        None => left,
+    } + NOTICE_CLEAR;
+    let edge = right + NOTICE_CLEAR;
+    let room = viewport - edge - from;
+    if room >= full {
+        (edge, full, true)
+    } else {
+        (edge, bare.min(room.max(NOTICE_HEIGHT)), false)
     }
 }
 
@@ -1996,10 +2105,6 @@ pub fn install(handle: WindowHandle<Cereal>, cx: &mut App) {
     })
     .detach();
 }
-
-/// The notice's height with one or two lines of text, which is the toast's:
-/// a toast that appears while the notice is up sits this far above it.
-pub const NOTICE_HEIGHT: f32 = 56.;
 
 #[cfg(test)]
 mod tests {

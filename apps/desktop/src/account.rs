@@ -121,6 +121,20 @@ pub struct AccountView {
     turn: u64,
     _subscriptions: Vec<Subscription>,
     focus: FocusHandle,
+    /// The form's own animated values: its parts opening and closing.
+    stage: crate::motion::Stage,
+    /// What the parts that come and go last said, drawn while they close.
+    said: std::cell::RefCell<Said>,
+}
+
+/// The words of the form's parts that come and go, as last shown.
+#[derive(Default)]
+struct Said {
+    /// How the address would travel, and whether that is a warning.
+    transport: (String, bool),
+    failed: String,
+    browser: &'static str,
+    error: String,
 }
 impl EventEmitter<AccountEvent> for AccountView {}
 impl AccountView {
@@ -149,6 +163,8 @@ impl AccountView {
             turn: 0,
             _subscriptions: subscriptions,
             focus: cx.focus_handle(),
+            stage: Default::default(),
+            said: Default::default(),
         }
     }
 
@@ -468,107 +484,175 @@ fn waiting_line(id: &'static str, words: &'static str, t: Theme, cx: &App) -> Di
 const FORM_HEIGHT: f32 = 460.;
 
 impl Render for AccountView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use crate::motion::appear;
         // The account page follows the app's theme, like the sign-in screen.
-        let t = Theme::new(crate::ui::is_dark());
+        let t = Theme::current(crate::ui::is_dark());
+        self.stage.begin();
         self.follow_address(cx);
-        let field = |input: &Entity<TextInput>| {
-            div()
-                .w_full()
-                .p(px(12.))
-                .rounded(px(12.))
-                .bg(t.card)
-                .border_1()
-                .border_color(t.border)
-                .child(input.clone())
+        let stage = &self.stage;
+        let field = |name: &'static str, input: &Entity<TextInput>, cx: &App| {
+            field_edge(
+                div()
+                    .relative()
+                    .w_full()
+                    .p(px(12.))
+                    .rounded(px(12.))
+                    .bg(t.card)
+                    .border_1(),
+                stage,
+                name,
+                input.read(cx).focus_handle.is_focused(window),
+                t,
+            )
+            .child(input.clone())
         };
+        // The form's rows are this far apart. A part that comes and goes
+        // carries the gap inside what opens and closes, so the rows below it
+        // slide by exactly its height.
+        const GAP: f32 = 14.;
+        let part = |content: AnyElement| div().w_full().pt(px(GAP)).child(content);
         // Everything under the heading. It arrives as one, a beat after the
         // heading, so no row of it is on the page before the rows around it.
-        let mut form = div().w_full().flex().flex_col().gap(px(14.));
+        let mut form = div().w_full().flex().flex_col();
         if let Some(session) = crate::accounts::default_session() {
             form = form
                 .child(
                     pill("account-back", "Back to notes", "chevron-left", t)
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(AccountEvent::Back))),
                 )
-                .child(session.user.name)
-                .child(small(session.user.email, t))
-                .child(
+                .child(part(div().child(session.user.name).into_any_element()))
+                .child(part(small(session.user.email, t).into_any_element()))
+                .child(part(
                     pill("account-sign-out", "Sign out", "log-out", t)
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(AccountEvent::SignOut))),
-                );
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(AccountEvent::SignOut)))
+                        .into_any_element(),
+                ))
+                .child(div().h(px(GAP)));
         } else if !crate::accounts::server_mode() {
             // Nothing is connected yet: the notes on this Mac are still there
             // to go back to.
-            form = form.child(
-                pill("account-back", "Back to notes", "chevron-left", t)
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(AccountEvent::Back))),
-            );
+            form = form
+                .child(
+                    pill("account-back", "Back to notes", "chevron-left", t)
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(AccountEvent::Back))),
+                )
+                .child(div().h(px(GAP)));
         }
-        form = form.child(field(&self.url));
+        form = form.child(field("account-address-field", &self.url, cx));
         // How what is typed there would travel (see the welcome's server
         // step, which says the same).
-        let transport = crate::link::address_transport(&self.url.read(cx).content());
-        if let Some((transport, note)) =
-            transport.and_then(|transport| Some((transport, transport.note()?)))
-        {
-            form = form.child(if transport.warns() {
-                div()
-                    .flex()
-                    .items_start()
-                    .gap(px(8.))
-                    .text_size(px(12.))
-                    .line_height(px(16.))
-                    .text_color(t.warning_ink)
-                    .child(icon("warning", 16., t.warning_ink))
-                    .child(div().flex_1().min_w_0().child(note))
-            } else {
-                small(note, t)
-            });
+        let transport = crate::link::address_transport(&self.url.read(cx).content())
+            .and_then(|transport| Some((transport.note()?, transport.warns())));
+        let mut said = self.said.borrow_mut();
+        if let Some((note, warns)) = &transport {
+            said.transport = (note.to_string(), *warns);
         }
-        let mut password_offered = true;
-        match self.discovery.clone() {
-            Discovery::Idle => {}
-            Discovery::Checking => {
-                form = form.child(crate::motion::swap_in(
-                    "account-checking",
-                    waiting_line("account-checking-words", "Checking how this server signs in…", t, cx),
-                ));
-            }
-            Discovery::Failed(message) => {
-                form = form.child(small(message, t)).child(
-                    pill("account-check-again", "Try again", "refresh", t).on_click(cx.listener(
-                        |this, _, _, cx| {
-                            let address = this.url.read(cx).content().trim().to_owned();
-                            this.ask(address, Duration::ZERO, cx);
-                            cx.notify();
-                        },
-                    )),
-                );
-            }
-            Discovery::Ready(_) if self.waiting.is_some() => {
-                password_offered = false;
-                form = form
-                    .child(crate::motion::swap_in(
-                        "account-waiting",
-                        waiting_line(
+        let (methods, waiting) = match &self.discovery {
+            Discovery::Ready(methods) => (Some(methods.clone()), self.waiting.is_some()),
+            _ => (None, false),
+        };
+        if let Discovery::Failed(message) = &self.discovery {
+            said.failed = message.clone();
+        }
+        let browser = methods.as_ref().and_then(|methods| methods.browser_label()).filter(|_| !waiting);
+        if let Some(label) = browser {
+            said.browser = label;
+        }
+        if let Some(error) = &self.error {
+            said.error = error.clone();
+        }
+        let password = methods.as_ref().is_some_and(|methods| methods.password) && !waiting;
+        // Without a password form, the note below says less. It is known
+        // only once the server has answered.
+        let password_offered = match &methods {
+            Some(methods) => methods.password && !waiting,
+            None => true,
+        };
+        // Each part opens and closes in place (one way of moving for all of
+        // them): the form grows and shrinks, and what is below it glides.
+        form = form
+            .children(appear(stage, ("account-transport", 0), transport.is_some(), part({
+                let (note, warns) = said.transport.clone();
+                if warns {
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap(px(8.))
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .text_color(t.warning_ink)
+                        .child(icon("warning", 16., t.warning_ink))
+                        .child(div().flex_1().min_w_0().child(note))
+                        .into_any_element()
+                } else {
+                    small(note, t).into_any_element()
+                }
+            })))
+            .children(appear(
+                stage,
+                ("account-checking", 0),
+                self.discovery == Discovery::Checking,
+                part(
+                    waiting_line("account-checking-words", "Checking how this server signs in…", t, cx)
+                        .into_any_element(),
+                ),
+            ))
+            .children(appear(
+                stage,
+                ("account-failed", 0),
+                matches!(self.discovery, Discovery::Failed(_)),
+                part(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(GAP))
+                        .child(small(said.failed.clone(), t))
+                        .child(
+                            pill("account-check-again", "Try again", "refresh", t).on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    let address = this.url.read(cx).content().trim().to_owned();
+                                    this.ask(address, Duration::ZERO, cx);
+                                    cx.notify();
+                                },
+                            )),
+                        )
+                        .into_any_element(),
+                ),
+            ))
+            .children(appear(
+                stage,
+                ("account-waiting", 0),
+                waiting,
+                part(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(GAP))
+                        .child(waiting_line(
                             "account-waiting-words",
                             "Waiting for you to sign in in your browser…",
                             t,
                             cx,
-                        ),
-                    ))
-                    .child(
-                        pill("account-browser-cancel", "Cancel", "", t)
-                            .on_click(cx.listener(|this, _, _, cx| this.cancel_browser(cx))),
-                    );
-            }
-            Discovery::Ready(methods) => {
-                password_offered = methods.password;
-                if methods.password {
-                    form = form
-                        .child(field(&self.email))
-                        .child(field(&self.password))
+                        ))
+                        .child(
+                            pill("account-browser-cancel", "Cancel", "", t)
+                                .on_click(cx.listener(|this, _, _, cx| this.cancel_browser(cx))),
+                        )
+                        .into_any_element(),
+                ),
+            ))
+            .children(appear(
+                stage,
+                ("account-password", 0),
+                password,
+                part(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(GAP))
+                        .child(field("account-email-field", &self.email, cx))
+                        .child(field("account-password-field", &self.password, cx))
                         .child(
                             pill(
                                 "account-sign-in",
@@ -581,46 +665,55 @@ impl Render for AccountView {
                                 t,
                             )
                             .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
-                        );
-                }
-                if let Some(label) = methods.browser_label() {
-                    let google = label == "Continue with Google";
-                    // The pill's own shape, with Google's mark in its four
-                    // colours where a tinted icon would otherwise be.
-                    form = form.child(crate::motion::arrive("account-browser-in", 0,
-                        pill(
-                            "account-browser",
-                            if self.busy && !methods.password {
-                                "Signing in…"
-                            } else {
-                                label
-                            },
-                            if google { "" } else { "globe" },
-                            t,
                         )
-                        .when(google, |pill| {
-                            pill.flex_row_reverse().child(
-                                img("icons/google.svg").size(px(16.)).flex_shrink_0(),
-                            )
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| this.continue_in_browser(cx))),
-                    ));
-                }
-            }
-        }
-        if let Some(error) = &self.error {
+                        .into_any_element(),
+                ),
+            ))
+            .children(appear(stage, ("account-browser", 0), browser.is_some(), part({
+                let label = said.browser;
+                let google = label == "Continue with Google";
+                // The pill's own shape, with Google's mark in its four
+                // colours where a tinted icon would otherwise be.
+                pill(
+                    "account-browser",
+                    if self.busy && !password {
+                        "Signing in…"
+                    } else {
+                        label
+                    },
+                    if google { "" } else { "globe" },
+                    t,
+                )
+                .when(google, |pill| {
+                    pill.flex_row_reverse().child(
+                        img("icons/google.svg").size(px(16.)).flex_shrink_0(),
+                    )
+                })
+                .on_click(cx.listener(|this, _, _, cx| this.continue_in_browser(cx)))
+                .into_any_element()
+            })))
             // What went wrong reads as that, as under the "Paste link" field.
-            form = form.child(small(error.clone(), t).text_color(t.danger));
-        }
-        form = form.child(small(
-            if password_offered {
-                "Your password is used only to sign in. The session is kept in macOS Keychain."
-            } else {
-                "Your session is kept in macOS Keychain."
-            },
-            t,
-        ));
-        div()
+            .children(appear(
+                stage,
+                ("account-error", 0),
+                self.error.is_some(),
+                part(small(said.error.clone(), t).text_color(t.danger).into_any_element()),
+            ))
+            .child(part(
+                crate::motion::swapped(
+                    small(
+                        if password_offered {
+                            "Your password is used only to sign in. The session is kept in macOS Keychain."
+                        } else {
+                            "Your session is kept in macOS Keychain."
+                        },
+                        t,
+                    ),
+                    stage.swap(("account-keychain-note", 0), u64::from(password_offered)),
+                ),
+            ));
+        drop(said);
+        let page = div()
             .track_focus(&self.focus)
             .size_full()
             .flex()
@@ -641,7 +734,7 @@ impl Render for AccountView {
                         .max_w_full()
                         .flex()
                         .flex_col()
-                        .gap(px(14.))
+                        .gap(px(GAP))
                         // The mark leads the page, alive: it is the wait as
                         // well as the name.
                         .child(crate::motion::arrive(
@@ -660,7 +753,9 @@ impl Render for AccountView {
                         ))
                         .child(crate::motion::arrive("account-form", 2, form)),
                 ),
-            )
+            );
+        self.stage.flush_as("account", window);
+        page
     }
 }
 

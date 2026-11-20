@@ -26,10 +26,10 @@
 //! | A menu, popover, dialog, palette or card opening and closing | [`Stage::presence`] for its pose, [`pop`] with a [`Pop`] anchored on the control that opened it, drawn on [`crate::ui::overlay`]; the control stays lit with [`hold`] |
 //! | A tooltip | [`crate::ui::tip`] (or `with_tooltip`): never GPUI's own `.tooltip` |
 //! | A toast | `Cereal::show_toast` / `show_toast_with` (one action) |
-//! | (a) Something entering or leaving the layout: a row, a banner, a message, a control | [`appear`] (its space opens and closes with it); [`vacate`] when what left can no longer be drawn |
+//! | (a) Something entering or leaving the layout: a row, a banner, a message, a control | [`appear`] (its space opens and closes with it); [`vacate`] when what left can no longer be drawn; [`appear_across`] for a control that comes and goes in a row of controls |
 //! | (b) A container whose content changes height: a list of results, a card with a section that comes and goes | [`follow_height`] |
 //! | (c) A selected fill or a highlight that moves between items: tabs, a sidebar, menu rows | [`Stage::glide`]: one [`Glide::indicator`] before the items, a [`Glide::probe`] in the selected one |
-//! | (d) Content replaced in place when a tab or a page of data is switched | [`crossfade`] (a body of text or a list), [`page`] (a whole screen), [`Stage::swap`] with [`swapped`] or [`swap_in`] (one small piece: an icon, a label) |
+//! | (d) Content replaced in place when a tab or a page of data is switched | [`crossfade`] (a body of text or a list), [`page`] (a whole screen), [`Stage::swap`] with [`swapped`] or [`swap_in`] (one small piece: an icon, a label), [`swap_layers`] (two whole layouts that take turns in one place) |
 //! | (e) A list whose rows come and go: it makes room and closes up | [`Stage::roster`] with [`roster_row`] |
 //! | (f) Anything pressable: buttons, pills, icon buttons, rows | [`tactile`] as the control's first child: the eased hover wash and the one pressed state (a slight squash, sprung back) |
 //! | A value that changes: a width, an offset, a rotation | [`Stage::aim`] |
@@ -480,6 +480,7 @@ impl Track {
             },
             visible: self.to > 0.5 || !settled,
             settled,
+            leaving: self.to <= 0.5 && !settled,
         }
     }
 }
@@ -495,6 +496,9 @@ pub struct Pose {
     /// False once a closed surface has finished leaving and can unmount.
     pub visible: bool,
     pub settled: bool,
+    /// On its way out: closing, and not there yet. What is inside a surface
+    /// that is leaving goes with it, whole (see [`Morph::posed`]).
+    pub leaving: bool,
 }
 
 impl Pose {
@@ -503,6 +507,7 @@ impl Pose {
         fade: 1.,
         visible: true,
         settled: true,
+        leaving: false,
     };
 
     /// The same pose kept fully opaque: for a shape that morphs out of one
@@ -1659,6 +1664,15 @@ pub fn content_fade(level: f32) -> f32 {
     x * x * (3. - 2. * x)
 }
 
+/// What the content's own opacity is multiplied by while its surface is
+/// leaving at `opacity`, so that the two fade as one: the shell's fill is
+/// drawn at the square root of the surface's opacity (see [`Morph`]'s paint),
+/// and so is the content.
+pub fn leaving_content(opacity: f32) -> f32 {
+    let opacity = opacity.clamp(0., 1.);
+    if opacity <= 0. { 0. } else { opacity.sqrt() / opacity }
+}
+
 /// How far to pull the content mask in from a shell with corner `radius`, so
 /// nothing paints outside the curve: the margin of the largest rectangle
 /// inside the rounded corners. It eases to nothing as the shell reaches its
@@ -1704,7 +1718,12 @@ impl<E: Styled + IntoElement + 'static> Morph<E> {
         let rest = 1. - pose.value;
         let side = ((0.5 - pop.anchor.0) * 2., (0.5 - pop.anchor.1) * 2.);
         self.opacity = pose.fade.clamp(0., 1.);
-        self.content = if pose.value < 1. {
+        // Arriving, the content comes in behind the shell. Leaving, it goes
+        // with the shell, whole: at the shell's own opacity all the way, so
+        // an emptied card is never what is left fading.
+        self.content = if pose.leaving {
+            leaving_content(self.opacity)
+        } else if pose.value < 1. {
             content_fade(pose.value)
         } else {
             1.
@@ -1891,6 +1910,7 @@ pub fn mount_pose(spring: Spring, progress: f32, reduced: bool) -> Pose {
             fade,
             visible: true,
             settled: progress >= 1.,
+            leaving: false,
         };
     }
     let value = spring.at(progress);
@@ -1899,6 +1919,7 @@ pub fn mount_pose(spring: Spring, progress: f32, reduced: bool) -> Pose {
         fade: fade_for(value),
         visible: true,
         settled: progress >= 1.,
+        leaving: false,
     }
 }
 
@@ -1915,6 +1936,7 @@ pub fn cascade_pose(elapsed: Duration, index: usize, reduced: bool) -> Pose {
             fade: 0.,
             visible: true,
             settled: false,
+            leaving: false,
         };
     };
     mount_pose(
@@ -2001,6 +2023,49 @@ pub fn crossfade<E: Styled + IntoElement + 'static>(
             morph.opacity(page_pose(led(skipped, t), true).0)
         })
         .into_any_element()
+}
+
+/// (d) Two whole layouts that take turns in one place (the sidebar's rows
+/// and the settings sidebar's): they crossfade as one move instead of one
+/// replacing the other in a frame. `second` is whether the second is the one
+/// showing; `key` names the pair on `stage`. Each is built only while it is
+/// on screen, with `cx` (whatever its builder needs: the view's context).
+/// The one arriving is laid out in the flow, over the one
+/// leaving, which keeps the pointer from it, so nothing that is fading away
+/// can be pressed. Opacity only, so it is the same with reduced motion.
+///
+/// Anything that marks a selection inside either layout needs its own
+/// [`Stage::glide`]: a highlight shared by both would travel from one
+/// layout's rows to the other's.
+pub fn swap_layers<C, A: IntoElement, B: IntoElement>(
+    stage: &Stage,
+    key: TrackKey,
+    second: bool,
+    cx: &mut C,
+    first: impl FnOnce(&mut C) -> A,
+    other: impl FnOnce(&mut C) -> B,
+) -> Div {
+    let pose = stage.presence(key, second, SNAPPY);
+    let layer = || div().flex_1().min_h_0().w_full().flex().flex_col();
+    let shell = div().relative().flex_1().min_h_0().flex().flex_col();
+    if pose.settled {
+        return if second {
+            shell.child(layer().child(other(cx)))
+        } else {
+            shell.child(layer().child(first(cx)))
+        };
+    }
+    // How far towards the second layout, as an opacity.
+    let level = if reduce_motion() { pose.fade } else { pose.value.clamp(0., 1.) };
+    let (first_fade, other_fade) = (1. - level, level);
+    let first = layer().opacity(first_fade).child(first(cx));
+    let other = layer().opacity(other_fade).child(other(cx));
+    let under = |layer: Div| layer.absolute().inset_0();
+    if second {
+        shell.child(under(first)).child(other.occlude())
+    } else {
+        shell.child(under(other)).child(first.occlude())
+    }
 }
 
 /// Apply a [`Stage::swap`] pose: a small piece of content that just replaced
@@ -3322,6 +3387,57 @@ pub fn vacate(stage: &Stage, key: TrackKey) -> Option<Div> {
     )
 }
 
+/// How visible a control that is opening or closing across a row is at
+/// `level` of its width: gone before its edges can cut into what it says
+/// (nothing below 55% of its width), whole only at its full width. The
+/// update capsule's labels come and go on the same terms.
+pub fn across_fade(level: f32) -> f32 {
+    fade_curve(((level - 0.55) / 0.45).clamp(0., 1.))
+}
+
+/// (a) A control that enters or leaves a row of controls (a "Save" that
+/// shows once there is something to save, a "Later" beside an action): its
+/// own shape opens to its width and closes again, so its neighbours slide
+/// instead of jumping, and it fades as it narrows, so no part-word is ever
+/// left on screen (see [`across_fade`]). `key` names it on `stage`; `shown`
+/// is whether it should be there. `width` is the control's width at rest and
+/// `gap` the room after it before its neighbour (give it here, not as the
+/// row's own gap, so that it closes with the control). `None` once it has
+/// left.
+///
+/// What was already there on the first frame is simply there. With reduced
+/// motion it fades in place at its full width and nothing slides.
+pub fn appear_across<E: Styled>(
+    stage: &Stage,
+    key: TrackKey,
+    shown: bool,
+    width: f32,
+    gap: f32,
+    control: E,
+) -> Option<E> {
+    let pose = stage.presence(key, shown, GOOEY);
+    if !pose.visible {
+        return None;
+    }
+    let control = control.flex_shrink_0();
+    if pose.at_rest() {
+        return Some(control.mr(px(gap)));
+    }
+    if reduce_motion() {
+        return Some(control.mr(px(gap)).opacity(pose.fade));
+    }
+    let level = pose.value.clamp(0., 1.);
+    Some(
+        control
+            .w(px(width * level))
+            .min_w(px(0.))
+            .mr(px(gap * level))
+            .px_0()
+            .overflow_hidden()
+            .opacity(across_fade(level)),
+    )
+}
+
 /// (e) One row of a [`Stage::roster`] called `name`: its content in a space
 /// that opens as the row arrives and closes after it has left. Pass `None`
 /// for a row that has left and can no longer be drawn; its space still
@@ -3637,7 +3753,7 @@ mod tests {
         assert_eq!(fold_height(120., -0.2), 0.);
         // A closed fold whose presence has ended is not built at all.
         let stage = Stage::default();
-        let closed = Pose { value: 0., fade: 0., visible: false, settled: true };
+        let closed = Pose { value: 0., fade: 0., visible: false, settled: true, leaving: false };
         assert!(fold(&stage, ("test-fold", 1), closed, gpui::div()).is_none());
         assert!(fold(&stage, ("test-fold", 1), Pose::REST, gpui::div()).is_some());
     }
@@ -3665,6 +3781,7 @@ mod tests {
             fade: fade_for(value),
             visible: true,
             settled: false,
+            leaving: false,
         }
     }
 
@@ -3937,6 +4054,23 @@ mod tests {
             assert!((0. ..=1.).contains(&value) && value >= previous);
             previous = value;
         }
+        // Leaving, the content has the shell's opacity all the way: never an
+        // emptied card fading on its own.
+        for tick in 1..=100 {
+            let opacity = tick as f32 / 100.;
+            assert!((opacity * leaving_content(opacity) - opacity.sqrt()).abs() < 1e-4);
+        }
+        assert_eq!(leaving_content(0.), 0.);
+        let leaving = Morph::new(div()).posed(
+            Pop::menu((1., 0.)),
+            Pose { value: 0.3, fade: fade_for(0.3), visible: true, settled: false, leaving: true },
+        );
+        assert!(leaving.opacity * leaving.content > 0.7, "the rows are still there with the shell");
+        // A control closing across its row is gone before its edges reach
+        // its label (13 px in on a 62 px pill is a fifth of its width).
+        assert_eq!(across_fade(1.), 1.);
+        assert_eq!(across_fade(0.55), 0.);
+        assert!(across_fade(0.6) < 0.25);
         // Collapsed, a 32 px corner needs about 9 px to clear its arc.
         let collapsed = corner_inset(32., (1., 0.13));
         assert!((9. ..9.6).contains(&collapsed));
@@ -4134,6 +4268,7 @@ mod tests {
                 fade: 0.,
                 visible: true,
                 settled: false,
+                leaving: false,
             },
         );
         let shell = collapsed.shell_bounds(bounds);
@@ -4395,10 +4530,10 @@ mod tests {
         // And nothing of it is remembered.
         assert!(FOLDS.with(|folds| folds.borrow().get(&key).is_none()));
         // A row of a list is the same: no content, a closing space, then nothing.
-        let leaving = Row { key: 9, pose: Pose { value: 0.5, fade: 0.4, visible: true, settled: false }, present: false };
+        let leaving = Row { key: 9, pose: Pose { value: 0.5, fade: 0.4, visible: true, settled: false, leaving: true }, present: false };
         FOLDS.with(|folds| folds.borrow_mut().insert(("rows", 9), 28.));
         assert!(roster_row(&stage, "rows", leaving, None::<Div>).is_some());
-        let gone = Row { pose: Pose { value: 0., fade: 0., visible: false, settled: true }, ..leaving };
+        let gone = Row { pose: Pose { value: 0., fade: 0., visible: false, settled: true, leaving: false }, ..leaving };
         assert!(roster_row(&stage, "rows", gone, None::<Div>).is_none());
     }
 
