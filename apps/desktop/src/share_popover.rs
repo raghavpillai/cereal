@@ -74,6 +74,15 @@ impl Level {
         }
     }
 
+    /// The same, for the popover's footer, where it stands beside "Copy
+    /// link" and has to fit: the link is named by the button next to it.
+    pub fn short_label(self, place: &str) -> String {
+        match self {
+            Level::Invited => "Only people invited".into(),
+            Level::Organization => format!("Anyone at {place}"),
+        }
+    }
+
     fn symbol(self) -> &'static str {
         match self {
             Level::Invited => "lock",
@@ -310,6 +319,9 @@ enum Ask {
     Level(Level),
 }
 
+/// The line under the field that says what was refused.
+const PROBLEM: crate::motion::TrackKey = ("share-problem", 0);
+
 pub struct Share {
     /// "Enter name or email".
     pub field: Entity<TextInput>,
@@ -398,8 +410,11 @@ impl Cereal {
             self.share.loading = false;
             if self.share.fixture.is_none() {
                 self.share.access = None;
-                self.share.problem = None;
             }
+            // What was refused belongs to the attempt, not to the note: a
+            // popover that is opened again says nothing about the last one.
+            self.share.problem = None;
+            self.stage.forget(PROBLEM);
             self.share.field.update(cx, |input, cx| input.set_content("", cx));
             self.share.field.read(cx).focus_handle.focus(window);
             self.share_load(cx);
@@ -883,7 +898,7 @@ impl Cereal {
             let key = crate::lazy::key(&entry.note_id);
             let hovered = crate::motion::reveal_key(("shared-by-name", key));
             let title = if entry.title.trim().is_empty() {
-                "Untitled note".to_string()
+                "New note".to_string()
             } else {
                 entry.title.clone()
             };
@@ -1062,8 +1077,13 @@ impl Cereal {
             .text_color(t.text)
             .child(crate::onboarding_view::place("share-popover"))
             .child(field);
-        if let Some(problem) = &share.problem {
-            card = card.child(
+        // What was refused folds in under the field and folds away again:
+        // the rows below it slide, and the card follows.
+        card = card.children(match &share.problem {
+            Some(problem) => crate::motion::appear(
+                &self.stage,
+                PROBLEM,
+                true,
                 div()
                     .id("share-problem")
                     .px(px(TEXT_X))
@@ -1072,8 +1092,9 @@ impl Cereal {
                     .line_height(px(16.))
                     .text_color(t.danger)
                     .child(problem.clone()),
-            );
-        }
+            ),
+            None => crate::motion::vacate(&self.stage, PROBLEM),
+        });
         // Share with attendees: one press for everyone at the meeting who is
         // in the workspace.
         if let Some((_, emails)) = access.and_then(Access::attendee_lines) {
@@ -1122,6 +1143,11 @@ impl Cereal {
                     .when(waiting, |button| button.opacity(DISABLED))
                     .on_click(cx.listener(|this, _, _, cx| this.share_with_attendees(cx)))
             };
+            // "Share" becomes "Shared" in place.
+            let action = crate::motion::swapped(
+                action,
+                self.stage.swap(("share-attendees-action", 0), all_shared as u64),
+            );
             card = card.child(caption("Share with attendees")).child(
                 div()
                     .mt(px(ROW_TOP))
@@ -1216,9 +1242,34 @@ impl Cereal {
                 );
             }
         }
-        for person in access.map(|access| access.people.as_slice()).unwrap_or_default() {
+        // The list makes room for someone added and closes up after
+        // someone removed.
+        let shared_with = access.map(|access| access.people.as_slice()).unwrap_or_default();
+        let keys: Vec<u64> = shared_with
+            .iter()
+            .map(|person| crate::lazy::key(&person.user_id))
+            .collect();
+        let rows = self.stage.roster(
+            "share-people",
+            crate::lazy::key(("share-people", share.note, share.epoch)),
+            &keys,
+        );
+        for row in rows {
+            let Some(person) = shared_with
+                .iter()
+                .find(|person| crate::lazy::key(&person.user_id) == row.key)
+            else {
+                // Removed: nothing left to draw, its space closes.
+                people = people.children(crate::motion::roster_row(
+                    &self.stage,
+                    "share-people",
+                    row,
+                    None::<Div>,
+                ));
+                continue;
+            };
             let user = person.user_id.clone();
-            let key = crate::lazy::key(&person.user_id);
+            let key = row.key;
             let remove = tool_tip(("share-remove", key), "close", "Remove access", t)
                 .size(px(24.))
                 .flex_shrink_0()
@@ -1226,7 +1277,12 @@ impl Cereal {
                 .on_click(cx.listener(move |this, _, _, cx| this.share_remove(user.clone(), cx)))
                 .into_any_element();
             let name = div().truncate().child(person.display_name()).into_any_element();
-            people = people.child(person_row(person, None, remove, name, self, cx));
+            people = people.children(crate::motion::roster_row(
+                &self.stage,
+                "share-people",
+                row,
+                Some(person_row(person, None, remove, name, self, cx)),
+            ));
         }
         card = card.child(caption("People with access").when(access.and_then(Access::attendee_lines).is_some(), |caption| {
             caption.pt(px(SECTION_GAP))
@@ -1255,7 +1311,7 @@ impl Cereal {
                     .truncate()
                     .text_size(px(12.5))
                     .text_color(t.secondary)
-                    .child(level.label(&place)),
+                    .child(level.short_label(&place)),
             )
             .child(icon("chevron-down", 10., t.muted))
             .when(!can_change, |button| button.opacity(DISABLED))
@@ -1316,6 +1372,10 @@ impl Cereal {
         // The level menu drops from the footer's control.
         let menu = self.stage.presence(("share-level", 0), share.level_menu && self.menu == Some(Menu::Share), GOOEY);
         if menu.visible {
+            let highlight = self.stage.glide("share-level");
+            if !self.stage.continuous(("share-level-menu", 0)) {
+                highlight.rest();
+            }
             let mut options = div()
                 .occlude()
                 .min_w(px(250.))
@@ -1327,7 +1387,8 @@ impl Cereal {
                 .border_1()
                 .border_color(t.border)
                 .shadow_lg()
-                .occlude().on_any_mouse_down(|_, _, cx| cx.stop_propagation());
+                .occlude().on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                .child(highlight.indicator(t.hover, 6.));
             for (index, option) in Level::ALL.into_iter().enumerate() {
                 options = options.child(
                     div()
@@ -1340,7 +1401,7 @@ impl Cereal {
                         .gap(px(8.))
                         .rounded(px(6.))
                         .cursor_default()
-                        .when(share.level_selected == index, |row| row.bg(t.hover))
+                        .when(share.level_selected == index, |row| row.child(highlight.probe(index)))
                         .child(icon(option.symbol(), 14., t.muted))
                         .child(div().flex_1().text_size(px(13.)).child(option.label(&place)))
                         .child(if option == level {
@@ -1404,6 +1465,12 @@ impl Cereal {
         let t = self.theme();
         let share = &self.share;
         let searching = !share.answered.is_empty();
+        // One highlight that travels between the rows, under the pointer
+        // and under the arrow keys alike.
+        let highlight = self.stage.glide("share-picker");
+        if !self.stage.continuous(("share-picker-list", 0)) {
+            highlight.rest();
+        }
         let mut list = div()
             .occlude()
             .w_full()
@@ -1416,6 +1483,7 @@ impl Cereal {
             .border_color(t.border)
             .shadow_lg()
             .occlude().on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+            .child(highlight.indicator(t.hover, 6.))
             .child(
                 div()
                     .h(px(PICKER_CAPTION))
@@ -1458,6 +1526,7 @@ impl Cereal {
             list = list.child(
                 div()
                     .id(("share-candidate", key))
+                    .relative()
                     .mx(px(PICKER_INSET))
                     .h(px(ROW_HEIGHT))
                     .px(px(FIELD_PAD - PICKER_INSET))
@@ -1467,7 +1536,7 @@ impl Cereal {
                     .gap(px(7.))
                     .rounded(px(6.))
                     .cursor_default()
-                    .when(share.selected == index, |row| row.bg(t.hover))
+                    .when(share.selected == index, |row| row.child(highlight.probe(key)))
                     .child(self.share_avatar(person, None, PICKER_AVATAR, cx))
                     .child(self.share_lines(
                         div().truncate().child(person.display_name()).into_any_element(),
@@ -1543,6 +1612,10 @@ mod tests {
         assert_eq!(Level::ALL.len(), 2);
         assert_eq!(Level::Invited.label("example.test"), "Only people invited");
         assert_eq!(Level::Organization.label("example.test"), "Anyone at example.test with the link");
+        // The footer's wording leaves the link to the button beside it, so
+        // it fits there.
+        assert_eq!(Level::Invited.short_label("example.test"), "Only people invited");
+        assert_eq!(Level::Organization.short_label("example.test"), "Anyone at example.test");
         assert_eq!(Level::Invited.wire(), "invited");
         assert_eq!(Level::Organization.wire(), "organization");
     }

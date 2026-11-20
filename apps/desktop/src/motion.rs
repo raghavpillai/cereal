@@ -35,6 +35,7 @@
 //! | A value that changes: a width, an offset, a rotation | [`Stage::aim`] |
 //! | Something that shares the window with its neighbour: a sidebar, a side panel | [`Stage::presence`] for its pose and [`Stage::room`] for the room it takes |
 //! | A group of items arriving together | [`Stage::mark`] then [`Stage::cascade_next`] with [`lift`] |
+//! | A scroll position that follows an end which keeps moving (a live transcript's newest line), or goes back to where it was | [`trail`], once a frame |
 use crate::ui::{FONT, Theme, icon};
 use gpui::{prelude::*, *};
 use std::{
@@ -2082,6 +2083,39 @@ pub fn swap_layers<C, A: IntoElement, B: IntoElement>(
     }
 }
 
+/// (d) [`crossfade`] where what was shown before can still be drawn (the
+/// other of a note's two documents): the two lie over each other while one
+/// fades out under the other fading in, so the page never dips or cuts
+/// between them. `arrived` is how far the incoming content is in, 0..=1,
+/// from a [`Stage::presence`] of what is shown (its `value`, or its `fade`
+/// with reduced motion); `outgoing` is only asked for while both show.
+/// Nothing moves, and the container has the incoming content's size
+/// throughout, so text the reader is following does not shift.
+pub fn crossfade_over(
+    arrived: f32,
+    incoming: impl IntoElement,
+    outgoing: impl FnOnce() -> Option<AnyElement>,
+) -> Div {
+    let arrived = arrived.clamp(0., 1.);
+    let shell = div().relative().w_full().min_w_0();
+    if arrived >= 1. {
+        return shell.child(div().child(incoming));
+    }
+    shell
+        .child(div().opacity(arrived).child(incoming))
+        .when_some(outgoing(), |shell, outgoing| {
+            shell.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w_full()
+                    .opacity(1. - arrived)
+                    .child(outgoing),
+            )
+        })
+}
+
 /// Apply a [`Stage::swap`] pose: a small piece of content that just replaced
 /// another fades in while rising a few pixels.
 pub fn swapped<E: Styled + IntoElement + 'static>(element: E, pose: Pose) -> AnyElement {
@@ -2212,6 +2246,19 @@ impl Glide {
         )
         .absolute()
         .inset_0()
+    }
+
+    /// Forget where the highlight was: when it is next drawn it is simply
+    /// on the selected item, at full strength, without travelling there or
+    /// fading in. For a group that comes back on screen selecting something
+    /// else than when it was last seen (another note's tabs).
+    pub fn rest(&self) {
+        let mut state = self.0.borrow_mut();
+        state.fresh = None;
+        state.key = None;
+        state.start = None;
+        state.shown = None;
+        state.alpha = Some(Track::rest(1., Instant::now()));
     }
 
     /// Paints the highlight. Place it before the items so it sits under them.
@@ -3586,6 +3633,37 @@ pub fn follow_height(stage: &Stage, key: TrackKey, content: impl IntoElement) ->
 }
 
 // ---------------------------------------------------------------------------
+// Trailing: a scroll position closing on where it should be
+// ---------------------------------------------------------------------------
+
+/// How quickly a trailing scroll position closes on its target: what is
+/// left of the distance falls to a third (1/e) in this long, so a row's
+/// height is covered in about a quarter of a second.
+pub const TRAIL: Duration = Duration::from_millis(60);
+/// The most a trailing scroll position travels: from further away it starts
+/// this far from its target, so going back a long way is still one quick
+/// movement and never a blur of text.
+pub const TRAIL_REACH: f32 = 240.;
+
+/// A scroll position that follows a target which keeps moving (the end of a
+/// transcript that is still growing), or is going back to where it was: it
+/// is `gap` from the target now (signed), and this is how far from it to
+/// draw it `elapsed` after it was last drawn. Call it once a frame with the
+/// real distance and set the offset from what comes back; when that is zero
+/// it has arrived. It leaves fast and lands softly, never past the target (a
+/// scroll that overshoots reads as the text bouncing), and because each
+/// frame starts from where things really are, new text arriving mid-way
+/// simply lengthens the journey. With reduced motion it is there at once.
+pub fn trail(gap: f32, elapsed: Duration) -> f32 {
+    if reduce_motion() || !gap.is_finite() {
+        return 0.;
+    }
+    let left = gap.clamp(-TRAIL_REACH, TRAIL_REACH)
+        * (-paced(elapsed) / TRAIL.as_secs_f32()).exp();
+    if left.abs() < 0.5 { 0. } else { left }
+}
+
+// ---------------------------------------------------------------------------
 // Slow loops
 // ---------------------------------------------------------------------------
 
@@ -3761,6 +3839,34 @@ pub fn cubic_bezier(t: f32, x1: f64, y1: f64, x2: f64, y2: f64) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_trailing_scroll_closes_on_its_target_without_passing_it() {
+        // (Reduce motion is read from the system; forced off here it moves.)
+        if super::reduce_motion() {
+            assert_eq!(super::trail(43., Duration::from_millis(16)), 0.);
+            return;
+        }
+        let frame = Duration::from_millis(16);
+        // A row's height is covered in about a quarter of a second, each
+        // frame nearer than the last and never past the end.
+        let mut gap = 43.;
+        let mut frames = 0;
+        while gap != 0. {
+            let next = super::trail(gap, frame);
+            assert!(next >= 0. && next < gap);
+            gap = next;
+            frames += 1;
+        }
+        assert!((12..=20).contains(&frames), "{frames} frames");
+        // The first frame already moves a good part of the way.
+        assert!(super::trail(43., frame) < 43. * 0.8);
+        // From far away it starts within reach, on either side.
+        assert!(super::trail(5000., Duration::ZERO) <= super::TRAIL_REACH);
+        assert!(super::trail(-5000., Duration::ZERO) >= -super::TRAIL_REACH);
+        assert_eq!(super::trail(0.3, frame), 0.);
+        assert_eq!(super::trail(f32::NAN, frame), 0.);
+    }
+
     use super::*;
     // `gpui::*` re-exports its own `test` attribute; these are plain unit tests.
     use std::prelude::v1::test;

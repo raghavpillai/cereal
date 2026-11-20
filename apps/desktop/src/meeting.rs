@@ -627,7 +627,11 @@ impl Cereal {
         let t = self.theme();
         let query = self.attendee_input.read(cx).content().to_string();
         let typing = !query.trim().is_empty();
-        let mut body = div()
+        // One surface: choosing an event replaces what the card shows (the
+        // field and the events in place of the details) and the card's edge
+        // travels to the new height, rather than a second card laid over
+        // the first. Leaving, it keeps what it was showing.
+        let shell = div()
             .w(px(280.))
             .rounded(px(POPOVER_RADIUS))
             .bg(t.card)
@@ -637,6 +641,21 @@ impl Cereal {
             .overflow_hidden()
             .flex()
             .flex_col();
+        let picking = matches!(
+            self.menu.as_ref().or(self.visible_menu.as_ref()),
+            Some(Menu::CalendarEvent)
+        );
+        let sized = |content: Div| {
+            shell.child(crate::motion::follow_height(
+                &self.stage,
+                ("details-card", 0),
+                crate::motion::crossfade(("details-card-content", picking as u64), content),
+            ))
+        };
+        if picking {
+            return sized(self.render_event_picker(cx));
+        }
+        let mut body = div().flex().flex_col();
         body = body.child(
             div()
                 .id("note-select-calendar-event")
@@ -649,7 +668,8 @@ impl Cereal {
                 .flex_col()
                 .gap(px(2.))
                 .cursor_default()
-                .child(crate::motion::tactile(t.bg).radius(0.))
+                // The same wash as every row of the card, in both themes.
+                .child(crate::motion::tactile(t.hover).radius(0.))
                 .child(
                     div()
                         .flex()
@@ -698,7 +718,7 @@ impl Cereal {
             .max_h(px(260.))
             .overflow_y_scroll()
             .pt(px(8.))
-            .pb(px(5.))
+            .pb(px(2.))
             .flex()
             .flex_col()
             .gap(px(4.))
@@ -732,7 +752,11 @@ impl Cereal {
                     .child(initial),
             )
         };
-        let mut rows = div().flex().flex_col().gap(px(3.));
+        // The list makes room for someone added and closes up after someone
+        // taken off (each row carries the 3 pt under it, so nothing is left
+        // over when a row has gone).
+        let mut rows = div().flex().flex_col();
+        let mut drawn: Vec<(u64, AnyElement)> = Vec::new();
         let mut shown = 0;
         for (index, person) in card.people.into_iter().enumerate() {
             if !matches_person(&person.name, &query) {
@@ -754,7 +778,8 @@ impl Cereal {
                 },
             )]);
             let remove = person.name.clone();
-            rows = rows.child(
+            drawn.push((
+                crate::lazy::key(("attendee", &person.name)),
                 div()
                     .id(("note-attendee", index))
                     .h(px(30.))
@@ -786,16 +811,19 @@ impl Cereal {
                                         note.participants.retain(|name| name != &remove);
                                     }
                                     this.persist(cx);
+                                    cx.notify();
                                 })),
                         )
-                    }),
-            );
+                    })
+                    .into_any_element(),
+            ));
         }
         // Someone known who is not on the note yet: the row adds them.
         for (index, name) in suggestions.into_iter().enumerate() {
             shown += 1;
             let add = name.clone();
-            rows = rows.child(
+            drawn.push((
+                crate::lazy::key(("suggested", &name)),
                 div()
                     .id(("suggested-attendee", index))
                     .h(px(30.))
@@ -823,8 +851,27 @@ impl Cereal {
                             input.set_content(content.clone(), cx);
                             cx.emit(crate::input::InputSubmitted { content });
                         });
-                    })),
-            );
+                    }))
+                    .into_any_element(),
+            ));
+        }
+        let keys: Vec<u64> = drawn.iter().map(|(key, _)| *key).collect();
+        let listed = self.stage.roster(
+            "note-attendees",
+            crate::lazy::key(("note-attendees", self.current_note)),
+            &keys,
+        );
+        for row in listed {
+            let content = drawn
+                .iter()
+                .position(|(key, _)| *key == row.key)
+                .map(|index| div().pb(px(3.)).child(drawn.swap_remove(index).1));
+            rows = rows.children(crate::motion::roster_row(
+                &self.stage,
+                "note-attendees",
+                row,
+                content,
+            ));
         }
         if shown == 0 {
             let line: SharedString = if typing {
@@ -834,7 +881,7 @@ impl Cereal {
             };
             rows = rows.child(div().h(px(30.)).px(px(8.)).flex().items_center().child(small(line, t)));
         }
-        body.child(list.child(rows))
+        sized(body.child(list.child(rows)))
     }
     pub fn render_connected_event_picker(&self, cx: &mut Context<Self>) -> Div {
         let t = self.theme();
@@ -908,19 +955,15 @@ impl Cereal {
                     })),
             );
         }
+        // The details card's content while an event is being chosen (see
+        // `render_details_card`): the card is the surface.
         div()
-            .w(px(266.))
-            .rounded(px(crate::ui::POPOVER_RADIUS))
-            .bg(t.card)
-            .border_1()
-            .border_color(t.border)
-            .shadow_lg()
-            .overflow_hidden()
             .flex()
             .flex_col()
             .child(
                 div()
                     .h(px(40.))
+                    .flex_shrink_0()
                     .px(px(12.))
                     .flex()
                     .items_center()
