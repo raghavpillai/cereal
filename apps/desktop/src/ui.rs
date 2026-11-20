@@ -82,6 +82,41 @@ pub struct Theme {
     pub info_edge: Hsla,
 }
 impl Theme {
+    /// The main window's theme right now: `dark` or light, and while the
+    /// theme is changing every colour part-way between the two, so the
+    /// window crossfades instead of repainting in one frame.
+    pub fn current(dark: bool) -> Self {
+        match THEME_CROSSFADE.with(|cell| cell.get()) {
+            Some(level) => Self::blend(level),
+            None => Self::new(dark),
+        }
+    }
+
+    /// Every colour `level` of the way from the light theme to the dark one.
+    pub fn blend(level: f32) -> Self {
+        let (light, dark) = (Self::new(false), Self::new(true));
+        let mix = |from: Hsla, to: Hsla| crate::motion::mix(from, to, level);
+        Self {
+            bg: mix(light.bg, dark.bg),
+            sidebar: mix(light.sidebar, dark.sidebar),
+            card: mix(light.card, dark.card),
+            text: mix(light.text, dark.text),
+            muted: mix(light.muted, dark.muted),
+            secondary: mix(light.secondary, dark.secondary),
+            border: mix(light.border, dark.border),
+            hairline: mix(light.hairline, dark.hairline),
+            hover: mix(light.hover, dark.hover),
+            fill: mix(light.fill, dark.fill),
+            accent: mix(light.accent, dark.accent),
+            danger: mix(light.danger, dark.danger),
+            warning_ink: mix(light.warning_ink, dark.warning_ink),
+            warning_fill: mix(light.warning_fill, dark.warning_fill),
+            warning_edge: mix(light.warning_edge, dark.warning_edge),
+            info_fill: mix(light.info_fill, dark.info_fill),
+            info_edge: mix(light.info_edge, dark.info_edge),
+        }
+    }
+
     pub fn new(dark: bool) -> Self {
         if dark {
             Self {
@@ -193,6 +228,40 @@ pub fn pill_shell(id: impl Into<ElementId>, t: Theme) -> Stateful<Div> {
                 .press(neutral_wash(0.12))
                 .round(),
         )
+}
+
+/// A dialog's filled button (the thing to do: "Invite", "Sign out", and in
+/// the danger colour "Remove", "Erase"): a pill of `fill` with its label in
+/// the page colour. The fill is its pointer feedback's own base, so it washes
+/// under the pointer and squashes on the press as one shape, like every
+/// other button.
+pub fn filled_pill(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    fill: Hsla,
+    t: Theme,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .relative()
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .h(px(28.))
+        .px(px(14.))
+        .rounded_full()
+        .text_size(px(13.))
+        .text_color(t.bg)
+        .cursor_default()
+        .child(
+            crate::motion::tactile(neutral_wash(0.14))
+                .press(neutral_wash(0.12))
+                .base(fill)
+                .round(),
+        )
+        .child(label.into())
+        .reach()
 }
 
 pub fn tool(id: impl Into<ElementId>, symbol: &str, t: Theme) -> Stateful<Div> {
@@ -371,12 +440,35 @@ thread_local! {
     static DARK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Device pixels per point of the main window's display.
     static SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(2.) };
+    /// How far the main window is from its light theme to its dark one,
+    /// while it is changing from one to the other (see [`Theme::current`]).
+    static THEME_CROSSFADE: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Say how far the window is from light (0) to dark (1) while the theme is
+/// changing, or `None` once it has changed. Called once a frame by the main
+/// window, before anything is built.
+pub fn set_theme_crossfade(level: Option<f32>) {
+    THEME_CROSSFADE.with(|cell| cell.set(level.map(|level| level.clamp(0., 1.))));
+}
+
+/// How dark the window is right now: 0 light, 1 dark, in between while the
+/// theme is changing. For colours chosen away from a [`Theme`].
+pub fn theme_level() -> f32 {
+    THEME_CROSSFADE
+        .with(|cell| cell.get())
+        .unwrap_or(if is_dark() { 1. } else { 0. })
 }
 
 /// Record whether focus is moving by keyboard (Tab) or by pointer. Returns
 /// whether that changed, in which case the window has to be drawn again.
 pub fn set_keyboard_focus(on: bool) -> bool {
     KEYBOARD_FOCUS.with(|flag| flag.replace(on) != on)
+}
+
+/// Whether focus is being moved with the keyboard (see [`set_keyboard_focus`]).
+pub fn keyboard_focus() -> bool {
+    KEYBOARD_FOCUS.with(|flag| flag.get())
 }
 
 pub fn set_dark(dark: bool) {
@@ -410,7 +502,7 @@ pub fn hairline(points: f32) -> f32 {
 /// darker grey, as in the reference, which reads as light as a 1 pt border
 /// of `t.border`. Dark mode keeps `t.border`.
 pub fn card_edge(t: Theme) -> Hsla {
-    if is_dark() { t.border } else { rgb(0xd4d3cb).into() }
+    crate::motion::mix(rgb(0xd4d3cb).into(), t.border, theme_level())
 }
 
 /// Whether the app is in its dark theme, for a view that is drawn outside
@@ -796,6 +888,45 @@ pub fn neutral_wash(alpha: f32) -> Hsla {
 /// Eased hover and press feedback for a list row with `radius` corners.
 pub fn row_feedback(t: Theme, radius: f32) -> crate::motion::Tactile {
     crate::motion::tactile(t.hover).radius(radius)
+}
+
+/// The edge of a text field, for every field in the app: the border colour
+/// at rest, a step stronger under the pointer, and the focus colour while
+/// the field has the keyboard, each change eased (the hover like every hover
+/// wash, the focus on the snappy spring's fade) instead of cut. `name` names
+/// the field on `stage` and must be its own among the fields on screen.
+/// Apply it to the field's box before the input is added to it, with the
+/// box's border width already set.
+pub fn field_edge<E: Styled + ParentElement>(
+    field: E,
+    stage: &crate::motion::Stage,
+    name: &'static str,
+    focused: bool,
+    t: Theme,
+) -> E {
+    let hover = crate::motion::reveal_key(("field-edge", name));
+    let focus = stage
+        .presence((name, u64::MAX), focused, crate::motion::SNAPPY)
+        .fade;
+    field
+        .border_color(field_edge_color(crate::motion::revealed(hover), focus, t))
+        .child(
+            div()
+                .id(name)
+                .absolute()
+                .inset_0()
+                .child(crate::motion::hover_probe(hover)),
+        )
+}
+
+/// [`field_edge`]'s colour with the pointer `hover` of the way onto the
+/// field and the focus `focus` of the way in.
+pub fn field_edge_color(hover: f32, focus: f32, t: Theme) -> Hsla {
+    crate::motion::mix(
+        crate::motion::mix(t.border, t.muted, 0.55 * hover.clamp(0., 1.)),
+        focus_ring(),
+        focus,
+    )
 }
 
 fn tool_label(id: &ElementId, symbol: &str) -> Option<SharedString> {

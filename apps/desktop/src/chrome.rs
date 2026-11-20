@@ -442,11 +442,6 @@ impl Cereal {
         let t = self.theme();
         let glide = self.stage.glide("sidebar");
         let settings = self.screen == Screen::Settings && self.current_note.is_none();
-        let body = if settings {
-            self.render_settings_sidebar(cx)
-        } else {
-            self.render_workspace_sidebar(cx)
-        };
         div()
             .w(px(self.sidebar_span))
             .h_full()
@@ -465,11 +460,16 @@ impl Cereal {
             // where they are while the sidebar slides away beneath them
             // (see `render_window_tools`).
             .child(div().h(px(48.)).flex_shrink_0())
-            // Entering or leaving Settings swaps the whole sidebar; the new
-            // one settles in like a page.
-            .child(crate::motion::page(
-                ("sidebar-mode", settings as u64),
-                div().flex_1().min_h_0().flex().flex_col().child(body),
+            // Entering or leaving Settings swaps the whole sidebar: the two
+            // crossfade as one move (each has its own highlight, so none
+            // travels across from one list to the other).
+            .child(crate::motion::swap_layers(
+                &self.stage,
+                ("sidebar-mode", 0),
+                settings,
+                cx,
+                |cx| self.render_workspace_sidebar(cx),
+                |cx| self.render_settings_sidebar(cx),
             ))
     }
 
@@ -1055,7 +1055,8 @@ impl Cereal {
                     // Every page but Home can step back to where it came from.
                     .when_some(back_label(self.screen, self.back_target()), |d, label| {
                         let label = if in_thread { BackLabel::Icon("chat") } else { label };
-                        d.child(back_pill("header-back", label, t).on_click(cx.listener(
+                        // It comes in with the page it steps back from.
+                        d.child(crate::motion::page("header-back-in", back_pill("header-back", label, t).on_click(cx.listener(
                             move |this, _, window, cx| {
                                 if in_thread {
                                     this.clear_chat(cx);
@@ -1064,7 +1065,7 @@ impl Cereal {
                                 }
                                 this.focus.focus(window);
                             },
-                        )))
+                        ))))
                     })
                     .when(chat_bar, |d| {
                         d.child(
@@ -1079,7 +1080,9 @@ impl Cereal {
                     }),
             )
             .when(self.screen == Screen::Settings, |header| {
-                header.child(
+                // The page's name comes in with the page.
+                header.child(crate::motion::page(
+                    "header-settings-title",
                     div()
                         .absolute()
                         .top(px(12.))
@@ -1091,7 +1094,7 @@ impl Cereal {
                         .line_height(px(18.))
                         .text_color(t.muted)
                         .child("Settings"),
-                )
+                ))
             })
             // An empty Chat page is already a new chat: its header stays
             // clear, as in the reference.

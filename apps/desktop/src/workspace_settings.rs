@@ -8,9 +8,12 @@
 //! (`apps/api/src/organizations.ts`); the rules are repeated here only so
 //! that an action that would be refused is not offered.
 use crate::{
-    accounts::{AccountClient, AccountId, client::path_id},
+    accounts::{
+        AccountClient, AccountId,
+        client::{RequestError, path_id},
+    },
     app::{Cereal, Menu, Screen},
-    input::{InputSubmitted, TextInput},
+    input::{InputChanged, InputSubmitted, TextInput},
     screens::SettingsTab,
     ui::*,
 };
@@ -263,19 +266,47 @@ fn id_in_path(id: &str) -> Result<String, String> {
     path_id(id).map_err(|error| error.message())
 }
 
+/// What the Workspace pages say when the server could not be asked at all.
+pub const COULD_NOT_LOAD: &str = "Couldn't load this workspace. Check your connection and try again.";
+pub const COULD_NOT_CHANGE: &str = "Couldn't reach your server. Check your connection and try again.";
+
+/// What a Workspace page says about a request that failed. A refusal is in
+/// the server's own words, which are about the workspace. A request that got
+/// no answer (or one that cannot be read) is said in the page's words,
+/// `unreachable`: the client's general message names a transport exit code
+/// and reassures about audio, neither of which belongs on a page about
+/// members. That message goes to the log instead.
+pub fn problem_said(error: &RequestError, unreachable: &'static str) -> String {
+    match error {
+        RequestError::NoAnswer { .. } | RequestError::Malformed => {
+            eprintln!("workspace: {}", error.message());
+            unreachable.to_owned()
+        }
+        _ => error.message(),
+    }
+}
+
+fn changed(error: RequestError) -> String {
+    problem_said(&error, COULD_NOT_CHANGE)
+}
+
 /// The account's workspace, its members and (for owners and admins) its
 /// invitations.
 pub(crate) fn read(client: &AccountClient) -> Result<OrganizationDetailsDTO, String> {
-    let list: OrganizationsDTO = client.request("GET", "/api/v1/organizations", None)?;
+    let loaded = |error: RequestError| problem_said(&error, COULD_NOT_LOAD);
+    let list: OrganizationsDTO = client.send("GET", "/api/v1/organizations", None, None).map_err(loaded)?;
     let id = chosen(&list).ok_or("You are not in a workspace on this server yet.")?;
-    client.request("GET", &format!("/api/v1/organizations/{}", id_in_path(id)?), None)
+    client
+        .send("GET", &format!("/api/v1/organizations/{}", id_in_path(id)?), None, None)
+        .map_err(loaded)
 }
 
 pub(crate) fn rename(client: &AccountClient, organization: &str, name: &str) -> Result<(), String> {
     let body = serde_json::to_value(UpdateOrganizationInput { name: name.to_owned() }).ok();
     client
-        .request::<serde_json::Value>("PATCH", &format!("/api/v1/organizations/{organization}"), body)
+        .send::<serde_json::Value>("PATCH", &format!("/api/v1/organizations/{organization}"), body, None)
         .map(|_| ())
+        .map_err(changed)
 }
 
 /// Invite each address in turn, and say how each went.
@@ -290,8 +321,9 @@ pub(crate) fn invite(
         .map(|email| {
             let body = serde_json::to_value(InviteOrganizationMemberInput { email: email.clone(), role: role.clone() }).ok();
             let sent = client
-                .request::<serde_json::Value>("POST", &format!("/api/v1/organizations/{organization}/invitations"), body)
-                .map(|_| ());
+                .send::<serde_json::Value>("POST", &format!("/api/v1/organizations/{organization}/invitations"), body, None)
+                .map(|_| ())
+                .map_err(changed);
             (email.clone(), sent)
         })
         .collect()
@@ -300,27 +332,31 @@ pub(crate) fn invite(
 pub(crate) fn cancel_invitation(client: &AccountClient, organization: &str, invitation: &str) -> Result<(), String> {
     let invitation = id_in_path(invitation)?;
     client
-        .request::<serde_json::Value>(
+        .send::<serde_json::Value>(
             "DELETE",
             &format!("/api/v1/organizations/{organization}/invitations/{invitation}"),
             None,
+            None,
         )
         .map(|_| ())
+        .map_err(changed)
 }
 
 pub(crate) fn set_role(client: &AccountClient, organization: &str, member: &str, role: InviteRole) -> Result<(), String> {
     let member = id_in_path(member)?;
     let body = serde_json::to_value(UpdateOrganizationMemberRoleInput { role }).ok();
     client
-        .request::<serde_json::Value>("PATCH", &format!("/api/v1/organizations/{organization}/members/{member}"), body)
+        .send::<serde_json::Value>("PATCH", &format!("/api/v1/organizations/{organization}/members/{member}"), body, None)
         .map(|_| ())
+        .map_err(changed)
 }
 
 pub(crate) fn remove_member(client: &AccountClient, organization: &str, member: &str) -> Result<(), String> {
     let member = id_in_path(member)?;
     client
-        .request::<serde_json::Value>("DELETE", &format!("/api/v1/organizations/{organization}/members/{member}"), None)
+        .send::<serde_json::Value>("DELETE", &format!("/api/v1/organizations/{organization}/members/{member}"), None, None)
         .map(|_| ())
+        .map_err(changed)
 }
 
 /// What the invite dialog says after a send: nothing when every invitation
@@ -348,9 +384,13 @@ pub struct Organizations {
     pub search: Entity<TextInput>,
     pub name: Entity<TextInput>,
     pub name_problem: Option<String>,
+    /// What the name's problem last said, drawn while its line closes.
+    name_said: std::cell::RefCell<String>,
     pub invite: Entity<TextInput>,
     pub invite_role: InviteRole,
     pub invite_problems: Vec<String>,
+    /// What the invite dialog's problems last said, drawn while they close.
+    invite_said: std::cell::RefCell<Vec<String>>,
     /// Whose "…" menu is open, and where the pointer opened it.
     pub row_menu: Option<(Target, Point<Pixels>)>,
     /// The member the confirmation is about, by membership id.
@@ -374,6 +414,19 @@ impl Organizations {
             cx.observe(&search, |_, _, cx| cx.notify()),
             cx.observe(&name, |_, _, cx| cx.notify()),
             cx.observe(&invite, |_, _, cx| cx.notify()),
+            // What was wrong with a name or an address stops being said once
+            // it is being put right.
+            cx.subscribe(&name, |this, _, _: &InputChanged, cx| {
+                if this.org.name_problem.take().is_some() {
+                    cx.notify();
+                }
+            }),
+            cx.subscribe(&invite, |this, _, _: &InputChanged, cx| {
+                if !this.org.invite_problems.is_empty() {
+                    this.org.invite_problems.clear();
+                    cx.notify();
+                }
+            }),
             cx.subscribe(&name, |this, _, _: &InputSubmitted, cx| this.rename_organization(cx)),
             cx.subscribe(&invite, |this, _, _: &InputSubmitted, cx| this.send_invitations(cx)),
         ];
@@ -387,9 +440,11 @@ impl Organizations {
                 search,
                 name,
                 name_problem: None,
+                name_said: Default::default(),
                 invite,
                 invite_role: InviteRole::Member,
                 invite_problems: Vec::new(),
+                invite_said: Default::default(),
                 row_menu: None,
                 removing: None,
                 fixture: false,
@@ -607,18 +662,22 @@ impl Cereal {
             return;
         }
         self.org.name_problem = None;
-        self.change_organization(
-            move |client, organization| rename(client, organization, &name),
-            |this, result, cx| match result.and_then(|renamed| renamed) {
+        let done = |this: &mut Self, result: Result<Result<(), String>, String>, cx: &mut Context<Self>| {
+            match result.and_then(|renamed| renamed) {
                 Ok(()) => {
                     this.show_toast("Workspace renamed", cx);
                     // The sidebar and the team space say the name too.
                     this.load_team_space(cx);
                 }
                 Err(error) => this.org.name_problem = Some(error),
-            },
-            cx,
-        );
+            }
+        };
+        #[cfg(debug_assertions)]
+        if self.org.fixture {
+            self.pretend_change(move |details| Ok(details.organization.name = name), done, cx);
+            return;
+        }
+        self.change_organization(move |client, organization| rename(client, organization, &name), done, cx);
     }
 
     /// Open the invite dialog with the keyboard in its field. What was typed
@@ -636,6 +695,17 @@ impl Cereal {
         self.menu = Some(Menu::Invite);
         self.org.invite.read(cx).focus_handle.focus(window);
         cx.notify();
+    }
+
+    /// A press on one of the invite dialog's own controls (a role, Invite
+    /// with nothing to send yet) takes the focus as any press does: the
+    /// caret goes back to the address field, so the next thing typed is an
+    /// address. Someone moving through the dialog with Tab keeps the focus
+    /// where they put it.
+    fn invite_caret(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu == Some(Menu::Invite) && !keyboard_focus() {
+            self.org.invite.read(cx).focus_handle.focus(window);
+        }
     }
 
     fn close_invite(&mut self, discard: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -672,9 +742,9 @@ impl Cereal {
         }
         self.org.invite_problems.clear();
         let sending = addresses.valid;
-        self.change_organization(
-            move |client, organization| invite(client, organization, &sending, &role),
-            |this, result, cx| {
+        let done = |this: &mut Self,
+                    result: Result<Vec<(String, Result<(), String>)>, String>,
+                    cx: &mut Context<Self>| {
                 let results = match result {
                     Ok(results) => results,
                     Err(error) => {
@@ -699,7 +769,15 @@ impl Cereal {
                     this.menu = None;
                 }
                 this.org.invite_problems = problems;
-            },
+        };
+        #[cfg(debug_assertions)]
+        if self.org.fixture {
+            self.pretend_change(move |details| pretend_invite(details, &sending, &role), done, cx);
+            return;
+        }
+        self.change_organization(
+            move |client, organization| invite(client, organization, &sending, &role),
+            done,
             cx,
         );
     }
@@ -753,12 +831,25 @@ impl Cereal {
                 self.menu = Some(Menu::RemoveMember);
             }
             (Action::CancelInvitation, Target::Invitation(id)) => {
-                self.change_organization(
-                    move |client, organization| cancel_invitation(client, organization, &id),
-                    |this, result, cx| match result.and_then(|cancelled| cancelled) {
+                let done = |this: &mut Self, result: Result<Result<(), String>, String>, cx: &mut Context<Self>| {
+                    match result.and_then(|cancelled| cancelled) {
                         Ok(()) => this.show_toast("Invitation cancelled", cx),
                         Err(error) => this.show_toast(&error, cx),
-                    },
+                    }
+                };
+                #[cfg(debug_assertions)]
+                if self.org.fixture {
+                    self.pretend_change(
+                        move |details| Ok(details.invitations.retain(|invitation| invitation.id != id)),
+                        done,
+                        cx,
+                    );
+                    cx.notify();
+                    return;
+                }
+                self.change_organization(
+                    move |client, organization| cancel_invitation(client, organization, &id),
+                    done,
                     cx,
                 );
             }
@@ -769,12 +860,30 @@ impl Cereal {
 
     fn set_member_role(&mut self, member: String, role: InviteRole, cx: &mut Context<Self>) {
         let said = if role == InviteRole::Admin { "Made an admin" } else { "Made a member" };
-        self.change_organization(
-            move |client, organization| set_role(client, organization, &member, role),
-            move |this, result, cx| match result.and_then(|changed| changed) {
+        let done = move |this: &mut Self, result: Result<Result<(), String>, String>, cx: &mut Context<Self>| {
+            match result.and_then(|changed| changed) {
                 Ok(()) => this.show_toast(said, cx),
                 Err(error) => this.show_toast(&error, cx),
-            },
+            }
+        };
+        #[cfg(debug_assertions)]
+        if self.org.fixture {
+            let to = if role == InviteRole::Admin { Role::Admin } else { Role::Member };
+            self.pretend_change(
+                move |details| {
+                    for person in details.members.iter_mut().filter(|person| person.id == member) {
+                        person.role = to.clone();
+                    }
+                    Ok(())
+                },
+                done,
+                cx,
+            );
+            return;
+        }
+        self.change_organization(
+            move |client, organization| set_role(client, organization, &member, role),
+            done,
             cx,
         );
     }
@@ -788,12 +897,21 @@ impl Cereal {
             cx.notify();
             return;
         }
-        self.change_organization(
-            move |client, organization| remove_member(client, organization, &member),
-            |this, result, cx| match result.and_then(|removed| removed) {
+        let done = |this: &mut Self, result: Result<Result<(), String>, String>, cx: &mut Context<Self>| {
+            match result.and_then(|removed| removed) {
                 Ok(()) => this.show_toast("Removed from the workspace", cx),
                 Err(error) => this.show_toast(&error, cx),
-            },
+            }
+        };
+        #[cfg(debug_assertions)]
+        if self.org.fixture {
+            self.pretend_change(move |details| Ok(details.members.retain(|person| person.id != member)), done, cx);
+            cx.notify();
+            return;
+        }
+        self.change_organization(
+            move |client, organization| remove_member(client, organization, &member),
+            done,
             cx,
         );
         cx.notify();
@@ -822,21 +940,34 @@ impl Cereal {
             .child("Workspace")
     }
 
-    /// A 28 pt text field: the card colour inside a hairline that turns to
-    /// the focus colour while it is typed in.
-    fn organization_field(&self, input: &Entity<TextInput>, window: &Window, cx: &mut Context<Self>) -> Div {
+    /// A 28 pt text field: the card colour inside a hairline that answers
+    /// the pointer and eases to the focus colour while it is typed in (see
+    /// [`field_edge`]). `name` is the field's own.
+    fn organization_field(
+        &self,
+        name: &'static str,
+        input: &Entity<TextInput>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let t = self.theme();
         let focused = input.read(cx).focus_handle.is_focused(window);
-        div()
-            .h(px(size::CONTROL))
-            .flex_shrink_0()
-            .px(px(9.))
-            .flex()
-            .items_center()
-            .rounded(px(size::FIELD_RADIUS))
-            .bg(t.card)
-            .border_1()
-            .border_color(if focused { focus_ring() } else { t.border })
+        field_edge(
+            div()
+                .relative()
+                .h(px(size::CONTROL))
+                .flex_shrink_0()
+                .px(px(9.))
+                .flex()
+                .items_center()
+                .rounded(px(size::FIELD_RADIUS))
+                .bg(t.card)
+                .border_1(),
+            &self.stage,
+            name,
+            focused,
+            t,
+        )
             .text_size(px(13.))
             // A text input is at least 22 pt tall with its line at the top:
             // a 22 pt line keeps what is typed on the field's middle.
@@ -872,21 +1003,33 @@ impl Cereal {
             Some(details) if may_manage(&details.organization.role) => {
                 let typed = self.org.name.read(cx).content();
                 let changed = typed.trim() != details.organization.name.trim();
+                // "Save" opens beside the field once there is a name to
+                // save, and closes when there is not: the field stays put.
+                let save = crate::motion::appear_across(
+                    &self.stage,
+                    ("org-name-save", 0),
+                    changed,
+                    (crate::update_view::pill_label_width("Save", window) + 26.).round(),
+                    14.,
+                    pill("org-name-save", if self.org.busy { "Saving…" } else { "Save" }, "", t)
+                        .when(self.org.busy, |save| save.opacity(DISABLED))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.focus.focus(window);
+                            this.rename_organization(cx);
+                        })),
+                );
                 card.child(
-                    row()
-                        .child(label("Workspace name", None))
-                        .when(changed, |row| {
-                            row.child(
-                                pill("org-name-save", if self.org.busy { "Saving…" } else { "Save" }, "", t)
-                                    .flex_shrink_0()
-                                    .when(self.org.busy, |save| save.opacity(DISABLED))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.focus.focus(window);
-                                        this.rename_organization(cx);
-                                    })),
-                            )
-                        })
-                        .child(self.organization_field(&self.org.name, window, cx).w(px(size::NAME_FIELD))),
+                    row().child(label("Workspace name", None)).child(
+                        div()
+                            .flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .children(save)
+                            .child(
+                                self.organization_field("org-name-field", &self.org.name, window, cx)
+                                    .w(px(size::NAME_FIELD)),
+                            ),
+                    ),
                 )
             }
             Some(details) => card.child(
@@ -911,20 +1054,27 @@ impl Cereal {
                     .child(small("Loading your workspace…", t)),
             }),
         };
+        // What is wrong with the name opens under the card and closes
+        // again (still saying what it said) once the name is being put right.
+        if let Some(problem) = &self.org.name_problem {
+            *self.org.name_said.borrow_mut() = problem.clone();
+        }
+        let problem = crate::motion::appear(
+            &self.stage,
+            ("org-name-problem", 0),
+            self.org.name_problem.is_some(),
+            div()
+                .pt(px(8.))
+                .px(px(9.))
+                .text_size(px(12.))
+                .line_height(px(16.))
+                .text_color(t.danger)
+                .child(self.org.name_said.borrow().clone()),
+        );
         column
             .child(crate::screens::section_label("Workspace setup", t))
             .child(card)
-            .when_some(self.org.name_problem.clone(), |column, problem| {
-                column.child(
-                    div()
-                        .mt(px(8.))
-                        .px(px(9.))
-                        .text_size(px(12.))
-                        .line_height(px(16.))
-                        .text_color(t.danger)
-                        .child(problem),
-                )
-            })
+            .children(problem)
     }
 
     fn organization_retry(&self, id: &'static str, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -999,7 +1149,7 @@ impl Cereal {
                     .gap(px(8.))
                     // Its text starts 8.7 pt from the field's edge in the reference.
                     .child(
-                        self.organization_field(&self.org.search, window, cx)
+                        self.organization_field("org-search-field", &self.org.search, window, cx)
                             .px(px(7.))
                             .w(px(size::SEARCH_WIDTH)),
                     )
@@ -1074,20 +1224,33 @@ impl Cereal {
                 let busy = self.org.busy;
                 // One person or invitation: a face, a name, an address, what
                 // they are, and the menu of what may be done about them.
+                // The row whose menu is open keeps its wash, and its "…" lit.
+                let menu_row = self
+                    .org
+                    .row_menu
+                    .as_ref()
+                    .filter(|_| self.menu == Some(Menu::Member))
+                    .map(|(target, _)| row_key(target));
                 let person = |face: Div,
                               name: String,
                               email: String,
                               status: Div,
                               target: Target,
                               cx: &mut Context<Self>| {
+                    let key = row_key(&target);
+                    // The row answers the pointer: a faint wash, eased like
+                    // every hover, and its "…" comes forward with it.
+                    let hover = crate::motion::reveal_key(("org-row", key));
+                    let over = crate::motion::revealed(hover);
+                    if menu_row == Some(key) {
+                        crate::motion::hold(("org-row", key));
+                        crate::motion::hold(("org-more", key));
+                    }
                     let more = (!self.organization_actions(&target).is_empty()).then(|| {
-                        let key = match &target {
-                            Target::Member(id) | Target::Invitation(id) => crate::lazy::key(id),
-                        };
                         // The reference's dots are 13.4 pt across: a 20 pt glyph.
                         tool_sized(("org-more", key), "more", 20., t)
                             .size(px(size::MORE))
-                            .when(busy, |more| more.opacity(DISABLED))
+                            .opacity(if busy { DISABLED } else { MORE_AT_REST + (1. - MORE_AT_REST) * over })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 if this.org.busy {
@@ -1098,6 +1261,8 @@ impl Cereal {
                             }))
                     });
                     div()
+                        .id(("org-row", key))
+                        .relative()
                         .h(px(size::ROW))
                         .flex_shrink_0()
                         .pl(px(size::LEFT))
@@ -1106,6 +1271,8 @@ impl Cereal {
                         .items_center()
                         .text_size(px(13.))
                         .line_height(px(18.))
+                        .bg(t.hover.opacity(ROW_WASH * over))
+                        .child(crate::motion::hover_probe(hover))
                         .child(
                             div()
                                 .flex_1()
@@ -1411,17 +1578,29 @@ impl Cereal {
                 let roles = self.org.viewer().map(invite_roles).unwrap_or_default();
                 let busy = self.org.busy;
                 let typed = parse_addresses(&self.org.invite.read(cx).content()).valid.len();
+                // The chosen role's fill travels from one pill to the other.
+                let chosen = self.stage.glide("invite-role");
                 let role = |id: &'static str, label: &'static str, role: InviteRole, cx: &mut Context<Self>| {
                     let selected = self.org.invite_role == role;
+                    let level = self
+                        .stage
+                        .aim((id, 0), if selected { 1. } else { 0. }, crate::motion::SNAPPY)
+                        .clamp(0., 1.);
                     pill(id, label, "", t)
-                        .when(selected, |pill| pill.bg(t.hover))
-                        .when(!selected, |pill| pill.text_color(t.muted))
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                        .relative()
+                        .when(selected, |pill| pill.child(chosen.probe(id)))
+                        .text_color(crate::motion::mix(t.muted, t.text, level))
+                        .on_click(cx.listener(move |this, _, window, cx| {
                             this.org.invite_role = role.clone();
+                            this.invite_caret(window, cx);
                             cx.notify();
                         }))
                 };
-                let mut choice = div().flex().items_center().gap(px(6.));
+                let mut choice = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(chosen.indicator(t.hover, 14.));
                 for offered in roles {
                     choice = choice.child(match offered {
                         InviteRole::Member => role("org-invite-member", "Member", InviteRole::Member, cx),
@@ -1437,27 +1616,43 @@ impl Cereal {
                     .into(),
                     cx,
                 )
-                .child(self.organization_field(&self.org.invite, window, cx).h(px(32.)).w_full())
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(12.))
-                        .child(div().text_size(px(13.)).line_height(px(18.)).text_color(t.muted).child("Role"))
-                        .child(choice),
-                )
-                .when(!self.org.invite_problems.is_empty(), |content| {
+                .child(self.organization_field("org-invite-field", &self.org.invite, window, cx).h(px(32.)).w_full())
+                .child({
+                    // What went wrong opens under the role and closes again
+                    // (still saying what it said) once it is being put right:
+                    // the dialog grows and shrinks, it does not jump.
+                    if !self.org.invite_problems.is_empty() {
+                        *self.org.invite_said.borrow_mut() = self.org.invite_problems.clone();
+                    }
                     let mut problems = div()
+                        // The dialog's own gap, inside what opens.
+                        .pt(px(16.))
                         .flex()
                         .flex_col()
                         .gap(px(4.))
                         .text_size(px(12.))
                         .line_height(px(16.))
                         .text_color(t.danger);
-                    for problem in &self.org.invite_problems {
+                    for problem in self.org.invite_said.borrow().iter() {
                         problems = problems.child(div().child(problem.clone()));
                     }
-                    content.child(problems)
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(12.))
+                                .child(div().text_size(px(13.)).line_height(px(18.)).text_color(t.muted).child("Role"))
+                                .child(choice),
+                        )
+                        .children(crate::motion::appear(
+                            &self.stage,
+                            ("org-invite-problems", 0),
+                            !self.org.invite_problems.is_empty(),
+                            problems,
+                        ))
                 })
                 .child(
                     div()
@@ -1471,12 +1666,28 @@ impl Cereal {
                         })))
                         .child(
                             filled("org-invite-send", send_label(typed, busy).into(), t.text, !busy)
-                                .on_click(cx.listener(|this, _, _, cx| this.send_invitations(cx))),
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.send_invitations(cx);
+                                    this.invite_caret(window, cx);
+                                })),
                         ),
                 );
                 dialog(content, overlay)
             }
         }
+    }
+}
+
+/// A row of the table under the pointer: how much of the hover wash it
+/// takes (the rows are not buttons, so it is fainter than a pressable row's),
+/// and how present its "…" is while the pointer is elsewhere.
+const ROW_WASH: f32 = 0.7;
+const MORE_AT_REST: f32 = 0.6;
+
+/// What names a row of the table, for its hover and its "…".
+fn row_key(target: &Target) -> u64 {
+    match target {
+        Target::Member(id) | Target::Invitation(id) => crate::lazy::key(id),
     }
 }
 
@@ -1519,6 +1730,85 @@ fn chip(label: &'static str, strong: bool, t: Theme) -> Div {
         .line_height(px(16.))
         .text_color(t.muted)
         .child(label)
+}
+
+/// How long a change to the made-up workspace takes to "arrive": long
+/// enough for what the page does meanwhile to be seen.
+#[cfg(debug_assertions)]
+const PRETEND_FOR: std::time::Duration = std::time::Duration::from_millis(450);
+
+/// The made-up workspace's answer to an invitation, in the words the server
+/// uses: someone who is in or already invited is refused, anyone else is
+/// listed as invited. Nothing is sent to anyone.
+#[cfg(debug_assertions)]
+fn pretend_invite(
+    details: &mut OrganizationDetailsDTO,
+    addresses: &[String],
+    role: &InviteRole,
+) -> Vec<(String, Result<(), String>)> {
+    addresses
+        .iter()
+        .map(|email| {
+            let sent = if details.members.iter().any(|member| member.email == *email) {
+                Err(format!("{email} is already a member of this workspace"))
+            } else if details.invitations.iter().any(|invitation| invitation.email == *email) {
+                Err(format!("{email} has already been invited"))
+            } else {
+                let number = 302 + details.invitations.len();
+                details.invitations.push(OrganizationInvitationDTO {
+                    created_at: format!("2026-11-18T09:00:{:02}.000Z", details.invitations.len() % 60),
+                    email: email.clone(),
+                    expires_at: "2026-11-25T09:00:00.000Z".into(),
+                    id: format!("00000000-0000-4000-8000-000000000{number}"),
+                    inviter_id: "0b7e1c9e-5a44-4c1d-9d2e-3f6a7b8c9d01".into(),
+                    organization_id: details.organization.id.clone(),
+                    organization_name: details.organization.name.clone(),
+                    role: if *role == InviteRole::Admin { Role::Admin } else { Role::Member },
+                    status: InvitationStatus::Pending,
+                });
+                Ok(())
+            };
+            (email.clone(), sent)
+        })
+        .collect()
+}
+
+#[cfg(debug_assertions)]
+impl Cereal {
+    /// A change to the made-up workspace of the scripted tour (`fixture`):
+    /// it is applied to the made-up people after a moment, as if a server
+    /// had taken it, and `done` hears how it went exactly as it would from a
+    /// server. So what the pages do while a change is on its way and after
+    /// it can be looked at and filmed. No server is asked anything.
+    fn pretend_change<T: 'static>(
+        &mut self,
+        apply: impl FnOnce(&mut OrganizationDetailsDTO) -> T + 'static,
+        done: impl FnOnce(&mut Self, Result<T, String>, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.org.busy || self.org.details.is_none() {
+            return false;
+        }
+        self.org.busy = true;
+        self.org.change = self.org.change.wrapping_add(1);
+        let change = self.org.change;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(crate::motion::slow(PRETEND_FOR)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.org.change != change || !this.org.fixture {
+                    return;
+                }
+                this.org.busy = false;
+                if let Some(result) = this.org.details.as_mut().map(apply) {
+                    done(this, Ok(result), cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        true
+    }
 }
 
 /// Made-up people for the layout stills (`CEREAL_TOUR=p-fix-org`): nobody
@@ -1614,9 +1904,7 @@ impl Cereal {
         match state {
             "loading" => self.org.loading = true,
             "failed" => {
-                self.org.problem = Some(
-                    "Server request failed (transport exit 7). Local audio is preserved; retry when connected.".into(),
-                )
+                self.org.problem = Some(problem_said(&RequestError::NoAnswer { exit: Some(7) }, COULD_NOT_LOAD))
             }
             _ => {}
         }

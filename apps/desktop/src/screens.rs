@@ -646,7 +646,10 @@ impl Cereal {
     /// Sign out when there is a session to end.
     pub fn render_settings_sidebar(&self, cx: &mut Context<Self>) -> Div {
         let t = self.theme();
-        let glide = self.stage.glide("sidebar");
+        // Its own highlight: it travels between the settings pages only, and
+        // comes and goes with this sidebar, never across to the workspace
+        // sidebar's rows.
+        let glide = self.stage.glide("settings-sidebar");
         let connected = crate::server::enabled();
         let session = crate::accounts::default_session()
             .filter(|_| connected)
@@ -683,7 +686,13 @@ impl Cereal {
             None => avatar.child(icon("cereal", 18., t.accent)),
         };
         let avatar = crate::portrait::avatar(picture, 32., avatar);
-        let mut tabs = div().pt(px(20.)).px(px(8.)).flex().flex_col().gap(px(1.));
+        let mut tabs = div()
+            .pt(px(20.))
+            .px(px(8.))
+            .flex()
+            .flex_col()
+            .gap(px(1.))
+            .child(glide.indicator(t.hover, 8.));
         // The workspace's pages follow under their own caption.
         let workspace = self
             .organization_offered()
@@ -709,6 +718,7 @@ impl Cereal {
                     .text_color(t.secondary)
                     .cursor_default()
                     .child(row_feedback(t, 8.))
+                    .relative()
                     .when(self.settings_tab == tab, |row| {
                         row.child(glide.probe(("settings", tab)))
                     })
@@ -796,6 +806,7 @@ impl Cereal {
                         settings_card(t)
                             .child(self.setting_toggle(
                                 "setting-live-indicator",
+                                RowPlace::First,
                                 "mic",
                                 "Live meeting indicator",
                                 "Floats at the edge of your screen while Cereal records in the background.",
@@ -805,6 +816,7 @@ impl Cereal {
                             ))
                             .child(self.setting_toggle(
                                 "setting-login-item",
+                                RowPlace::Last,
                                 "power",
                                 "Open Cereal when you log in",
                                 match login {
@@ -941,6 +953,7 @@ impl Cereal {
                         settings_card(t)
                             .child(self.setting_toggle(
                                 "setting-menu-bar-events",
+                                RowPlace::First,
                                 "menu-bar",
                                 "Show upcoming meetings in menu bar",
                                 "Your next meeting and the time until it starts, in the macOS menu bar.",
@@ -950,6 +963,7 @@ impl Cereal {
                             ))
                             .child(self.setting_toggle(
                                 "setting-events-without-participants",
+                                RowPlace::Last,
                                 "person-outline",
                                 "Show events with no participants",
                                 "Coming up and the menu bar include events with nobody else invited and no call link.",
@@ -967,10 +981,11 @@ impl Cereal {
             }
             SettingsTab::Notifications => {
                 use crate::notifications::Kind;
-                let toggle = |kind: Kind, cx: &mut Context<Self>| {
+                let toggle = |kind: Kind, place: RowPlace, cx: &mut Context<Self>| {
                     let (id, symbol, label, description) = kind.row();
                     self.setting_toggle(
                         id,
+                        place,
                         symbol,
                         label,
                         description,
@@ -979,10 +994,10 @@ impl Cereal {
                         cx,
                     )
                 };
-                let meeting = toggle(Kind::Meeting, cx);
-                let notes = toggle(Kind::Notes, cx);
-                let recording = toggle(Kind::Recording, cx);
-                let account = toggle(Kind::Account, cx);
+                let meeting = toggle(Kind::Meeting, RowPlace::Only, cx);
+                let notes = toggle(Kind::Notes, RowPlace::First, cx);
+                let recording = toggle(Kind::Recording, RowPlace::Middle, cx);
+                let account = toggle(Kind::Account, RowPlace::Last, cx);
                 column = column
                     .when_some(self.notification_permission_row(cx), |c, row| {
                         c.child(section_label("macOS", t)).child(settings_card(t).child(row))
@@ -1163,6 +1178,8 @@ impl Cereal {
                     cx.notify();
                 })),
         );
+        // The dot under the icon in use travels to the one that is chosen.
+        let dot = self.stage.glide("app-icon");
         let icons = div()
             // The strip starts a little left of the text above it and sits
             // 13 px under the row's tile.
@@ -1184,10 +1201,11 @@ impl Cereal {
                     .border(px(hairline(0.5)))
                     .border_color(card_edge(t))
                     .bg(t.hover)
+                    .child(dot.indicator(t.muted, 2.))
                     .children(
                         crate::desktop_preferences::AppIcon::ALL
                             .into_iter()
-                            .map(|choice| self.app_icon_choice(choice, cx)),
+                            .map(|choice| self.app_icon_choice(choice, &dot, cx)),
                     ),
             )
             .when_some(crate::desktop_preferences::preference_error(), |d, error| {
@@ -1220,6 +1238,7 @@ impl Cereal {
     fn app_icon_choice(
         &self,
         choice: crate::desktop_preferences::AppIcon,
+        dot: &crate::motion::Glide,
         cx: &mut Context<Self>,
     ) -> Div {
         let t = self.theme();
@@ -1266,15 +1285,23 @@ impl Cereal {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .when(selected, |d| {
-                        d.child(div().size(px(4.)).rounded_full().bg(t.muted))
-                    }),
+                    .child(
+                        div()
+                            .relative()
+                            .size(px(4.))
+                            .when(selected, |d| d.child(dot.probe(choice.name()))),
+                    ),
             )
     }
 
+    /// A setting that is on or off: the whole row is the control. It washes
+    /// under the pointer and squashes on the press like every other control,
+    /// and Tab draws its ring round the row itself (see [`pressable_row`]),
+    /// so it is plain which switch Space will flip.
     fn setting_toggle(
         &self,
         id: &'static str,
+        place: RowPlace,
         symbol: &'static str,
         label: &'static str,
         description: &'static str,
@@ -1283,8 +1310,14 @@ impl Cereal {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let t = self.theme();
-        settings_row(symbol, label, description, t)
-            .id(id)
+        pressable_row(settings_row_shell().id(id), place, t)
+            .child(settings_row_tile(symbol, t))
+            .child(
+                settings_row_text()
+                    .gap(px(2.))
+                    .child(settings_row_title(t).child(label))
+                    .child(small(description, t)),
+            )
             .child(self.switch(id, enabled))
             .reach().on_click(cx.listener(move |this, _, _, cx| {
                 match setting {
@@ -1309,24 +1342,35 @@ impl Cereal {
             }))
     }
 
-    /// The switch at the end of a setting's row, the same design as a
-    /// calendar's ([`Self::row_switch`]): a 32 by 20 track, grey when off,
-    /// and a 16 pt knob 2 pt inside it that travels 12 pt.
+    /// The switch at the end of a setting's row: a 32 by 20 track, grey
+    /// when off, and a 16 pt knob 2 pt inside it that travels 12 pt.
     fn switch(&self, id: &'static str, enabled: bool) -> Div {
+        self.switch_with(self.stage.glide(id), (id, 0), enabled).mt(px(4.))
+    }
+
+    /// The switch on a calendar's row: the same switch, moving the same way.
+    fn row_switch(&self, key: u64, enabled: bool) -> Div {
+        let knob = ROW_KNOBS.with(|knobs| knobs.borrow_mut().entry(key).or_default().clone());
+        self.switch_with(knob, ("calendar-switch", key), enabled)
+    }
+
+    /// Every switch in Settings. The knob is a droplet: its leading edge
+    /// runs ahead and the trailing edge catches up (`knob` is its glide),
+    /// while the track's tint follows on `level`'s track.
+    fn switch_with(
+        &self,
+        knob: crate::motion::Glide,
+        level: crate::motion::TrackKey,
+        enabled: bool,
+    ) -> Div {
         let t = self.theme();
-        // The knob is a droplet: its leading edge runs ahead and the
-        // trailing edge catches up, while the track's tint follows.
-        let knob = self.stage.glide(id);
         let level = self
             .stage
-            .aim(
-                (id, 0),
-                if enabled { 1. } else { 0. },
-                crate::motion::SNAPPY,
-            )
+            .aim(level, if enabled { 1. } else { 0. }, crate::motion::SNAPPY)
             .clamp(0., 1.);
         let slot = |on: bool| {
             div()
+                .relative()
                 .size(px(16.))
                 .rounded_full()
                 .when(on == enabled, |slot| slot.child(knob.probe(on)))
@@ -1334,7 +1378,6 @@ impl Cereal {
         div()
             .relative()
             .flex_shrink_0()
-            .mt(px(4.))
             .w(px(32.))
             .h(px(20.))
             .p(px(2.))
@@ -1355,51 +1398,9 @@ impl Cereal {
             .child(slot(true))
     }
 
-    /// The switch on a calendar's row, as in the reference: a 32 by 20
-    /// track, grey when off, and a 16 pt knob 2 pt inside it that travels
-    /// 12 pt. Its knob slides without a droplet of its own.
-    fn row_switch(&self, key: u64, enabled: bool) -> Div {
-        let t = self.theme();
-        let level = self
-            .stage
-            .aim(
-                ("calendar-switch", key),
-                if enabled { 1. } else { 0. },
-                crate::motion::SNAPPY,
-            )
-            .clamp(0., 1.);
-        div()
-            .relative()
-            .flex_shrink_0()
-            .w(px(32.))
-            .h(px(20.))
-            .rounded_full()
-            .bg(self.switch_off())
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .rounded_full()
-                    .bg(t.accent.opacity(level)),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top(px(2.))
-                    .left(px(2. + 12. * level))
-                    .size(px(16.))
-                    .rounded_full()
-                    .bg(rgb(0xfcfcf8)),
-            )
-    }
-
     /// A switch's track when it is off: the reference's grey.
     fn switch_off(&self) -> Hsla {
-        if self.workspace.settings.dark_mode {
-            rgba(0xffffff40).into()
-        } else {
-            rgb(0xacada8).into()
-        }
+        crate::motion::mix(rgb(0xacada8).into(), rgba(0xffffff40).into(), theme_level())
     }
 
     fn set_meeting_preference(
@@ -1473,15 +1474,19 @@ impl Cereal {
             let key = crate::lazy::key(&id);
             card = card
                 .child(
-                    div()
-                        .id(("visible-calendar", key))
-                        .relative()
-                        .h(px(49.4))
-                        .flex_shrink_0()
-                        .px(px(16.))
-                        .flex()
-                        .items_center()
-                        .gap(px(16.))
+                    pressable_row(
+                        div()
+                            .id(("visible-calendar", key))
+                            .relative()
+                            .h(px(49.4))
+                            .flex_shrink_0()
+                            .px(px(16.))
+                            .flex()
+                            .items_center()
+                            .gap(px(16.)),
+                        RowPlace::of(index, count + usize::from(connections.is_some())),
+                        t,
+                    )
                         .child(
                             div()
                                 .size(px(12.))
@@ -1519,12 +1524,23 @@ impl Cereal {
                 .text_color(t.muted)
                 .child("Don't see the calendar you want?\u{a0}")
                 .child(
-                    div()
-                        .id("visible-calendars-connect")
-                        .underline()
-                        .child("See how to connect other calendars")
-                        .reach()
-                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                    // A link: its words warm under the pointer and take a
+                    // faint fill while pressed.
+                    crate::motion::warms(
+                        div()
+                            .id("visible-calendars-connect")
+                            .relative()
+                            .rounded(px(4.))
+                            .underline()
+                            .cursor_default()
+                            .child(crate::motion::tactile(gpui::transparent_black()).press(t.fill).radius(4.)),
+                        crate::motion::reveal_key("visible-calendars-connect"),
+                        t.muted,
+                        t.text,
+                    )
+                    .child("See how to connect other calendars")
+                    .reach()
+                    .on_click(move |_, _, cx| cx.open_url(&url)),
                 ),
         ));
         Some(
@@ -1537,13 +1553,21 @@ impl Cereal {
                         .justify_between()
                         .child(section_label("Visible calendars", t))
                         .child(
+                            // A text button: its word where it always
+                            // was, in a wash that answers the pointer.
                             div()
                                 .id("visible-calendars-reset")
-                                .mb(px(6.))
-                                .pr(px(17.))
+                                .relative()
+                                .mb(px(4.))
+                                .mr(px(11.))
+                                .px(px(6.))
+                                .py(px(2.))
+                                .rounded(px(6.))
                                 .text_size(px(13.))
                                 .line_height(px(18.))
                                 .text_color(t.accent)
+                                .cursor_default()
+                                .child(row_feedback(t, 6.))
                                 .child("Reset")
                                 .reach()
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -1879,33 +1903,18 @@ impl Cereal {
                 action == sheet.default
             };
             let button = if filled {
-                // The dialog's filled button.
-                div()
-                    .id(("account-sheet-action", index))
-                    .h(px(28.))
-                    .px(px(14.))
-                    .rounded_full()
-                    .flex()
-                    .items_center()
-                    .text_size(px(13.))
-                    .bg(if erases { t.danger } else { t.text })
-                    .text_color(t.bg)
-                    .cursor_default()
-                    .child(label.clone())
+                filled_pill(
+                    ("account-sheet-action", index),
+                    label.clone(),
+                    if erases { t.danger } else { t.text },
+                    t,
+                )
             } else {
                 pill(("account-sheet-action", index), label.clone(), "", t).h(px(28.))
             };
-            row = row.child(
-                crate::motion::dims(
-                    button,
-                    crate::motion::reveal_key(("account-sheet-action", index)),
-                    0.14,
-                )
-                .reach()
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.account_sheet_chosen(action, window, cx)
-                })),
-            );
+            row = row.child(button.on_click(cx.listener(move |this, _, window, cx| {
+                this.account_sheet_chosen(action, window, cx)
+            })));
         }
         let Some(warning) = &sheet.warning else {
             return row;
@@ -2173,7 +2182,7 @@ fn page_title(text: impl Into<SharedString>, t: Theme) -> Div {
 pub(crate) fn settings_card(t: Theme) -> Div {
     div()
         .w_full()
-        .rounded(px(16.))
+        .rounded(px(CARD_RADIUS))
         .border(px(hairline(0.5)))
         .border_color(card_edge(t))
         .bg(t.card)
@@ -2201,6 +2210,64 @@ pub(crate) const ROW_GAP: f32 = 14.;
 pub(crate) const ROW_TILE: f32 = 32.;
 pub(crate) const ROW_TILE_RADIUS: f32 = 8.;
 pub(crate) const ROW_ICON: f32 = 16.;
+
+/// A settings card's corner radius.
+pub(crate) const CARD_RADIUS: f32 = 16.;
+
+/// Where a row sits in its card: the corners its wash and its focus ring
+/// follow, so neither leaves the card's rounded ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RowPlace {
+    Only,
+    First,
+    Middle,
+    Last,
+}
+
+impl RowPlace {
+    /// The place of row `index` of `count`.
+    pub(crate) fn of(index: usize, count: usize) -> Self {
+        match (index == 0, index + 1 >= count) {
+            (true, true) => RowPlace::Only,
+            (true, false) => RowPlace::First,
+            (false, true) => RowPlace::Last,
+            (false, false) => RowPlace::Middle,
+        }
+    }
+
+    /// The row's top and bottom corner radii: the card's, inside its edge.
+    pub(crate) fn corners(self) -> (f32, f32) {
+        let inner = CARD_RADIUS - hairline(0.5);
+        match self {
+            RowPlace::Only => (inner, inner),
+            RowPlace::First => (inner, 0.),
+            RowPlace::Middle => (0., 0.),
+            RowPlace::Last => (0., inner),
+        }
+    }
+}
+
+/// A row of a settings card that is itself the control (a switch's row, a
+/// calendar's): `row` (which has its id) with the shared hover wash and
+/// pressed state under its content, shaped to its `place` in the card. The
+/// row clips to that shape, so its keyboard focus ring is drawn just inside
+/// it, whole, instead of being cut off by the card. Add the row's content,
+/// then `.reach()` and its click.
+pub(crate) fn pressable_row(row: Stateful<Div>, place: RowPlace, t: Theme) -> Stateful<Div> {
+    let (top, bottom) = place.corners();
+    row.relative()
+        .rounded_t(px(top))
+        .rounded_b(px(bottom))
+        .overflow_hidden()
+        .cursor_default()
+        .child(crate::motion::tactile(t.hover).corners(top, top, bottom, bottom))
+}
+
+thread_local! {
+    /// The knob of each calendar's switch (see `Cereal::row_switch`).
+    static ROW_KNOBS: std::cell::RefCell<std::collections::HashMap<u64, crate::motion::Glide>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
 
 /// A settings row with nothing in it: its box.
 pub(crate) fn settings_row_shell() -> Div {
@@ -2244,31 +2311,34 @@ pub(crate) fn settings_row(
     t: Theme,
 ) -> Div {
     settings_row_shell()
-        .child(
-            div()
-                .size(px(ROW_TILE))
-                .flex_shrink_0()
-                .rounded(px(ROW_TILE_RADIUS))
-                .bg(t.hover)
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(icon(
-                    symbol,
-                    ROW_ICON,
-                    if symbol == "cereal" {
-                        t.accent
-                    } else {
-                        t.secondary
-                    },
-                )),
-        )
+        .child(settings_row_tile(symbol, t))
         .child(
             settings_row_text()
                 .gap(px(2.))
                 .child(settings_row_title(t).child(title.into()))
                 .child(small(description.into(), t)),
         )
+}
+
+/// A settings row's icon tile.
+pub(crate) fn settings_row_tile(symbol: &str, t: Theme) -> Div {
+    div()
+        .size(px(ROW_TILE))
+        .flex_shrink_0()
+        .rounded(px(ROW_TILE_RADIUS))
+        .bg(t.hover)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icon(
+            symbol,
+            ROW_ICON,
+            if symbol == "cereal" {
+                t.accent
+            } else {
+                t.secondary
+            },
+        ))
 }
 
 pub(crate) fn empty_illustration(symbol: &str, t: Theme) -> Div {
