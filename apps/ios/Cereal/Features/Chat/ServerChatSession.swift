@@ -276,7 +276,7 @@ enum ChatHistoryRule {
         guard requestID == id else { return }
         if let failure {
             error = failure.localizedDescription
-            markInterruptedReply()
+            markFailedReply()
         }
         finishReply(); busy = false; requestID = nil; request = nil; deltaBuffer = nil
         endActivity(finished: failure == nil)
@@ -313,6 +313,15 @@ enum ChatHistoryRule {
         activity.end(id, finished)
     }
 
+    /// The request failed: what arrived of the answer stays, marked as failed, not as stopped.
+    /// The person did not stop it, and the conversation says what went wrong under it.
+    private func markFailedReply() {
+        guard messages.last?.role == .assistant, messages.last?.isStreaming == true else { return }
+        var annotations = messages[messages.count - 1].annotations ?? ChatTurnAnnotations()
+        annotations.markFailed()
+        messages[messages.count - 1].annotations = annotations
+    }
+
     private func markInterruptedReply() {
         guard messages.last?.role == .assistant, messages.last?.isStreaming == true else { return }
         messages[messages.count - 1].isInterrupted = true
@@ -320,6 +329,7 @@ enum ChatHistoryRule {
 
     private func finishReply() {
         guard messages.last?.role == .assistant else { return }
+        // (A failed answer with nothing to show is only its mark: it goes too.)
         if messages.last?.text.isEmpty == true && messages.last?.annotations?.hasContent != true { messages.removeLast() }
         else { messages[messages.count - 1].isStreaming = false }
     }

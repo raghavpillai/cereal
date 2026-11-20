@@ -78,14 +78,28 @@ enum ChatThoughts {
 
     /// The status line, or nil when there is nothing to say (an old answer with no
     /// timing and no thoughts).
-    static func status(_ annotations: ChatTurnAnnotations?, thinking: Bool, stopped: Bool) -> String? {
+    ///
+    /// An answer the person stopped says so once. Stopped before any of it had arrived, this
+    /// line says it; stopped part-way, this line keeps how long it thought and one line under
+    /// the text says "Stopped" (`showsStoppedLine`). An answer the server failed is never
+    /// "Stopped": the conversation shows the error and offers to ask again.
+    static func status(_ annotations: ChatTurnAnnotations?, thinking: Bool, stopped: Bool, hasText: Bool = false) -> String? {
         if thinking { return annotations.flatMap(liveHeading) ?? "Thinking" }
-        if stopped { return "Stopped" }
+        if stopped && !hasText { return "Stopped" }
         if let elapsed = annotations?.elapsedMs {
             return "\(annotations.map(worked) == true ? "Worked" : "Thought") for \(max(1, elapsed / 1000))s"
         }
         return annotations?.hasThoughts == true ? "Meeting sources" : nil
     }
+
+    /// Whether the status line is drawn at all: while thinking, when there are thoughts to
+    /// open under it, or when it is the one place that says the answer was stopped.
+    static func showsStatus(thinking: Bool, stopped: Bool, hasText: Bool, hasThoughts: Bool) -> Bool {
+        thinking || hasThoughts || (stopped && !hasText)
+    }
+
+    /// The line under a stopped answer's text. See `status`.
+    static func showsStoppedLine(stopped: Bool, hasText: Bool) -> Bool { stopped && hasText }
 
     /// A meeting's day as a list prints it beside the meeting: "Today", "Yesterday",
     /// "Nov 13", and the year only when it is not this one ("Dec 30, 2025"). A date
@@ -114,6 +128,8 @@ struct ChatThoughtsView: View {
     /// The answer is still arriving.
     let streaming: Bool
     let stopped: Bool
+    /// Some of the answer is on screen.
+    var hasText = false
     var onMeeting: ((ChatToolMeetingDTO) -> Void)?
     /// The person's own choice; left alone the thoughts are open only while thinking.
     /// (Debug QA: `-qa.thoughtsOpen YES` opens every answer's thoughts, for screenshots.)
@@ -126,6 +142,8 @@ struct ChatThoughtsView: View {
         #endif
     }
     @State private var openSteps: Set<String> = []
+    /// Counts the person's own openings and closings, for the haptic.
+    @State private var toggles = 0
     @Environment(\.motion) private var motion
 
     private var hasThoughts: Bool { annotations?.hasThoughts == true }
@@ -134,17 +152,19 @@ struct ChatThoughtsView: View {
     var body: some View {
         // As in the reference's iPhone chat, an answer with nothing to unfold (no reasoning, no
         // lookups) has no line above it once it arrives: "Thinking", then just the answer.
-        if let label = ChatThoughts.status(annotations, thinking: thinking, stopped: stopped), thinking || stopped || hasThoughts {
+        if let label = ChatThoughts.status(annotations, thinking: thinking, stopped: stopped, hasText: hasText),
+           ChatThoughts.showsStatus(thinking: thinking, stopped: stopped, hasText: hasText, hasThoughts: hasThoughts) {
             VStack(alignment: .leading, spacing: 0) {
                 Button {
                     guard hasThoughts else { return }
-                    withAnimation(motion.settle) { expanded = !open }
+                    toggles += 1
+                    withAnimation(motion.snappy) { expanded = !open }
                 } label: {
                     HStack(spacing: 6) {
                         if thinking {
                             // The Cereal mark, turning, as on the desktop.
                             // Darker than the words beside it, as measured (#797975 against #A4A49E on light).
-                            ThinkingIndicator(size: 15).foregroundStyle(Theme.textSecondary.opacity(0.8)).transition(motion.fade)
+                            ThinkingIndicator(size: 15).foregroundStyle(Theme.textSecondary.opacity(0.8)).transition(motion.replace())
                         }
                         ZStack(alignment: .leading) {
                             if thinking { SheenLabel(text: label).id(label).transition(motion.swap) }
@@ -155,18 +175,23 @@ struct ChatThoughtsView: View {
                                 .rotationEffect(.degrees(open ? 90 : 0))
                         }
                     }
-                    .font(.system(size: 15)).foregroundStyle(Theme.textTertiary)
+                    .uiFont(15).foregroundStyle(Theme.textTertiary)
                     .frame(minHeight: 30, alignment: .leading).contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .animation(motion.snappy, value: label)
+                // A line with nothing under it is not a control: it neither squashes nor is read as a button.
+                .buttonStyle(.squash).allowsHitTesting(hasThoughts)
+                .accessibilityRemoveTraits(hasThoughts ? [] : .isButton)
+                .animates(label)
                 .accessibilityLabel(label)
                 .accessibilityValue(hasThoughts ? (open ? "Expanded" : "Collapsed") : "")
                 .accessibilityHint(hasThoughts ? (open ? "Hides the thoughts behind this answer" : "Shows the thoughts behind this answer") : "")
                 .accessibilityIdentifier("chat-thoughts-status")
-                if open, let annotations { rail(annotations).transition(motion.rise) }
+                // Cut to the room as it opens, so the rows never lie across the answer moving down.
+                if open, let annotations { rail(annotations).transition(motion.unfold) }
             }
-            .animation(motion.settle, value: open)
+            .animates(open)
+            // Thoughts and lookups opening and closing: a selection, as a disclosure is.
+            .haptic(.selection, trigger: toggles)
         }
     }
 
@@ -193,7 +218,7 @@ struct ChatThoughtsView: View {
                 Text(Self.inline(paragraph)).foregroundStyle(Theme.textSecondary)
             }
         }
-        .font(.system(size: 14)).lineSpacing(3)
+        .uiFont(14).lineSpacing(3)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -206,7 +231,8 @@ struct ChatThoughtsView: View {
         return VStack(alignment: .leading, spacing: 6) {
             Button {
                 guard !results.isEmpty else { return }
-                withAnimation(motion.settle) {
+                toggles += 1
+                withAnimation(motion.snappy) {
                     if openSteps.remove(tool.callId) == nil { openSteps.insert(tool.callId) }
                 }
             } label: {
@@ -218,33 +244,35 @@ struct ChatThoughtsView: View {
                             .rotationEffect(.degrees(showing ? 90 : 0))
                     }
                 }
-                .font(.system(size: 14))
+                .uiFont(14)
                 .foregroundStyle(look.failed ? Theme.textTertiary : Theme.textSecondary)
                 .frame(minHeight: 24, alignment: .leading).contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.squash).allowsHitTesting(!results.isEmpty)
             .accessibilityValue(results.isEmpty ? "" : (showing ? "Expanded" : "Collapsed"))
             .accessibilityIdentifier("chat-tool-\(tool.callId)")
             if showing {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(results, id: \.noteId) { meeting in
-                        Button { onMeeting?(meeting) } label: {
+                        RowButton { onMeeting?(meeting) } label: {
                             HStack(spacing: 12) {
                                 Text(meeting.title.trimmingCharacters(in: .whitespaces).isEmpty ? "New note" : meeting.title)
                                     .lineLimit(1).foregroundStyle(Theme.textSecondary)
                                 Spacer(minLength: 4)
-                                Text(ChatThoughts.relativeDay(meeting.date)).font(.system(size: 13)).foregroundStyle(Theme.textTertiary)
+                                Text(ChatThoughts.relativeDay(meeting.date)).uiFont(13).foregroundStyle(Theme.textTertiary)
                             }
-                            .font(.system(size: 14)).padding(.horizontal, 8).frame(minHeight: 36).contentShape(Rectangle())
+                            .uiFont(14).frame(minHeight: 36).contentShape(Rectangle())
                         }
-                        .buttonStyle(.plain).disabled(onMeeting == nil)
+                        // The wash reaches 8 pt past the label: that is the row's own inset.
+                        .padding(.horizontal, 8)
+                        .disabled(onMeeting == nil)
                         .accessibilityLabel("Open meeting \(meeting.title), \(ChatThoughts.relativeDay(meeting.date))")
                     }
                 }
                 .padding(.leading, 6)
                 .overlay(alignment: .leading) { Rectangle().fill(Theme.textTertiary.opacity(0.35)).frame(width: 1) }
                 .padding(.leading, 7.5)
-                .transition(motion.rise)
+                .transition(motion.unfold)
             }
         }
     }
@@ -284,29 +312,5 @@ struct ChatThoughtsView: View {
             }
             self.label = shown
         }
-    }
-}
-
-/// Words with a sheen passing over them, for what is under way.
-struct SheenLabel: View {
-    let text: String
-    @State private var phase: CGFloat = -1
-    @Environment(\.motion) private var motion
-
-    var body: some View {
-        Text(text)
-            .overlay {
-                GeometryReader { geometry in
-                    // The theme's ink: a bright sheen over grey on the dark page, a dark one on the light page.
-                    LinearGradient(colors: [.clear, Theme.textPrimary.opacity(0.55), .clear], startPoint: .leading, endPoint: .trailing)
-                        .frame(width: 50, height: geometry.size.height)
-                        .offset(x: phase * (geometry.size.width + 50))
-                }
-                .mask(Text(text))
-                .allowsHitTesting(false)
-            }
-            .onAppear {
-                if !motion.reduceMotion { withAnimation(.linear(duration: 1.2).repeatForever(autoreverses: false)) { phase = 1 } }
-            }
     }
 }

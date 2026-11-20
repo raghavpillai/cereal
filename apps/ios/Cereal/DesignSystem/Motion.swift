@@ -63,6 +63,9 @@ enum MotionResolver {
     /// Half a breath of a placeholder: full strength to faint.
     static let breathDuration = 0.9
     static let breathFaint = 0.45
+    /// One pass of the sheen over words that say what is under way (`SheenLabel`).
+    /// A sheen moves at one speed, so this is the one linear animation in the app.
+    static let sheenPeriod = 1.2
 
     static func spec(_ token: MotionToken, phase: MotionPhase = .enter, reduceMotion: Bool) -> MotionSpec {
         if reduceMotion { return MotionSpec(curve: .easeOut, duration: reducedDuration, bounce: 0) }
@@ -154,6 +157,19 @@ struct Motion: Equatable, Sendable {
         )
     }
 
+    /// **A block that opens between lines of text** (an error above a document,
+    /// the thoughts above an answer, the meetings under a lookup, a progress
+    /// row above notes). Where what lies under the new block is text, `rise`
+    /// is not enough: the block is drawn at its full height from the first
+    /// frame, across lines that are still moving out of its way. This one is
+    /// cut to the room as the room opens, and to the room as it closes, so the
+    /// two are never drawn over each other.
+    ///
+    /// It carries no animation of its own: it opens at the pace of whatever
+    /// moves its neighbours. Put `.animates(value)` on the stack that holds it,
+    /// or make the change inside `withAnimation(motion.snappy)`.
+    var unfold: AnyTransition { AnyTransition(UnfoldTransition()) }
+
     /// **Content taking the place of other content in the same spot** (loading
     /// turning into loaded, one answer into the next, one prompt into another).
     /// The old is gone before the new can be read: it fades in
@@ -229,10 +245,15 @@ struct SquashButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         let pressed = configuration.isPressed && isEnabled
+        // The spring is given to the squash and the dim alone. As an animation of the whole label it
+        // also took over where the label is: a button whose tap moves it (the chat's Send drops the
+        // keyboard under its own bar) was carried there by its release spring, behind the bar.
         configuration.label
-            .scaleEffect(pressed ? MotionResolver.pressScale(reduceMotion: motion.reduceMotion, scale: scale) : 1)
-            .opacity(pressed ? MotionResolver.pressOpacity(reduceMotion: motion.reduceMotion) : 1)
-            .animation(motion.animation(.snappy, entering: !pressed), value: pressed)
+            .animation(motion.animation(.snappy, entering: !pressed)) { label in
+                label
+                    .scaleEffect(pressed ? MotionResolver.pressScale(reduceMotion: motion.reduceMotion, scale: scale) : 1)
+                    .opacity(pressed ? MotionResolver.pressOpacity(reduceMotion: motion.reduceMotion) : 1)
+            }
     }
 }
 
@@ -431,6 +452,48 @@ extension View {
     func animates<Value: Equatable>(_ value: Value, _ token: MotionToken = .snappy) -> some View {
         modifier(TokenAnimation(value: value, token: token))
     }
+}
+
+/// `Motion.unfold`. The content keeps its own height throughout (text is never
+/// laid out again as the room grows); only the window onto it changes.
+private struct UnfoldTransition: Transition {
+    func body(content: Content, phase: TransitionPhase) -> some View {
+        content
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(height: phase.isIdentity ? nil : 0, alignment: .top)
+            .clipped()
+            .opacity(phase.isIdentity ? 1 : 0)
+    }
+}
+
+private struct Closing: ViewModifier {
+    let shown: Bool
+    @Environment(\.motion) private var motion
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(shown ? 1 : 0)
+            // Gone before the room has closed far; back at the room's own pace.
+            .animation(shown ? motion.snappy : motion.leave, value: shown)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(height: shown ? nil : 0, alignment: .top)
+            .clipped()
+            .animation(motion.snappy, value: shown)
+            .allowsHitTesting(shown)
+            .accessibilityHidden(!shown)
+    }
+}
+
+extension View {
+    /// **A row of a bar that itself moves** (the recipe chips on the chat
+    /// composer, which rides the keyboard; a line of a floating bar). Such a row
+    /// must not leave by a transition: a view that is leaving is drawn where it
+    /// was, and the bar travels on without it. It stays in the bar instead and
+    /// closes: it fades in `leaveDuration` while its room closes with `snappy`.
+    ///
+    /// Keep drawing the row's last content while `shown` is false (hold it in
+    /// `@State`), so it has something to fade.
+    func closes(unless shown: Bool) -> some View { modifier(Closing(shown: shown)) }
 }
 
 /// **Content that replaces other content in the same place**, as one view:

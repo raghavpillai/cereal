@@ -1097,6 +1097,7 @@ struct InlineProgress: View {
 /// column like the Home tiles (measured from the reference).
 struct NoteMetaChips: View {
     let date: Date
+    /// The people in the meeting other than the account holder.
     let attendeeCount: Int
     var showCalendarIcon = true
     var onMetadata: (() -> Void)? = nil
@@ -1125,9 +1126,12 @@ struct NoteMetaChips: View {
             Text(date.noteMetaString)
             // The reference's people glyph is taller (16 pt) and sits 16 pt after the date, 7 pt before the count.
             Image(systemName: "person.2").font(.system(size: 16)).padding(.leading, 6).padding(.trailing, -2)
-            Text(attendeeCount > 0 ? "+\(attendeeCount)" : "Me")
+            Text(Self.peopleLabel(others: attendeeCount))
         }
     }
+
+    /// "Me" alone, "Me +4" with four others. A bare "+5" for a meeting of five read as five more people.
+    static func peopleLabel(others: Int) -> String { others > 0 ? "Me +\(others)" : "Me" }
 }
 
 /// The outlined capsule of facts under a note title: 36 pt tall, 14 pt text.
@@ -1138,10 +1142,12 @@ struct NoteMetaCapsule<Content: View>: View {
 
     var body: some View {
         HStack(spacing: 6) { content }
-            .font(.system(size: 14))
+            .uiFont(14)
             .foregroundStyle(Theme.textSecondary)
             .padding(.leading, leading).padding(.trailing, 17)
-            .frame(height: 36)
+            .frame(minHeight: 36)
+            // Its words grow with the text size as far as a one-line capsule holds.
+            .dynamicTypeSize(...DynamicTypeSize.accessibility1)
             .contentShape(Rectangle().inset(by: -4))
             .overlay(Capsule().strokeBorder(Theme.ink.opacity(0.10), lineWidth: 1))
     }

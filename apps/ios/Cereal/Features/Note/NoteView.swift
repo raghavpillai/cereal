@@ -63,16 +63,17 @@ struct NoteView: View {
                         .transition(motion.pop(anchor: .leading))
                     }
 
-                    // The two documents cross-fade. Large text never animates its layout.
-                    if mode == .enhanced && !note.sections.isEmpty {
-                        EnhancedNotesView(sections: note.sections)
-                            .transition(.asymmetric(insertion: motion.fade, removal: .identity))
-                    } else {
-                        Text(note.userNotes.isEmpty ? "No notes yet." : note.userNotes)
-                            .readingFont(.body)
-                            .lineSpacing(6)
-                            .foregroundStyle(note.userNotes.isEmpty ? Theme.textTertiary : Theme.textSecondary)
-                            .transition(.asymmetric(insertion: motion.fade, removal: .identity))
+                    // One document at a time (`Replaced`), as on a server note. Large text never animates its layout.
+                    let enhanced = mode == .enhanced && !note.sections.isEmpty
+                    Replaced(id: enhanced) {
+                        if enhanced {
+                            EnhancedNotesView(sections: note.sections)
+                        } else {
+                            Text(note.userNotes.isEmpty ? "No notes yet." : note.userNotes)
+                                .readingFont(.body)
+                                .lineSpacing(6)
+                                .foregroundStyle(note.userNotes.isEmpty ? Theme.textTertiary : Theme.textSecondary)
+                        }
                     }
                 }
                 .animation(motion.exit(.settle), value: note.needsGeneration)
@@ -94,7 +95,7 @@ struct NoteView: View {
                 Button("View transcript", systemImage: "text.alignleft") { showTranscript = true }
                 Button(mode == .enhanced ? "Show my notes" : "Show enhanced notes",
                        systemImage: mode == .enhanced ? "text.viewfinder" : "sparkles") {
-                    withAnimation(motion.snappy) { mode = mode == .enhanced ? .mine : .enhanced }
+                    mode = mode == .enhanced ? .mine : .enhanced
                     Haptics.shared.play(.selection)
                 }
                 Button("Copy notes", systemImage: "doc.on.doc") {
@@ -192,7 +193,7 @@ struct TranscriptView: View {
                     ForEach(note.transcript) { seg in
                         VStack(alignment: .leading, spacing: 4) {
                             Text("\(seg.speaker) · \(Duration.seconds(seg.startedAt).formatted(.time(pattern: .minuteSecond)))")
-                                .font(.system(size: 13, weight: .medium))
+                                .uiFont(13, weight: .medium)
                                 .foregroundStyle(Theme.textTertiary)
                             Text(seg.text).readingFont(.body).foregroundStyle(Theme.textPrimary)
                         }

@@ -11,11 +11,13 @@ struct NoteProgressRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            ProgressView().controlSize(.small).tint(Theme.textTertiary)
-            ShimmerText(text: text)
+            // The app's one loader and its one sheen (`CerealLoader`, `SheenLabel`), not a system spinner.
+            CerealLoader(size: 18, color: Theme.textTertiary)
+            SheenLabel(text: text).uiFont(16, weight: .medium).foregroundStyle(Theme.textTertiary).lineLimit(1)
         }
         .padding(.horizontal, 15)
-        .frame(height: 44)
+        .frame(minHeight: 44)
+        .dynamicTypeSize(...DynamicTypeSize.accessibility1)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.quietFill, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
         .padding(.leading, -HomeMetrics.tileOutdent)
@@ -28,37 +30,6 @@ struct NoteProgressRow: View {
         if finishing { return "Uploading transcript..." }
         if generating { return "Generating notes..." }
         return nil
-    }
-}
-
-/// Words with a darker band passing over them from the leading edge, about
-/// once every 1.6 s. Still under Reduce Motion.
-struct ShimmerText: View {
-    let text: String
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        let label = Text(text).font(.system(size: 16, weight: .medium))
-        label.foregroundStyle(Theme.textTertiary)
-            .overlay {
-                if !reduceMotion {
-                    TimelineView(.animation) { context in
-                        let period = 1.6
-                        let phase = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
-                        label.foregroundStyle(Theme.textSecondary)
-                            .mask {
-                                GeometryReader { proxy in
-                                    let band = max(60, proxy.size.width * 0.45)
-                                    LinearGradient(colors: [.clear, .black, .clear], startPoint: .leading, endPoint: .trailing)
-                                        .frame(width: band)
-                                        .offset(x: -band + (proxy.size.width + band) * phase)
-                                }
-                            }
-                    }
-                    .accessibilityHidden(true)
-                }
-            }
-            .lineLimit(1)
     }
 }
 
@@ -78,21 +49,21 @@ struct NotifyWhenReadyCard: View {
                     Image(systemName: "xmark").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.textTertiary)
                         .frame(width: 32, height: 32).contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.squash)
                 .padding(.trailing, -8).padding(.top, -8)
                 .accessibilityLabel("Not now")
             }
             Text("Get notified when your notes are ready")
-                .font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.textPrimary)
+                .uiFont(15, weight: .semibold).foregroundStyle(Theme.textPrimary)
                 .padding(.top, 8)
             Text("Notes usually take a few minutes to generate. We'll let you know when they're ready")
-                .font(.system(size: 13)).foregroundStyle(Theme.textSecondary)
+                .uiFont(13).foregroundStyle(Theme.textSecondary)
                 .padding(.top, 4)
                 .fixedSize(horizontal: false, vertical: true)
             Button(action: onNotify) {
-                Text("Notify me").font(.system(size: 15, weight: .medium))
+                Text("Notify me").uiFont(15, weight: .medium)
                     .foregroundStyle(Theme.onStartMeeting)
-                    .frame(maxWidth: .infinity).frame(height: 40)
+                    .frame(maxWidth: .infinity).frame(minHeight: 40)
                     .background(Theme.startMeeting, in: Capsule())
                     .contentShape(Capsule())
             }

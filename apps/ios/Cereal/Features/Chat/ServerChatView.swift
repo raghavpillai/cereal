@@ -30,6 +30,8 @@ struct ServerChatView: View {
     @State private var scrollIdentity = UUID()
     @State private var selectedCitation: ChatCitationSelection?
     @State private var choosingMeeting = false
+    /// The meeting picked in the picker, until the picker has closed.
+    @State private var chosenMeeting: ServerNoteRow?
     @FocusState private var focused: Bool
 
     private var title: String {
@@ -48,16 +50,19 @@ struct ServerChatView: View {
 
     var body: some View {
         scaffold
-        .onAppear {
-            restore()
-            // The reference opens a note's empty chat ready to type: the keyboard rises as the screen slides in.
-            if noteID != nil, messages.isEmpty, !Self.qaNoFocus { focused = true }
-        }
-        // Where focus could not be taken during the transition, it is taken once the screen is in place.
+        .onAppear { restore() }
+        // The reference opens a note's empty chat ready to type: the keyboard rises as the screen slides in.
+        // The composer's field takes it as it enters the window (`keyboardOnArrival`). Should that not
+        // have happened (the field was not there yet), focus is asked for on every frame until it is
+        // taken, which is as soon as the push allows.
         .task {
-            guard noteID != nil else { return }
-            try? await Task.sleep(for: .milliseconds(panel == nil ? 450 : 380))
-            if messages.isEmpty, !Task.isCancelled, !focused, !Self.qaNoFocus { focused = true }
+            guard opensReadyToType else { return }
+            for _ in 0..<90 {
+                guard messages.isEmpty, !Task.isCancelled else { return }
+                if focused { return }
+                focused = true
+                try? await Task.sleep(for: .milliseconds(16))
+            }
         }
         #if DEBUG
         // QA only: `-qa.ask "question"` asks it once in a note's chat, for displays simulated touches cannot reach.
@@ -93,12 +98,22 @@ struct ServerChatView: View {
         // Another account, or none: this screen lets go of the conversation it showed. Ending the
         // answers of an account that signed out is `ServerChatSessions.accountChanged`, at the root.
         .onChange(of: sessionKey) {
-            selectedCitation = nil; choosingMeeting = false; session = nil; draft = ""; restore()
+            selectedCitation = nil; chosenMeeting = nil; choosingMeeting = false; session = nil; draft = ""; restore()
         }
         .sheet(isPresented: $showHistory) { historySheet.task { await saved.refresh(server: server, noteID: noteID) } }
         .sheet(item: $selectedCitation) { ChatCitationTranscriptSheet(selection: $0) }
-        .sheet(isPresented: $choosingMeeting) { ChatMeetingContextPicker(onSelect: selectMeetingContext) }
+        // The meeting chosen opens when the picker has gone, not a guessed while after it was told to go.
+        .sheet(isPresented: $choosingMeeting, onDismiss: openChosenMeeting) { ChatMeetingContextPicker(onSelect: { chosenMeeting = $0; choosingMeeting = false }) }
     }
+
+    /// A note's chat with nothing asked yet opens with the keyboard up.
+    private var opensReadyToType: Bool {
+        guard noteID != nil, !Self.qaNoFocus, session.map({ $0.messages.isEmpty }) ?? Self.startsEmpty(sessionKey) else { return false }
+        return true
+    }
+
+    /// Before `restore` has run: whether the conversation that will be taken up is empty.
+    private static func startsEmpty(_ key: String) -> Bool { ServerChatSessions.shared.isEmpty(key) }
 
     /// QA only: `-qa.noFocus YES` leaves the keyboard down, for screenshots of the whole screen.
     private static var qaNoFocus: Bool {
@@ -134,7 +149,7 @@ struct ServerChatView: View {
     private var column: some View {
             VStack(alignment: .leading, spacing: 0) {
                 // The splash says hello in its own words; the bar's title is for a conversation.
-                Text(splash ? " " : title).font(.system(size: 15, weight: .semibold))
+                Text(splash ? " " : title).uiFont(15, weight: .semibold)
                     .foregroundStyle(Theme.chatText).lineLimit(1)
                     .padding(.top, RailMetrics.chatTitleInsets(compact: verticalSizeClass == .compact).top)
                     .padding(.bottom, RailMetrics.chatTitleInsets(compact: verticalSizeClass == .compact).bottom).padding(.leading, Theme.gutter)
@@ -150,7 +165,7 @@ struct ServerChatView: View {
                                 .padding(.trailing, ChatColumn.trailing)
                         }
                     }
-                if noteID == nil && !splash { Text("Across your private notes").font(.caption).foregroundStyle(Theme.textSecondary).padding(.leading, Theme.gutter).padding(.bottom, 8) }
+                if noteID == nil && !splash { Text("Across your private notes").uiFont(12, relativeTo: .caption).foregroundStyle(Theme.textSecondary).padding(.leading, Theme.gutter).padding(.bottom, 8) }
                 ScrollViewReader { proxy in
                     ScrollView {
                         // Not a lazy stack. A lazy one guesses the height of rows that are off
@@ -161,7 +176,7 @@ struct ServerChatView: View {
                         // when the keyboard comes up. A conversation is a bounded number of rows
                         // and each row is equatable, so laying all of them out costs little.
                         VStack(alignment: .leading, spacing: 22) {
-                            if messages.isEmpty { emptyState.transition(motion.fade) }
+                            if messages.isEmpty { emptyState.transition(motion.replace()) }
                             ForEach(messages) { message in
                                 ChatMessageView(message: message, onCitation: { openCitation($0, turnID: message.id) }, onMeeting: { openMeeting($0, turnID: message.id) },
                                                 showsSources: noteID == nil)
@@ -169,11 +184,16 @@ struct ServerChatView: View {
                                     .transition(message.role == .user ? motion.pop(anchor: .bottomTrailing) : motion.rise)
                             }
                             if let error {
+                                // What went wrong, and the one thing to do about it. Nothing here says
+                                // "stopped": the person did not stop it.
                                 VStack(alignment: .leading, spacing: 0) {
-                                    Text(error).font(.footnote).foregroundStyle(Theme.textSecondary)
-                                    Button("Retry question", systemImage: "arrow.clockwise") { retryLastQuestion() }
-                                        .font(.footnote).disabled(busy)
+                                    Text(error).uiFont(13, relativeTo: .footnote).foregroundStyle(Theme.textSecondary)
+                                    Button(Wording.retry, systemImage: "arrow.clockwise") { retryLastQuestion() }
+                                        .uiFont(13, weight: .medium, relativeTo: .footnote).foregroundStyle(Theme.accentText)
+                                        .disabled(busy)
                                         .frame(minHeight: 44).contentShape(Rectangle())
+                                        .buttonStyle(.squash)
+                                        .accessibilityIdentifier("server-chat-retry")
                                 }.accessibilityIdentifier("server-chat-error")
                                     .transition(motion.rise)
                             }
@@ -188,9 +208,9 @@ struct ServerChatView: View {
                         .padding(.leading, ChatColumn.leading).padding(.trailing, ChatColumn.trailing).padding(.top, 8)
                         .fillsChatRoom(room)
                         // Existing text settles without a bounce; the new question pops through its own transition.
-                        .animation(motion.settle, value: messages.count)
-                        .animation(motion.snappy, value: error)
-                        .animation(motion.snappy, value: queue)
+                        .animates(messages.count, .settle)
+                        .animates(error)
+                        .animates(queue)
                     }
                     .id(scrollIdentity)
                     .scrollIndicators(.hidden).scrollDismissesKeyboard(.interactively)
@@ -236,7 +256,8 @@ struct ServerChatView: View {
                                 onSend: send, onStop: stop, queuesWhileGenerating: true, availableModels: availableModels,
                                 identifierPrefix: "server-chat",
                                 recipes: noteID != nil && messages.isEmpty && queue.isEmpty ? ChatRecipes.note : [],
-                                onRecipe: { draft = $0; send() })
+                                onRecipe: { draft = $0; send() },
+                                keyboardOnArrival: opensReadyToType)
                                 .glassMorph("composer", in: glass)
                                 // The control is drawn here so its glass buds off the composer, on a
                                 // zero-height line along the composer's top edge. The bar does not take
@@ -249,8 +270,8 @@ struct ServerChatView: View {
                                                 .foregroundStyle(Theme.textPrimary).frame(width: 36, height: 36)
                                                 .glassSurface(Circle(), interactive: true)
                                                 .glassMorph("latest", in: glass)
-                                                .scaleEffect(latestPressed && !motion.reduceMotion ? 0.9 : 1)
-                                                .animation(motion.snappy, value: latestPressed)
+                                                .scaleEffect(latestPressed ? MotionResolver.pressScale(reduceMotion: motion.reduceMotion, scale: 0.9) : 1)
+                                                .animates(latestPressed)
                                                 .padding(.bottom, ChatColumn.latestGap)
                                                 .allowsHitTesting(false).accessibilityHidden(true)
                                         }
@@ -259,7 +280,7 @@ struct ServerChatView: View {
                         }
                         .animation(motion.animation(.gooey, entering: showsLatest), value: showsLatest)
                         .chatBarBackdrop(raised: showsLatest)
-                        .animation(motion.snappy, value: showsLatest)
+                        .animates(showsLatest)
                     }
                 }
             }
@@ -291,37 +312,37 @@ struct ServerChatView: View {
                         Spacer()
                         Button { focused = false; showHistory = true } label: {
                             Text("See all").frame(minHeight: 44).contentShape(Rectangle())
-                        }.buttonStyle(.plain).accessibilityIdentifier("server-chat-see-all")
+                        }.buttonStyle(.squash).accessibilityIdentifier("server-chat-see-all")
                     }
-                    .font(.system(size: 14)).foregroundStyle(Theme.textSecondary)
+                    .uiFont(14).foregroundStyle(Theme.textSecondary)
                     .padding(.top, 40)
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(recents, id: \.id) { thread in
-                            Button { openSaved(thread) } label: {
+                            RowButton { openSaved(thread) } label: {
                                 HStack(spacing: 12) {
                                     Image(systemName: thread.noteId == nil ? "bubble.left" : "doc.text")
                                         .font(.system(size: 14)).foregroundStyle(Theme.textSecondary)
                                         .frame(width: 32, height: 32)
                                         .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                                         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.stroke, lineWidth: 1))
-                                    Text(ChatThreadTurns.title(thread)).font(.system(size: 15)).foregroundStyle(Theme.textPrimary).lineLimit(1)
+                                    Text(ChatThreadTurns.title(thread, asked: asked)).uiFont(15).foregroundStyle(Theme.textPrimary).lineLimit(1)
                                     Spacer(minLength: 8)
                                     if let at = CalendarSchedule.timestamp(thread.updatedAt) {
-                                        Text(ChatThreadTurns.age(of: at)).font(.system(size: 13)).monospacedDigit()
+                                        Text(ChatThreadTurns.age(of: at)).uiFont(13).monospacedDigit()
                                             .foregroundStyle(Theme.textSecondary)
                                             .accessibilityLabel(ChatThreadTurns.spokenAge(of: at))
                                     }
                                 }
                                 .frame(minHeight: 48).contentShape(Rectangle())
                             }
-                            .buttonStyle(RowPressStyle())
                             .accessibilityIdentifier("server-chat-recent")
+                            .transition(motion.rise)
                         }
                     }
-                    .transition(motion.fade)
+                    .transition(motion.rise)
                 }
             }
-            .animation(motion.snappy, value: recents.map(\.id))
+            .animates(recents.map(\.id))
             .task { await saved.refresh(server: server, noteID: nil) }
         }
         // A meeting's empty chat is empty: its recipes sit in one row above the composer.
@@ -329,6 +350,9 @@ struct ServerChatView: View {
 
     /// The three newest saved chats, for the splash.
     private var recents: [ChatThreadSummaryDTO] { Array(saved.listed.prefix(3)) }
+
+    /// The first question of each chat asked in here, by thread: the name of a saved chat the server has not named.
+    private var asked: [String: String] { ChatThreadTurns.asked(in: session?.conversationsForHistory ?? []) }
 
     /// Conversations kept on this iPhone only. Those saved on the server are listed from there instead.
     private var visibleHistory: [ChatConversation] { (session?.conversationsForHistory ?? []).filter { $0.threadID == nil } }
@@ -346,7 +370,7 @@ struct ServerChatView: View {
     }
 
     private var historySheet: some View {
-        ChatHistorySheet(saved: saved, local: visibleHistory, error: ServerChatSessions.shared.persistenceError,
+        ChatHistorySheet(saved: saved, local: visibleHistory, asked: asked, error: ServerChatSessions.shared.persistenceError,
                          onOpen: openSaved,
                          onOpenLocal: { conversation in
                              focused = false
@@ -360,12 +384,16 @@ struct ServerChatView: View {
     }
 
     /// Sends the question, or queues it behind the answer that is arriving.
+    ///
+    /// One rule for the keyboard: a question that goes out now puts it away, so the answer has the
+    /// screen; one that waits behind an answer leaves it up for the next. Editing is ended before the
+    /// draft is read and cleared (`Keyboard`): `focused = false` alone takes effect on a later update,
+    /// after the field was emptied, and then did not put the keyboard away at all.
     private func send() {
-        guard let session else { return }
+        guard let session, !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if ChatSendRule.dropsKeyboard(answerArriving: session.busy) { Keyboard.dismiss(); focused = false }
         guard session.ask(draft, model: selectedModel) else { return }
         draft = ""; followsTail = true
-        // A question that goes out now puts the keyboard away; one that waits leaves it for the next.
-        if session.queue.isEmpty { focused = false }
     }
 
     /// Stop ends the answer and brings the questions that were waiting back to the composer.
@@ -379,15 +407,12 @@ struct ServerChatView: View {
         draft = waiting.joined(separator: "\n")
     }
 
-    private func selectMeetingContext(_ note: ServerNoteRow) {
-        choosingMeeting = false
-        let account = server.accountIdentity
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(300))
-            guard !Task.isCancelled, let account, server.accountIdentity == account,
-                  server.title(ofNote: note.id) != nil else { return }
-            if let id = server.accountID { router.path.append(.serverChat(id, noteID: note.id)) }
-        }
+    /// The picker has closed: the meeting chosen in it, if one was, opens its chat.
+    private func openChosenMeeting() {
+        guard let note = chosenMeeting else { return }
+        chosenMeeting = nil
+        guard server.title(ofNote: note.id) != nil, let id = server.accountID else { return }
+        router.path.append(.serverChat(id, noteID: note.id))
     }
     private func openMeeting(_ meeting: ChatToolMeetingDTO, turnID: UUID) {
         guard messages.first(where: { $0.id == turnID })?.annotations?.tools.contains(where: { $0.results?.contains(where: { $0.noteId == meeting.noteId }) == true }) == true,
@@ -424,6 +449,12 @@ struct ServerChatView: View {
     }
 }
 
+/// What sending a question does to the keyboard.
+enum ChatSendRule {
+    /// A question that goes out now drops the keyboard; one queued behind an answer keeps it.
+    static func dropsKeyboard(answerArriving: Bool) -> Bool { !answerArriving }
+}
+
 /// Where Chat in the app's navigation leads.
 enum ChatNavigation {
     /// The chat across meetings of the default account, on a new conversation's splash
@@ -453,7 +484,7 @@ struct QueuedQuestionRow: View {
                     .opacity(0.5)
             }
             HStack(spacing: 2) {
-                Text("Queued · sends when this answer finishes").font(.caption).foregroundStyle(Theme.textSecondary)
+                Text("Queued" + Wording.dot + "sends when this answer finishes").uiFont(12, relativeTo: .caption).foregroundStyle(Theme.textSecondary)
                 Button(action: remove) {
                     Image(systemName: "xmark.circle.fill").font(.system(size: 15)).foregroundStyle(Theme.textSecondary)
                         .frame(width: 44, height: 44).contentShape(Rectangle())
@@ -505,6 +536,9 @@ struct QueuedQuestionRow: View {
         }
     }
     func load(for key: String) -> ConversationState { values[key] ?? ConversationState() }
+
+    /// Whether the conversation for this account and note has nothing in it yet.
+    func isEmpty(_ key: String) -> Bool { live[key].map { $0.messages.isEmpty } ?? load(for: key).messages.isEmpty }
 
     /// The conversation for this account and note. The same object for as long as it is in
     /// use, so a screen that comes back finds the answer that kept arriving while it was away.

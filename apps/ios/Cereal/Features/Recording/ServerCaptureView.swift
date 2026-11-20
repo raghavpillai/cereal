@@ -91,7 +91,7 @@ struct ServerCaptureView: View {
             Theme.background
             VStack(alignment: .leading, spacing: 0) {
                 CaptureNoteEditor(title: $title, text: $text, focused: $focus,
-                    date: date, attendeeCount: meetingContext?.meeting.map { MeetingPresentation.people($0).count } ?? 0, identifierPrefix: "server-capture", onMetadata: { focus = nil; showingMeeting = true })
+                    date: date, attendeeCount: meetingContext?.meeting.map(NoteMetaChips.others) ?? 0, identifierPrefix: "server-capture", onMetadata: { focus = nil; showingMeeting = true })
             }.padding(.horizontal, rail.captureGutter)
                 .frame(maxHeight: .infinity, alignment: .top)
                 // The controls are an inset of the editor, so text never runs under them.

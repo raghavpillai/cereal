@@ -88,19 +88,23 @@ struct ChatCitationTranscriptSheet: View {
                 ServerTranscriptView(note: note, focusSegmentID: resolvedSegmentID)
             } else {
                 NavigationStack {
-                    Group {
-                        if let error {
-                            ContentUnavailableView("Source unavailable", systemImage: "text.magnifyingglass", description: Text(error))
-                        } else { ProgressView("Loading cited transcript") }
+                    // Nothing for the first moment, then the mark; "unavailable" only once it is known (`Loading`).
+                    Loading(while: error == nil, alignment: .center) {
+                        InlineProgress(text: "Loading the cited transcript…")
+                    } then: {
+                        ScreenPrompt(symbol: "text.magnifyingglass", title: "Source unavailable", detail: error, bottomRoom: 40)
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Theme.sheet.ignoresSafeArea())
                     .navigationTitle(selection.citation.title).navigationBarTitleDisplayMode(.inline)
+                    .sheetBar()
                     .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
                 }
             }
         }
         // Loading turns into the cited transcript, or into the error, with a cross-fade.
-        .animation(motion.snappy, value: note?.id)
-        .animation(motion.snappy, value: error)
+        .animates(note?.id)
+        .animates(error)
         .task(id: selection.id) {
             guard selection.accountIdentity == server.accountIdentity else { error = "Sign in to the account that owns this source."; return }
             do {
@@ -113,10 +117,12 @@ struct ChatCitationTranscriptSheet: View {
             } catch is CancellationError { }
             catch { self.error = error.localizedDescription }
         }
+        // The source could not be opened: felt, as any request that fails is.
+        .haptic(.error, trigger: error) { old, new in new != nil && new != old }
         .onChange(of: server.accountIdentity) { _, identity in
             if identity != selection.accountIdentity { note = nil; dismiss() }
         }
-        .glassSheet()
+        .glassSheet(background: Theme.sheet)
     }
 }
 
@@ -125,25 +131,45 @@ struct ChatMeetingContextPicker: View {
     @Environment(ServerNotesModel.self) private var server
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
+    @State private var chosen = 0
     var body: some View {
+        // The rows Home has loaded, by title; reaching the end asks for the next page.
+        let matches = server.list.rows.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) }
         NavigationStack {
             List {
-                // The rows Home has loaded, by title; reaching the end asks for the next page.
-                ForEach(server.list.rows.filter { query.isEmpty || $0.title.localizedCaseInsensitiveContains(query) }) { note in
-                    Button { onSelect(note) } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(note.title.isEmpty ? "Untitled note" : note.title).foregroundStyle(Theme.textPrimary)
-                            Text(Self.day(note)).font(.caption).foregroundStyle(Theme.textSecondary)
-                        }.padding(.vertical, 5)
-                    }.listRowBackground(Theme.surface)
-                        .onAppear { if note.id == server.list.rows.last?.id { Task { await server.loadMore() } } }
+                ForEach(matches) { note in
+                    Button { chosen += 1; onSelect(note) } label: {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(note.title.isEmpty ? "Untitled note" : note.title).uiFont(16, weight: .medium).foregroundStyle(Theme.textPrimary).lineLimit(2)
+                            Text(Self.day(note)).uiFont(13).foregroundStyle(Theme.textSecondary)
+                        }
+                        .padding(.vertical, 9).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.row)
+                    .listRowBackground(Color.clear).listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
+                    .accessibilityIdentifier("chat-meeting-choice")
+                    .onAppear { if note.id == server.list.rows.last?.id { Task { await server.loadMore() } } }
                 }
             }
-            .searchable(text: $query, prompt: "Choose a meeting")
-            .scrollContentBackground(.hidden).background(Color.clear)
-            .navigationTitle("Meeting context").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-        }.glassSheet()
+            .listStyle(.plain)
+            .overlay {
+                // A search that finds nothing says so, as Search does.
+                if matches.isEmpty {
+                    ScreenPrompt(symbol: "magnifyingglass", title: query.isEmpty ? "No meetings yet" : "No meetings match", bottomRoom: 40)
+                }
+            }
+            .animates(matches.isEmpty)
+            .searchable(text: $query, prompt: "Search meetings")
+            .scrollContentBackground(.hidden).background(Theme.sheet.ignoresSafeArea())
+            .navigationTitle("Choose a meeting").navigationBarTitleDisplayMode(.inline)
+            .sheetBar()
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+            // A meeting chosen: a selection, made.
+            .haptic(.selection, trigger: chosen)
+        }
+        .glassSheet(background: Theme.sheet)
+        .dynamicTypeSize(...DynamicTypeSize.accessibility1)
     }
 
     /// The meeting's day as Home writes it ("Today 7:47 AM", "12 Nov 7:47 AM"), not the raw ISO date.
@@ -164,7 +190,7 @@ struct ChatSuggestionChips: View {
     var body: some View {
         ForEach(Array(suggestions.enumerated()), id: \.element) { index, suggestion in
             Button { onSelect(suggestion) } label: {
-                Text(suggestion).font(.system(size: 15)).foregroundStyle(Theme.textSecondary)
+                Text(suggestion).uiFont(15).foregroundStyle(Theme.textSecondary)
                     .padding(.horizontal, 14).padding(.vertical, 10)
                     .background(Theme.surface, in: Capsule())
                     .overlay(Capsule().strokeBorder(Theme.stroke, lineWidth: 1))

@@ -20,18 +20,47 @@ enum ChatThreadTurns {
             for tool in message.tools { annotations.apply(ChatStreamEventDTO(text: "", tool: tool, type: .tool)) }
             if !message.citations.isEmpty { annotations.apply(ChatStreamEventDTO(citations: message.citations, text: "", type: .citations)) }
             var text = message.content
-            if message.status == .failed, text.isEmpty { text = message.error ?? "The answer could not be completed." }
+            // An answer the server failed is not one the person stopped: it carries no "Stopped".
+            if message.status == .failed {
+                annotations.markFailed()
+                if text.isEmpty { text = message.error ?? "The answer could not be completed." }
+            }
             guard !text.isEmpty || annotations.hasContent else { return nil }
             // How long it thought is kept even with nothing else to show: its line says so.
-            let kept = annotations.hasContent || annotations.elapsedMs != nil
-            return ChatMessage(id: id, role: .assistant, text: text, isInterrupted: message.status != .complete,
+            let kept = annotations.hasContent || annotations.elapsedMs != nil || annotations.failed
+            return ChatMessage(id: id, role: .assistant, text: text, isInterrupted: message.status == .interrupted || message.status == .streaming,
                                annotations: kept ? annotations : nil)
         }
     }
 
-    static func title(_ summary: ChatThreadSummaryDTO) -> String {
-        guard let title = summary.title, !title.trimmingCharacters(in: .whitespaces).isEmpty else { return "Untitled thread" }
-        return title
+    /// What a saved chat is called in a list. The server names a chat once its first answer is
+    /// complete, so one whose first question failed or was stopped has no name there. `asked` is
+    /// what this iPhone knows it was asked (the first question of each chat started here, by
+    /// thread), and names it meanwhile, as a chat on screen is named by its question.
+    static func title(_ summary: ChatThreadSummaryDTO, asked: [String: String] = [:]) -> String {
+        if let title = summary.title, !title.trimmingCharacters(in: .whitespaces).isEmpty { return title }
+        if let question = asked[summary.id.lowercased()].map(questionTitle), !question.isEmpty { return question }
+        return untitled
+    }
+
+    /// Nothing else in the app calls a chat a "thread".
+    static let untitled = "Untitled chat"
+
+    /// A question as a title: one line, as the server cuts it (`questionTitle` in apps/api/src/chats.ts).
+    static func questionTitle(_ question: String) -> String {
+        let line = question.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return line.count <= 70 ? line : line.prefix(69).trimmingCharacters(in: .whitespaces) + "…"
+    }
+
+    /// The first question of each chat this iPhone has asked in, by the thread it is saved as.
+    static func asked(in conversations: [ChatConversation]) -> [String: String] {
+        var asked: [String: String] = [:]
+        for conversation in conversations {
+            guard let thread = conversation.threadID?.lowercased(),
+                  let question = conversation.messages.first(where: { $0.role == .user })?.text, !question.isEmpty else { continue }
+            asked[thread] = question
+        }
+        return asked
     }
 
     /// A thread nobody asked anything in and nobody named: a chat whose first

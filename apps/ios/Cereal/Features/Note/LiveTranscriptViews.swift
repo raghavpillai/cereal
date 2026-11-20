@@ -55,17 +55,17 @@ struct LiveStatusLine: View {
         VStack(spacing: 4) {
             if let text {
                 Text(text).font(font).foregroundStyle(color).multilineTextAlignment(.center)
-                    .transition(motion.fade)
+                    .transition(motion.rise)
                     .accessibilityIdentifier("live-transcript-status")
             }
             if let missing {
                 Text(missing).font(font).foregroundStyle(Theme.danger).multilineTextAlignment(.center)
-                    .transition(motion.fade)
+                    .transition(motion.rise)
                     .accessibilityIdentifier("live-transcript-missing")
             }
         }
-        .animation(motion.snappy, value: text)
-        .animation(motion.snappy, value: missing)
+        .animates(text)
+        .animates(missing)
     }
 }
 
@@ -207,7 +207,7 @@ struct LiveTranscriptLineView: View {
             // change that is animated is a line brightening as it becomes final.
             Text(content.text).readingFont(.body).contentTransition(.identity)
                 .opacity(content.isFinal ? 1 : 0.6)
-                .animation(motion.snappy, value: content.isFinal)
+                .animates(content.isFinal)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         // A line that starts as interim text fades in once. Stored lines, and

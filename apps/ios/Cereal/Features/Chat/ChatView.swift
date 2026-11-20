@@ -32,7 +32,7 @@ struct ChatView: View {
         RailScaffold {
             VStack(alignment: .leading, spacing: 0) {
                 Text(note?.displayTitle ?? "Ask anything")
-                    .font(.system(size: 15, weight: .semibold))
+                    .uiFont(15, weight: .semibold)
                     .foregroundStyle(Theme.chatText)
                     .lineLimit(1)
                     .padding(.top, RailMetrics.chatTitleInsets(compact: verticalSizeClass == .compact).top)
@@ -44,7 +44,7 @@ struct ChatView: View {
                     ScrollView {
                         // Not lazy, for the reason given in `ServerChatView`: exact heights.
                         VStack(alignment: .leading, spacing: 22) {
-                            if messages.isEmpty && note == nil { emptyState.transition(motion.fade) }
+                            if messages.isEmpty && note == nil { emptyState.transition(motion.replace()) }
                             ForEach(messages) { msg in
                                 ChatMessageView(message: msg).equatable().id(msg.id)
                                     .transition(msg.role == .user ? motion.pop(anchor: .bottomTrailing) : motion.rise)
@@ -56,7 +56,7 @@ struct ChatView: View {
                         .padding(.top, 8)
                         .fillsChatRoom(room)
                         // Existing text settles without a bounce; the new question pops through its own transition.
-                        .animation(motion.settle, value: messages.count)
+                        .animates(messages.count, .settle)
                     }
                     .scrollIndicators(.hidden)
                     .scrollDismissesKeyboard(.interactively)
@@ -151,8 +151,10 @@ struct ChatView: View {
     }
 
     private func send() {
+        guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !isGenerating else { return }
+        // As in `ServerChatView.send`: editing ends before the draft is read and cleared.
+        Keyboard.dismiss(); focused = false
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty, !isGenerating else { return }
         draft = ""
         messages.append(ChatMessage(role: .user, text: prompt))
         let reply = ChatMessage(role: .assistant, text: "", isStreaming: true)
@@ -224,10 +226,16 @@ struct ChatMessageView: View {
     /// False in a conversation about one note: everything in it comes from that note, so
     /// its answers carry no source marks, as on the desktop.
     var showsSources = true
-    @State private var copied = false
-    @State private var copyCount = 0
+    @State private var copied = Copied()
     @State private var expanded = false
+    /// A source tapped inside the expanded answer: opened once that sheet has gone.
+    @State private var afterExpanded: (() -> Void)?
     @Environment(\.motion) private var motion
+
+    /// The server could not finish this answer. The conversation says so under it, with a way to ask again.
+    private var failed: Bool { message.annotations?.failed == true }
+    /// The person stopped this answer.
+    private var stopped: Bool { message.isInterrupted && !message.isStreaming && !failed }
 
     var body: some View {
         switch message.role {
@@ -248,21 +256,16 @@ struct ChatMessageView: View {
                         Button {
                             // Copied text carries no source marks, as on the desktop.
                             UIPasteboard.general.string = ChatCitationMarkup.withoutMarkers(message.text)
-                            copyCount += 1
-                            withAnimation(motion.snappy) { copied = true }
+                            copied.mark()
                         } label: {
-                            Image(systemName: copied ? "checkmark" : "clipboard").contentTransition(motion.symbolReplace).chatActionTarget()
+                            Image(systemName: copied.symbol("clipboard")).contentTransition(motion.symbolReplace).chatActionTarget()
                         }
-                            .accessibilityLabel(copied ? "Copied answer" : "Copy answer")
+                            .accessibilityLabel(copied.isOn ? "Copied answer" : "Copy answer")
                         Button { expanded = true } label: { Image(systemName: "viewfinder").chatActionTarget() }.accessibilityLabel("Expand answer")
-                    }.font(.system(size: 15)).foregroundStyle(Theme.textTertiary).buttonStyle(SquashButtonStyle(scale: 0.86)).haptic(.done, trigger: copyCount)
+                    }.font(.system(size: 15)).foregroundStyle(Theme.textTertiary).buttonStyle(SquashButtonStyle(scale: 0.86))
                         .padding(.leading, -11).padding(.vertical, -14)
-                        // The tick confirms the copy, then gives the control back.
-                        .task(id: copyCount) {
-                            guard copied else { return }
-                            try? await Task.sleep(for: .seconds(1.5))
-                            if !Task.isCancelled { withAnimation(motion.snappy) { copied = false } }
-                        }
+                        // The tick confirms the copy, then gives the control back (`Copied`).
+                        .confirmsCopy($copied)
                         .symbolEffectsRemoved(motion.reduceMotion)
                         .transition(motion.rise)
                 }
@@ -271,17 +274,19 @@ struct ChatMessageView: View {
             // scrolled back into view is not animated.
             .animation(motion.settle, value: message.isStreaming)
             .onChange(of: message.isStreaming) { _, streaming in
-                if !streaming, !message.text.isEmpty, !message.isInterrupted {
+                if !streaming, !message.text.isEmpty, !message.isInterrupted, !failed {
                     AccessibilityNotification.Announcement("Answer ready").post()
                 }
             }
             .textSelection(.enabled)
-            .sheet(isPresented: $expanded) {
+            // What was tapped in the expanded answer opens when that sheet has gone, not a guessed while later.
+            .sheet(isPresented: $expanded, onDismiss: { afterExpanded?(); afterExpanded = nil }) {
                 NavigationStack {
                     ScrollView { response.padding(24).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }
-                        .background(Color.clear).navigationTitle("Answer").navigationBarTitleDisplayMode(.inline)
+                        .background(Theme.sheet.ignoresSafeArea()).navigationTitle("Answer").navigationBarTitleDisplayMode(.inline)
+                        .sheetBar()
                         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { expanded = false } } }
-                }.glassSheet()
+                }.glassSheet(background: Theme.sheet)
             }
         }
     }
@@ -290,35 +295,34 @@ struct ChatMessageView: View {
             // One status line, whether or not the answer searched meetings: "Thinking" and what is
             // being done, then "Thought for Ns" or "Worked for Ns", with the thoughts under it.
             ChatThoughtsView(annotations: message.annotations, thinking: message.text.isEmpty && message.isStreaming,
-                             streaming: message.isStreaming, stopped: message.isInterrupted && !message.isStreaming, onMeeting: openMeeting)
+                             streaming: message.isStreaming, stopped: stopped, hasText: !message.text.isEmpty, onMeeting: openMeeting)
                 .padding(.bottom, -4)
             if !message.text.isEmpty {
                 MarkdownBlocks(text: message.text, citations: showsSources ? message.annotations?.citations ?? [] : [],
                                turnID: message.annotations == nil ? nil : message.id, streaming: message.isStreaming,
                                showsSources: showsSources, onCitation: openCitation)
-                    .transition(motion.fade)
+                    .transition(motion.rise)
             }
-            if message.isInterrupted {
-                Label("Response interrupted", systemImage: "pause.circle").font(.caption).foregroundStyle(Theme.textSecondary)
+            // One line for an answer the person stopped, where it stops. (Stopped before any of it
+            // arrived, the line above says so instead.) An answer the server failed says nothing here:
+            // the conversation shows what went wrong and offers to ask again.
+            if ChatThoughts.showsStoppedLine(stopped: stopped, hasText: !message.text.isEmpty) {
+                Label("Stopped", systemImage: "stop.circle").uiFont(12, relativeTo: .caption).foregroundStyle(Theme.textSecondary)
                     .accessibilityIdentifier("chat-response-interrupted")
-                    .transition(motion.fade)
+                    .transition(motion.rise)
             }
         }
-        .animation(motion.snappy, value: message.text.isEmpty)
-        .animation(motion.snappy, value: message.isInterrupted)
-        .animation(motion.settle, value: message.annotations?.tools.isEmpty ?? true)
+        .animates(message.text.isEmpty)
+        .animates(message.isInterrupted)
+        .animates(message.annotations?.tools.isEmpty ?? true)
     }
     private func openCitation(_ citation: ChatCitationDTO) {
-        if expanded {
-            expanded = false
-            Task { @MainActor in try? await Task.sleep(for: .milliseconds(300)); onCitation?(citation) }
-        } else { onCitation?(citation) }
+        if expanded { afterExpanded = { onCitation?(citation) }; expanded = false }
+        else { onCitation?(citation) }
     }
     private func openMeeting(_ meeting: ChatToolMeetingDTO) {
-        if expanded {
-            expanded = false
-            Task { @MainActor in try? await Task.sleep(for: .milliseconds(300)); onMeeting?(meeting) }
-        } else { onMeeting?(meeting) }
+        if expanded { afterExpanded = { onMeeting?(meeting) }; expanded = false }
+        else { onMeeting?(meeting) }
     }
 }
 
@@ -344,8 +348,10 @@ struct MarkdownBlocks: View {
                 Group {
                 switch block {
                 case .heading(let value):
-                    text(value).font(.system(size: 17, weight: .semibold))
+                    // One point over the body at every text size: it grows with the text it heads.
+                    text(value).uiFont(17, weight: .semibold)
                         .foregroundStyle(Theme.chatText).padding(.top, 6)
+                        .accessibilityAddTraits(.isHeader)
                 case .list(let marker, let value, let depth):
                     HStack(alignment: .firstTextBaseline, spacing: 12) {
                         Text(marker).frame(minWidth: 12, alignment: .leading)
@@ -579,9 +585,14 @@ struct ChatComposer: View {
     /// Recipe chips shown in one row just above the composer (an empty conversation).
     var recipes: [String] = []
     var onRecipe: ((String) -> Void)? = nil
+    /// The field has the keyboard as its screen slides in (`takesKeyboardOnArrival`).
+    var keyboardOnArrival = false
     @Environment(\.motion) private var motion
     @Environment(\.railMetrics) private var rail
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+    /// The chips last offered: what the row draws while it closes.
+    /// (The keyboard on arrival is decided once, when the screen is made.)
+    @State private var heldRecipes: [String] = []
     private var hasText: Bool { !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     private typealias Action = ChatComposerRule.Action
     private var action: Action { ChatComposerRule.action(isGenerating: isGenerating, hasText: hasText, queues: queuesWhileGenerating) }
@@ -589,16 +600,21 @@ struct ChatComposer: View {
     private var sends: Bool { action == .send }
 
     var body: some View {
-        VStack(spacing: 12) {
-            if !recipes.isEmpty, let onRecipe {
+        let offers = !recipes.isEmpty && onRecipe != nil
+        VStack(spacing: 0) {
+            if offers || !heldRecipes.isEmpty {
                 // The row is as wide as the composer and cut at its edges, as in the reference.
-                ChatRecipeChips(recipes: recipes, margin: 2, onSelect: onRecipe)
+                // It stays in the bar and closes there (`closes`): the bar rides the keyboard, and a
+                // row that left by a transition was left behind in the middle of the page.
+                ChatRecipeChips(recipes: offers ? recipes : heldRecipes, margin: 2, onSelect: { onRecipe?($0) })
                     .padding(.leading, rail.composerLeading).padding(.trailing, rail.composerTrailing)
-                    .transition(motion.fade)
+                    .padding(.bottom, 12)
+                    .closes(unless: offers)
             }
             card
         }
-        .animation(motion.snappy, value: recipes.isEmpty)
+        .onChange(of: recipes, initial: true) { _, now in if !now.isEmpty { heldRecipes = now } }
+        .animates(recipes.isEmpty)
         // The bar is wider than the text column and sits just above the home
         // indicator, or the keyboard. Both chat screens get the same margins.
         .padding(.bottom, verticalSizeClass == .compact ? 6 : rail.composerBottom)
@@ -610,13 +626,14 @@ struct ChatComposer: View {
         // sides and 8 pt from the bottom, 4 pt apart.
         VStack(alignment: .leading, spacing: 0) {
             TextField("", text: $draft, prompt: Text("Ask anything").foregroundStyle(Theme.textTertiary), axis: .vertical)
-                .font(.system(size: 16))
+                .uiFont(16)
                 .foregroundStyle(Theme.chatText)
                 .tint(Theme.accent)
                 .lineLimit(1...5)
                 .focused(focused)
+                .takesKeyboardOnArrival(keyboardOnArrival)
                 .submitLabel(.send)
-                .onSubmit(onSend)
+                .onSubmit(submit)
                 .accessibilityLabel("Ask anything")
                 .accessibilityIdentifier("\(identifierPrefix)-composer")
                 .padding(.horizontal, 19)
@@ -634,9 +651,29 @@ struct ChatComposer: View {
         // An opaque card, as in the reference: white on the light page, a lifted grey on the dark one.
         .background(Theme.chatComposer, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .shadow(color: Theme.chatComposerShadow, radius: 14, y: 3)
-        .animation(motion.snappy, value: action)
         .padding(.leading, rail.composerLeading)
         .padding(.trailing, rail.composerTrailing)
+    }
+
+    /// Sends what is typed. The field is empty the moment the question goes out, always.
+    ///
+    /// The keyboard can still be about to change the text when Send is tapped straight after a key
+    /// (an autocorrection, a suggestion being applied): it then handed its text to the field after
+    /// the draft had been cleared, and the field showed the sent question again with Send off. So
+    /// the keyboard is made to let go first (`Keyboard.settle`; the caller ends editing altogether
+    /// when the keyboard is to drop), and where the field keeps the keyboard it is looked at again
+    /// once the keyboard has had its turn.
+    private func submit() {
+        Keyboard.settle()
+        onSend()
+        guard draft.isEmpty else { return }
+        Task { @MainActor in
+            for wait in [0, 60, 200] {
+                try? await Task.sleep(for: .milliseconds(wait))
+                guard draft.isEmpty, focused.wrappedValue else { return }
+                if Keyboard.textInFocus != nil { Keyboard.emptyFocusedField() }
+            }
+        }
     }
 
     /// One round button: a gold disc with a bold dark arrow that sends, the same disc with
@@ -644,15 +681,21 @@ struct ChatComposer: View {
     /// something to send (where the reference has a microphone; chat takes no dictation).
     private var actionButton: some View {
         Button {
-            if stops { onStop() } else if sends { onSend() }
+            if stops { onStop() } else if sends { submit() }
         } label: {
+            let live = stops || sends
             Image(systemName: stops ? "stop.fill" : "arrow.up")
                 .font(.system(size: stops ? 13 : 18, weight: .bold))
-                .foregroundStyle(stops || sends ? Theme.sendGlyph : Theme.textSecondary)
                 .contentTransition(motion.symbolReplace)
                 .frame(width: 40, height: 40)
-                .background(stops || sends ? Theme.sendGold : Theme.quietFill, in: Circle())
-                .opacity(action == .idle ? 0.45 : 1)
+                // The disc's own colour and strength change with a spring, and nothing else does: an
+                // animation of the whole button also took over its place in the card when a send
+                // dropped the keyboard, and the disc trailed behind the card.
+                .animation(motion.snappy) { glyph in
+                    glyph.foregroundStyle(live ? Theme.sendGlyph : Theme.textSecondary)
+                        .background(live ? Theme.sendGold : Theme.quietFill, in: Circle())
+                        .opacity(action == .idle ? 0.45 : 1)
+                }
                 // Send and stop are one droplet: it dips and springs
                 // back as the glyph and colour change.
                 .keyframeAnimator(initialValue: 1.0, trigger: action) { content, scale in

@@ -36,7 +36,7 @@ struct ChatRecipeChips: View {
                 // In place as the screen slides in, as in the reference: no entrance of their own.
                 ForEach(recipes, id: \.self) { recipe in
                     Button { onSelect(recipe) } label: {
-                        Text(recipe).font(.system(size: 15)).foregroundStyle(Theme.chatText)
+                        Text(recipe).uiFont(15).foregroundStyle(Theme.chatText)
                             .lineLimit(1).fixedSize()
                             .padding(.horizontal, 12).frame(height: 36)
                             .background(Theme.chatChip, in: Capsule())
@@ -123,7 +123,7 @@ struct ChatModelMenu: View {
                 Text(label).lineLimit(1)
                 Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold))
             }
-            .font(.system(size: 15, weight: .medium))
+            .uiFont(15, weight: .medium)
             .foregroundStyle(Theme.textSecondary)
             .padding(.leading, 16).padding(.trailing, 12.5)
             .frame(height: 40)
@@ -140,138 +140,6 @@ struct ChatModelMenu: View {
         guard key != model else { return }
         model = key
         Haptics.shared.play(.selection)
-    }
-}
-
-/// The Cereal mark beside "Thinking", moving as on the desktop: one turn a loop,
-/// swung rather than ticked, breathing smaller and paler twice a turn. Still
-/// with Reduce Motion.
-struct ThinkingIndicator: View {
-    var size: CGFloat = 13
-    @Environment(\.motion) private var motion
-    private static let loop: Double = 2.4
-
-    var body: some View {
-        Group {
-            if motion.reduceMotion {
-                mark
-            } else {
-                TimelineView(.animation) { context in
-                    let pose = Self.pose(context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: Self.loop) / Self.loop)
-                    mark.rotationEffect(.degrees(pose.turn * 360)).scaleEffect(pose.scale).opacity(pose.ink)
-                }
-            }
-        }
-        .frame(width: size, height: size)
-        .accessibilityHidden(true)
-    }
-
-    private var mark: some View { CerealMarkShape().fill(style: FillStyle(eoFill: true)) }
-
-    /// The desktop's `thinking_mark_pose`: turn (0...1), scale and ink at `progress` through the loop.
-    static func pose(_ progress: Double) -> (turn: Double, scale: Double, ink: Double) {
-        let p = min(max(progress, 0), 1)
-        let breath = 0.5 - 0.5 * cos(2 * 2 * .pi * p)
-        let turn = min(max(p - 0.55 * sin(2 * .pi * p) / (2 * .pi), 0), 1)
-        return (turn, 1 - 0.12 * breath, 1 - 0.35 * breath)
-    }
-}
-
-/// The Cereal mark as a loader, the desktop's `cereal_loader`: the bowl spins
-/// once on a loose spring, squeezing as it goes; the flakes are flung round
-/// after it, each a beat later, then hop outward in turn. Still with Reduce Motion.
-struct CerealLoader: View {
-    var size: CGFloat = 20
-    var color: Color = Theme.accent
-    /// False holds the mark at rest and draws no frames: for a loader that keeps
-    /// its place in a row while there is nothing to wait for.
-    var running = true
-    @Environment(\.motion) private var motion
-    /// Each wait starts its loop from the beginning, with the spin.
-    @State private var started = Date.now
-    /// Off screen (under a pushed screen, or gone) nothing is drawn.
-    @State private var visible = false
-    static let loop = 2.2
-    private static let spin = 0.42, lag = 0.055
-    /// The middle of the bowl's ring (not of its outline's bounds, which the bite cuts short),
-    /// its outer radius, and the least clear page kept between it and a flake: as on the desktop.
-    private static let bowl = CGPoint(x: 10.9925, y: 12.2575)
-    private static let ring = 10.2925, gap = 0.55
-    static let flakes: [(center: CGPoint, radius: Double)] = [(CGPoint(x: 21.835, y: 2.149), 0.7), (CGPoint(x: 22.147, y: 6.575), 1.152)]
-    /// The flakes swing and hop outside the mark's 24-unit box, by up to this
-    /// much on each side. They are drawn in a canvas that much larger, which
-    /// takes no more room in the layout than the mark does.
-    static let margin = 4.0
-
-    struct Pose {
-        var turn: Double, scale: Double
-        var flakes: [(center: CGPoint, scale: Double)]
-    }
-
-    var body: some View {
-        Group {
-            if motion.reduceMotion {
-                CerealMarkShape().fill(color, style: FillStyle(eoFill: true))
-            } else {
-                let moving = running && visible
-                TimelineView(.animation(paused: !moving)) { context in
-                    let elapsed = max(context.date.timeIntervalSince(started), 0)
-                    let pose = Self.pose(moving ? elapsed.truncatingRemainder(dividingBy: Self.loop) / Self.loop : 0)
-                    Canvas { canvas, _ in
-                        let unit = size / 24
-                        canvas.translateBy(x: Self.margin * unit, y: Self.margin * unit)
-                        var bowl = canvas
-                        bowl.translateBy(x: Self.bowl.x * unit, y: Self.bowl.y * unit)
-                        bowl.rotate(by: .radians(2 * .pi * pose.turn))
-                        bowl.scaleBy(x: pose.scale, y: pose.scale)
-                        bowl.translateBy(x: -Self.bowl.x * unit, y: -Self.bowl.y * unit)
-                        bowl.fill(CerealMarkShape(bowlOnly: true).path(in: CGRect(x: 0, y: 0, width: size, height: size)), with: .color(color), style: FillStyle(eoFill: true))
-                        for (index, flake) in pose.flakes.enumerated() {
-                            let radius = Self.flakes[index].radius * flake.scale * unit
-                            canvas.fill(Path(ellipseIn: CGRect(x: flake.center.x * unit - radius, y: flake.center.y * unit - radius, width: 2 * radius, height: 2 * radius)), with: .color(color))
-                        }
-                    }
-                    .frame(width: size * (24 + 2 * Self.margin) / 24, height: size * (24 + 2 * Self.margin) / 24)
-                }
-                .onAppear { started = .now; visible = true }
-                .onDisappear { visible = false }
-                .onChange(of: running) { _, now in if now { started = .now } }
-            }
-        }
-        .frame(width: size, height: size)
-        .accessibilityHidden(true)
-    }
-
-    /// 0 → 1 → 0 across 0...1, flat at both ends; 0 outside it.
-    private static func bump(_ t: Double) -> Double { (0...1).contains(t) ? pow(sin(.pi * t), 2) : 0 }
-
-    /// The desktop's loader spring (damping 0.56): a unit step that swings past 1 and settles on it.
-    private static func spring(_ t: Double) -> Double {
-        guard t > 0 else { return 0 }
-        guard t < 1 else { return 1 }
-        let zeta = 0.56, omega = 6.9 / zeta, damped = omega * (1 - zeta * zeta).squareRoot()
-        func raw(_ t: Double) -> Double { 1 - exp(-zeta * omega * t) * (cos(damped * t) + zeta * omega / damped * sin(damped * t)) }
-        return raw(t) / raw(1)
-    }
-
-    /// The desktop's `cereal_loader_pose`, in the mark's 24-unit box.
-    static func pose(_ progress: Double) -> Pose {
-        let p = min(max(progress, 0), 1)
-        let flakes = Self.flakes.enumerated().map { index, flake -> (center: CGPoint, scale: Double) in
-            let after = (p - lag * Double(index + 1)) / spin
-            let hop = bump((p - 0.66 - 0.11 * Double(index)) / 0.2)
-            let turn = spring(after), angle = 2 * .pi * turn
-            // Pulled in most on the far side of the bowl, wherever in time that is.
-            let pull = bump(min(max(turn, 0), 1))
-            let grow = 1 - 0.3 * pull + 0.35 * hop
-            // But never onto the bowl: a flake that touches it reads as a lump on its rim.
-            let away = hypot(flake.center.x - bowl.x, flake.center.y - bowl.y)
-            let clear = (ring + gap + flake.radius * grow) / away
-            let reach = max(1 - 0.3 * pull, min(clear, 1)) + 0.13 * hop
-            let dx = (flake.center.x - bowl.x) * reach, dy = (flake.center.y - bowl.y) * reach
-            return (CGPoint(x: bowl.x + dx * cos(angle) - dy * sin(angle), y: bowl.y + dx * sin(angle) + dy * cos(angle)), grow)
-        }
-        return Pose(turn: spring(p / spin), scale: 1 - 0.08 * bump(p / spin), flakes: flakes)
     }
 }
 
@@ -429,7 +297,7 @@ struct ChatPanelHeaderControls: View {
             GlassCircleButton(systemImage: "xmark", size: 36, glyphSize: 14, action: onClose)
                 .accessibilityLabel("Close chat")
         }
-        .animation(motion.snappy, value: hasMessages)
+        .animates(hasMessages)
     }
 }
 
@@ -440,6 +308,8 @@ struct ChatPanelHeaderControls: View {
 struct ChatHistorySheet: View {
     let saved: ServerChatThreadList
     let local: [ChatConversation]
+    /// The first question of chats asked on this iPhone, by thread: see `ChatThreadTurns.title`.
+    var asked: [String: String] = [:]
     let error: String?
     let onOpen: (ChatThreadSummaryDTO) -> Void
     let onOpenLocal: (ChatConversation) -> Void
@@ -448,6 +318,7 @@ struct ChatHistorySheet: View {
     let onClose: () -> Void
     @State private var query = ""
     @State private var detent = PresentationDetent.medium
+    @Environment(\.motion) private var motion
 
     private struct Row: Identifiable {
         let id: String
@@ -484,7 +355,7 @@ struct ChatHistorySheet: View {
 
     private var rows: [Row] {
         let threads = saved.listed.map { thread in
-            Row(id: thread.id, title: ChatThreadTurns.title(thread), subtitle: nil,
+            Row(id: thread.id, title: ChatThreadTurns.title(thread, asked: asked), subtitle: nil,
                 date: CalendarSchedule.timestamp(thread.updatedAt), thread: thread, conversation: nil)
         }
         let kept = local.map { conversation in
@@ -498,16 +369,23 @@ struct ChatHistorySheet: View {
     }
 
     var body: some View {
+        let rows = rows
         NavigationStack {
+            // Nothing says "no chats" until the server has answered (`Loading`).
+            Loading(while: saved.loading && saved.threads.isEmpty && local.isEmpty, alignment: .top) { placeholder } then: {
+            if rows.isEmpty {
+                VStack(spacing: 0) {
+                    if let message = error ?? saved.error {
+                        Text(message).uiFont(13, relativeTo: .footnote).foregroundStyle(Theme.textSecondary)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.top, 8)
+                    }
+                    ScreenPrompt(symbol: "bubble.left.and.bubble.right", title: query.isEmpty ? "No previous chats" : "No chats match",
+                                 detail: query.isEmpty ? "Chats you have here are kept." : nil, bottomRoom: 0)
+                }
+            } else {
             List {
                 if let message = error ?? saved.error {
-                    Text(message).font(.footnote).foregroundStyle(Theme.textSecondary).listRowBackground(Color.clear)
-                }
-                let rows = rows
-                if rows.isEmpty {
-                    ContentUnavailableView(saved.loading ? "Loading chats" : query.isEmpty ? "No previous chats" : "No chats match",
-                                           systemImage: "bubble.left.and.bubble.right")
-                        .listRowBackground(Color.clear).listRowSeparator(.hidden)
+                    Text(message).uiFont(13, relativeTo: .footnote).foregroundStyle(Theme.textSecondary).listRowBackground(Color.clear)
                 }
                 ForEach(Day.allCases, id: \.self) { day in
                     let section = rows.filter { Day.of($0.date) == day }
@@ -517,30 +395,48 @@ struct ChatHistorySheet: View {
                                 Button { if let thread = row.thread { onOpen(thread) } else if let conversation = row.conversation { onOpenLocal(conversation) } } label: {
                                     rowLabel(row)
                                 }
-                                .buttonStyle(RowPressStyle())
+                                .buttonStyle(.row)
                                 .listRowBackground(Color.clear).listRowSeparator(.hidden)
                                 .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
                                 .accessibilityIdentifier("server-chat-thread")
-                                .swipeActions {
+                                // Red, with the bin, as every swipe that deletes is (Shared with me).
+                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                     if let thread = row.thread {
-                                        Button("Delete", role: .destructive) { Haptics.shared.play(.destructive); onDelete(thread.id) }
+                                        Button(role: .destructive) { Haptics.shared.play(.destructive); onDelete(thread.id) } label: { Label("Delete", systemImage: "trash") }
+                                            .tint(Theme.danger)
                                     }
                                 }
                             }
                         } header: {
-                            Text(day.title).font(.system(size: 13)).foregroundStyle(Theme.textSecondary).textCase(nil)
+                            // The day stays under the title as its rows pass: on the sheet's colour, not on them.
+                            Text(day.title).uiFont(13).foregroundStyle(Theme.textSecondary).textCase(nil)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 20))
+                                .background(Theme.sheet.padding(.horizontal, -20).padding(.vertical, -6))
                         }
                     }
                 }
                 if saved.more > 0, query.isEmpty {
-                    Button("Show \(saved.more) more", action: onMore)
-                        .font(.footnote).disabled(saved.loading)
+                    Button(action: onMore) {
+                        HStack(spacing: 8) {
+                            Text("Show \(saved.more) more")
+                            if saved.loading { CerealLoader(size: 16, color: Theme.accentText).transition(motion.pop) }
+                        }
+                        .uiFont(14, weight: .medium).foregroundStyle(Theme.accentText)
+                        .frame(minHeight: 44).contentShape(Rectangle())
+                    }
+                        .buttonStyle(.squash).disabled(saved.loading)
+                        .animates(saved.loading)
                         .listRowBackground(Color.clear).listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
                         .accessibilityIdentifier("server-chat-more")
                 }
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden).background(Color.clear)
+            }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             // The field at the foot of the sheet, as in the reference. Drawn here rather than with
             // `searchable`, whose place and form change from one SDK to the next (a toolbar button on 27).
             .safeAreaInset(edge: .bottom, spacing: 0) { searchField }
@@ -552,12 +448,27 @@ struct ChatHistorySheet: View {
         .presentationDetents([.medium, .large], selection: $detent)
         // Pulled up to full height or back to half: felt as the detent it is.
         .haptic(.selection, trigger: detent)
-        .glassSheet()
+        // One colour, so the header and the field can end the list in it (`sheetBarBackdrop`).
+        .glassSheet(background: Theme.sheet)
+        .dynamicTypeSize(...DynamicTypeSize.accessibility1)
+    }
+
+    /// The room of a few rows, while the chats are on their way.
+    private var placeholder: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            ForEach(0..<4, id: \.self) { index in
+                RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Theme.quietFill)
+                    .frame(width: [220, 170, 250, 140][index], height: 14)
+            }
+        }
+        .padding(.horizontal, 20).padding(.top, 44)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement().accessibilityLabel("Loading chats")
     }
 
     private var header: some View {
         ZStack {
-            Text("Chat History").font(.headline).foregroundStyle(Theme.textPrimary).accessibilityAddTraits(.isHeader)
+            Text("Chat History").uiFont(17, weight: .semibold, relativeTo: .headline).foregroundStyle(Theme.textPrimary).accessibilityAddTraits(.isHeader)
             HStack {
                 GlassCircleButton(systemImage: "xmark", size: 44, glyphSize: 17, action: onClose)
                     .accessibilityLabel("Close")
@@ -565,6 +476,8 @@ struct ChatHistorySheet: View {
             }
         }
         .padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 8)
+        // Rows are gone before they reach the title.
+        .sheetBarBackdrop(.top)
     }
 
     private var searchField: some View {
@@ -575,24 +488,29 @@ struct ChatHistorySheet: View {
             if !query.isEmpty {
                 Button("Clear search", systemImage: "xmark.circle.fill") { query = "" }
                     .labelStyle(.iconOnly).foregroundStyle(Theme.textTertiary)
+                    .buttonStyle(SquashButtonStyle(scale: 0.86))
+                    .transition(motion.pop)
             }
         }
-        .font(.system(size: 17))
+        .uiFont(17)
         .padding(.horizontal, 16).frame(height: 48)
         .glassSurface(Capsule(), interactive: true, tint: Theme.fieldTint)
-        .padding(.horizontal, 20).padding(.bottom, 8)
+        .animates(query.isEmpty)
+        .padding(.horizontal, 20).padding(.top, 6).padding(.bottom, 8)
+        // The list ends above the field: nothing is read through its glass or seen under it.
+        .sheetBarBackdrop(.bottom)
     }
 
     private func rowLabel(_ row: Row) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(row.title).font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.textPrimary).lineLimit(1)
+                Text(row.title).uiFont(15, weight: .semibold).foregroundStyle(Theme.textPrimary).lineLimit(1)
                 Spacer(minLength: 8)
                 if row.subtitle == nil, let date = row.date { age(date) }
             }
             if let subtitle = row.subtitle {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(subtitle).font(.system(size: 14)).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                    Text(subtitle).uiFont(14).foregroundStyle(Theme.textSecondary).lineLimit(1)
                     Spacer(minLength: 8)
                     if let date = row.date { age(date) }
                 }
@@ -604,7 +522,7 @@ struct ChatHistorySheet: View {
     }
 
     private func age(_ date: Date) -> some View {
-        Text("· " + ChatThreadTurns.age(of: date)).font(.system(size: 13)).monospacedDigit()
+        Text("· " + ChatThreadTurns.age(of: date)).uiFont(13).monospacedDigit()
             .foregroundStyle(Theme.textSecondary)
             .accessibilityLabel(ChatThreadTurns.spokenAge(of: date))
     }

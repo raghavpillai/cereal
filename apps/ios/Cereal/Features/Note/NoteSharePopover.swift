@@ -17,7 +17,7 @@ struct NoteSharePopover: View {
     @Environment(\.motion) private var motion
     @State private var url: URL?
     @State private var busy: Action?
-    @State private var copied = false
+    @State private var copied = Copied()
     @State private var showingQR = false
     @State private var sharing: SharedLink?
     @State private var error: String?
@@ -29,29 +29,34 @@ struct NoteSharePopover: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if showingQR, let url {
-                qr(url).transition(.opacity)
+                qr(url).transition(motion.replace())
             } else {
                 HStack(alignment: .top, spacing: 14) {
                     action(.share, title: "Share via", systemImage: "square.and.arrow.up")
-                    action(.copy, title: copied ? "Copied" : "Copy link", systemImage: copied ? "checkmark" : "link")
+                    action(.copy, title: copied.title("Copy link"), systemImage: copied.symbol("link"))
                     action(.qr, title: "QR code", systemImage: "qrcode")
                 }
                 .padding(.horizontal, 2)
                 if let error {
-                    Text(error).font(.system(size: 13)).foregroundStyle(Theme.danger).padding(.top, 10)
+                    // The action that failed is right above: tapping it again is the retry.
+                    Text(error).uiFont(13).foregroundStyle(Theme.danger).padding(.top, 10)
                         .fixedSize(horizontal: false, vertical: true)
+                        .transition(motion.rise)
+                        .accessibilityIdentifier("share-error")
                 }
                 access.padding(.top, 18)
             }
         }
         .padding(.horizontal, 22).padding(.top, 22).padding(.bottom, 18)
         .frame(width: 330, alignment: .leading)
-        .animation(motion.snappy, value: showingQR)
-        .animation(motion.snappy, value: copied)
-        .animation(motion.snappy, value: error)
-        // The link is on the clipboard; making it failed.
-        .haptic(.done, trigger: copied) { _, now in now }
+        .animates(showingQR)
+        .animates(error)
+        .animates(busy)
+        // The link is on the clipboard (`Copied`); making it failed.
+        .confirmsCopy($copied)
         .haptic(.error, trigger: error) { old, new in new != nil && new != old }
+        // Three round actions in a fixed width: the words grow as far as that holds.
+        .dynamicTypeSize(...DynamicTypeSize.xxLarge)
         .presentationCompactAdaptation(.popover)
         .sheet(item: $sharing) { ActivitySheet(items: [$0.url]).ignoresSafeArea() }
     }
@@ -60,13 +65,13 @@ struct NoteSharePopover: View {
         Button { run(kind) } label: {
             VStack(spacing: 9) {
                 ZStack {
-                    if busy == kind { ProgressView().transition(motion.swap) }
-                    else { Image(systemName: systemImage).font(.system(size: 22, weight: .regular)).transition(motion.swap) }
+                    if busy == kind { CerealLoader(size: 22, color: Theme.textPrimary).transition(motion.swap) }
+                    else { Image(systemName: systemImage).font(.system(size: 22, weight: .regular)).contentTransition(motion.symbolReplace).transition(motion.swap) }
                 }
                 .foregroundStyle(Theme.textPrimary)
                 .frame(width: 66, height: 66)
                 .background(Theme.quietFill, in: Circle())
-                Text(title).font(.system(size: 13)).foregroundStyle(Theme.textPrimary).lineLimit(1).fixedSize()
+                Text(title).uiFont(13).foregroundStyle(Theme.textPrimary).lineLimit(1).fixedSize()
             }
             .frame(minWidth: 76)
             .contentShape(Rectangle())
@@ -81,15 +86,17 @@ struct NoteSharePopover: View {
             Image(systemName: "globe").font(.system(size: 22, weight: .light)).foregroundStyle(Theme.textPrimary)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Link access").font(.system(size: 13)).foregroundStyle(Theme.textSecondary)
+                Text("Link access").uiFont(13).foregroundStyle(Theme.textSecondary)
                 Menu {
-                    Button("Anyone with the link", systemImage: "checkmark") {}
-                    Toggle("Expires after 24 hours", isOn: $expires)
+                    // One column of checks and no glyphs: with a glyph column beside it the menu had
+                    // too little room for its words, and both of these ran onto a second line.
+                    Toggle("Anyone with the link", isOn: Binding(get: { true }, set: { _ in }))
+                    Toggle("Expires in 24 hours", isOn: $expires)
                     Divider()
-                    Button("Manage links…", systemImage: "link.badge.plus", action: onManage)
+                    Button("Manage links…", action: onManage)
                 } label: {
                     HStack(spacing: 6) {
-                        Text("Anyone with the link").font(.system(size: 16)).foregroundStyle(Theme.textPrimary)
+                        Text("Anyone with the link").uiFont(16).foregroundStyle(Theme.textPrimary)
                         Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.textSecondary)
                     }
                 }
@@ -108,7 +115,8 @@ struct NoteSharePopover: View {
                     .padding(12).background(.white, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .accessibilityLabel("QR code for the shared link")
             }
-            Button("Done") { showingQR = false }.font(.system(size: 16, weight: .medium)).tint(Theme.textPrimary)
+            Button("Done") { showingQR = false }.uiFont(16, weight: .medium).foregroundStyle(Theme.textPrimary)
+                .frame(minWidth: 88, minHeight: 44).contentShape(Rectangle()).buttonStyle(.squash)
         }
         .frame(maxWidth: .infinity)
     }
@@ -121,9 +129,7 @@ struct NoteSharePopover: View {
             case .share: sharing = SharedLink(url: link)
             case .copy:
                 UIPasteboard.general.url = link
-                copied = true
-                try? await Task.sleep(for: .seconds(1.6))
-                copied = false
+                copied.mark()
             case .qr: showingQR = true
             }
         }

@@ -13,13 +13,15 @@ struct ChatTurnAnnotations: Codable, Sendable, Hashable {
     /// How long the answer was thought about: from the question to its first text
     /// (or to its end, when no text came). Nil for an answer that never said.
     private(set) var elapsedMs: Int?
+    /// The server could not finish this answer (as opposed to the person stopping it).
+    private(set) var failed = false
     var hasContent: Bool { !tools.isEmpty || !citations.isEmpty || hasThoughts }
     /// Something to show under the answer's status line: a lookup or some reasoning.
     var hasThoughts: Bool { !tools.isEmpty || reasoning.contains { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } }
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.revision == rhs.revision }
     func hash(into hasher: inout Hasher) { hasher.combine(revision) }
 
-    private enum CodingKeys: String, CodingKey { case revision, tools, citations, reasoning, elapsedMs }
+    private enum CodingKeys: String, CodingKey { case revision, tools, citations, reasoning, elapsedMs, failed }
 
     init() {}
 
@@ -31,12 +33,20 @@ struct ChatTurnAnnotations: Codable, Sendable, Hashable {
         citations = try values.decodeIfPresent([ChatCitationDTO].self, forKey: .citations) ?? []
         reasoning = try values.decodeIfPresent([ChatReasoningDTO].self, forKey: .reasoning) ?? []
         elapsedMs = try values.decodeIfPresent(Int.self, forKey: .elapsedMs)
+        failed = try values.decodeIfPresent(Bool.self, forKey: .failed) ?? false
     }
 
     /// A saved answer's reasoning and timing, as the server kept them.
     init(saved reasoning: [ChatReasoningDTO], elapsedMs: Int?) {
         self.reasoning = Array(reasoning.prefix(40))
         self.elapsedMs = elapsedMs
+    }
+
+    /// The answer ended because the request failed.
+    mutating func markFailed() {
+        guard !failed else { return }
+        failed = true
+        revision = UUID()
     }
 
     /// The first time this answer's thinking is known to have ended. Later calls change nothing.

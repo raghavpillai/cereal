@@ -11,11 +11,10 @@ struct SharedNoteView: View {
     @Environment(AccountsModel.self) private var accounts
     @Environment(ConnectionMode.self) private var mode
     @Environment(SharedNoteHistory.self) private var history
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @Environment(\.motion) private var motion
     @State private var phase: Phase = .loading
-    @State private var copiedCount = 0
+    @State private var copied = Copied()
 
     enum Phase: Equatable {
         case loading
@@ -42,23 +41,24 @@ struct SharedNoteView: View {
 
     private var reader: some View {
         RailScaffold {
-            Group {
+            // The note is on its way: nothing for the first moment, then its room, breathing; the note or
+            // what went wrong only once the server has answered (`Loading`).
+            Loading(while: phase == .loading) {
+                SharedNotePlaceholder()
+            } then: {
                 switch phase {
                 case .loaded(let note):
                     ScrollView { SharedNoteDocument(note: note, host: link.origin.displayHost) { openURL(link.webURL) } }
                         .refreshable { await load() }
-                        .transition(motion.fade)
-                case .loading:
-                    InlineProgress(text: "Loading shared note…")
-                        .padding(.top, 28).padding(.leading, Theme.gutter)
-                        .frame(maxWidth: .infinity, alignment: .leading)
                 case .failed(let error):
                     failure(error)
+                case .loading:
+                    Color.clear
                 }
             }
-            .animation(motion.snappy, value: phase)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } leading: {
-            GlassCircleButton(systemImage: "chevron.left") { dismiss() }
+            BackButton()
         } standalone: {
             ShareLink(item: link.webURL) { RailGlyph(systemImage: "square.and.arrow.up") }
                 .buttonStyle(.plain).glass(Circle())
@@ -69,22 +69,23 @@ struct SharedNoteView: View {
                 Button("Open in browser", systemImage: "safari") { openURL(link.webURL) }
                 Button("Copy link", systemImage: "link") {
                     UIPasteboard.general.string = link.webURL.absoluteString
-                    copiedCount += 1
+                    copied.mark()
                 }
                 if case .loaded(let note) = phase {
                     Button("Copy notes", systemImage: "doc.on.doc") {
                         UIPasteboard.general.string = [note.title, note.enhanced, note.body].filter { !$0.isEmpty }.joined(separator: "\n\n")
-                        copiedCount += 1
+                        copied.mark()
                     }
                 }
             } label: {
-                RailGlyph(systemImage: "ellipsis")
+                // A copy made from the menu is confirmed here, where the menu closes to (`Copied`).
+                RailGlyph(systemImage: copied.symbol("ellipsis")).contentTransition(motion.symbolReplace)
             }.menuOrder(.fixed).tint(Theme.textSecondary).glass(Circle())
-                .accessibilityLabel("Shared note actions")
+                .confirmsCopy($copied)
+                .accessibilityLabel("Shared note actions").accessibilityValue(copied.isOn ? "Copied" : "")
         } bottom: {
             EmptyView()
         }
-        .haptic(.done, trigger: copiedCount)
     }
 
     @ViewBuilder private func failure(_ error: SharedNoteError) -> some View {
@@ -131,7 +132,8 @@ private struct SharedNoteDocument: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(note.title.isEmpty ? "Untitled note" : note.title)
-                .font(.noteTitle).lineSpacing(4).foregroundStyle(Theme.textPrimary).padding(.top, 18)
+                .displayFont(33).tracking(Theme.noteTitleTracking).lineSpacing(Theme.noteTitleLineSpacing).foregroundStyle(Theme.textPrimary).padding(.top, 18)
+                .dynamicTypeSize(...DynamicTypeSize.accessibility1)
                 .accessibilityAddTraits(.isHeader)
             if day != nil || note.duration != nil {
                 NoteMetaCapsule {
@@ -152,7 +154,7 @@ private struct SharedNoteDocument: View {
                 Image(systemName: "lock").font(.system(size: 12)).accessibilityHidden(true)
                 Text("Shared · read-only · \(host)")
             }
-            .font(.system(size: 13)).foregroundStyle(Theme.textSecondary)
+            .uiFont(13).foregroundStyle(Theme.textSecondary)
             .padding(.top, 12).padding(.bottom, 17)
             .accessibilityIdentifier("shared-note-provenance")
 
@@ -173,10 +175,11 @@ private struct SharedNoteDocument: View {
             }
             if !enhanced.isWhole || !typed.isWhole {
                 VStack(alignment: .leading, spacing: 0) {
-                    Text("This note is longer than the app shows.").font(.footnote)
+                    Text("This note is longer than the app shows.").uiFont(13, relativeTo: .footnote).foregroundStyle(Theme.textSecondary)
                     Button("Open in browser", action: openInBrowser)
-                        .frame(minHeight: 44).contentShape(Rectangle())
-                }.foregroundStyle(Theme.textSecondary).padding(.top, 20)
+                        .uiFont(15, weight: .medium).foregroundStyle(Theme.accentText)
+                        .frame(minHeight: 44).contentShape(Rectangle()).buttonStyle(.squash)
+                }.padding(.top, 20)
             }
         }
         .padding(.leading, Theme.gutter).padding(.trailing, 8).padding(.bottom, 24)
@@ -191,6 +194,26 @@ private struct SharedNoteDocument: View {
         if calendar.isDateInYesterday(date) { return "Yesterday" }
         let sameYear = calendar.component(.year, from: date) == calendar.component(.year, from: .now)
         return date.formatted(sameYear ? .dateTime.day().month(.abbreviated) : .dateTime.day().month(.abbreviated).year())
+    }
+}
+
+/// The room of a shared note that is on its way.
+private struct SharedNotePlaceholder: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            bar(width: 230, height: 30).padding(.top, 24)
+            bar(width: 150, height: 30, radius: 15).padding(.top, 20)
+            ForEach(0..<5, id: \.self) { index in
+                bar(width: [300, 260, 320, 240, 180][index], height: 13).padding(.top, index == 0 ? 34 : 16)
+            }
+        }
+        .padding(.leading, Theme.gutter)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement().accessibilityLabel("Loading shared note")
+    }
+
+    private func bar(width: CGFloat, height: CGFloat, radius: CGFloat = 6) -> some View {
+        RoundedRectangle(cornerRadius: radius, style: .continuous).fill(Theme.quietFill).frame(width: width, height: height)
     }
 }
 
@@ -217,7 +240,6 @@ struct ServerSignInPrompt: View {
     let offersSignIn: Bool
     @Environment(AccountsModel.self) private var accounts
     @Environment(Router.self) private var router
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
 
     var body: some View {
@@ -225,7 +247,7 @@ struct ServerSignInPrompt: View {
             ScreenPrompt(symbol: "lock", title: "This note is on \(origin.displayHost)", detail: "Sign in to that server to view it.",
                          caption: elsewhere, actions: offersSignIn ? [ScreenPrompt.Action(title: "Open in browser") { openURL(webURL) }] : [])
         } leading: {
-            GlassCircleButton(systemImage: "chevron.left") { dismiss() }
+            BackButton()
         } bottom: {
             if offersSignIn {
                 PrimaryBarButton(title: "Sign in", systemImage: "person.crop.circle") { router.signIn(to: origin) }
