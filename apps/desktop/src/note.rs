@@ -1836,10 +1836,13 @@ impl Cereal {
         // The header and the conversation arrive behind the frame's moving
         // edge. The composer does not: it is the pill the panel grew out
         // of, and it stays exactly as it was, at full strength, throughout.
+        // With reduced motion nothing moves and the panel only fades: its
+        // card first, then what is on it, so the conversation is never
+        // read through a card that is still letting the page show.
         let arriving = if pose.value < 1. {
             crate::motion::content_fade(pose.value)
         } else {
-            pose.fade
+            crate::motion::content_fade(pose.fade)
         };
         // Grown out of the focused bar's tray, the recent-chats button there
         // is the header's: it carries on rather than going out and coming
@@ -1870,7 +1873,8 @@ impl Cereal {
                         .px(px(5.5))
                         .gap(px(4.))
                         .opacity(leading)
-                        .child(icon("chevron-down", 12., t.muted))
+                        // Where its list hangs from.
+                        .child(crate::onboarding_view::place("note-chat-history"))
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_chat_history(cx))),
                 )
                 .child(div().flex_1())
@@ -1894,6 +1898,8 @@ impl Cereal {
                                 this.screen = crate::app::Screen::Chat;
                                 this.assistant_open = false;
                             }
+                            // The page grows out of this panel.
+                            this.chat_widen();
                             this.sidebar_open = true;
                             this.chat_history_open = false;
                             this.focus.focus(window);
@@ -1962,14 +1968,10 @@ impl Cereal {
                         linear_color_stop(t.card.opacity(0.), 0.),
                         linear_color_stop(t.card, 1.),
                     )),
-            );
-        // The scroll-to-latest button and the history popover leave as they
-        // arrive.
-        let scroll_down = self.stage.presence(
-            ("chat-scroll-down", 0),
-            self.chat_can_scroll_down(),
-            crate::motion::SNAPPY,
-        );
+            )
+            // The way back down to the newest answer, over the view's foot.
+            .children(self.render_chat_scroll_foot(t.card, cx));
+        // The history popover leaves as it arrives.
         let history = self.stage.presence(
             ("chat-history", 0),
             self.chat_history_open,
@@ -2064,13 +2066,7 @@ impl Cereal {
                         ),
                     ),
             )
-            .when(scroll_down.visible, |d| {
-                d.child(crate::motion::pop(
-                    self.render_chat_scroll_down(cx),
-                    crate::motion::Pop::chip((0.5, 1.)),
-                    scroll_down,
-                ))
-            });
+            ;
         // The frame (fill, hairline, shadow) is a shape of its own that
         // morphs out of the pill's outline; see `motion::Morph`. The content
         // lies over it, cut to as much of the panel as the frame has reached.
@@ -2166,32 +2162,30 @@ impl Cereal {
                     .child(header),
             )
             // The recent chats drop from the header's button, over the
-            // conversation.
+            // conversation, on a layer over the whole window: a press
+            // anywhere else closes the list and does nothing more (the
+            // field keeps the keyboard, the panel stays open).
             .when(history.visible, |d| {
-                // A press anywhere else closes the list and does nothing
-                // more, as with every menu: it does not also fold the panel
-                // or land on the note, and a press on the button that
-                // opened the list simply closes it. The field keeps the
-                // keyboard (as with the model menu).
-                d.child(page_overlay(
-                    self.chat_history_open,
-                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                        this.dismiss_chat_history(cx)
-                    }),
-                ))
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(header_top + 35.))
-                        .left(px(12.))
-                        .child(crate::motion::pop(
-                            floating(self.render_chat_history(cx)),
-                            crate::motion::Pop::menu((0.08, 0.)),
-                            history,
-                        )),
-                )
+                let button = crate::onboarding_view::placed("note-chat-history");
+                d.children(button.map(|button| {
+                    crate::ui::lifted(
+                        crate::ui::overlay(
+                            self.chat_history_open,
+                            cx.listener(|this, _, _, cx| this.dismiss_chat_history(cx)),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .top(button.bottom() + px(6.))
+                                .left(button.left() - px(2.))
+                                .child(crate::motion::pop(
+                                    self.render_chat_history(cx),
+                                    crate::motion::Pop::menu((0.08, 0.)),
+                                    history,
+                                )),
+                        ),
+                    )
+                }))
             })
             .into_any_element()
     }

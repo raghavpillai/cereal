@@ -294,16 +294,12 @@ pub struct Cereal {
     /// at the end of its row).
     pub chat_threads_collapsed: bool,
     pub chat_history_open: bool,
-    /// When a press outside the recent-chats list last closed it (see
-    /// `toggle_chat_history`).
-    pub chat_history_closed_at: Option<std::time::Instant>,
-    /// When a press outside the model menu last closed it (see
-    /// `toggle_chat_model_picker`).
-    pub chat_model_picker_closed_at: Option<std::time::Instant>,
     pub chat_scroll: ScrollHandle,
     /// The conversation as it was last drawn (`chat_follow_signature`), so a
     /// reader at its end is kept there while it grows (`render_chat_turns`).
     pub chat_follow: std::cell::Cell<u64>,
+    /// What chat's own surfaces keep between frames (see `chat::ChatUi`).
+    pub chat_ui: crate::chat::ChatUi,
     pub chat_archives: Vec<crate::chat::ArchivedChat>,
     /// Each account's saved threads on its server (`chat_sync.rs`).
     pub chat_sync: crate::chat_sync::ChatSync,
@@ -372,6 +368,7 @@ impl Cereal {
         let search = cx.new(|cx| TextInput::new("Search meetings", false, cx));
         let ask = cx.new(|cx| TextInput::new("Ask anything", false, cx));
         ask.update(cx, |input, cx| input.set_chat_mode(cx));
+        let chat_ui = crate::chat::ChatUi::new(&ask, cx);
         let title_input = cx.new(|cx| TextInput::new("New note", false, cx));
         title_input.update(cx, |input, cx| input.set_wrap(true, cx));
         let editor =
@@ -661,10 +658,9 @@ impl Cereal {
             chat_threads_expanded: false,
             chat_threads_collapsed: false,
             chat_history_open: false,
-            chat_history_closed_at: None,
-            chat_model_picker_closed_at: None,
             chat_scroll: ScrollHandle::new(),
             chat_follow: std::cell::Cell::new(0),
+            chat_ui,
             chat_archives: crate::chat::load_history(),
             chat_sync: Default::default(),
             chat_thread_id: uuid::Uuid::new_v4().to_string(),
@@ -724,6 +720,8 @@ impl Cereal {
         crate::chrome::record_navigation(&mut self.nav_history, self.screen, screen);
         self.screen = screen;
         self.current_note = None;
+        // A way back to a conversation only leads from the note it opened.
+        self.chat_ui.back = None;
         if leaving_note {
             self.restore_note_chat(0, cx);
         }
@@ -852,6 +850,7 @@ impl Cereal {
         self.summary.dismiss();
         let changed = self.current_note != Some(id);
         if self.current_note != Some(id) {
+            self.chat_ui.back = None;
             self.chat_maximized = false;
             self.assistant_open = false;
             // An answer still arriving carries on in its conversation.
@@ -1921,17 +1920,8 @@ impl Render for Cereal {
                 s.child(self.render_search(cx))
             })
             .when(history_pose.visible, |s| {
-                let left = self.sidebar_inset()
-                    + if self.current_note.is_some() {
-                        62.
-                    } else if self.screen == Screen::Chat && self.sidebar_away() {
-                        // Under the bar's own History button: past the
-                        // traffic lights, the two window tools and the back pill.
-                        // (8 + 80, two 28 pt tools and a 43 pt pill, 5 pt apart).
-                        202.
-                    } else {
-                        8.
-                    };
+                // Under the control that opened it (see `chat_history_place`).
+                let (top, left, anchor) = self.chat_history_place(window);
                 // A press outside it closes it and goes no further.
                 s.child(
                     crate::ui::overlay(
@@ -1941,10 +1931,10 @@ impl Render for Cereal {
                             cx.notify();
                         }),
                     )
-                    .child(div().absolute().top(px(42.)).left(px(left)).child(
+                    .child(div().absolute().top(px(top)).left(px(left)).child(
                         crate::motion::pop(
                             self.render_chat_history(cx),
-                            crate::motion::Pop::menu((0.1, 0.)),
+                            crate::motion::Pop::menu(anchor),
                             history_pose,
                         ),
                     )),

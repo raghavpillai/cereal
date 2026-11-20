@@ -2492,6 +2492,18 @@ pub fn revealed(key: u64) -> f32 {
     })
 }
 
+/// Ease a hover level towards lit or unlit, as [`tactile`] eases its wash:
+/// for something painted by hand that answers the pointer (a chip drawn
+/// over text) and cannot hold a feedback layer. `track` is its level, kept
+/// by the caller between frames; read it with [`Track::value`] and ask for
+/// frames until it has [`Track::settled`].
+pub fn hover_to(track: &mut Track, lit: bool, now: Instant) {
+    let to = if lit { 1. } else { 0. };
+    if track.target() != to {
+        track.retarget(to, now, slow(if lit { HOVER_IN } else { HOVER_OUT }), Curve::Fade);
+    }
+}
+
 /// `from` blended toward `to` by `level`, for text that warms on hover.
 pub fn mix(from: Hsla, to: Hsla, level: f32) -> Hsla {
     let level = level.clamp(0., 1.);
