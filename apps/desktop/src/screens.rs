@@ -109,74 +109,145 @@ impl Cereal {
                 Entry::Hit(hit) => crate::lazy::key(("hit", hit.row.id, &hit.snippet)),
             })
             .collect();
-        let scroll = crate::lazy::scroll("search-results");
-        let mut list = div().flex().flex_col().w_full().child(crate::lazy::column(
-            "search-results",
-            &keys,
-            f32::from(window.viewport_size().width),
-            0.,
-            &scroll,
-            window,
-            |index| match entries[index] {
-                Entry::Day(date) => div()
-                    .px(px(8.))
-                    .pt(px(28.))
-                    .pb(px(8.))
-                    .text_size(px(12.))
-                    .line_height(px(16.))
-                    .text_color(t.muted)
-                    .child(crate::home::date_label(date))
-                    .into_any_element(),
-                Entry::Hit(hit) => {
-                    let (note, snippet) = (&hit.row, &hit.snippet);
-                    crate::motion::stats::copied(note.title.len() + snippet.len());
-                    let highlights = crate::note::transcript_match_ranges(snippet, query)
-                        .into_iter()
-                        .map(|range| {
-                            (
-                                range,
-                                HighlightStyle {
-                                    background_color: Some(rgba(0xb9853455).into()),
-                                    ..Default::default()
-                                },
-                            )
-                        });
-                    let id = note.id;
-                    div()
-                        .relative()
-                        .child(self.list_row(id, note.title.clone(), &note.time, cx))
-                        .child(
-                            div()
-                                .id(("search-result-preview", id))
-                                .pl(px(52.))
-                                .pr(px(8.))
-                                // The excerpt belongs to the row above it:
-                                // the next result starts a little lower.
-                                .pb(px(10.))
-                                .text_size(px(12.))
-                                .line_height(px(16.))
-                                .text_color(t.muted)
-                                .cursor_default()
-                                .child(StyledText::new(snippet.clone()).with_highlights(highlights))
-                                .reach().on_click(
-                                    cx.listener(move |this, _, _, cx| this.open_note(id, cx)),
-                                ),
+        // A hit that leaves (its note went to Trash) folds shut and the
+        // hits under it close up; another search is another list.
+        let scope = crate::lazy::key(query);
+        HITS_LEFT.with(|left| {
+            left.borrow_mut().update(crate::lazy::key((self.workspace.revision(), scope)), || {
+                entries
+                    .iter()
+                    .zip(&keys)
+                    .map(|(entry, key)| {
+                        (
+                            *key,
+                            match entry {
+                                Entry::Day(date) => KeptHit::Day((*date).to_owned()),
+                                Entry::Hit(hit) => KeptHit::Hit((*hit).clone()),
+                            },
                         )
-                        .into_any_element()
-                }
-            },
-        ));
-        if notes.is_empty() {
-            list = list.child(
+                    })
+                    .collect()
+            })
+        });
+        let drawn = crate::lazy::roster(&self.stage, "search-results", scope, &keys);
+        let drawn_keys: Vec<u64> = drawn.iter().map(|row| row.key).collect();
+        let plain = drawn.len() == entries.len();
+        let at: std::collections::HashMap<u64, usize> = if plain {
+            Default::default()
+        } else {
+            keys.iter().enumerate().map(|(index, key)| (*key, index)).collect()
+        };
+        if !plain {
+            let leaving: Vec<u64> = drawn.iter().filter(|row| !row.present).map(|row| row.key).collect();
+            HITS_LEFT.with(|left| left.borrow_mut().keep(&leaving));
+        }
+        // The hit the arrow keys moved to is brought into view.
+        if let Some(id) = Self::take_note_to_reveal()
+            && let Some(index) = entries
+                .iter()
+                .zip(&keys)
+                .find(|(entry, _)| matches!(entry, Entry::Hit(hit) if hit.row.id == id))
+                .and_then(|(_, key)| drawn_keys.iter().position(|drawn| drawn == key))
+        {
+            crate::lazy::reveal("search-results", index);
+        }
+        let scroll = crate::lazy::scroll("search-results");
+        let glide = self.stage.glide("search-results");
+        let keyboard = keyboard_focus();
+        let draw_caption = |date: &str| {
+            div()
+                .px(px(8.))
+                .pt(px(28.))
+                .pb(px(8.))
+                .text_size(px(12.))
+                .line_height(px(16.))
+                .text_color(t.muted)
+                .child(crate::home::date_label(date))
+                .into_any_element()
+        };
+        // A hit is one row: its title line and the excerpt under it light,
+        // press and open together. `live` is false for one that has left
+        // the list and is only closing up.
+        let draw_hit = |hit: &crate::home::SearchHit, live: bool, cx: &mut Context<Self>| {
+            let (note, snippet) = (&hit.row, &hit.snippet);
+            crate::motion::stats::copied(note.title.len() + snippet.len());
+            let highlights = crate::note::transcript_match_ranges(snippet, query)
+                .into_iter()
+                .map(|range| {
+                    (
+                        range,
+                        HighlightStyle {
+                            background_color: Some(rgba(0xb9853455).into()),
+                            ..Default::default()
+                        },
+                    )
+                });
+            let id = note.id;
+            let name = if live { "note-row" } else { "note-row-left" };
+            let hovered = crate::motion::reveal_key((name, id));
+            let more = if live { self.note_row_more(id, cx) } else { div().id(("note-row-left-more", id)) };
+            let row = self
+                .list_row_shell((name, id), hovered)
+                .child(self.list_row_line(hovered, note.title.clone(), "Me", &note.time, more))
+                .child(
+                    div()
+                        // Under the title, past the tile.
+                        .pl(px(44.))
+                        .pb(px(8.))
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .text_color(t.muted)
+                        .child(StyledText::new(snippet.clone()).with_highlights(highlights)),
+                );
+            if !live {
+                return row.into_any_element();
+            }
+            let focused = keyboard
+                && reach_handle(("note-row", id)).is_some_and(|handle| handle.is_focused(window));
+            self.note_row_actions(row, id, cx)
+                .when(focused, |row| row.child(glide.probe(id)))
+                .into_any_element()
+        };
+        let list = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .child(glide.indicator(t.hover, 12.))
+            .child(crate::lazy::column(
+                "search-results",
+                &drawn_keys,
+                f32::from(window.viewport_size().width),
+                0.,
+                &scroll,
+                window,
+                |index| {
+                    let row = drawn[index];
+                    let entry = if plain { Some(index) } else { at.get(&row.key).copied() };
+                    let content = match entry.filter(|_| row.present).map(|index| &entries[index]) {
+                        Some(Entry::Day(date)) => Some(draw_caption(date)),
+                        Some(Entry::Hit(hit)) => Some(draw_hit(hit, true, cx)),
+                        None => HITS_LEFT.with(|left| left.borrow().left(row.key).cloned()).map(|kept| match kept {
+                            KeptHit::Day(date) => draw_caption(&date),
+                            KeptHit::Hit(hit) => draw_hit(&hit, false, cx),
+                        }),
+                    };
+                    crate::motion::roster_row(&self.stage, "search-results", row, content)
+                        .map_or_else(|| div().into_any_element(), IntoElement::into_any_element)
+                },
+            ))
+            // Said once the last hit has gone, or at once when there were none.
+            .children(crate::motion::appear_on_page(
+                &self.stage,
+                ("search-results-none", scope),
+                notes.is_empty() && drawn.is_empty(),
                 div()
                     .py(px(40.))
                     .px(px(8.))
                     .text_color(t.muted)
                     .text_size(px(14.))
                     .child("No matching meetings. Try another search."),
-            );
-        }
-        screen_scroller("search-results-page")
+            ));
+        let page = screen_scroller("search-results-page")
             .track_scroll(&scroll)
             .pr(px(10.))
             .child(
@@ -199,14 +270,19 @@ impl Cereal {
                     .child(div().mt(px(40.)).h(px(1.)).bg(t.border))
                     .child(
                         div().mt(px(40.)).child(
+                            // What was searched: a label, not a control. It
+                            // answers neither the pointer nor the keyboard.
                             div().flex().child(
-                                pill("search-owned-notes", "My notes", "lock", t).bg(t.hover),
+                                pill_frame("search-owned-notes", t)
+                                    .bg(t.hover)
+                                    .child(icon("lock", 16., t.muted))
+                                    .child("My notes"),
                             ),
                         ),
                     )
                     .child(list),
-            )
-            .into_any_element()
+            );
+        scrolling_page(page, "search-results", &scroll)
     }
 
     /// "Shared with me": the shared notes opened on this Mac, newest first,
@@ -218,6 +294,9 @@ impl Cereal {
         let visits = self.links.history.visits();
         let focused = self.links.paste.read(cx).focus_handle.is_focused(window);
         let typed = !self.links.paste.read(cx).content().trim().is_empty();
+        // "Open" grows in from the field's trailing edge with the first
+        // character, and goes back into it with the last.
+        let open = self.stage.presence_on_page(("shared-paste-open", 0), typed, crate::motion::SNAPPY);
         // The field is a row of the list below it: the same height, corner
         // and insets, so its icon and text stand over the rows' tiles and
         // titles.
@@ -255,97 +334,143 @@ impl Cereal {
                     .line_height(px(20.))
                     .child(self.links.paste.clone()),
             )
-            .when(typed, |field| {
-                field.child(
+            .when(open.visible, |field| {
+                // (On its way out it is only its outline and its word.)
+                let pill = if typed {
                     pill("shared-paste-open", "Open", "", t)
-                        .on_click(cx.listener(|this, _, _, cx| this.open_pasted_link(cx))),
-                )
+                        .on_click(cx.listener(|this, _, _, cx| this.open_pasted_link(cx)))
+                } else {
+                    pill_frame("shared-paste-open", t).child("Open")
+                };
+                field.child(crate::motion::pop(pill, crate::motion::Pop::chip((1., 0.5)), open))
             });
+        // What is wrong with the link opens under the field and the page
+        // makes room; it is still drawn, as it was, while it closes.
+        let problem = PASTE_PROBLEM.with(|last| {
+            let mut last = last.borrow_mut();
+            if let Some(problem) = &self.links.problem {
+                last.clone_from(problem);
+            }
+            last.clone()
+        });
         let mut column = screen_column(self.page_column_width(window))
             .child(page_title("Shared with me", t))
             .child(paste)
-            .when_some(self.links.problem.clone(), |column, problem| {
-                column.child(
-                    div()
-                        .id("shared-paste-problem")
-                        .mt(px(6.))
-                        .px(px(8.))
-                        .text_size(px(12.))
-                        .line_height(px(16.))
-                        .text_color(t.danger)
-                        .child(problem),
-                )
-            });
+            .children(crate::motion::appear_on_page(
+                &self.stage,
+                ("shared-paste-problem", 0),
+                self.links.problem.is_some(),
+                div()
+                    .id("shared-paste-problem")
+                    .mt(px(6.))
+                    .px(px(8.))
+                    .text_size(px(12.))
+                    .line_height(px(16.))
+                    .text_color(t.danger)
+                    .child(problem),
+            ));
         // Notes shared with this account by name, as its server lists them.
         let by_name = self.render_shared_by_name(cx);
         let nothing = visits.is_empty() && by_name.is_none();
         column = column.children(by_name);
-        if nothing {
-            column = column.child(
-                div()
-                    .mt(px(58.))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(14.))
-                    .child(empty_illustration("person-outline", t))
-                    .child(
-                        div()
-                            .mt(px(8.))
-                            .font_family(DISPLAY)
-                            .text_size(px(24.))
-                            .child("Nothing shared with you yet"),
-                    )
-                    .child(
-                        div()
-                            .max_w(px(350.))
-                            .text_center()
-                            .text_size(px(14.))
-                            .line_height(px(22.))
-                            .text_color(t.muted)
-                            .child("Shared notes you open are kept here."),
-                    ),
-            );
-        }
-        // Home's list: a day caption, then that day's rows.
+        // Home's list: a day caption, then that day's rows. A note taken
+        // off the list folds shut and the rows under it close up.
+        let mut entries: Vec<(u64, KeptVisit)> = Vec::with_capacity(visits.len() + 8);
         let mut last_day = String::new();
         for visit in visits {
-            let opened = visit.opened_at.with_timezone(&chrono::Local);
-            let day = opened.format("%Y-%m-%d").to_string();
+            let day = visit.opened_at.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string();
             if day != last_day {
-                column = column.child(
-                    caption(crate::home::date_label(&day), t)
-                        .px(px(8.))
-                        .pt(px(25.))
-                        .pb(px(2.)),
-                );
+                entries.push((crate::lazy::key(("shared-day", &day)), KeptVisit::Day(day.clone())));
                 last_day = day;
             }
-            let key = crate::lazy::key(visit.link.web_url());
-            let hovered = crate::motion::reveal_key(("shared-visit", key));
-            let (open, remove) = (visit.link.clone(), visit.link.clone());
-            column = column.child(
-                self.list_row_frame(
-                    ("shared-visit", key),
-                    hovered,
-                    visit.title.clone().into(),
-                    visit.link.origin.display_host(),
-                    &opened.format("%-I:%M %p").to_string(),
-                    tool_tip(("shared-visit-remove", key), "close", "Remove from list", t)
-                        .size(px(24.))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.remove_shared_visit(&remove, cx);
-                        })),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.open_link(crate::link::AppLink::Shared(open.clone()), cx)
-                })),
-            );
+            entries.push((crate::lazy::key(visit.link.web_url()), KeptVisit::Visit(visit.clone())));
         }
-        screen_scroller("shared-screen")
-            .child(column)
-            .into_any_element()
+        let keys: Vec<u64> = entries.iter().map(|(key, _)| *key).collect();
+        VISITS_LEFT.with(|left| left.borrow_mut().update(crate::lazy::key(&keys), || entries.clone()));
+        let drawn = self.stage.roster("shared-visits", 0, &keys);
+        let leaving: Vec<u64> = drawn.iter().filter(|row| !row.present).map(|row| row.key).collect();
+        VISITS_LEFT.with(|left| left.borrow_mut().keep(&leaving));
+        let mut listed: std::collections::HashMap<u64, KeptVisit> = entries.into_iter().collect();
+        for row in &drawn {
+            let (kept, live) = match listed.remove(&row.key) {
+                Some(kept) if row.present => (Some(kept), true),
+                _ => (VISITS_LEFT.with(|left| left.borrow().left(row.key).cloned()), false),
+            };
+            let content = kept.map(|kept| match kept {
+                KeptVisit::Day(day) => caption(crate::home::date_label(&day), t)
+                    .px(px(8.))
+                    .pt(px(25.))
+                    .pb(px(2.))
+                    .into_any_element(),
+                KeptVisit::Visit(visit) => {
+                    let opened = visit.opened_at.with_timezone(&chrono::Local);
+                    let key = row.key;
+                    let name = if live { "shared-visit" } else { "shared-visit-left" };
+                    let hovered = crate::motion::reveal_key((name, key));
+                    let (open, remove) = (visit.link.clone(), visit.link.clone());
+                    let action = if live {
+                        tool_tip(("shared-visit-remove", key), "close", "Remove from list", t)
+                            .size(px(24.))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.remove_shared_visit(&remove, cx);
+                            }))
+                    } else {
+                        div().id(("shared-visit-left-remove", key))
+                    };
+                    self.list_row_frame(
+                        (name, key),
+                        hovered,
+                        visit.title.clone().into(),
+                        visit.link.origin.display_host(),
+                        &opened.format("%-I:%M %p").to_string(),
+                        action,
+                    )
+                    .when(live, |row| {
+                        row.on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_link(crate::link::AppLink::Shared(open.clone()), cx)
+                        }))
+                    })
+                    .into_any_element()
+                }
+            });
+            column = column.children(crate::motion::roster_row(&self.stage, "shared-visits", *row, content));
+        }
+        // The empty page arrives once the last note has left the list.
+        column = column.children(crate::motion::appear_on_page(
+            &self.stage,
+            ("shared-nothing", 0),
+            nothing && drawn.is_empty(),
+            div()
+                .mt(px(58.))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(14.))
+                .child(empty_illustration("person-outline", t))
+                .child(
+                    div()
+                        .mt(px(8.))
+                        .font_family(DISPLAY)
+                        .text_size(px(24.))
+                        .child("Nothing shared with you yet"),
+                )
+                .child(
+                    div()
+                        .max_w(px(350.))
+                        .text_center()
+                        .text_size(px(14.))
+                        .line_height(px(22.))
+                        .text_color(t.muted)
+                        .child("Shared notes you open are kept here."),
+                ),
+        ));
+        let scroll = crate::lazy::scroll("shared-with-me");
+        scrolling_page(
+            screen_scroller("shared-screen").track_scroll(&scroll).child(column),
+            "shared-with-me",
+            &scroll,
+        )
     }
 
     fn render_chat_screen(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -2124,6 +2249,46 @@ impl Cereal {
         }
         column
     }
+}
+
+thread_local! {
+    /// What the search-results page and "Shared with me" showed of the rows
+    /// that have left them, drawn while their space closes.
+    static HITS_LEFT: std::cell::RefCell<crate::lazy::Leavers<KeptHit>> =
+        std::cell::RefCell::new(Default::default());
+    static VISITS_LEFT: std::cell::RefCell<crate::lazy::Leavers<KeptVisit>> =
+        std::cell::RefCell::new(Default::default());
+    /// What was last wrong with a pasted link.
+    static PASTE_PROBLEM: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// A caption or a hit of the search-results page that has left it.
+#[derive(Clone)]
+enum KeptHit {
+    Day(String),
+    Hit(crate::home::SearchHit),
+}
+
+/// A caption or a row of "Shared with me".
+#[derive(Clone)]
+enum KeptVisit {
+    Day(String),
+    Visit(crate::shared::Visit),
+}
+
+/// A page that scrolls, with the app's scroll indicator over it: `scroller`
+/// is its [`screen_scroller`], tracking `scroll`.
+fn scrolling_page(scroller: Stateful<Div>, name: &'static str, scroll: &ScrollHandle) -> AnyElement {
+    div()
+        .relative()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .flex()
+        .flex_col()
+        .child(scroller)
+        .child(scroll_thumb(name, scroll))
+        .into_any_element()
 }
 
 fn screen_scroller(id: &'static str) -> Stateful<Div> {

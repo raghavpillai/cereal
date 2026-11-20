@@ -1113,6 +1113,10 @@ impl Cereal {
     /// text field, in the order they are drawn. The note's body keeps Tab for
     /// itself, as it always has (it types a tab); Shift-Tab leaves it.
     fn focus_step(&mut self, back: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // The open Trash popover keeps Tab among its own controls.
+        if self.trash_tab(back, window, cx) {
+            return;
+        }
         let typing_a_tab = !back
             && (self.editor.read(cx).focus_handle.is_focused(window)
                 || self
@@ -1160,6 +1164,8 @@ impl Cereal {
             }
             Some(Layer::Sidebar) => self.sidebar_overlay = false,
             Some(Layer::ChatHistory) => self.chat_history_open = false,
+            // The team space's "Add notes" sheet, under all of the above.
+            None if self.team.picker.is_some() => self.team.picker = None,
             None => return false,
         }
         cx.notify();
@@ -1570,6 +1576,8 @@ impl Render for Cereal {
                 // These hold a text field of their own.
                 Some(Menu::NoteDetails | Menu::CalendarEvent | Menu::Share)
             )
+            // Tab has put the focus on one of the Trash popover's controls.
+            && !self.trash_focus_inside(window)
         {
             self.focus.focus(window);
         }

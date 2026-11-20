@@ -32,7 +32,7 @@ impl SharedNote {
     /// The title as the list and the page show it.
     pub fn display_title(&self) -> String {
         if self.title.trim().is_empty() {
-            "Untitled note".into()
+            "New note".into()
         } else {
             self.title.clone()
         }
@@ -461,7 +461,7 @@ mod tests {
         assert_eq!(note.date, NaiveDate::from_ymd_opt(2026, 11, 12));
         // Fields a server of another version leaves out are simply empty.
         let bare = read(&reply(200, "{}")).unwrap();
-        assert_eq!(bare.display_title(), "Untitled note");
+        assert_eq!(bare.display_title(), "New note");
         assert_eq!((bare.enhanced.as_str(), bare.body.as_str(), bare.date), ("", "", None));
         for date in ["2026-13-01", "2026-11-12T10:00:00Z", "12/11/2026", "", "2026-1-2"] {
             let note = read(&reply(200, &format!(r#"{{"title":"t","date":"{date}"}}"#))).unwrap();

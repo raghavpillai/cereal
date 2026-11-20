@@ -272,7 +272,8 @@ fn face(member: &TeamSpaceMemberDTO, size: f32, radius: Option<f32>, cx: &mut Ap
     crate::portrait::avatar(picture(member, cx), size, letter(&member.name, key, size, radius))
 }
 
-/// One of the page's capsule tabs.
+/// One of the page's capsule tabs. The selected one's fill is the page's
+/// travelling highlight (`glide("team-tabs")`), never a fill of its own.
 fn tab_pill(id: &'static str, label: &'static str, symbol: &str, selected: bool, t: Theme) -> Stateful<Div> {
     let ink = if selected { t.text } else { t.muted };
     div()
@@ -282,7 +283,6 @@ fn tab_pill(id: &'static str, label: &'static str, symbol: &str, selected: bool,
         .rounded_full()
         .border_1()
         .border_color(t.hairline)
-        .when(selected, |tab| tab.bg(t.hover))
         .flex()
         .items_center()
         .gap(px(6.))
@@ -305,9 +305,22 @@ fn round_button(id: &'static str, symbol: &str, label: &'static str, active: boo
 }
 
 thread_local! {
-    /// The banner's height as last laid out, so that closing it can fold
-    /// exactly the space it took.
-    static BANNER_HEIGHT: std::cell::Cell<f32> = const { std::cell::Cell::new(86.) };
+    /// What the lists showed of the rows that have left them, drawn while
+    /// their space closes.
+    static NOTES_LEFT: std::cell::RefCell<crate::lazy::Leavers<KeptNote>> =
+        std::cell::RefCell::new(Default::default());
+    static PEOPLE_LEFT: std::cell::RefCell<crate::lazy::Leavers<TeamSpacePersonDTO>> =
+        std::cell::RefCell::new(Default::default());
+    /// What was ticked in the "Add notes" sheet when it was last open: it
+    /// leaves showing what it showed.
+    static LAST_PICKED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A caption or a row of the notes list that has left it.
+#[derive(Clone)]
+enum KeptNote {
+    Day(String),
+    Note(TeamSpaceNoteDTO),
 }
 
 impl Cereal {
@@ -455,7 +468,7 @@ impl Cereal {
         notes
             .into_iter()
             .map(|note| {
-                let title = if note.title.trim().is_empty() { "Untitled note".into() } else { note.title.clone() };
+                let title = if note.title.trim().is_empty() { "New note".into() } else { note.title.clone() };
                 (note.id, title, note.date.clone())
             })
             .collect()
@@ -720,14 +733,26 @@ impl Cereal {
             .flex_shrink_0()
             .child(self.team_hero(window, cx))
             .child(self.team_toolbar(cx))
-            .child(match self.team.tab {
-                Tab::Notes => self.team_notes(cx),
-                Tab::People => self.team_people(cx),
-            });
+            // The tab's content firms up when the tab is switched, or when
+            // the page it was waiting for arrives.
+            .child(crate::motion::crossfade(
+                (
+                    "team-body",
+                    crate::lazy::key((
+                        self.team.tab == Tab::People,
+                        self.team.page.is_some(),
+                        self.team.problem.is_some(),
+                    )),
+                ),
+                match self.team.tab {
+                    Tab::Notes => self.team_notes(cx),
+                    Tab::People => self.team_people(cx),
+                },
+            ));
         let picker = self.stage.presence(
             ("team-picker", 0),
             self.team.picker.is_some(),
-            crate::motion::SNAPPY,
+            crate::motion::GOOEY,
         );
         div()
             .relative()
@@ -752,9 +777,7 @@ impl Cereal {
                     .child(column),
             )
             .child(scroll_thumb("team-space", &self.team.scroll))
-            .when(picker.visible && self.team.picker.is_some(), |root| {
-                root.child(self.team_picker(picker, cx))
-            })
+            .when(picker.visible, |root| root.child(self.team_picker(picker, cx)))
             .into_any_element()
     }
 
@@ -797,13 +820,6 @@ impl Cereal {
                     ),
             );
         }
-        let dismissed = self.workspace.settings.team_banner_dismissed;
-        let banner = if dismissed {
-            let pose = self.stage.presence(("team-banner", 0), false, crate::motion::SNAPPY);
-            pose.visible.then_some(pose)
-        } else {
-            Some(crate::motion::Pose::REST)
-        };
         let focused = self.ask.read(cx).focus_handle.is_focused(window);
         let can_send = !self.ask.read(cx).content().trim().is_empty();
         // The banner is the gold of the app's accent, quiet enough to read on.
@@ -864,72 +880,56 @@ impl Cereal {
                     .child(icon("users", 13., t.muted))
                     .child("Your team workspace"),
             )
-            .when_some(banner, |hero, pose| {
-                let leaving = dismissed.then_some(pose);
-                let measure = canvas(
-                    |bounds, _, _| BANNER_HEIGHT.with(|height| height.set(f32::from(bounds.size.height))),
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .inset_0();
-                hero.child(
-                    div()
-                        .w_full()
-                        .when_some(leaving, |shell, pose| {
-                            shell
-                                .h(px((40. + BANNER_HEIGHT.with(std::cell::Cell::get)) * pose.value.clamp(0., 1.)))
-                                .overflow_hidden()
-                                .opacity(pose.fade)
-                        })
-                        .child(
-                            div()
-                                .relative()
-                                .when(leaving.is_none(), |banner| banner.child(measure))
-                                .mt(px(40.))
-                                .w_full()
-                                .px(px(16.))
-                                .pt(px(14.))
-                                .pb(px(17.))
-                                .rounded(px(12.))
-                                .border_1()
-                                .border_color(edge)
-                                .bg(fill)
-                                .flex()
-                                .items_start()
-                                .gap(px(12.))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(6.))
-                                        .child(
-                                            div()
-                                                .text_size(px(14.))
-                                                .line_height(px(18.))
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .child(BANNER_TITLE),
-                                        )
-                                        .child(
-                                            div()
-                                                .max_w(px(520.))
-                                                .text_size(px(13.))
-                                                .line_height(px(19.))
-                                                .text_color(t.secondary)
-                                                .child(BANNER_TEXT),
-                                        ),
-                                )
-                                .child(
-                                    tool_tip("dismiss-team-banner", "close", "Dismiss", t)
-                                        .size(px(22.))
-                                        .mt(px(-6.))
-                                        .mr(px(-6.))
-                                        .on_click(cx.listener(|this, _, _, cx| this.dismiss_team_banner(cx))),
-                                ),
-                        ),
-                )
-            })
+            // Closed, the banner fades while the space it took (its own
+            // height and the 40 pt above it) closes up under it.
+            .children(crate::motion::appear_on_page(
+                &self.stage,
+                ("team-banner", 0),
+                !self.workspace.settings.team_banner_dismissed,
+                div()
+                    .mt(px(40.))
+                    .w_full()
+                    .px(px(16.))
+                    .pt(px(14.))
+                    .pb(px(17.))
+                    .rounded(px(12.))
+                    .border_1()
+                    .border_color(edge)
+                    .bg(fill)
+                    .flex()
+                    .items_start()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .text_size(px(14.))
+                                    .line_height(px(18.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(BANNER_TITLE),
+                            )
+                            .child(
+                                div()
+                                    .max_w(px(520.))
+                                    .text_size(px(13.))
+                                    .line_height(px(19.))
+                                    .text_color(t.secondary)
+                                    .child(BANNER_TEXT),
+                            ),
+                    )
+                    .child(
+                        tool_tip("dismiss-team-banner", "close", "Dismiss", t)
+                            .size(px(22.))
+                            .mt(px(-6.))
+                            .mr(px(-6.))
+                            .on_click(cx.listener(|this, _, _, cx| this.dismiss_team_banner(cx))),
+                    ),
+            ))
             .child(
                 // The composer sits 16 px in from the column.
                 div().mt(px(56.)).w_full().px(px(16.)).child(
@@ -965,8 +965,6 @@ impl Cereal {
 
     /// Close the banner for good on this Mac.
     pub fn dismiss_team_banner(&mut self, cx: &mut Context<Self>) {
-        // Leave from fully present.
-        self.stage.kick(("team-banner", 0), 1., crate::motion::SNAPPY);
         self.workspace.settings.team_banner_dismissed = true;
         self.persist(cx);
         cx.notify();
@@ -977,7 +975,15 @@ impl Cereal {
         let t = self.theme();
         let people = self.team.tab == Tab::People;
         let searching = people && self.team.people_search_open;
+        // The selected tab's fill travels from one pill to the other; what
+        // belongs to People (its search and its order) grows in beside
+        // "Add notes" and goes the way it came.
+        let glide = self.stage.glide("team-tabs");
+        let tools = self.stage.presence_on_page(("team-people-tools", 0), people, crate::motion::SNAPPY);
+        let field = self.stage.presence_on_page(("team-people-search", 0), searching, crate::motion::SNAPPY);
+        let from_trailing = crate::motion::Pop::chip((1., 0.5));
         div()
+            .relative()
             .mt(px(55.))
             .mb(px(9.))
             .w_full()
@@ -985,28 +991,29 @@ impl Cereal {
             .flex()
             .items_center()
             .gap(px(4.))
+            .child(glide.indicator(t.hover, size::TAB_HEIGHT / 2.))
             .child(
-                tab_pill("team-tab-notes", "Notes", "notes-lines", !people, t).on_click(cx.listener(
-                    |this, _, window, cx| {
+                tab_pill("team-tab-notes", "Notes", "notes-lines", !people, t)
+                    .when(!people, |tab| tab.child(glide.probe("notes")))
+                    .on_click(cx.listener(|this, _, window, cx| {
                         this.focus.focus(window);
                         this.team.tab = Tab::Notes;
                         cx.notify();
-                    },
-                )),
+                    })),
             )
             .child(
-                tab_pill("team-tab-people", "People", "person-outline", people, t).on_click(cx.listener(
-                    |this, _, window, cx| {
+                tab_pill("team-tab-people", "People", "person-outline", people, t)
+                    .when(people, |tab| tab.child(glide.probe("people")))
+                    .on_click(cx.listener(|this, _, window, cx| {
                         this.focus.focus(window);
                         this.team.tab = Tab::People;
                         this.team.person = None;
                         cx.notify();
-                    },
-                )),
+                    })),
             )
             .child(div().flex_1())
-            .when(searching, |bar| {
-                bar.child(
+            .when(field.visible, |bar| {
+                bar.child(crate::motion::pop(
                     div()
                         .w(px(180.))
                         .h(px(size::TAB_HEIGHT))
@@ -1019,12 +1026,17 @@ impl Cereal {
                         .text_size(px(12.))
                         .line_height(px(16.))
                         .child(div().flex_1().min_w_0().child(self.team.people_search.clone())),
-                )
+                    from_trailing,
+                    field,
+                ))
             })
-            .when(people, |bar| {
-                bar.child(
+            .when(tools.visible, |bar| {
+                bar.child(crate::motion::pop(
                     round_button("team-people-search", "search", "Search people", searching, t).on_click(
                         cx.listener(|this, _, window, cx| {
+                            if this.team.tab != Tab::People {
+                                return;
+                            }
                             this.team.people_search_open = !this.team.people_search_open;
                             if this.team.people_search_open {
                                 this.team.people_search.read(cx).focus_handle.focus(window);
@@ -1035,8 +1047,10 @@ impl Cereal {
                             cx.notify();
                         }),
                     ),
-                )
-                .child(
+                    from_trailing,
+                    tools,
+                ))
+                .child(crate::motion::pop(
                     round_button(
                         "team-people-sort",
                         "sliders-horizontal",
@@ -1045,11 +1059,16 @@ impl Cereal {
                         t,
                     )
                     .on_click(cx.listener(|this, _, window, cx| {
+                        if this.team.tab != Tab::People {
+                            return;
+                        }
                         this.focus.focus(window);
                         this.team.oldest_first = !this.team.oldest_first;
                         cx.notify();
                     })),
-                )
+                    from_trailing,
+                    tools,
+                ))
             })
             .child(
                 pill("team-add-notes", "Add notes", "plus-small", t)
@@ -1057,8 +1076,9 @@ impl Cereal {
                     .px(px(11.))
                     .text_size(px(12.))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.focus.focus(window);
                         this.open_team_picker(cx);
+                        // What is typed next searches one's notes.
+                        this.team.picker_search.read(cx).focus_handle.focus(window);
                     })),
             )
     }
@@ -1131,17 +1151,18 @@ impl Cereal {
                 div().mt(px(14.)).px(px(8.)).flex().items_center().gap(px(8.)).child(
                     div()
                         .id("team-person-filter")
+                        .relative()
                         .h(px(24.))
                         .pl(px(10.))
                         .pr(px(6.))
                         .rounded_full()
-                        .bg(t.fill)
                         .flex()
                         .items_center()
                         .gap(px(6.))
                         .text_size(px(12.))
                         .text_color(t.text)
                         .cursor_default()
+                        .child(crate::motion::tactile(neutral_wash(0.14)).base(t.fill).round())
                         .child(format!("Notes with {}", person.name))
                         .child(icon("close", 11., t.muted))
                         .reach()
@@ -1153,52 +1174,83 @@ impl Cereal {
                 ),
             );
         }
-        if notes.is_empty() {
-            let organization = page.organization.name.trim();
-            let everyone = if organization.is_empty() { "your workspace".to_owned() } else { organization.to_owned() };
-            return list.child(self.team_empty(
+        // A note taken out of the space folds shut and the rows under it
+        // close up, its day's caption with it when it was the day's last.
+        let mut entries: Vec<(u64, KeptNote)> = Vec::with_capacity(notes.len() + 8);
+        let mut day = "";
+        // (A day that comes up again further down is another caption.)
+        let mut captions: std::collections::HashMap<&str, u32> = Default::default();
+        for note in &notes {
+            if note.date != day {
+                day = &note.date;
+                let again = captions.entry(day).or_default();
+                entries.push((crate::lazy::key(("team-day", day, *again)), KeptNote::Day(day.to_owned())));
+                *again += 1;
+            }
+            entries.push((crate::lazy::key(("team-note", &note.id)), KeptNote::Note((*note).clone())));
+        }
+        let keys: Vec<u64> = entries.iter().map(|(key, _)| *key).collect();
+        let scope = crate::lazy::key(person.map(|person| (&person.email, &person.name)));
+        NOTES_LEFT.with(|left| left.borrow_mut().update(crate::lazy::key((&keys, scope)), || entries.clone()));
+        let drawn = self.stage.roster("team-notes", scope, &keys);
+        let leaving: Vec<u64> = drawn.iter().filter(|row| !row.present).map(|row| row.key).collect();
+        NOTES_LEFT.with(|left| left.borrow_mut().keep(&leaving));
+        let mut listed: std::collections::HashMap<u64, KeptNote> = entries.into_iter().collect();
+        for row in &drawn {
+            let (kept, live) = match listed.remove(&row.key) {
+                Some(kept) if row.present => (Some(kept), true),
+                _ => (NOTES_LEFT.with(|left| left.borrow().left(row.key).cloned()), false),
+            };
+            let content = kept.map(|kept| match kept {
+                KeptNote::Day(day) => caption(crate::home::date_label(&day), t)
+                    .px(px(8.))
+                    .pt(px(25.))
+                    .pb(px(2.))
+                    .into_any_element(),
+                KeptNote::Note(note) => self.team_note_row(&note, live, cx).into_any_element(),
+            });
+            list = list.children(crate::motion::roster_row(&self.stage, "team-notes", *row, content));
+        }
+        // The empty space says so once its last note has gone.
+        let organization = page.organization.name.trim();
+        let everyone = if organization.is_empty() { "your workspace".to_owned() } else { organization.to_owned() };
+        list.children(crate::motion::appear_on_page(
+            &self.stage,
+            ("team-notes-empty", 0),
+            notes.is_empty() && drawn.is_empty(),
+            self.team_empty(
                 "users",
                 if person.is_some() { "No notes with them here" } else { "Nothing shared with the team yet" },
                 format!("Add a note and everyone in {everyone} can read it. It stays yours: only you can change it."),
                 Some(pill("team-empty-add", "Add notes", "plus-small", t).on_click(cx.listener(
                     |this, _, window, cx| {
-                        this.focus.focus(window);
                         this.open_team_picker(cx);
+                        this.team.picker_search.read(cx).focus_handle.focus(window);
                     },
                 ))),
-            ));
-        }
-        let mut day = "";
-        for note in notes {
-            if note.date != day {
-                day = &note.date;
-                list = list.child(
-                    caption(crate::home::date_label(day), t)
-                        .px(px(8.))
-                        .pt(px(25.))
-                        .pb(px(2.)),
-                );
-            }
-            list = list.child(self.team_note_row(note, cx));
-        }
-        list
+            ),
+        ))
     }
 
     /// A note in the space: its owner's face, its title over who it was
     /// with, and when. Under the pointer the time gives way to "remove" for
     /// those who may.
-    fn team_note_row(&self, note: &TeamSpaceNoteDTO, cx: &mut Context<Self>) -> Stateful<Div> {
+    ///
+    /// `live` is false for a row that has left the list and is only closing
+    /// up: it answers nothing.
+    fn team_note_row(&self, note: &TeamSpaceNoteDTO, live: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = self.theme();
         let key = crate::lazy::key(("team-note", &note.id));
-        let hovered = crate::motion::reveal_key(("team-note", key));
+        let hovered = crate::motion::reveal_key(("team-note", key, live));
         let names: Vec<String> = note.attendees.people.iter().map(|person| person.short_name.clone()).collect();
         let subtitle = attendee_line(&names, usize::try_from(note.attendees.others).unwrap_or(0), &note.owner.name);
-        let title = if note.title.trim().is_empty() { "Untitled note".to_owned() } else { note.title.clone() };
+        let title = if note.title.trim().is_empty() { "New note".to_owned() } else { note.title.clone() };
         let time = row_time(note);
         let (id, mine) = (note.id.clone(), note.mine);
         let removed = note.id.clone();
         div()
-            .id(("team-note", key))
+            .id((if live { "team-note" } else { "team-note-left" }, key))
+            .relative()
             .w_full()
             .h(px(44.))
             .mb(px(4.))
@@ -1210,8 +1262,7 @@ impl Cereal {
             .rounded(px(12.))
             .cursor_default()
             .map(|row| crate::motion::lift(row, self.stage.cascade_next("page")))
-            .child(row_feedback(t, 12.).reveals(hovered))
-            .reach()
+            .when(live, |row| row.child(row_feedback(t, 12.).reveals(hovered)).reach())
             .child(face(&note.owner, 28., Some(6.), cx))
             .child(
                 div()
@@ -1232,7 +1283,7 @@ impl Cereal {
                     .items_center()
                     .justify_end()
                     .map(|trailing| {
-                        if note.can_remove {
+                        if note.can_remove && live {
                             trailing
                                 .child(crate::motion::conceal(time_label(&time, t), hovered))
                                 .child(
@@ -1250,7 +1301,9 @@ impl Cereal {
                         }
                     }),
             )
-            .on_click(cx.listener(move |this, _, _, cx| this.open_team_note(id.clone(), mine, cx)))
+            .when(live, |row| {
+                row.on_click(cx.listener(move |this, _, _, cx| this.open_team_note(id.clone(), mine, cx)))
+            })
     }
 
     fn team_people(&self, cx: &mut Context<Self>) -> Div {
@@ -1299,14 +1352,30 @@ impl Cereal {
                 .child(
                     div()
                         .id("team-people-last-note")
+                        .relative()
                         .w(px(size::DATE_COLUMN))
+                        .h(px(24.))
                         .flex_shrink_0()
                         .flex()
                         .items_center()
                         .gap(px(5.))
+                        .rounded(px(6.))
                         .cursor_default()
+                        // The wash reaches 6 pt past the words on each side.
+                        .child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .left(px(-6.))
+                                .right(px(6.))
+                                .child(crate::motion::tactile(t.hover).radius(6.)),
+                        )
                         .child(head("Last note"))
-                        .child(icon(if self.team.oldest_first { "arrow-up" } else { "arrow-down" }, 11., t.muted))
+                        .child(crate::motion::swapped(
+                            icon(if self.team.oldest_first { "arrow-up" } else { "arrow-down" }, 11., t.muted),
+                            self.stage.swap(("team-people-order", 0), u64::from(self.team.oldest_first)),
+                        ))
                         .reach()
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.focus.focus(window);
@@ -1315,19 +1384,46 @@ impl Cereal {
                         })),
                 ),
         );
-        if people.is_empty() {
-            return table.child(
-                div().py(px(40.)).flex().justify_center().child(small("No one matches that search.", t)),
-            );
-        }
-        for person in people {
-            let key = crate::lazy::key(("team-person", &person.email, &person.name));
+        // Rows that a search leaves out fold shut, and open again when it
+        // lets them back; another order is another list.
+        let key_of = |person: &TeamSpacePersonDTO| crate::lazy::key(("team-person", &person.email, &person.name));
+        let keys: Vec<u64> = people.iter().map(|person| key_of(person)).collect();
+        let scope = u64::from(self.team.oldest_first);
+        PEOPLE_LEFT.with(|left| {
+            left.borrow_mut().update(crate::lazy::key((&keys, scope)), || {
+                people.iter().map(|person| (key_of(person), (*person).clone())).collect()
+            })
+        });
+        let drawn = self.stage.roster("team-people", scope, &keys);
+        let leaving: Vec<u64> = drawn.iter().filter(|row| !row.present).map(|row| row.key).collect();
+        PEOPLE_LEFT.with(|left| left.borrow_mut().keep(&leaving));
+        let mut listed: std::collections::HashMap<u64, &TeamSpacePersonDTO> =
+            keys.iter().copied().zip(people.iter().copied()).collect();
+        let nobody = people.is_empty() && drawn.is_empty();
+        for row in drawn {
+            let (person, live) = match listed.remove(&row.key) {
+                Some(person) if row.present => (person.clone(), true),
+                _ => match PEOPLE_LEFT.with(|left| left.borrow().left(row.key).cloned()) {
+                    Some(person) => (person, false),
+                    None => {
+                        table = table.children(crate::motion::roster_row(&self.stage, "team-people", row, None::<Div>));
+                        continue;
+                    }
+                },
+            };
+            let person = &person;
+            let key = row.key;
             let tint_key = person.email.clone().unwrap_or_else(|| person.name.clone());
             let email = person.email.clone().unwrap_or_default();
             let chosen = person.clone();
-            table = table.child(
+            table = table.children(crate::motion::roster_row(
+                &self.stage,
+                "team-people",
+                row,
+                Some(
                 div()
-                    .id(("team-person", key))
+                    .id((if live { "team-person" } else { "team-person-left" }, key))
+                    .relative()
                     .w_full()
                     .h(px(size::PERSON_ROW - 4.))
                     .mb(px(4.))
@@ -1338,8 +1434,7 @@ impl Cereal {
                     .rounded(px(12.))
                     .cursor_default()
                     .map(|row| crate::motion::lift(row, self.stage.cascade_next("page")))
-                    .child(row_feedback(t, 12.))
-                    .reach()
+                    .when(live, |row| row.child(row_feedback(t, 12.)).reach())
                     .child(
                         div()
                             .flex_1()
@@ -1392,7 +1487,7 @@ impl Cereal {
                             .text_color(t.muted)
                             .child(last_note_label(&person.last_note_date, today)),
                     )
-                    .when(!own, |row| {
+                    .when(!own && live, |row| {
                         // Their notes, on the Notes tab.
                         row.on_click(cx.listener(move |this, _, window, cx| {
                             this.focus.focus(window);
@@ -1401,15 +1496,27 @@ impl Cereal {
                             cx.notify();
                         }))
                     }),
-            );
+                ),
+            ));
         }
-        table
+        table.children(crate::motion::appear_on_page(
+            &self.stage,
+            ("team-people-none", 0),
+            nobody,
+            div().py(px(40.)).flex().justify_center().child(small("No one matches that search.", t)),
+        ))
     }
 
     /// The "Add notes" sheet: one's own notes, a search, and ticks.
     fn team_picker(&self, pose: crate::motion::Pose, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme();
-        let Some(picker) = &self.team.picker else { return div().into_any_element() };
+        // Closed, it is drawn as it was for as long as it takes to leave.
+        let open = self.team.picker.is_some();
+        let closing = Picker { selected: LAST_PICKED.with(|last| last.borrow().clone()), sending: false };
+        let picker = self.team.picker.as_ref().unwrap_or(&closing);
+        if open {
+            LAST_PICKED.with(|last| last.borrow_mut().clone_from(&picker.selected));
+        }
         let candidates = self.team_candidates(cx);
         let count = picker.selected.len();
         let today = Local::now().date_naive();
@@ -1459,7 +1566,17 @@ impl Cereal {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .when(picked, |tick| tick.child(icon("check", 11., t.bg))),
+                            // The check rises in as the box fills.
+                            .when(picked, |tick| {
+                                tick.child(crate::motion::swapped(
+                                    icon("check", 11., t.bg),
+                                    self.stage.swap(("team-pick", id), 1),
+                                ))
+                            })
+                            .when(!picked, |tick| {
+                                self.stage.swap(("team-pick", id), 0);
+                                tick
+                            }),
                     )
                     .child(div().flex_1().min_w_0().text_size(px(13.5)).truncate().child(title))
                     .child(small(last_note_label(&date, today), t).flex_shrink_0())
@@ -1483,7 +1600,6 @@ impl Cereal {
             .overflow_hidden()
             .flex()
             .flex_col()
-            .occlude()
             .child(
                 div()
                     .px(px(16.))
@@ -1535,34 +1651,39 @@ impl Cereal {
                         pill("team-picker-add", add, "", t)
                             .bg(t.text)
                             .text_color(t.bg)
-                            .when(count == 0 || picker.sending, |add| add.opacity(DISABLED))
+                            // It firms up with the first tick.
+                            .opacity(
+                                self.stage
+                                    .aim(
+                                        ("team-picker-add", 0),
+                                        if count == 0 || picker.sending { DISABLED } else { 1. },
+                                        crate::motion::SNAPPY,
+                                    )
+                                    .clamp(DISABLED, 1.),
+                            )
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.focus.focus(window);
                                 this.add_team_picks(cx);
                             })),
                     ),
             );
-        div()
-            .absolute()
-            .inset_0()
-            .occlude()
-            .bg(scrim(Scrim::Dialog, pose.fade))
-            .flex()
-            .items_center()
-            .justify_center()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.team.picker = None;
-                    cx.notify();
-                }),
-            )
-            .child(crate::motion::pop(
-                card.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
-                crate::motion::Pop::menu((0.5, 0.5)),
-                pose,
-            ))
-            .into_any_element()
+        // A dialog on the app's one overlay layer: the page behind it takes
+        // no pointer, a press outside closes it and goes no further, and
+        // Escape closes it (`Cereal::dismiss_top`).
+        overlay(
+            open,
+            cx.listener(|this, _, window, cx| {
+                this.team.picker = None;
+                this.focus.focus(window);
+                cx.notify();
+            }),
+        )
+        .bg(scrim(Scrim::Dialog, pose.fade))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(crate::motion::pop(floating(card), crate::motion::Pop::DIALOG, pose))
+        .into_any_element()
     }
 }
 

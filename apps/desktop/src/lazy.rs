@@ -61,6 +61,12 @@ struct Column {
     top: f32,
     /// An item to bring into view once its position is known.
     reveal: Option<usize>,
+    /// How much of the viewport's bottom something floats over: an item
+    /// brought into view stays clear of it (see [`reveal_clear`]).
+    reveal_inset: f32,
+    /// The rows that were arriving or leaving in the last frame (see
+    /// [`roster`]).
+    moving: Vec<u64>,
     /// An item to glide to the middle of the viewport (see [`centre`]).
     centre: Option<Centre>,
     /// The caller is scrolling its container to the bottom this frame.
@@ -136,6 +142,18 @@ pub fn scroll(name: &'static str) -> ScrollHandle {
 /// children are no longer one per item).
 pub fn reveal(name: &'static str, index: usize) {
     COLUMNS.with(|columns| columns.borrow_mut().entry(name).or_default().reveal = Some(index));
+}
+
+/// [`reveal`] for a column whose scroll container has something floating
+/// over its last `below` points (a composer, a bar): the item is brought
+/// into the part of the viewport above that.
+pub fn reveal_clear(name: &'static str, index: usize, below: f32) {
+    COLUMNS.with(|columns| {
+        let mut columns = columns.borrow_mut();
+        let column = columns.entry(name).or_default();
+        column.reveal = Some(index);
+        column.reveal_inset = below.max(0.);
+    });
 }
 
 /// Glide the scroll offset until item `index` sits in the middle of the
@@ -223,6 +241,83 @@ pub fn offset_to_centre(item: Range<f32>, viewport: f32, max: f32) -> f32 {
 /// the end of the column rather than what the old offset points at.
 pub fn to_end(name: &'static str) {
     COLUMNS.with(|columns| columns.borrow_mut().entry(name).or_default().to_end = true);
+}
+
+/// `Stage::roster` for the rows of the windowed column `name` (the roster
+/// has the column's name): the rows to build the column from, those that
+/// have just left included. A row on its way in or out is built wherever it
+/// is and measured every frame, and once more when it has come to rest, so
+/// the column never stands on a height taken in the middle of the movement.
+pub fn roster(stage: &crate::motion::Stage, name: &'static str, scope: u64, keys: &[u64]) -> Vec<crate::motion::Row> {
+    let rows = stage.roster(name, scope, keys);
+    let moving: Vec<u64> = rows
+        .iter()
+        .filter(|row| !row.present || !row.pose.at_rest())
+        .map(|row| row.key)
+        .collect();
+    COLUMNS.with(|columns| {
+        let mut columns = columns.borrow_mut();
+        let column = columns.entry(name).or_default();
+        if column.moving.is_empty() && moving.is_empty() {
+            return;
+        }
+        for key in column.moving.iter().chain(&moving) {
+            column.heights.remove(key);
+        }
+        column.moving = moving;
+    });
+    rows
+}
+
+/// What the rows of a list showed, kept so that a row which has left the
+/// list can still be drawn while its space closes (`Stage::roster` returns
+/// such a row with `present` false; pass what [`Leavers::left`] has for it
+/// to `motion::roster_row`).
+pub struct Leavers<T> {
+    token: Option<u64>,
+    live: HashMap<u64, T>,
+    left: HashMap<u64, T>,
+}
+
+impl<T> Default for Leavers<T> {
+    fn default() -> Self {
+        Self { token: None, live: HashMap::new(), left: HashMap::new() }
+    }
+}
+
+impl<T> Leavers<T> {
+    /// Call every frame the list is drawn. `token` is anything that changes
+    /// when the list does (a revision, a hash of its keys); `rows` is asked
+    /// for the list's rows by key only when it has, so a long list costs
+    /// nothing on the frames in between.
+    pub fn update(&mut self, token: u64, rows: impl FnOnce() -> Vec<(u64, T)>) {
+        if self.token == Some(token) {
+            return;
+        }
+        self.token = Some(token);
+        let now: HashMap<u64, T> = rows().into_iter().collect();
+        for (key, row) in std::mem::take(&mut self.live) {
+            if !now.contains_key(&key) {
+                self.left.insert(key, row);
+            }
+        }
+        // One that came back is the list's own again.
+        self.left.retain(|key, _| !now.contains_key(key));
+        self.live = now;
+    }
+
+    /// What the row `key` showed before it left.
+    pub fn left(&self, key: u64) -> Option<&T> {
+        self.left.get(&key)
+    }
+
+    /// Forget the rows that have finished leaving: `leaving` are the keys
+    /// still being drawn on their way out.
+    pub fn keep(&mut self, leaving: &[u64]) {
+        if !self.left.is_empty() {
+            self.left.retain(|key, _| leaving.contains(key));
+        }
+    }
 }
 
 /// Where each item starts in column coordinates, and where the column ends.
@@ -460,7 +555,8 @@ fn windowed(
                 match position(&heights, gap, index) {
                     Some(item) => {
                         column.reveal = None;
-                        let item = item.start + column.top..item.end + column.top;
+                        let inset = std::mem::take(&mut column.reveal_inset).min(view_height / 2.);
+                        let item = item.start + column.top..item.end + column.top + inset;
                         if let Some(target) = offset_to_show(item, scrolled, view_height) {
                             scroll.set_offset(point(scroll.offset().x, px(-target)));
                             scrolled = target;
@@ -908,6 +1004,35 @@ mod tests {
         let (gapped, total) = tops(&[40.; 3], 8.);
         assert_eq!((gapped, total), (vec![0., 48., 96.], 136.));
         assert_eq!(tops(&[], 8.), (vec![], 0.));
+    }
+
+    #[test]
+    fn a_row_that_left_is_kept_until_its_space_has_closed() {
+        let mut leavers = Leavers::default();
+        let mut asked = 0;
+        let mut list = |leavers: &mut Leavers<&'static str>, token, rows: Vec<(u64, &'static str)>| {
+            leavers.update(token, || {
+                asked += 1;
+                rows
+            });
+        };
+        list(&mut leavers, 1, vec![(1, "one"), (2, "two"), (3, "three")]);
+        assert_eq!(leavers.left(2), None);
+        // Nothing changed: the rows are not asked for again.
+        list(&mut leavers, 1, vec![]);
+        // Two leaves: what it showed is still there to draw.
+        list(&mut leavers, 2, vec![(1, "one"), (3, "three")]);
+        assert_eq!(leavers.left(2), Some(&"two"));
+        // Another leaves while the first is still closing: both are kept.
+        list(&mut leavers, 3, vec![(1, "one")]);
+        assert_eq!((leavers.left(2), leavers.left(3)), (Some(&"two"), Some(&"three")));
+        // The first has closed.
+        leavers.keep(&[3]);
+        assert_eq!((leavers.left(2), leavers.left(3)), (None, Some(&"three")));
+        // Undo: it is the list's own row again, not a leaver.
+        list(&mut leavers, 4, vec![(1, "one"), (3, "three")]);
+        assert_eq!(leavers.left(3), None);
+        assert_eq!(asked, 4);
     }
 
     #[test]

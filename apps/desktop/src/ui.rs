@@ -379,6 +379,11 @@ pub fn set_keyboard_focus(on: bool) -> bool {
     KEYBOARD_FOCUS.with(|flag| flag.replace(on) != on)
 }
 
+/// Whether the focus is being moved with the keyboard (the ring shows).
+pub(crate) fn keyboard_focus() -> bool {
+    KEYBOARD_FOCUS.with(|flag| flag.get())
+}
+
 pub fn set_dark(dark: bool) {
     DARK.with(|flag| flag.set(dark));
 }
@@ -551,6 +556,15 @@ impl<E: StatefulInteractiveElement + ParentElement> Reach for E {
     }
 }
 
+/// The focus handle of the reachable control with element id `id` (the one
+/// [`Reach::reach`] gives it), made now if the control has not been drawn
+/// yet: for moving the keyboard focus to a particular control, as when a
+/// popover keeps Tab among its own controls or a question that has just
+/// appeared takes the focus from the button that asked it.
+pub(crate) fn reach_handle(id: impl Into<ElementId>) -> Option<FocusHandle> {
+    focus_handle_for(Some(id.into()))
+}
+
 /// The scroll thumb: 6 px wide, 3 px in from the edges of its container.
 const THUMB_WIDTH: f32 = 6.;
 const THUMB_INSET: f32 = 3.;
@@ -678,6 +692,36 @@ pub fn scroll_thumb(name: &'static str, scroll: &ScrollHandle) -> impl IntoEleme
 
 /// Opacity of a control that is present but cannot be used right now.
 pub const DISABLED: f32 = 0.45;
+
+/// The system's double-click interval: two presses closer together than
+/// this are one double click, not two decisions.
+#[allow(unexpected_cfgs)]
+pub fn double_click_interval() -> std::time::Duration {
+    static INTERVAL: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *INTERVAL.get_or_init(|| {
+        #[cfg(target_os = "macos")]
+        {
+            use objc::{class, msg_send, sel, sel_impl};
+            let seconds: f64 = unsafe { msg_send![class!(NSEvent), doubleClickInterval] };
+            if seconds.is_finite() && seconds > 0. {
+                return std::time::Duration::from_secs_f64(seconds.clamp(0.25, 5.));
+            }
+        }
+        std::time::Duration::from_millis(500)
+    })
+}
+
+/// Whether a press on the button that confirms something destructive is an
+/// answer to the question. It is not when it comes within `interval` (the
+/// double-click interval) of the question being asked, or as the second
+/// press of a double click: that is the press that asked, landing twice.
+/// Every destructive confirmation that appears in place (in a row, in a
+/// popover) asks this before it acts, and is drawn dimmed until it would
+/// say yes. The other half of the rule is where the button is drawn: never
+/// under the pointer that asked.
+pub fn press_confirms(since_asked: std::time::Duration, click_count: usize, interval: std::time::Duration) -> bool {
+    click_count <= 1 && since_asked >= interval
+}
 
 /// Corner radius of every floating popover: menus, the details card, the
 /// event pickers, the language menu and the model list.
@@ -1617,6 +1661,21 @@ mod tests {
         assert!(pose.fade > 0. && pose.fade < 1.);
         tips.report(a, false, ms(900), true);
         assert!(tips.pose(a, ms(900) + crate::motion::REDUCED_FADE * 2, true).is_none());
+    }
+
+    #[test]
+    fn a_press_inside_the_double_click_interval_is_not_an_answer() {
+        use std::time::Duration;
+        let interval = Duration::from_millis(500);
+        // The film of D1-008: the second click came 233 ms after the first.
+        assert!(!press_confirms(Duration::from_millis(233), 1, interval));
+        assert!(!press_confirms(Duration::from_millis(499), 1, interval));
+        assert!(press_confirms(interval, 1, interval));
+        assert!(press_confirms(Duration::from_secs(3), 1, interval));
+        // The second press of a double click never is, however late the
+        // system still counts it as one.
+        assert!(!press_confirms(Duration::from_secs(3), 2, interval));
+        assert!(!press_confirms(Duration::from_millis(100), 3, interval));
     }
 
     #[test]
