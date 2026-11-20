@@ -3339,6 +3339,61 @@ fn bar_steps() -> Vec<Step> {
     ]
 }
 
+/// The live transcript one event at a time, `wb-…`, for filming how a line
+/// arrives, how the status line and the trouble banner come and go, and the
+/// "jump to latest" capsule: each step does one thing and returns at once,
+/// so a script can drive the pointer in between.
+fn live_film_steps() -> Vec<Step> {
+    use crate::live::{Event, Phase};
+    fn open(view: &mut Cereal, lines: usize, cx: &mut Context<Cereal>) {
+        view.navigate(Screen::Home, cx);
+        view.open_note(1, cx);
+        view.active_tab = NoteTab::Notes;
+        if let Some(note) = view.workspace.note_mut(1) {
+            note.replace_transcript("");
+        }
+        view.live_preview(1, speech::meeting(lines), cx);
+        view.recording_last_click = None;
+        view.recording_changed_at = None;
+        view.start_recording_preview(1, cx);
+        view.transcript_open = true;
+        view.transcript_epoch = view.transcript_epoch.wrapping_add(1);
+        view.live_preview(1, vec![speech::spoken(lines, 12)], cx);
+    }
+    vec![
+        // A meeting a few lines in, and one an hour in.
+        step("wb-live-short", 300, |view, cx| open(view, 7, cx)),
+        step("wb-live-long", 300, |view, cx| open(view, 100, cx)),
+        // The line being spoken becomes final and the next one starts.
+        step("wb-line-a", 100, |view, cx| {
+            view.live_preview(1, vec![speech::stored(7), speech::spoken(8, 9)], cx);
+        }),
+        step("wb-line-b", 100, |view, cx| {
+            view.live_preview(1, vec![speech::stored(8), speech::spoken(9, 14)], cx);
+        }),
+        step("wb-line-c", 100, |view, cx| {
+            view.live_preview(1, vec![speech::stored(9), speech::spoken(10, 6)], cx);
+        }),
+        step("wb-more-a", 100, |view, cx| {
+            view.live_preview(1, vec![speech::stored(100), speech::spoken(101, 9)], cx);
+        }),
+        step("wb-more-b", 100, |view, cx| {
+            view.live_preview(1, vec![speech::stored(101), speech::spoken(102, 14)], cx);
+        }),
+        step("wb-behind", 100, |view, cx| {
+            view.live_preview(1, vec![Event::Status(Phase::CatchingUp, 15)], cx);
+        }),
+        step("wb-caught-up", 100, |view, cx| {
+            view.live_preview(1, vec![Event::Status(Phase::Live, 0)], cx);
+        }),
+        // A recording that fails, and is tried again.
+        step("wb-failed", 100, |view, cx| {
+            view.recording.fail(view.recording.epoch);
+            cx.notify();
+        }),
+    ]
+}
+
 /// A stretch the stream skipped and its durable part then filled in,
 /// `p-gap-…`: stills for review. The reader has scrolled up and the filled
 /// text lands above what they are reading, which must not move.
@@ -4104,6 +4159,7 @@ pub fn run(handle: WindowHandle<Cereal>, cx: &mut App) {
             .into_iter()
             .chain(still_steps())
             .chain(live_still_steps())
+            .chain(live_film_steps())
             .chain(transcript_panel_steps())
             .chain(bench_steps())
             .chain(live_bench_steps())

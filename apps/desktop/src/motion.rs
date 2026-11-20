@@ -35,6 +35,7 @@
 //! | A value that changes: a width, an offset, a rotation | [`Stage::aim`] |
 //! | Something that shares the window with its neighbour: a sidebar, a side panel | [`Stage::presence`] for its pose and [`Stage::room`] for the room it takes |
 //! | A group of items arriving together | [`Stage::mark`] then [`Stage::cascade_next`] with [`lift`] |
+//! | A scroll position that follows an end which keeps moving (a live transcript's newest line), or goes back to where it was | [`trail`], once a frame |
 use crate::ui::{FONT, Theme, icon};
 use gpui::{prelude::*, *};
 use std::{
@@ -3459,6 +3460,37 @@ pub fn follow_height(stage: &Stage, key: TrackKey, content: impl IntoElement) ->
 }
 
 // ---------------------------------------------------------------------------
+// Trailing: a scroll position closing on where it should be
+// ---------------------------------------------------------------------------
+
+/// How quickly a trailing scroll position closes on its target: what is
+/// left of the distance falls to a third (1/e) in this long, so a row's
+/// height is covered in about a quarter of a second.
+pub const TRAIL: Duration = Duration::from_millis(60);
+/// The most a trailing scroll position travels: from further away it starts
+/// this far from its target, so going back a long way is still one quick
+/// movement and never a blur of text.
+pub const TRAIL_REACH: f32 = 240.;
+
+/// A scroll position that follows a target which keeps moving (the end of a
+/// transcript that is still growing), or is going back to where it was: it
+/// is `gap` from the target now (signed), and this is how far from it to
+/// draw it `elapsed` after it was last drawn. Call it once a frame with the
+/// real distance and set the offset from what comes back; when that is zero
+/// it has arrived. It leaves fast and lands softly, never past the target (a
+/// scroll that overshoots reads as the text bouncing), and because each
+/// frame starts from where things really are, new text arriving mid-way
+/// simply lengthens the journey. With reduced motion it is there at once.
+pub fn trail(gap: f32, elapsed: Duration) -> f32 {
+    if reduce_motion() || !gap.is_finite() {
+        return 0.;
+    }
+    let left = gap.clamp(-TRAIL_REACH, TRAIL_REACH)
+        * (-paced(elapsed) / TRAIL.as_secs_f32()).exp();
+    if left.abs() < 0.5 { 0. } else { left }
+}
+
+// ---------------------------------------------------------------------------
 // Slow loops
 // ---------------------------------------------------------------------------
 
@@ -3634,6 +3666,34 @@ pub fn cubic_bezier(t: f32, x1: f64, y1: f64, x2: f64, y2: f64) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_trailing_scroll_closes_on_its_target_without_passing_it() {
+        // (Reduce motion is read from the system; forced off here it moves.)
+        if super::reduce_motion() {
+            assert_eq!(super::trail(43., Duration::from_millis(16)), 0.);
+            return;
+        }
+        let frame = Duration::from_millis(16);
+        // A row's height is covered in about a quarter of a second, each
+        // frame nearer than the last and never past the end.
+        let mut gap = 43.;
+        let mut frames = 0;
+        while gap != 0. {
+            let next = super::trail(gap, frame);
+            assert!(next >= 0. && next < gap);
+            gap = next;
+            frames += 1;
+        }
+        assert!((12..=20).contains(&frames), "{frames} frames");
+        // The first frame already moves a good part of the way.
+        assert!(super::trail(43., frame) < 43. * 0.8);
+        // From far away it starts within reach, on either side.
+        assert!(super::trail(5000., Duration::ZERO) <= super::TRAIL_REACH);
+        assert!(super::trail(-5000., Duration::ZERO) >= -super::TRAIL_REACH);
+        assert_eq!(super::trail(0.3, frame), 0.);
+        assert_eq!(super::trail(f32::NAN, frame), 0.);
+    }
+
     use super::*;
     // `gpui::*` re-exports its own `test` attribute; these are plain unit tests.
     use std::prelude::v1::test;

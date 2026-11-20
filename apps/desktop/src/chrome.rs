@@ -1677,7 +1677,7 @@ impl Cereal {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        use crate::motion::{GOOEY, Pop, pop};
+        use crate::motion::{Pop, pop};
         let t = self.theme();
         let menu = self.visible_menu.clone().or(self.menu.clone()).unwrap();
         self.menu_keyboard.rows.borrow_mut().clear();
@@ -1737,13 +1737,6 @@ impl Cereal {
             }
             Menu::NoteDetails | Menu::CalendarEvent => {
                 let anchors = self.note_metadata_anchors(window);
-                // The event picker unfolds from the details card and folds
-                // back into it; the card itself stays put in between.
-                let picker = self.stage.presence(
-                    ("event-picker", 0),
-                    menu == Menu::CalendarEvent && self.menu.is_some(),
-                    GOOEY,
-                );
                 // It hangs from the chip that opened it, wherever the title
                 // above has put that (a title of several lines moves it).
                 let chip = crate::onboarding_view::placed("note-details");
@@ -1763,20 +1756,14 @@ impl Cereal {
                             .child(
                                 div()
                                     .relative()
+                                    // The event picker is the card's own
+                                    // content while an event is chosen (see
+                                    // `render_details_card`).
                                     .child(pop(
                                         floating(self.render_note_details(cx)),
                                         Pop::menu((0.15, 0.)),
                                         pose,
-                                    ))
-                                    .when(picker.visible, |d| {
-                                        d.child(div().absolute().left(px(8.)).top(px(50.)).child(
-                                            pop(
-                                                floating(self.render_event_picker(cx)),
-                                                Pop::menu((0.1, 0.)),
-                                                picker,
-                                            ),
-                                        ))
-                                    }),
+                                    )),
                             ),
                     )
                     .into_any_element();
@@ -2181,7 +2168,7 @@ impl Cereal {
                     .flatten();
                 let (title,description)=match &menu {
                     Menu::Account=>sheet.as_ref().map(|sheet|(sheet.title.clone(),sheet.body.clone())).unwrap_or_default(),
-                    Menu::RecordingHelp=>("Recording a meeting".into(),"Start captures your microphone and computer audio separately. Stop saves the recording and transcribes it without generating notes. Choose Generate notes when you are ready. Resume keeps the same transcript; after you stop again, Regenerate notes includes the new conversation.".into()),
+                    Menu::RecordingHelp=>self.recording_help_text(),
                     Menu::Shortcuts=>("Keyboard shortcuts".into(),"Make yourself at home.".into()),
                     _=>("Cereal".into(),"Native notes, thoughtfully simple.".into()),
                 };

@@ -1769,29 +1769,33 @@ impl Cereal {
             .border(px(edge))
             .border_color(border)
             .shadow_lg()
-            .child(body)
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .when(live, |card| {
-                card.on_mouse_down_out(cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    if !trigger.contains(&event.position) {
-                        this.summary.dismiss();
-                        cx.notify();
-                    }
-                }))
-            });
+            .child(body);
         Some(
             deferred(
-                anchored()
-                    .anchor(side)
-                    .position(anchor)
-                    .snap_to_window_with_margin(px(12.))
-                    // The source card grows out of the paragraph's trigger at
-                    // the corner it hangs from, and folds back into it.
-                    .child(crate::motion::pop(
-                        card,
-                        crate::motion::Pop::menu((1., if above { 1. } else { 0. })),
-                        pose,
-                    )),
+                // A press outside the card closes it and does nothing more
+                // (it does not also edit the line under it, and nothing
+                // behind the card lights up meanwhile), as with every menu.
+                crate::note::page_overlay(
+                    live,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.summary.dismiss();
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    anchored()
+                        .anchor(side)
+                        .position(anchor)
+                        .snap_to_window_with_margin(px(12.))
+                        // The source card grows out of the paragraph's trigger
+                        // at the corner it hangs from, and folds back into it.
+                        .child(crate::motion::pop(
+                            floating(card),
+                            crate::motion::Pop::menu((1., if above { 1. } else { 0. })),
+                            pose,
+                        )),
+                ),
             )
             .with_priority(10)
             .into_any_element(),

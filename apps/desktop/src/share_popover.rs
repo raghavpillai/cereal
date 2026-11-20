@@ -898,7 +898,7 @@ impl Cereal {
             let key = crate::lazy::key(&entry.note_id);
             let hovered = crate::motion::reveal_key(("shared-by-name", key));
             let title = if entry.title.trim().is_empty() {
-                "Untitled note".to_string()
+                "New note".to_string()
             } else {
                 entry.title.clone()
             };

@@ -130,7 +130,28 @@ pub struct PanelState {
     find_restore: Option<(Point<Pixels>, bool)>,
     /// The microphone and language the running capture started with.
     pub capture: Option<(Option<String>, &'static str)>,
+    /// The reader is at the end of the transcript, and stays there as it
+    /// grows: decided when the panel opens and each time they scroll.
+    pub following: bool,
+    /// The wheel has turned since the last frame.
+    pub wheeled: bool,
+    /// An offset the transcript is easing back to (Find has closed).
+    pub back_to: Option<f32>,
+    /// When the offset was last moved toward the end or toward `back_to`.
+    pub trailed: Option<Instant>,
+    /// How many rows the transcript had when the reader left its end: the
+    /// "jump to latest" capsule counts the ones since.
+    pub left_at: usize,
+    /// Whether each footer menu said its choice waits for the next
+    /// recording, when it was last open: a menu that is leaving keeps the
+    /// words it was dismissed with.
+    microphone_waits: std::cell::Cell<bool>,
+    language_waits: std::cell::Cell<bool>,
 }
+
+/// How near its end (in points) a transcript is still "at the end": a
+/// reader within this of it follows the newest text.
+pub const FOLLOW_WITHIN: f32 = 48.;
 
 /// The eight segments of the sound popover's meter that `level` lights. A
 /// microphone that is being heard always lights the first, so the meter
@@ -664,6 +685,8 @@ const BAR_GAP: f32 = 8.;
 pub const PANEL_RADIUS: f32 = 32.;
 /// The two capsules have become one shape by this much of the way open.
 const FUSED_BY: f32 = 0.36;
+/// How far under its moving top edge the panel's content dissolves.
+const VEIL: f32 = 44.;
 
 /// Where the bar stood, in the panel's own frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -949,6 +972,30 @@ impl Element for Fuse {
             window.with_content_mask(Some(ContentMask { bounds: whole.inset(inset) }), |window| {
                 parts.content.paint(window, cx)
             });
+            // The shape's top edge travels over the transcript. A mask is a
+            // rectangle and the edge has round corners, so text would lie
+            // across it: the content dissolves into the panel's colour just
+            // under the edge instead, and is gone before the edge reaches it.
+            if let Some((rect, radii)) = shapes.first().filter(|_| shapes.len() == 1) {
+                let veil = smooth((1. - level).abs() / 0.03) * alpha;
+                let depth = px(VEIL).min(rect.size.height);
+                window.paint_quad(
+                    fill(
+                        Bounds::new(rect.origin, size(rect.size.width, depth)),
+                        linear_gradient(
+                            180.,
+                            linear_color_stop(t.card.opacity(veil), 0.35),
+                            linear_color_stop(t.card.opacity(0.), 1.),
+                        ),
+                    )
+                    .corner_radii(Corners {
+                        top_left: radii.top_left.min(depth),
+                        top_right: radii.top_right.min(depth),
+                        bottom_right: px(0.),
+                        bottom_left: px(0.),
+                    }),
+                );
+            }
         }
         if let Some(content) = &mut parts.leaving {
             let mask = shapes.last().map_or(whole, |(rect, _)| *rect);
@@ -986,6 +1033,8 @@ impl Element for Fuse {
 
 /// Width of the Find field and of the popovers that open from the footer.
 pub const FIND_WIDTH: f32 = 220.;
+/// Find closed: the magnifier button, the size of every tool.
+const FIND_CLOSED: f32 = 28.;
 const SOUND_WIDTH: f32 = 264.;
 const MENU_WIDTH: f32 = 236.;
 
@@ -1081,9 +1130,8 @@ impl Cereal {
     // ------------------------------------------------------------- Find
 
     pub(crate) fn transcript_find_begin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let following = self.transcript_scroll.max_offset().height + self.transcript_scroll.offset().y
-            <= px(48.);
-        self.panel.find_restore = Some((self.transcript_scroll.offset(), following));
+        self.panel.find_restore = Some((self.transcript_scroll.offset(), self.panel.following));
+        self.panel.back_to = None;
         self.transcript_find_open = true;
         self.summary.transcript_selection = None;
         self.transcript_find_index = 0;
@@ -1105,27 +1153,40 @@ impl Cereal {
         self.search.update(cx, |input, cx| input.set_content("", cx));
         // The query is empty again: nothing to reveal on the next frame.
         self.transcript_last_query.clear();
+        // The transcript eases back (see `motion::trail`): to its end for a
+        // reader who was following it, or to where they were reading.
         match self.panel.find_restore.take() {
             Some((_, true)) | None => {
-                self.transcript_scroll.scroll_to_bottom();
-                crate::lazy::to_end("transcript");
+                self.panel.following = true;
+                self.panel.back_to = None;
             }
-            Some((offset, false)) => self.transcript_scroll.set_offset(offset),
+            Some((offset, false)) => {
+                self.panel.following = false;
+                self.panel.back_to = Some(-f32::from(offset.y));
+            }
         }
+        self.panel.trailed = None;
         self.focus.focus(window);
         cx.notify();
     }
 
-    /// The Find field: the query, then the count, the two steps, a divider
-    /// and the close button, all inside one rounded field.
+    /// Find, as one capsule at the start of the panel's toolbar. Closed it
+    /// is the magnifier button; open it is the field, grown out of that
+    /// button (the glyph stays where it was): the query, then the count and
+    /// the two steps, which slide in with the first letter typed, a divider
+    /// and the close button. It folds back into the button the same way.
+    /// `find` is its presence.
     pub(crate) fn transcript_find_field(
         &self,
         query: &str,
         index: usize,
         positions: Vec<usize>,
+        find: Pose,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let t = self.theme();
+        let open = self.transcript_find_open;
         let count = positions.len();
         let step = move |this: &mut Self, previous: bool, cx: &mut Context<Self>| {
             if let Some(next) = crate::note::transcript_find_step(this.transcript_find_index, count, previous) {
@@ -1134,18 +1195,62 @@ impl Cereal {
             }
             cx.notify();
         };
-        let mut field = div()
+        let level = if find.visible { find.value.max(0.) } else { 0. };
+        let settled = level.min(1.);
+        let capsule = div()
             .id("transcript-find-capsule")
-            .w(px(FIND_WIDTH))
-            .h(px(30.))
-            .pl(px(12.))
-            .pr(px(5.))
-            .rounded_full()
-            .bg(t.hover)
-            .border(px(crate::ui::hairline(0.5)))
-            .border_color(t.hairline)
+            .relative()
+            .w(px(FIND_CLOSED + (FIND_WIDTH - FIND_CLOSED) * level))
+            .h(px(FIND_CLOSED + 2. * settled))
+            .flex_shrink_0()
+            .rounded(px(6. + 9. * settled))
+            .overflow_hidden()
             .flex()
             .items_center()
+            // The glyph, at the button's centre in both states.
+            .child(
+                div()
+                    .w(px(FIND_CLOSED))
+                    .h_full()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon("search", 15., t.muted)),
+            );
+        if !find.visible {
+            return capsule
+                .cursor_default()
+                .child(crate::motion::tactile(t.hover).press(t.border.opacity(0.6)).radius(6.))
+                .child(crate::ui::tip("Find in transcript", t))
+                .reach()
+                .on_click(cx.listener(|this, _, window, cx| this.transcript_find_begin(window, cx)));
+        }
+        // The count, the steps and the divider take their room as the first
+        // letter is typed and give it back when the query is cleared.
+        let extras = self.stage.presence(
+            ("transcript-find-extras", 0),
+            open && !query.is_empty(),
+            crate::motion::SNAPPY,
+        );
+        let counted = if count == 0 {
+            "0/0".to_string()
+        } else {
+            format!("{}/{count}", index + 1)
+        };
+        let extras_width = self.stage.aim(
+            ("transcript-find-extras-width", 0),
+            crate::note::label_width(&counted, 11., window).ceil() + 10. + 2. * 22. + 9.,
+            crate::motion::SNAPPY,
+        );
+        // The fill is the button's own wash while the field grows out of
+        // it, and goes with the field as it folds back.
+        let fill = if open { 1. } else { find.fade };
+        let mut field = capsule
+            .bg(t.hover.opacity(fill))
+            .border(px(crate::ui::hairline(0.5)))
+            .border_color(t.hairline.opacity(t.hairline.a * find.fade))
+            .pr(px(5.))
             // Return steps to the next match and Shift-Return to the one
             // before, ahead of the field's own handling of either.
             .capture_action(cx.listener({
@@ -1167,32 +1272,36 @@ impl Cereal {
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
+                    .opacity(find.fade)
                     .text_size(px(13.))
                     // The input's own box is 22 pt tall: a line of the same
                     // height puts the text on the field's centre line.
                     .line_height(px(22.))
                     .child(self.search.clone()),
             );
-        if !query.is_empty() {
-            field = field.child(
-                div()
-                    .flex_shrink_0()
-                    .pl(px(6.))
-                    .pr(px(4.))
-                    .text_size(px(11.))
-                    .line_height(px(16.))
-                    .text_color(t.muted)
-                    .whitespace_nowrap()
-                    .child(if count == 0 {
-                        "0/0".to_string()
-                    } else {
-                        format!("{}/{count}", index + 1)
-                    }),
-            );
+        if extras.visible {
+            let mut group = div()
+                .w(px((extras_width * self.stage.room(("transcript-find-extras", 0), extras)).max(0.)))
+                .flex_shrink_0()
+                .overflow_hidden()
+                .opacity(extras.fade * find.fade)
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .pl(px(6.))
+                        .pr(px(4.))
+                        .text_size(px(11.))
+                        .line_height(px(16.))
+                        .text_color(t.muted)
+                        .whitespace_nowrap()
+                        .child(counted),
+                );
             for previous in [true, false] {
                 let tip = if previous { "Previous match" } else { "Next match" };
                 let step = step.clone();
-                field = field.child(
+                group = group.child(
                     div()
                         .id(if previous {
                             "transcript-find-previous"
@@ -1220,12 +1329,15 @@ impl Cereal {
                         .on_click(cx.listener(move |this, _, _, cx| step(this, previous, cx))),
                 );
             }
-            field = field.child(div().mx(px(4.)).w(px(1.)).h(px(12.)).flex_shrink_0().bg(t.hairline));
+            field = field.child(
+                group.child(div().mx(px(4.)).w(px(1.)).h(px(12.)).flex_shrink_0().bg(t.hairline)),
+            );
         }
         field.child(
             tool_tip("transcript-find-close", "close", "Close Find", t)
                 .size(px(22.))
                 .flex_shrink_0()
+                .opacity(find.fade)
                 .on_click(cx.listener(|this, _, window, cx| this.transcript_find_end(window, cx))),
         )
     }
@@ -1234,20 +1346,36 @@ impl Cereal {
 
     /// The right of the panel's footer: the microphone in use, the sound
     /// settings and the language of the transcript.
-    pub(crate) fn transcript_footer_tools(&self, cx: &mut Context<Self>) -> Div {
+    pub(crate) fn transcript_footer_tools(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let t = self.theme();
         let choice = |id: &'static str,
                       glyph: Option<&'static str>,
                       label: SharedString,
                       menu: Menu,
                       cx: &mut Context<Self>| {
+            // The control is as wide as its words, and eases to the width
+            // of new ones (another language, another microphone), so its
+            // neighbours glide aside instead of jumping.
+            let natural = 8.
+                + if glyph.is_some() { 15. + 5. + 2. } else { 0. }
+                + crate::note::label_width(&label, 13., window).ceil()
+                + 2.
+                + 16.
+                + 4.;
+            let width = self.stage.aim(
+                ("transcript-choice-width", crate::lazy::key(id)),
+                natural,
+                crate::motion::GOOEY,
+            );
             div()
                 .id(id)
                 .h(px(28.))
+                .w(px(width.max(0.)))
                 .min_w_0()
                 .pl(px(8.))
                 .pr(px(4.))
                 .rounded(px(6.))
+                .overflow_hidden()
                 .flex()
                 .items_center()
                 .gap(px(2.))
@@ -1257,9 +1385,9 @@ impl Cereal {
                 .cursor_default()
                 .child(crate::motion::tactile(t.hover).radius(6.))
                 .when_some(glyph, |control, glyph| {
-                    control.child(div().pr(px(5.)).child(icon(glyph, 15., t.muted)))
+                    control.child(div().flex_shrink_0().pr(px(5.)).child(icon(glyph, 15., t.muted)))
                 })
-                .child(div().min_w_0().truncate().child(label))
+                .child(div().flex_1().min_w_0().truncate().child(label))
                 .child(icon("footer-chevron", 16., t.muted))
                 .reach()
                 .on_click(cx.listener(move |this, _, window, cx| {
@@ -1498,6 +1626,13 @@ impl Cereal {
                 .capture
                 .as_ref()
                 .is_some_and(|(started, _)| *started != now);
+        // A menu that is leaving keeps what it said when it was dismissed.
+        let running = if self.menu == Some(Menu::RecordingInput) {
+            self.panel.microphone_waits.set(running);
+            running
+        } else {
+            self.panel.microphone_waits.get()
+        };
         menu.when(running, |menu| menu.child(self.next_start_note()))
     }
 
@@ -1520,6 +1655,14 @@ impl Cereal {
                 .capture
                 .as_ref()
                 .is_some_and(|(_, code)| *code != current.code);
+        // A menu that is leaving keeps what it said when it was dismissed:
+        // the choice that closed it does not add a line to it on its way out.
+        let running = if self.menu == Some(Menu::RecordingLanguage) {
+            self.panel.language_waits.set(running);
+            running
+        } else {
+            self.panel.language_waits.get()
+        };
         self.popover_shell(188.)
             .p(px(4.))
             .child(self.stage.glide("menu").indicator(t.hover, 6.))

@@ -62,6 +62,22 @@ pub(crate) fn transcript_panel_width(viewport: f32) -> f32 {
     DOCUMENT_WIDTH.min(viewport - 32.).max(200.)
 }
 
+/// [`crate::ui::overlay`] for something that floats from inside the page
+/// (the source card of a paragraph, the recent chats of the Ask panel): the
+/// layer reaches past its parent in every direction, so it covers the whole
+/// window whatever it is drawn in. Draw it just before the floating thing.
+pub(crate) fn page_overlay(
+    open: bool,
+    dismiss: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> Div {
+    const FAR: f32 = 6000.;
+    overlay(open, dismiss)
+        .top(px(-FAR))
+        .left(px(-FAR))
+        .right(px(-FAR))
+        .bottom(px(-FAR))
+}
+
 /// What the joined view tabs of a note page show.
 #[derive(Clone, Copy)]
 pub(crate) struct NoteTabs {
@@ -159,6 +175,11 @@ pub(crate) fn note_tab_widths(notes_label: f32, enhanced_label: f32, menu: bool)
 
 /// The width of a view tab's label as it is drawn: 13 px in the body face.
 pub(crate) fn note_tab_label_width(label: &'static str, window: &Window) -> f32 {
+    label_width(label, 13., window)
+}
+
+/// The width of one line of `label` at `size` px in the body face.
+pub(crate) fn label_width(label: &str, size: f32, window: &Window) -> f32 {
     let runs = [TextRun {
         len: label.len(),
         font: font(FONT),
@@ -170,7 +191,7 @@ pub(crate) fn note_tab_label_width(label: &'static str, window: &Window) -> f32 
     f32::from(
         window
             .text_system()
-            .shape_line(label.into(), px(13.), &runs, None)
+            .shape_line(label.to_owned().into(), px(size), &runs, None)
             .width,
     )
 }
@@ -1065,27 +1086,86 @@ impl Cereal {
         let matches = transcript_find_matches(&utterances, &query);
         let live_revision = self.live.revision();
         let reopened = self.transcript_last_epoch != self.transcript_epoch;
-        let grew = transcript != self.transcript_last_text
-            || live_revision != self.transcript_last_live;
+        // Where the reader is: `at` of a scroll range of `end`, as the last
+        // frame laid it out.
+        let end = f32::from(self.transcript_scroll.max_offset().height).max(0.);
+        let at = -f32::from(self.transcript_scroll.offset().y);
+        let row_count = rows.len();
+        if std::mem::take(&mut self.panel.wheeled) {
+            // The reader scrolled: they follow the newest text only from
+            // its end, and nothing carries them anywhere meanwhile.
+            let following = end - at <= crate::transcript_panel::FOLLOW_WITHIN;
+            if self.panel.following && !following {
+                self.panel.left_at = row_count;
+            }
+            self.panel.following = following;
+            self.panel.back_to = None;
+            self.panel.trailed = None;
+        }
+        // Ease the offset toward `target` (see `motion::trail`); true once
+        // it is there.
+        let ease = |panel: &mut crate::transcript_panel::PanelState,
+                    scroll: &ScrollHandle,
+                    stage: &crate::motion::Stage,
+                    target: f32| {
+            let now = std::time::Instant::now();
+            let elapsed = panel
+                .trailed
+                .map_or(crate::motion::FRAME_LEAD, |last| now.saturating_duration_since(last));
+            let left = crate::motion::trail(target - at, elapsed);
+            scroll.set_offset(point(scroll.offset().x, px(-(target - left))));
+            if left == 0. {
+                panel.trailed = None;
+            } else {
+                panel.trailed = Some(now);
+                stage.keep_alive();
+            }
+            left == 0.
+        };
         if query != self.transcript_last_query {
             self.transcript_find_index = 0;
+            self.panel.trailed = None;
             if let Some(first) = matches.first() {
                 crate::lazy::reveal("transcript", first.utterance_index);
             }
-        } else if query.is_empty()
+        } else if !query.is_empty() {
+            self.panel.trailed = None;
+        } else if reopened {
             // Opening the panel shows the newest text, unless it was opened
-            // on a source. After that it follows the tail only for a reader
-            // who is already there: one who scrolled up is left alone.
-            && ((reopened && source_highlight.is_none())
-                || (!reopened
-                    && grew
-                    && self.transcript_scroll.max_offset().height
-                        + self.transcript_scroll.offset().y
-                        <= px(48.)))
-        {
-            self.transcript_scroll.scroll_to_bottom();
-            crate::lazy::to_end("transcript");
+            // on a source.
+            self.panel.following = source_highlight.is_none();
+            self.panel.back_to = None;
+            self.panel.trailed = None;
+            self.panel.left_at = row_count;
+            if self.panel.following {
+                self.transcript_scroll.scroll_to_bottom();
+                crate::lazy::to_end("transcript");
+            }
+        } else if let Some(target) = self.panel.back_to {
+            // Find has closed: back to where the reader was.
+            if ease(&mut self.panel, &self.transcript_scroll, &self.stage, target.clamp(0., end)) {
+                self.panel.back_to = None;
+            }
+        } else if self.panel.following && end - at > 0.01 {
+            // A reader at the end stays there as the transcript grows: the
+            // rows glide up to make room for a new line instead of jumping
+            // by its height. One who scrolled up is left alone.
+            ease(&mut self.panel, &self.transcript_scroll, &self.stage, end);
+        } else {
+            self.panel.trailed = None;
         }
+        if self.panel.following {
+            self.panel.left_at = row_count;
+        }
+        // Once the reader is a good way from the end of a transcript that
+        // is still being written, a capsule says how much has been said
+        // since and takes them back, as the chat's does.
+        let latest = self.stage.presence(
+            ("transcript-latest", id),
+            live && !self.panel.following && query.is_empty() && end - at > 200.,
+            crate::motion::SNAPPY,
+        );
+        let unread = row_count.saturating_sub(self.panel.left_at);
         if !matches.is_empty() {
             self.transcript_find_index %= matches.len();
         }
@@ -1153,6 +1233,12 @@ impl Cereal {
                 .is_none_or(|(_, level)| *level >= 1.)
         });
         let live_status = self.live.status(id);
+        // A panel that opens on trouble simply shows it.
+        const TROUBLE: &str = "transcript-trouble";
+        if reopened {
+            self.stage.settle(("live-status", id), live_status.is_some());
+            self.stage.settle((TROUBLE, id), failed);
+        }
         let status_pose = self.stage.presence(
             ("live-status", id),
             live_status.is_some(),
@@ -1166,20 +1252,20 @@ impl Cereal {
             .flex()
             .items_center()
             .gap(px(2.));
-        if self.transcript_find_open {
-            toolbar = toolbar.child(self.transcript_find_field(
-                &query,
-                self.transcript_find_index,
-                matches.iter().map(|found| found.utterance_index).collect(),
-                cx,
-            ));
-        } else {
-            toolbar = toolbar.child(
-                tool_tip("transcript-find", "search", "Find in transcript", t).on_click(
-                    cx.listener(|this, _, window, cx| this.transcript_find_begin(window, cx)),
-                ),
-            );
-        }
+        // Find is one capsule: the magnifier, and the field it grows into.
+        let find = self.stage.presence(
+            ("transcript-find", 0),
+            self.transcript_find_open,
+            crate::motion::GOOEY,
+        );
+        toolbar = toolbar.child(self.transcript_find_field(
+            &query,
+            self.transcript_find_index,
+            matches.iter().map(|found| found.utterance_index).collect(),
+            find,
+            window,
+            cx,
+        ));
         toolbar = toolbar.child(div().flex_1()).child(
             tool_tip("transcript-copy", "copy", "Copy transcript", t).on_click(cx.listener(
                 move |this, _, _, cx| {
@@ -1203,7 +1289,13 @@ impl Cereal {
             .flex()
             .flex_col()
             .overflow_y_scroll()
-            .track_scroll(&self.transcript_scroll);
+            .track_scroll(&self.transcript_scroll)
+            // The reader's own scrolling decides whether the transcript
+            // goes on following its end (see `following` above).
+            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                this.panel.wheeled = true;
+                cx.notify();
+            }));
         // The room above the first line is a spacer, not a margin: a scroll
         // container measures its content from its first child's box to its
         // last, so a margin above the first child would be cut from the
@@ -1215,11 +1307,11 @@ impl Cereal {
             } else if crate::server::enabled() && self.server_pending > 0 {
                 "Transcribing…"
             } else if crate::server::enabled() {
-                "Transcript Paused"
+                "Transcript paused"
             } else if live && !failed {
                 "Waiting for speech…"
             } else {
-                "Transcript Paused"
+                "Transcript paused"
             };
             body = body
                 .flex()
@@ -1308,12 +1400,17 @@ impl Cereal {
             ));
         }
         // One quiet line under the newest text when the live transcript is
-        // behind, reconnecting or unavailable. Absent when all is well.
+        // behind, reconnecting or unavailable. Absent when all is well. Its
+        // room opens and closes with it, so the transcript eases up and
+        // settles back instead of jumping by the line's height.
         if status_pose.visible
             && let Some(status) = live_status
         {
             let ink = if status.warning { t.warning_ink } else { t.muted };
-            body = body.child(
+            body = body.children(crate::motion::fold(
+                &self.stage,
+                ("live-status", id),
+                status_pose,
                 div().w_full().flex_shrink_0().px(px(12.)).pb(px(8.)).child(
                     div()
                         .id("transcript-live-status")
@@ -1325,11 +1422,10 @@ impl Cereal {
                         .text_size(px(11.))
                         .line_height(px(16.))
                         .text_color(ink)
-                        .opacity(status_pose.fade)
                         .when(status.warning, |line| line.child(icon("warning", 12., ink)))
                         .child(status.text),
                 ),
-            );
+            ));
         }
         let (warning_ink, warning_fill) = (t.warning_ink, t.warning_fill);
         let inner = div()
@@ -1341,12 +1437,14 @@ impl Cereal {
             .flex()
             .flex_col()
             .child(toolbar)
-            .when(failed, |d| {
-                d.child(
+            // The trouble banner folds in when a recording fails and folds
+            // away when it is retried: the rows under it ease, not jump.
+            .children(crate::motion::appear(
+                &self.stage,
+                (TROUBLE, id),
+                failed,
+                div().w_full().flex_shrink_0().px(px(8.)).pt(px(4.)).pb(px(8.)).child(
                     div()
-                        .mx(px(8.))
-                        .mt(px(4.))
-                        .mb(px(8.))
                         .h(px(36.))
                         .flex_shrink_0()
                         .px(px(12.))
@@ -1369,28 +1467,8 @@ impl Cereal {
                                 "An audio input could not record. Check its permission or device."
                             },
                         ))
-                        .child(
-                            div()
-                                .id("transcript-help-guide")
-                                .flex()
-                                .items_center()
-                                .gap(px(4.))
-                                .cursor_pointer()
-                                .map(|link| {
-                                    crate::motion::dims(
-                                        link,
-                                        crate::motion::reveal_key("transcript-help-guide"),
-                                        0.25,
-                                    )
-                                })
-                                .child("Help guide")
-                                .child(icon("share", 12., warning_ink))
-                                .reach().on_click(cx.listener(|this, _, window, cx| {
-                                    this.focus.focus(window);
-                                    this.open_menu(Menu::RecordingHelp);
-                                    cx.notify();
-                                })),
-                        )
+                        // One way to the card that says what went wrong and
+                        // what to try (it stays in the app: no outward glyph).
                         .child(
                             pill("transcript-troubleshooting", "Troubleshooting", "", t)
                                 .h(px(26.))
@@ -1403,8 +1481,8 @@ impl Cereal {
                                     cx.notify();
                                 })),
                         ),
-                )
-            })
+                ),
+            ))
             .child(body)
             .child(crate::ui::scroll_thumb("transcript", &self.transcript_scroll))
             .child(separator(t))
@@ -1420,8 +1498,47 @@ impl Cereal {
                     .pr(px(12.))
                     .flex()
                     .items_center()
-                    .child(self.transcript_footer_tools(cx)),
-            );
+                    .child(self.transcript_footer_tools(window, cx)),
+            )
+            .when(latest.visible, |panel| {
+                panel.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom(px(64. + 12.))
+                        .flex()
+                        .justify_center()
+                        .child(crate::motion::pop(
+                            round_tool("transcript-latest", "arrow-down", "Jump to latest", t)
+                                .w_auto()
+                                .min_w(px(36.))
+                                .h(px(26.))
+                                .px(px(10.))
+                                .gap(px(5.))
+                                .bg(crate::motion::mix(t.card, t.text, 0.12))
+                                .text_color(t.text)
+                                .text_size(px(12.))
+                                .line_height(px(16.))
+                                .whitespace_nowrap()
+                                .shadow(vec![BoxShadow {
+                                    color: hsla(0., 0., 0., 0.16),
+                                    offset: point(px(0.), px(3.)),
+                                    blur_radius: px(10.),
+                                    spread_radius: px(0.),
+                                }])
+                                .when(unread > 0, |capsule| capsule.child(format!("{unread} new")))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.panel.following = true;
+                                    this.panel.back_to = None;
+                                    this.panel.trailed = None;
+                                    cx.notify();
+                                })),
+                            crate::motion::Pop::chip((0.5, 1.)),
+                            latest,
+                        )),
+                )
+            });
         let inner = inner
             .occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
@@ -1506,9 +1623,17 @@ impl Cereal {
                 removable: true,
             }
         }));
+        // A note kept here remembers the event it was given by its day and
+        // time: the row names it instead of asking again.
+        let title = note.and_then(|note| {
+            self.calendar_events("")
+                .into_iter()
+                .find(|event| event.id != note.id && event.date == note.date && event.time == note.time)
+                .map(|event| event.title)
+        });
         self.render_details_card(
             DetailsCard {
-                title: None,
+                title,
                 when,
                 links: None,
                 status: Vec::new(),
@@ -1558,7 +1683,9 @@ impl Cereal {
                     .items_start()
                     .gap(px(10.))
                     .cursor_default()
-                    .child(crate::motion::tactile(t.bg).radius(6.))
+                    // Lighter under the pointer in the dark theme too, as
+                    // every other menu's rows are.
+                    .child(row_feedback(t, 6.))
                     .child(
                         div()
                             .mt(px(5.))
@@ -1594,19 +1721,15 @@ impl Cereal {
                     })),
             );
         }
+        // The details card's content while an event is being chosen (see
+        // `render_details_card`): the card is the surface.
         div()
-            .w(px(266.))
-            .rounded(px(POPOVER_RADIUS))
-            .border_1()
-            .border_color(t.border)
-            .bg(t.card)
-            .shadow_lg()
-            .overflow_hidden()
             .flex()
             .flex_col()
             .child(
                 div()
                     .h(px(40.))
+                    .flex_shrink_0()
                     .px(px(12.))
                     .flex()
                     .items_center()
@@ -1738,13 +1861,18 @@ impl Cereal {
                 .flex()
                 .items_center()
                 .gap(px(4.))
+                // The glyph and its chevron are one button with one wash, as
+                // the History button of the chat page is.
                 .child(
                     tool_tip("note-chat-history", "chat-history", "Recent chats", t)
-                        .size(px(26.))
+                        .w_auto()
+                        .h(px(26.))
+                        .px(px(5.5))
+                        .gap(px(4.))
                         .opacity(leading)
+                        .child(icon("chevron-down", 12., t.muted))
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_chat_history(cx))),
                 )
-                .child(div().opacity(leading).child(icon("chevron-down", 12., t.muted)))
                 .child(div().flex_1())
                 .child(
                     tool_tip("new-note-chat", "chat-new", "New chat", t)
@@ -1847,6 +1975,10 @@ impl Cereal {
             self.chat_history_open,
             crate::motion::GOOEY,
         );
+        // The button that opened the list stays lit while it is open.
+        if self.chat_history_open {
+            crate::motion::hold("note-chat-history");
+        }
         let full = f32::from(height) + 2.;
         let pill = if home { crate::motion::ASK_PILL } else { NOTE_PILL };
         let unfold = crate::motion::ask_unfold(foot, pill, (f32::from(width), full));
@@ -2036,32 +2168,59 @@ impl Cereal {
             // The recent chats drop from the header's button, over the
             // conversation.
             .when(history.visible, |d| {
-                d.child(
+                // A press anywhere else closes the list and does nothing
+                // more, as with every menu: it does not also fold the panel
+                // or land on the note, and a press on the button that
+                // opened the list simply closes it. The field keeps the
+                // keyboard (as with the model menu).
+                d.child(page_overlay(
+                    self.chat_history_open,
+                    cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.dismiss_chat_history(cx)
+                    }),
+                ))
+                .child(
                     div()
                         .absolute()
                         .top(px(header_top + 35.))
                         .left(px(12.))
                         .child(crate::motion::pop(
-                            self.render_chat_history(cx),
+                            floating(self.render_chat_history(cx)),
                             crate::motion::Pop::menu((0.08, 0.)),
                             history,
-                        ))
-                        // A press anywhere else closes the list, as it does
-                        // on the full chat page. (In an empty chat the panel
-                        // grows to fit the list and the button moves up, so
-                        // the list could not be closed from where it was
-                        // opened.)
-                        .on_mouse_down_out(cx.listener(|this, _, window, cx| {
-                            // Only the list closes: the field keeps the
-                            // keyboard (as with the model menu).
-                            if this.chat_history_open {
-                                window.prevent_default();
-                            }
-                            this.dismiss_chat_history(cx)
-                        })),
+                        )),
                 )
             })
             .into_any_element()
+    }
+}
+
+impl Cereal {
+    /// What the card behind the transcript's "Troubleshooting" says: for a
+    /// recording that failed, what went wrong and what to try; otherwise how
+    /// recording works.
+    pub(crate) fn recording_help_text(&self) -> (String, String) {
+        let failed = self.recording.phase == crate::recording::Phase::Failed;
+        if !failed {
+            return (
+                "Recording a meeting".into(),
+                "Start captures your microphone and computer audio separately. Stop saves the recording and transcribes it without generating notes. Choose Generate notes when you are ready. Resume keeps the same transcript; after you stop again, Regenerate notes includes the new conversation.".into(),
+            );
+        }
+        let cause = self
+            .audio_error
+            .clone()
+            .filter(|error| !error.trim().is_empty())
+            .unwrap_or_else(|| "Cereal could not record from one of its audio inputs.".into());
+        (
+            "The recording stopped".into(),
+            format!(
+                "{} Check that the microphone named in the transcript’s footer is connected, and that Cereal is allowed to use the microphone and to record system audio in System Settings › Privacy & Security. Then press Retry in the transcript to carry on in the same note.",
+                cause.trim_end_matches('.').to_owned() + "."
+            ),
+        )
     }
 }
 
@@ -2843,8 +3002,10 @@ fn transcript_bubble(
         corner(same_after && !own),
         corner(same_after && own),
     );
+    // In the dark panel one's own words are a dark gold, as they are in the
+    // floating pill's transcript: the side that should stand out does.
     let fill: Hsla = if dark {
-        if own { rgb(0x292929) } else { rgb(0x4e4d4b) }
+        if own { rgb(0x453c22) } else { rgb(0x4e4d4b) }
     } else if own {
         rgba(0xe0af2f66)
     } else {
@@ -3111,8 +3272,20 @@ mod metadata_tests {
     fn popovers_follow_the_joined_views() {
         let enhanced = metadata_anchors(1200., Some(147.));
         assert_eq!(enhanced.details_left, 443.);
+        // The column is one width with or without generated notes, so the
+        // chip of a note without them starts at the column's own gutter.
         let ungenerated = metadata_anchors(1200., None);
-        assert_eq!(ungenerated.details_left, 293.);
+        assert_eq!(ungenerated.details_left, 288.);
+        assert_eq!(enhanced.details_left - ungenerated.details_left, 147. + 8.);
+    }
+
+    #[test]
+    fn the_transcript_panel_keeps_a_margin_in_a_narrow_window() {
+        assert_eq!(transcript_panel_width(1260.), DOCUMENT_WIDTH);
+        assert_eq!(transcript_panel_width(714.), DOCUMENT_WIDTH);
+        // Never wider than the window less 16 pt on each side.
+        assert_eq!(transcript_panel_width(520.), 488.);
+        assert_eq!(transcript_panel_width(760.), 682.);
     }
 
     #[test]
