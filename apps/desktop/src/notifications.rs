@@ -226,7 +226,8 @@ fn note_target(note: u64) -> String {
 fn note_title(title: &str) -> String {
     let title = title.trim();
     if title.is_empty() {
-        "Untitled note".into()
+        // What the lists and the title field call a note with no name.
+        "New note".into()
     } else {
         crate::menubar::shorten(title, 80)
     }
@@ -1114,7 +1115,7 @@ mod tests {
     #[test]
     fn notices_say_what_happened_and_replace_their_own_kind_for_a_note() {
         let ready = notes_ready(42, "  ");
-        assert_eq!((ready.title.as_str(), ready.body.as_str()), ("Notes ready", "Untitled note"));
+        assert_eq!((ready.title.as_str(), ready.body.as_str()), ("Notes ready", "New note"));
         assert!(ready.background, "In front, the window already shows the notes");
         let failed = notes_failed(42, "Weekly sync", "The model is unavailable");
         assert_eq!(failed.id, ready.id, "A failure replaces the earlier notice for that note");

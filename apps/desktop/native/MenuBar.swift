@@ -23,6 +23,8 @@ private struct ShellEntry: Decodable, Sendable {
 private struct ShellModel: Decodable, Sendable {
     let title: String?
     let tooltip: String
+    /// A recording is running: the mark is drawn with level bars beside it.
+    let recording: Bool?
     let items: [ShellEntry]
 }
 
@@ -53,6 +55,8 @@ final class MenuBar: NSObject {
     private var item: NSStatusItem?
     private var callback: CerealShellCallback?
     private var mark: NSImage?
+    /// The mark with three level bars beside it, shown while recording.
+    private var recordingMark: NSImage?
 
     func install(markPath: String, name: String, callback: CerealShellCallback) {
         self.callback = callback
@@ -61,7 +65,7 @@ final class MenuBar: NSObject {
         // Drawn as vectors at whatever scale the menu bar has, and a
         // template: macOS tints it for light and dark menu bars.
         let side: CGFloat = 17
-        let image = NSImage(size: NSSize(width: side, height: side), flipped: true) { _ in
+        let drawMark = {
             let path = NSBezierPath()
             path.windingRule = .evenOdd
             for outline in outlines {
@@ -74,11 +78,30 @@ final class MenuBar: NSObject {
             path.transform(using: scale)
             NSColor.black.setFill()
             path.fill()
+        }
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: true) { _ in
+            drawMark()
             return true
         }
         image.isTemplate = true
         image.accessibilityDescription = "Cereal"
         mark = image
+        // While recording: the same mark and, 3 pt after it, the recording
+        // capsule's three level bars (2 pt wide, 2 pt apart, centred on the
+        // mark's middle). A template too, so it reads on any menu bar.
+        let bars: [CGFloat] = [7, 13, 9]
+        let recording = NSImage(size: NSSize(width: side + 3 + 10, height: side), flipped: true) { _ in
+            drawMark()
+            for (index, height) in bars.enumerated() {
+                let bar = NSRect(
+                    x: side + 3 + CGFloat(index) * 4, y: (side - height) / 2, width: 2, height: height)
+                NSBezierPath(roundedRect: bar, xRadius: 1, yRadius: 1).fill()
+            }
+            return true
+        }
+        recording.isTemplate = true
+        recording.accessibilityDescription = "Cereal, recording"
+        recordingMark = recording
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.autosaveName = name
         item.behavior = []
@@ -100,6 +123,9 @@ final class MenuBar: NSObject {
     fileprivate func update(_ model: ShellModel) {
         guard let item else { return }
         if let button = item.button {
+            let recording = model.recording ?? false
+            button.image = recording ? (recordingMark ?? mark) : mark
+            button.setAccessibilityLabel(recording ? "Cereal, recording" : "Cereal")
             button.title = model.title.map { " " + $0 } ?? ""
             button.toolTip = model.tooltip
         }

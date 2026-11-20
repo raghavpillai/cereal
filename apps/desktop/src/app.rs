@@ -900,7 +900,13 @@ impl Cereal {
             self.show_toast("Sign in before creating a server note", cx);
             return;
         }
-        self.finish_recording_preview(cx);
+        // A recording under way in another note is never ended by starting a
+        // new one: the note opens without recording and says how to move the
+        // recording here (see `offer_recording_here`).
+        let recording = self.recording_elsewhere(None);
+        if recording.is_none() {
+            self.finish_recording_preview(cx);
+        }
         self.recording_last_click = None;
         self.recording_changed_at = None;
         let Some(id) = self.create_note_without_event() else {
@@ -913,7 +919,10 @@ impl Cereal {
         self.title_input
             .update(cx, |input, cx| input.set_content("", cx));
         self.persist(cx);
-        self.start_recording_preview(id, cx);
+        match recording {
+            Some(other) => self.offer_recording_here(id, other, cx),
+            None => self.start_recording_preview(id, cx),
+        }
         self.editor.read(cx).focus_handle.focus(window);
     }
     /// A new note with no calendar event. With accounts it goes to the
@@ -1859,6 +1868,8 @@ impl Render for Cereal {
                 this.quit_requested(crate::menubar::QuitKind::Completely, window, cx)
             }))
             .on_action(cx.listener(|this, _: &CheckForUpdates, _, cx| this.check_for_updates(cx)))
+            .on_action(cx.listener(Self::toggle_recording_key))
+            .on_action(cx.listener(Self::toggle_transcript_key))
             .on_action(cx.listener(|_, _: &CloseWindow, window, cx| {
                 crate::pill::hide_main_window(window, cx)
             }))
@@ -2031,6 +2042,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-alt-q", QuitCompletely, None),
     ]);
+    crate::recording_view::init(cx);
 }
 
 /// A delayed dismissal belongs only to the exact toast that scheduled it.

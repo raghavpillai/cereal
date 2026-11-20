@@ -289,6 +289,9 @@ pub struct Model {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub tooltip: String,
+    /// A recording is running: the mark is drawn with the level bars beside
+    /// it for as long as it does.
+    pub recording: bool,
     pub items: Vec<Entry>,
 }
 
@@ -304,11 +307,25 @@ pub struct Surroundings {
     pub can_check: bool,
     /// A debug build says so, so it is never taken for the installed app.
     pub debug: bool,
+    /// The note a recording is running in, by the name it is told by
+    /// (`recording_view::recording_title`): the item shows that it runs, and
+    /// its menu opens with the note and "Stop Recording".
+    pub recording: Option<String>,
 }
 
 pub fn model(agenda: &Agenda, around: &Surroundings) -> Model {
     let mut items = Vec::new();
     let mut title = None;
+    // A recording comes first: it is what is happening now, and the way to
+    // stop it must not be looked for.
+    if let Some(note) = &around.recording {
+        items.extend([
+            Entry::header("Recording"),
+            Entry::action(note.clone(), "recording-open"),
+            Entry::action("Stop Recording", "recording-stop"),
+            Entry::separator(),
+        ]);
+    }
     if around.show_events {
         if let Some((row, countdown)) = &agenda.next {
             let (caption, when) = match countdown {
@@ -372,13 +389,14 @@ pub fn model(agenda: &Agenda, around: &Surroundings) -> Model {
             None => "dev".into(),
         });
     }
+    let name = if around.debug { "Cereal (debug build)" } else { "Cereal" };
     Model {
         title,
-        tooltip: if around.debug {
-            "Cereal (debug build)".into()
-        } else {
-            "Cereal".into()
+        tooltip: match &around.recording {
+            Some(note) => format!("{name} · recording “{note}”"),
+            None => name.into(),
         },
+        recording: around.recording.is_some(),
         items,
     }
 }
@@ -522,7 +540,7 @@ pub struct State {
     /// The model last handed to the native side.
     pushed: String,
     /// What the model was last built from.
-    signature: Option<(u64, u64, &'static str, bool, u64, bool)>,
+    signature: Option<(u64, u64, &'static str, bool, u64, bool, Option<String>)>,
     /// Reminders waiting with macOS: key (account and event) to the second
     /// they fire.
     reminders: HashMap<String, i64>,
@@ -568,6 +586,13 @@ impl Cereal {
             .collect()
     }
 
+    /// The note a recording is running in, as the menu bar names it.
+    fn menu_bar_recording(&self) -> Option<String> {
+        let id = self.recording.note_id.filter(|_| self.recording.is_active())?;
+        let note = self.workspace.note(id).filter(|note| !note.trashed)?;
+        Some(crate::recording_view::recording_title(&note.title))
+    }
+
     fn menu_bar_model(&self) -> Model {
         let preferences = crate::desktop_preferences::meeting();
         let agenda = if preferences.menu_bar_events {
@@ -583,6 +608,7 @@ impl Cereal {
                 update_status: self.updates.status(),
                 can_check: self.updates.row().2,
                 debug: cfg!(debug_assertions),
+                recording: self.menu_bar_recording(),
             },
         )
     }
@@ -685,8 +711,10 @@ impl Cereal {
             // comes, goes or changes state.
             crate::accounts::revision(),
             crate::accounts::any_shown(),
+            // Whether a recording runs, and in which note by name.
+            self.menu_bar_recording(),
         );
-        if self.menu_bar.signature != Some(signature) {
+        if self.menu_bar.signature.as_ref() != Some(&signature) {
             self.menu_bar.signature = Some(signature);
             self.refresh_menu_bar();
         }
@@ -772,6 +800,14 @@ impl Cereal {
                 self.reveal_main_window(window, cx);
                 self.check_for_updates(cx);
             }
+            // The recording's note, from the top of the menu while it runs.
+            "recording-open" => {
+                self.reveal_main_window(window, cx);
+                if let Some(id) = self.recording.note_id.filter(|_| !welcome) {
+                    self.open_note(id, cx);
+                }
+            }
+            "recording-stop" => self.stop_recording_from_anywhere(cx),
             "toggle-events" => {
                 let show = !crate::desktop_preferences::meeting().menu_bar_events;
                 self.set_menu_bar_events(show, cx);
@@ -1093,6 +1129,7 @@ mod tests {
             update_status: "Latest version",
             can_check: true,
             debug: false,
+            recording: None,
         }
     }
 
@@ -1143,6 +1180,49 @@ mod tests {
         assert_eq!(cut.graphemes(true).count(), TITLE_LIMIT);
         assert!(cut.ends_with('…'));
         assert_eq!(shorten("  padded  ", TITLE_LIMIT), "padded");
+    }
+
+    #[test]
+    fn a_recording_shows_in_the_item_and_heads_its_menu() {
+        // Idle: the mark alone, and nothing about a recording in the menu.
+        let idle = model(&Agenda::default(), &around(true));
+        assert!(!idle.recording);
+        assert_eq!(idle.tooltip, "Cereal");
+        assert!(idle.items.iter().all(|entry| entry.command != Some("recording-stop")));
+        assert_eq!(idle.items[0].title.as_deref(), Some("Open Cereal"));
+        // Recording: the item says so, and the menu opens with the note and
+        // the way to stop it, before the calendar and everything else.
+        let recording = model(
+            &Agenda::default(),
+            &Surroundings { recording: Some("Design sync".into()), ..around(true) },
+        );
+        assert!(recording.recording);
+        assert_eq!(recording.tooltip, "Cereal · recording “Design sync”");
+        let head: Vec<_> = recording.items[..4]
+            .iter()
+            .map(|entry| (entry.kind, entry.title.as_deref().unwrap_or("-"), entry.command))
+            .collect();
+        assert_eq!(
+            head,
+            [
+                ("header", "Recording", None),
+                ("action", "Design sync", Some("recording-open")),
+                ("action", "Stop Recording", Some("recording-stop")),
+                ("separator", "-", None),
+            ]
+        );
+        assert!(recording.items[1].enabled && recording.items[2].enabled);
+        assert_eq!(recording.items[4].title.as_deref(), Some("Open Cereal"));
+        // The native side reads the flag, and the rest is as it was.
+        let json: serde_json::Value = serde_json::to_value(&recording).unwrap();
+        assert_eq!(json["recording"], true);
+        assert_eq!(recording.items[4..], idle.items[..]);
+        // With events hidden it still shows.
+        let hidden = model(
+            &Agenda::default(),
+            &Surroundings { recording: Some("New note".into()), ..around(false) },
+        );
+        assert_eq!(hidden.items[2].command, Some("recording-stop"));
     }
 
     #[test]
