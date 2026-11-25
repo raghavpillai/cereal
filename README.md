@@ -7,6 +7,23 @@ Self-hosted meeting notes. Cereal records a meeting, shows the transcript while 
 - **Web app**: read your notes and shared notes, manage your account, and administer the instance.
 - **Server**: API, transcription and note generation, with PostgreSQL for storage.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/desktop-home-dark.png">
+  <img src="docs/images/desktop-home.png" alt="Cereal for Mac: upcoming meetings from the calendar above the list of recent notes, with Ask anything at the bottom">
+</picture>
+
+| Notes written after the meeting | Ask about your meetings |
+| --- | --- |
+| ![A meeting's generated notes, grouped under Product direction, Design updates and Next steps](docs/images/desktop-note.png) | ![Chat answering "List recent todos" with the action items from three meetings](docs/images/desktop-chat.png) |
+
+<p align="center">
+  <img src="docs/images/iphone-home.png" width="250" alt="iPhone: today's notes, grouped by day">
+  <img src="docs/images/iphone-note.png" width="250" alt="iPhone: a meeting's summary, decisions and open questions">
+  <img src="docs/images/iphone-chat.png" width="250" alt="iPhone: chat listing a meeting's action items">
+</p>
+
+<sub>Screenshots use made-up sample data.</sub>
+
 ## Run the server
 
 Install Docker with Compose, then:
